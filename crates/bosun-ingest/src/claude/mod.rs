@@ -21,6 +21,9 @@ use bosun_core::{
 };
 use serde_json::{Map, Value};
 
+pub use crate::layout::{FileKind, Located};
+
+use crate::layout::Provider;
 use crate::line::{LineParser, Outcome, gap, len64};
 use crate::normalise::{absolute, command_head};
 use crate::record::{
@@ -77,21 +80,19 @@ impl LineParser for Parser {
     }
 }
 
-/// What a file under a configuration directory's `projects/` is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileKind {
-    /// A transcript: `<session>.jsonl`, or a sub-agent's `agent-<agent>.jsonl`.
-    Transcript,
-    /// A sub-agent's `agent-<agent>.meta.json`.
-    Meta,
-}
+impl Provider for Parser {
+    fn locate(&self, path: &Path) -> Option<Located> {
+        locate(path)
+    }
 
-/// A file located by the path layout of #3.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Located {
-    /// The context window the file belongs to.
-    pub window: WindowKey,
-    pub kind: FileKind,
+    fn descend(&self, dir: &str) -> bool {
+        // Spilled tool outputs: many files, none a transcript.
+        dir != "tool-results"
+    }
+
+    fn parse_meta(&self, window: &WindowKey, bytes: &[u8]) -> Result<WindowMeta, Gap> {
+        parse_meta(window, bytes)
+    }
 }
 
 /// The context window of a transcript or meta file, from its path:

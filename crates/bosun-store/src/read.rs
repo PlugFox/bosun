@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnection;
 
 use crate::error::{Error, from_db};
+use crate::writer::SourceFile;
 
 /// Queries over the read-only pool. Cloning it is cheap; every clone shares the pool.
 #[derive(Debug, Clone)]
@@ -55,6 +56,36 @@ impl Reader {
     pub async fn message(&self, provider: &str, id: &str) -> Result<Option<Message>, Error> {
         let mut conn = self.pool.acquire().await?;
         load_message(&mut conn, provider, id).await
+    }
+
+    /// Every transcript file of `provider` and how far it has been parsed, by file key.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn source_files(&self, provider: &str) -> Result<Vec<SourceFile>, Error> {
+        let rows = sqlx::query!(
+            "SELECT file_key, path, size, parsed_offset, parser_version, last_line_hash
+             FROM source_file WHERE provider = ? ORDER BY file_key",
+            provider,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(SourceFile {
+                    provider: provider.to_owned(),
+                    file_key: row.file_key,
+                    path: row.path,
+                    size: from_db(row.size, "file size")?,
+                    parsed_offset: from_db(row.parsed_offset, "parsed offset")?,
+                    parser_version: u32::try_from(row.parser_version).map_err(|_| {
+                        Error::Corrupt(format!("parser version {}", row.parser_version))
+                    })?,
+                    last_line_hash: row.last_line_hash,
+                })
+            })
+            .collect()
     }
 
     /// The price table as stored now.

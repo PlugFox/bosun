@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO repo (path, remote, default_branch) VALUES (?, ?, ?)\n         ON CONFLICT (path) DO UPDATE SET\n             remote = coalesce(excluded.remote, remote),\n             default_branch = coalesce(excluded.default_branch, default_branch)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "b29708e369b86b2d0dc567b4363d8af8adce6d01cb3363a6fceeb5637d238223"
+}

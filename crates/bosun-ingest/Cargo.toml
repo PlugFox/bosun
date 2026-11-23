@@ -1,6 +1,6 @@
 [package]
 name = "bosun-ingest"
-description = "Provider transcript parsers of bosun: transcript lines to the event model."
+description = "Transcript discovery, tailing and provider parsers of bosun: transcript files to the store."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,18 +8,18 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# Parsing only (#20): no async runtime, no database. Discovery and tailing are #21's.
 [dependencies]
+bosun-config = { path = "../bosun-config" }
 bosun-core = { path = "../bosun-core" }
-serde_json.workspace = true
-
-# The commit reader's tests store what it reads and query the link (#23); synthetic session
-# rows are written with sqlx directly.
-[dev-dependencies]
 bosun-store = { path = "../bosun-store" }
+file-id.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+
+# The commit reader's tests write synthetic session rows with sqlx directly (#23).
+[dev-dependencies]
 sqlx.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO repo (path) VALUES (?)\n           ON CONFLICT (path) DO UPDATE SET path = excluded.path\n           RETURNING id AS \"id!: i64\"",
+  "query": "SELECT id AS \"id!: i64\" FROM repo WHERE path = ?",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "bd98c4443cf97ba689d69bc32f93a4503033024615c844d702aa7cd4923ef3d0"
+  "hash": "6d5336b32ca08f79fb285d4f464b094c33303efb4d884af51181818e6de78737"
 }

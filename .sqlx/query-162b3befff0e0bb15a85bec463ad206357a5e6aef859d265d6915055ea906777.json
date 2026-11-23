@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT tc.id AS \"id!: i64\", r.path AS \"repo?: String\"\n           FROM tool_call tc\n           JOIN message m ON m.id = tc.message_id\n           LEFT JOIN repo r ON r.id = m.repo_id\n           WHERE m.provider = ? AND m.message_key = ? AND tc.tool_use_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "repo?: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "path"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "162b3befff0e0bb15a85bec463ad206357a5e6aef859d265d6915055ea906777"
+}

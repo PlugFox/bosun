@@ -1,8 +1,8 @@
 //! Test helpers: the fixture corpus and the sums of `expected.json` (#16, `fixtures/README.md`).
 //!
 //! Repository attribution here is the rule of the fixtures' README (the longest configured
-//! root that is the cwd or an ancestor of it, on whole path components), written for the tests
-//! only: in the daemon it is #21's.
+//! root that is the cwd or an ancestor of it, on whole path components), written again for the
+//! parser tests: the store applies `bosun_core::repo_root`, which the store-backed tests check.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -99,7 +99,39 @@ pub(crate) struct Totals {
 }
 
 impl Totals {
-    fn drop_zeros(mut self) -> Self {
+    /// Adds `messages` messages of window `window` attributed to `repo`, with token sums
+    /// `tokens`: one row of a `GROUP BY` over the store.
+    pub(crate) fn add_rows(
+        &mut self,
+        window: (String, Option<String>),
+        repo: Option<String>,
+        messages: u64,
+        tokens: Tokens,
+    ) {
+        for sums in [
+            self.sessions.entry(window).or_default(),
+            self.repos.entry(repo).or_default(),
+            &mut self.total,
+        ] {
+            sums.messages += messages;
+            sums.tokens.input += tokens.input;
+            sums.tokens.cache_write_5m += tokens.cache_write_5m;
+            sums.tokens.cache_write_1h += tokens.cache_write_1h;
+            sums.tokens.cache_read += tokens.cache_read;
+            sums.tokens.output += tokens.output;
+        }
+    }
+
+    /// The same totals with each repository named by its canonical key, as the store keeps it.
+    pub(crate) fn canonical_repos(mut self) -> Self {
+        self.repos = std::mem::take(&mut self.repos)
+            .into_iter()
+            .map(|(repo, sums)| (repo.map(|r| canonical_path(&r, style_of(&r))), sums))
+            .collect();
+        self
+    }
+
+    pub(crate) fn drop_zeros(mut self) -> Self {
         let zero = Sums::default();
         self.sessions.retain(|_, sums| *sums != zero);
         self.repos.retain(|_, sums| *sums != zero);

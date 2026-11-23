@@ -130,3 +130,80 @@ pub struct Gap {
     /// Why the line is a gap.
     pub reason: String,
 }
+
+/// The result of a tool call. It arrives in a later record than the call, so it is an event of
+/// its own and is applied to the call by `tool_use` id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResult {
+    pub provider: String,
+    /// The `tool_use` id of the call this is the result of.
+    pub tool_use_id: String,
+    /// Size of the result, in bytes.
+    pub result_bytes: u64,
+    /// Whether the result was an error.
+    pub is_error: bool,
+}
+
+/// How a tool call touched a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TouchKind {
+    Read,
+    Write,
+    Search,
+}
+
+impl TouchKind {
+    /// The name the store keeps.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Search => "search",
+        }
+    }
+}
+
+/// A file (or, for a search, a directory) a tool call touched. The path is canonical and
+/// absolute; the store makes it relative to the repository of the message.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileTouch {
+    pub provider: String,
+    /// The message whose tool call this is.
+    pub message_id: String,
+    pub tool_use_id: String,
+    /// The canonical absolute path ([`crate::canonical_path`]).
+    pub path: String,
+    pub kind: TouchKind,
+}
+
+/// A provider's totals for one model in a session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelTotals {
+    pub tokens: Tokens,
+    /// The provider's own cost, in USD, when it gives one.
+    pub cost_usd: Option<f64>,
+}
+
+/// The provider's own per-model totals for a session (Claude Code's `cost-state`). A session
+/// may hold several; the last one, by offset, is the cumulative total (#3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionCheck {
+    pub provider: String,
+    pub session_id: String,
+    /// The offset of the line, so that the last record of a file wins.
+    pub offset: u64,
+    pub total_cost_usd: Option<f64>,
+    pub models: BTreeMap<String, ModelTotals>,
+}
+
+/// What a provider says about a context window beyond its key: for a sub-agent, its parent,
+/// its type and depth, and the tool call that spawned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowMeta {
+    pub window: ContextWindow,
+    pub agent_type: Option<String>,
+    pub spawn_depth: Option<u32>,
+    /// The `tool_use` id of the call in the parent that spawned this window.
+    pub spawned_by: Option<String>,
+}

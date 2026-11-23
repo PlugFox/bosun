@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT m.message_key, r.path AS \"repo?: String\"\n                   FROM message m LEFT JOIN repo r ON r.id = m.repo_id\n                   ORDER BY m.message_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "message_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "message_key"
+          }
+        }
+      },
+      {
+        "name": "repo?: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "path"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "28bd6522422d0bd97bd3df63f4437ab77160185f0cbedac65c1bb88ea15db663"
+}

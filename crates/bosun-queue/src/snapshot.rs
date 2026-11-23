@@ -96,6 +96,7 @@ mod tests {
                 key: None,
                 body: "Also check the docs.".into(),
             }],
+            blocked_by: Vec::new(),
         }
     }
 

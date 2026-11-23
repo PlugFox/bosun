@@ -84,7 +84,7 @@ pub struct Changes {
     pub cards: Vec<Card>,
     /// Cards that were not on the board at the cursor.
     pub added: Vec<ItemId>,
-    /// Cards whose title, body, labels or draft flag changed since the cursor. Comments are not
+    /// Cards whose title, body, labels, draft flag or dependencies changed since the cursor. Comments are not
     /// tracked here: they are read from [`Changes::cards`] when the item is snapshotted.
     pub edited: Vec<ItemId>,
     /// Cards that changed column since the cursor.
@@ -177,7 +177,7 @@ impl Changes {
 struct Mark {
     id: ItemId,
     column: Column,
-    /// A digest of the title, body, labels and draft flag.
+    /// A digest of the title, body, labels, draft flag and dependencies.
     digest: String,
 }
 
@@ -194,6 +194,9 @@ impl Mark {
             hasher.update(part.as_bytes());
         }
         hasher.update([u8::from(card.draft)]);
+        for blocker in &card.blocked_by {
+            hasher.update(blocker.0.to_le_bytes());
+        }
         let digest = hasher.finalize();
         Self {
             id: card.id,
@@ -252,6 +255,15 @@ pub enum QueueError {
     Conflict(String),
     /// An I/O error reading or writing the board.
     Io(io::Error),
+    /// A remote board could not be asked, or answered with an error (a GraphQL backend).
+    /// Retrying later may succeed.
+    Remote(String),
+    /// The board does not match the configuration: a project, its Status field or a column's
+    /// option is missing, ambiguous, or was renamed since start. Not transient: the repository
+    /// pauses with this error until the user fixes the board or the configuration.
+    Setup(String),
+    /// The backend does not implement this call.
+    Unsupported(&'static str),
 }
 
 impl QueueError {
@@ -259,7 +271,10 @@ impl QueueError {
     /// keeps the row).
     #[must_use]
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Conflict(_) | Self::Io(_) | Self::Invalid(_))
+        matches!(
+            self,
+            Self::Conflict(_) | Self::Io(_) | Self::Invalid(_) | Self::Remote(_)
+        )
     }
 }
 
@@ -271,6 +286,9 @@ impl fmt::Display for QueueError {
             Self::Invalid(why) => write!(f, "the board is not valid: {why}"),
             Self::Conflict(why) => write!(f, "the board changed during a write: {why}"),
             Self::Io(e) => write!(f, "board I/O failed: {e}"),
+            Self::Remote(why) => write!(f, "the board cannot be read: {why}"),
+            Self::Setup(why) => write!(f, "the board does not match the configuration: {why}"),
+            Self::Unsupported(what) => f.write_str(what),
         }
     }
 }
@@ -303,6 +321,7 @@ mod tests {
             labels: Vec::new(),
             draft: false,
             comments: Vec::new(),
+            blocked_by: Vec::new(),
         }
     }
 

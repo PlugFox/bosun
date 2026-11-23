@@ -13,6 +13,9 @@
 //!   comments.
 //! - [`local`] (feature `local_file`, on by default): the board as one TOML file the user edits
 //!   while the daemon runs; its module docs give the format and the concurrency rules.
+//! - [`projects_v2`] (feature `projects_v2`, on by default): the GitHub Projects v2 backend,
+//!   GraphQL through a [`projects_v2::GraphQl`] transport; its module docs give the polling,
+//!   the start-up resolution and the author allowlist.
 //! - [`testsuite`] (feature `testsuite`): the backend-agnostic trait test suite, for the
 //!   Projects v2 backend (#60, #61).
 //!
@@ -28,6 +31,8 @@ pub mod snapshot;
 
 #[cfg(feature = "local_file")]
 pub mod local;
+#[cfg(feature = "projects_v2")]
+pub mod projects_v2;
 #[cfg(any(test, feature = "testsuite"))]
 pub mod testsuite;
 
@@ -38,6 +43,8 @@ pub use lint::{
 };
 #[cfg(feature = "local_file")]
 pub use local::LocalFile;
+#[cfg(feature = "projects_v2")]
+pub use projects_v2::ProjectsV2;
 pub use queue::{Changes, Cursor, Queue, QueueError};
 pub use snapshot::Snapshot;
 

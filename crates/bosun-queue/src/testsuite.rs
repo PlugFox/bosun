@@ -91,6 +91,7 @@ pub fn card(id: u64, column: Column, verdict: &str) -> Card {
         labels: Vec::new(),
         draft: false,
         comments: Vec::new(),
+        blocked_by: Vec::new(),
     }
 }
 

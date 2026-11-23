@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use bosun_core::{PathStyle, canonical_path};
+use bosun_git::NO_HOOKS;
 use bosun_store::{CommitLink, Options, Reader, Repo, Store, Write};
 use sqlx::Connection;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};

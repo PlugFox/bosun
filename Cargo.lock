@@ -116,6 +116,10 @@ dependencies = [
 [[package]]
 name = "bosun-git"
 version = "0.0.0"
+dependencies = [
+ "regex",
+ "tempfile",
+]
 
 [[package]]
 name = "bosun-heat"
@@ -140,6 +144,7 @@ version = "0.0.0"
 dependencies = [
  "bosun-config",
  "bosun-core",
+ "bosun-git",
  "bosun-store",
  "file-id",
  "notify",

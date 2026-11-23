@@ -299,7 +299,7 @@
         "attempts": [
           {
             "number": 1,
-            "state": "verdict_running",
+            "state": "fail",
             "started_ms": 947462401000,
             "ended_ms": 947463520000,
             "wall_clock_ms": 1119000,

@@ -10,15 +10,20 @@ use bosun_api::rpc::{ErrorObject, code};
 use bosun_api::{EventBody, Wide};
 use bosun_client::framing;
 use bosun_client::{Endpoint, Stream};
-use bosun_config::{Config, Repo};
+use bosun_config::{Config, Queue, Repo, SystemProbe};
 use bosun_ingest::{Handle, Ingest, Options as IngestOptions, Report, claude};
+use bosun_proc::{NativeSpawner, SystemPower};
+use bosun_queue::LocalFile;
 use bosun_store::{Options as StoreOptions, Store};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::api::{self, Answer};
 use crate::commits::Commits;
+use crate::config_watch;
 use crate::events::{self, Batch, Events, Subscriber};
+use crate::executor;
 use crate::listen::{self, ClaimError, Listener};
 
 /// How often the ingest's counters are compared for `ingest_progress` and `ingest_pass`.
@@ -26,6 +31,9 @@ const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The most events written to a subscriber in one batch.
 const BATCH: usize = 256;
+
+/// How often a repository's loop polls its board and wakes a parked item.
+const LOOP_POLL: Duration = Duration::from_secs(2);
 
 /// One identity: its own store, its own ingest and its own event stream.
 #[derive(Debug)]
@@ -102,6 +110,7 @@ fn now_ms() -> i64 {
 /// checkpoints and truncates its WAL.
 pub(crate) async fn run(
     config: Config,
+    config_path: PathBuf,
     endpoint: Endpoint,
     stop: impl Future<Output = ()>,
 ) -> Result<(), Failure> {
@@ -133,7 +142,24 @@ pub(crate) async fn run(
     });
 
     let progress = tokio::spawn(watch_ingest(state.clone()));
+    // The configuration in force, replaced by each valid edit of the file (#55, #62).
+    let (config_tx, config_rx) = watch::channel(Arc::new(config.clone()));
+    let watcher = config_watch::spawn(
+        config_path,
+        config_tx,
+        Arc::new(SystemProbe::new()),
+        config_watch::INTERVAL,
+        config_watch::Reported::default(),
+    );
+    let loops = start_loops(&config, &state, &config_rx);
+    drop(config_rx);
     serve(listener, &state, stop).await;
+    // The watcher holds the sender: without it every loop ends, killing its child first.
+    watcher.abort();
+    let _ = watcher.await;
+    for task in loops {
+        let _ = task.await;
+    }
     progress.abort();
     let _ = progress.await;
     match Arc::try_unwrap(state) {
@@ -349,4 +375,86 @@ async fn watch_ingest(state: Arc<State>) {
             }
         }
     }
+}
+
+/// This daemon's id on boards: host and OS user, as claim markers need it stable (#61).
+fn daemon_id() -> String {
+    let var = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|n| std::env::var(n).ok())
+            .unwrap_or_else(|| "unknown".to_owned())
+    };
+    let raw = format!(
+        "{}/{}",
+        var(&["COMPUTERNAME", "HOSTNAME"]),
+        var(&["USERNAME", "USER"])
+    );
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_./".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(100)
+        .collect()
+}
+
+/// Starts the loop of every repository whose queue is a local file (#62). A Projects v2 board
+/// is not run by the loop yet.
+fn start_loops(
+    config: &Config,
+    state: &State,
+    config_rx: &watch::Receiver<Arc<Config>>,
+) -> Vec<JoinHandle<()>> {
+    let agent = bosun_config::tools::find_program("claude", std::env::var_os("PATH").as_deref());
+    let daemon_id = daemon_id();
+    let mut loops = Vec::new();
+    for (name, repo) in &config.repos {
+        let file = match &repo.queue {
+            Some(Queue::LocalFile { file }) => file.clone(),
+            Some(_) => {
+                eprintln!(
+                    "bosund: repository {name}: only a local-file queue is run in this version"
+                );
+                continue;
+            }
+            None => continue,
+        };
+        let Some(served) = state.identities.get(&repo.identity) else {
+            continue;
+        };
+        let work_dir = served
+            .database
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("bosun-work")
+            .join(&served.name);
+        let options = executor::Options {
+            repo: name.clone(),
+            daemon_id: daemon_id.clone(),
+            agent: agent.clone(),
+            work_dir,
+            poll: LOOP_POLL,
+            recheck: Duration::from_mins(1),
+            #[cfg(test)]
+            failpoint: None,
+        };
+        let deps = executor::Deps {
+            reader: served.store.reader().clone(),
+            writer: served.store.writer().clone(),
+            events: served.events.clone(),
+            queue: Arc::new(LocalFile::new(file)),
+            spawner: Arc::new(NativeSpawner),
+            power: Arc::new(SystemPower),
+            logins: Arc::new(executor::GhLogins),
+        };
+        eprintln!("bosund: repository {name}: the loop runs");
+        loops.push(tokio::spawn(
+            executor::Loop::new(options, deps, config_rx.clone()).run(),
+        ));
+    }
+    loops
 }

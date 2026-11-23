@@ -76,6 +76,7 @@ pub(crate) fn spec(role: Role) -> ChildSpec {
         args: args(),
         env: env(role),
         cwd: std::env::temp_dir(),
+        stdin: false,
     }
 }
 

@@ -350,10 +350,6 @@ fn admits(filter: &EventFilter, stored: &Stored) -> bool {
 
 /// The event of a transition of `item`'s machine, followed by a limit park or resume when the
 /// transition is one.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the loop (#62) publishes transitions")
-)]
 pub(crate) fn transition(item: &ItemId, t: &Transition) -> Vec<EventBody> {
     let mut bodies = vec![EventBody::ItemTransition {
         item: item.to_string(),
@@ -418,10 +414,6 @@ fn reason_of(state: State) -> Option<String> {
 
 /// The name of a session's exit as `session_ended` carries it; `killed` when the daemon
 /// killed it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the loop (#62) publishes session ends")
-)]
 pub(crate) fn exit_name(exit: Option<Exit>) -> &'static str {
     match exit {
         None => "killed",
@@ -433,10 +425,6 @@ pub(crate) fn exit_name(exit: Option<Exit>) -> &'static str {
 }
 
 /// The name of a verdict run's result as `verdict_finished` carries it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the loop (#62) publishes verdict runs")
-)]
 pub(crate) fn run_result_name(result: RunResult) -> &'static str {
     match result {
         RunResult::Pass => "pass",

@@ -8,14 +8,14 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::key::{ProcessKey, StartTime};
 use crate::sys;
 
 /// What to start: the program, its arguments, its whole environment and its working
 /// directory. Nothing is inherited from the daemon: the environment is exactly `env` (#2), and
-/// stdin is closed.
+/// stdin is closed unless `stdin` asks for a pipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildSpec {
     /// The program, a path or a name looked up on the daemon's `PATH`.
@@ -26,6 +26,9 @@ pub struct ChildSpec {
     pub env: Vec<(OsString, OsString)>,
     /// The working directory.
     pub cwd: PathBuf,
+    /// Give the child a standard input pipe ([`Spawned::stdin`]) instead of a closed one: an
+    /// agent CLI reads its prompt there.
+    pub stdin: bool,
 }
 
 /// One output stream of a child, read by the caller.
@@ -34,6 +37,9 @@ pub struct ChildSpec {
 /// not the daemon's own (the session shim of #8 relays the streams over its own channel) fits
 /// the same seam. The native one boxes tokio's pipe; reading it costs one virtual call per read.
 pub type Output = Box<dyn AsyncRead + Send + Unpin>;
+
+/// The standard input of a child, written by the caller; dropping it closes the pipe.
+pub type Input = Box<dyn AsyncWrite + Send + Unpin>;
 
 /// The future of [`Tree::wait`].
 pub type WaitFuture<'a> = Pin<Box<dyn Future<Output = io::Result<ExitStatus>> + Send + 'a>>;
@@ -65,6 +71,8 @@ pub struct Spawned {
     pub stdout: Output,
     /// The child's stderr.
     pub stderr: Output,
+    /// The child's stdin, when [`ChildSpec::stdin`] asked for it.
+    pub stdin: Option<Input>,
 }
 
 impl fmt::Debug for Spawned {
@@ -103,7 +111,11 @@ impl Spawner for NativeSpawner {
             .env_clear()
             .envs(spec.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&spec.cwd)
-            .stdin(Stdio::null())
+            .stdin(if spec.stdin {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let (mut child, container) = sys::spawn_contained(&mut command)?;
@@ -112,6 +124,7 @@ impl Spawner for NativeSpawner {
             .ok_or_else(|| io::Error::other("the child has no pid"))?;
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
+        let stdin = child.stdin.take().map(|s| Box::new(s) as Input);
         let start = match sys::child_start_time(&child) {
             Ok(start) => start,
             Err(e) => {
@@ -131,6 +144,7 @@ impl Spawner for NativeSpawner {
             tree: Box::new(tree),
             stdout: Box::new(stdout),
             stderr: Box::new(stderr),
+            stdin,
         })
     }
 }

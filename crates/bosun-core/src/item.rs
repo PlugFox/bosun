@@ -639,6 +639,10 @@ pub struct Transition {
     pub attempt_from: Option<AttemptState>,
     /// The attempt's state after, if there is an attempt.
     pub attempt_to: Option<AttemptState>,
+    /// The attempt this transition ended and replaced with a new one, in its final state. When
+    /// a failed attempt is followed at once by the next one, `attempt_from` and `attempt_to`
+    /// describe the new attempt's arrow, and this is the only record of how the old one ended.
+    pub ended: Option<Attempt>,
     /// The event's name ([`Event::name`]).
     pub cause: &'static str,
     /// The side effects, in order.
@@ -661,6 +665,7 @@ pub fn step(item: &Item, event: &Event, ctx: &Ctx) -> Option<Stepped> {
     let mut draft = Draft {
         item: item.clone(),
         effects: Vec::new(),
+        ended: None,
         ctx: *ctx,
     };
     draft.apply(event)?;
@@ -671,6 +676,8 @@ pub fn step(item: &Item, event: &Event, ctx: &Ctx) -> Option<Stepped> {
 struct Draft {
     item: Item,
     effects: Vec<EffectKind>,
+    /// The attempt a new attempt replaced in this step, in its final state.
+    ended: Option<Attempt>,
     ctx: Ctx,
 }
 
@@ -954,6 +961,8 @@ impl Draft {
         }
         match next {
             Next::NewAttempt => {
+                // A requeue or a restart has already dropped the old attempt.
+                self.ended = self.item.attempt.take();
                 self.item.attempts += 1;
                 self.item.spawns += 1;
                 let (attempt, spawn) = (self.item.attempts, self.item.spawns);
@@ -1153,6 +1162,7 @@ impl Draft {
             to,
             attempt_from: before.attempt.as_ref().map(|a| a.state),
             attempt_to: self.item.attempt.as_ref().map(|a| a.state),
+            ended: self.ended,
             cause: event.name(),
             effects,
         };
@@ -1274,6 +1284,19 @@ mod tests {
         let item = attempt(item, &[RunResult::Fail, RunResult::Fail]);
         assert_eq!(item.state, State::NeedsYou(Reason::AttemptsExhausted));
         assert_eq!(item.failed, 2);
+    }
+
+    #[test]
+    fn the_transition_to_the_next_attempt_carries_the_failed_one() {
+        let item = attempt(running(), &[RunResult::Fail]);
+        let next = go(&item, &verdict(&item, RunResult::Fail), &ctx());
+        assert_eq!(cur(&next.item).0, 2);
+        let ended = next.transition.ended.expect("attempt 1 ended here");
+        assert_eq!((ended.number, ended.state), (1, AttemptState::Fail));
+        assert_eq!(next.transition.attempt_to, Some(AttemptState::Spawned));
+        // A step that keeps the attempt ends none.
+        let first = go(&running(), &exit(&running(), Exit::Ok), &ctx());
+        assert_eq!(first.transition.ended, None);
     }
 
     #[test]

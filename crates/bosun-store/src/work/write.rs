@@ -213,6 +213,11 @@ pub(crate) async fn record_transition(
             "{key} does not follow the recorded transition {recorded}"
         )));
     }
+    // The attempt a new one replaced keeps its final state (a failed verdict, #62), not the
+    // last state an earlier transition recorded for it.
+    if let Some(ended) = &t.ended {
+        upsert_attempt(conn, item_row, ended, at_ms).await?;
+    }
     if let Some(attempt) = &item.attempt {
         upsert_attempt(conn, item_row, attempt, at_ms).await?;
     }

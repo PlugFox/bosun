@@ -13,11 +13,21 @@ bosun-api = { path = "../bosun-api" }
 bosun-client = { path = "../bosun-client" }
 bosun-config = { path = "../bosun-config" }
 bosun-core = { path = "../bosun-core" }
+bosun-git = { path = "../bosun-git" }
 bosun-heat = { path = "../bosun-heat" }
+bosun-identity = { path = "../bosun-identity" }
 bosun-ingest = { path = "../bosun-ingest" }
+# Spawning into a container, the power request (#50), and the pipe's security descriptor (#71).
+bosun-proc = { path = "../bosun-proc" }
+bosun-queue = { path = "../bosun-queue" }
+bosun-runner = { path = "../bosun-runner" }
 bosun-store = { path = "../bosun-store" }
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+# The temporary index that sets an item's uncommitted work aside (#62).
+tempfile.workspace = true
 tokio = { workspace = true, features = [
   "io-util",
   "macros",
@@ -27,13 +37,6 @@ tokio = { workspace = true, features = [
   "sync",
   "time",
 ] }
-
-# The owner-only security descriptor of the named pipe (#71).
-[target.'cfg(windows)'.dependencies]
-bosun-proc = { path = "../bosun-proc" }
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -203,6 +203,11 @@ fn the_command_loads_only_the_session_mcp_servers() {
             "one MCP configuration"
         );
         assert_eq!(values(&argv, "--mcp-config"), ["/fixture/run/mcp.json"]);
+        assert_eq!(
+            values(&argv, "--setting-sources"),
+            ["project"],
+            "no user settings or hooks: {argv:?}"
+        );
         assert!(
             !argv
                 .iter()

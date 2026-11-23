@@ -85,7 +85,7 @@ Runs: the messages of the sessions bosun spawned for each item, sub-agents inclu
 
 | item | attempt | state | started | wall clock | sessions | models | refused calls | messages | input | cache write 5m | cache write 1h | cache read | output | eqv | cost USD |
 | --- | ---: | --- | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| local:demo#1 | 1 | verdict_running | 2000-01-10T00:00:01Z | 0:18:39 | 1 fresh 00000000-0000-4000-8000-072000000001 (limit); 2 resume 00000000-0000-4000-8000-072000000001 (ok) | claude-opus-5-5, claude-sonnet-5-5 | 0 | 7 | 52 | 520 | 0 | 5200 | 156 | 1491 | 0.0060 |
+| local:demo#1 | 1 | fail | 2000-01-10T00:00:01Z | 0:18:39 | 1 fresh 00000000-0000-4000-8000-072000000001 (limit); 2 resume 00000000-0000-4000-8000-072000000001 (ok) | claude-opus-5-5, claude-sonnet-5-5 | 0 | 7 | 52 | 520 | 0 | 5200 | 156 | 1491 | 0.0060 |
 | local:demo#1 | 2 | flaky | 2000-01-10T00:18:40Z | 0:16:40 | 3 fresh 00000000-0000-4000-8000-072000000002 (ok) | claude-sonnet-5-5 | 1 | 3 | 39 | 390 | 0 | 3900 | 117 | 653 | 0.0026 |
 | local:demo#2 | 1 | verdict_pending | 2000-01-10T00:50:01Z |  | 1 fresh 00000000-0000-4000-8000-072000000003 (ok) | claude-opus-5-5 | 0 | 2 | 34 | 340 | 0 | 3400 | 102 | 1139 | 0.0046 |
 

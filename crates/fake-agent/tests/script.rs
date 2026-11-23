@@ -128,3 +128,39 @@ fn a_script_error_exits_with_125() {
             .contains("unknown command")
     );
 }
+
+#[test]
+fn the_script_dir_picks_the_items_script_and_wait_waits_for_its_file() {
+    let scratch = tempfile::tempdir().unwrap();
+    let empty_config = scratch.path().join("gitconfig");
+    std::fs::write(&empty_config, "").unwrap();
+    let scripts = scratch.path().join("scripts");
+    std::fs::create_dir(&scripts).unwrap();
+    let release = scratch.path().join("release");
+    std::fs::write(
+        scripts.join("demo_7.script"),
+        format!("wait {}\nprint item seven\n", release.display()),
+    )
+    .unwrap();
+    let mut child = isolated(
+        env!("CARGO_BIN_EXE_fake-agent"),
+        scratch.path(),
+        &empty_config,
+    );
+    let child = child
+        .arg("--fake-script-dir")
+        .arg(&scripts)
+        .env("BOSUN_ITEM", "demo#7")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut child = child;
+    assert!(child.try_wait().unwrap().is_none(), "it waits for the file");
+    std::fs::write(&release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "item seven");
+}

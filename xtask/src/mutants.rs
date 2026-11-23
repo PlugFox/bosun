@@ -935,7 +935,62 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::an_ingested_session_links_a_commit_inside_its_span"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_skip_base_verdict",
+        issue: 62,
+        breaks: "the claim skips the verdict on the base commit (D7): a card that passes there is spawned",
+        package: "bosund",
+        check: Check::Test(SCENARIO_62),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_live_verdict",
+        issue: 62,
+        breaks: "the verdict runs the live card's command, not the snapshot's (#5)",
+        package: "bosund",
+        check: Check::Test(SCENARIO_62),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_effect_before_transition",
+        issue: 62,
+        breaks: "the loop performs an arrow's effects before its row is written",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::a_refused_transition_leaves_no_effect_without_its_row",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_ignore_hash_change",
+        issue: 62,
+        breaks: "a configuration or policy change during a session goes unnoticed",
+        package: "bosund",
+        check: Check::Test(SCENARIO_62),
+        platform: None,
+    },
+    // The "reaches Done" forms of #53's mutants, in the loop's scenario suite (#62).
+    Mutant {
+        name: "mutant_git_skip_clean_tree",
+        issue: 62,
+        breaks: "an item that passes only because of an uncommitted file reaches Done",
+        package: "bosund",
+        check: Check::Test(SCENARIO_62),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_skip_ancestry",
+        issue: 62,
+        breaks: "an agent that resets below the base reaches the verdict and Done",
+        package: "bosund",
+        check: Check::Test(SCENARIO_62),
+        platform: None,
+    },
 ];
+
+/// The scenario suite of the loop (#62), which hosts several mutants.
+const SCENARIO_62: &str =
+    "executor::tests::seven_items_end_done_or_needs_you_and_board_edits_take_effect";
 
 /// What one side (without or with the cfg) of a mutant run produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

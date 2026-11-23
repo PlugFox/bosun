@@ -783,3 +783,131 @@ async fn a_write_for_an_unknown_item_fails_its_batch() {
     );
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_transition_from_a_stale_item_fails_its_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    store.writer().write(vec![register()]).await.unwrap();
+    let claim = go(&Item::new(id()), &Event::Claim);
+    let confirmed = go(&claim.item, &Event::ClaimConfirmed);
+    let lost = go(&claim.item, &Event::ClaimLost);
+    store
+        .writer()
+        .write(vec![transition(&claim), transition(&confirmed)])
+        .await
+        .unwrap();
+    // Another arrow under a stored key, computed from the same stale item.
+    let err = store
+        .writer()
+        .write(vec![transition(&lost)])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::Error::Stale(_)), "{err}");
+    // An arrow that skips one.
+    let (attempt, spawn, _) = current(&confirmed.item);
+    let exited = go(
+        &confirmed.item,
+        &Event::Exited {
+            attempt,
+            spawn,
+            exit: Exit::Ok,
+            text: String::new(),
+        },
+    );
+    let verify = go(
+        &exited.item,
+        &Event::Preconditions {
+            attempt,
+            passed: true,
+        },
+    );
+    let err = store
+        .writer()
+        .write(vec![transition(&verify)])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::Error::Stale(_)), "{err}");
+    let stored = store.reader().item(&id()).await.unwrap().unwrap();
+    assert_eq!(stored.item, confirmed.item);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_late_session_end_keeps_the_current_child_and_a_reaped_child_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    store.writer().write(vec![register()]).await.unwrap();
+    let claim = go(&Item::new(id()), &Event::Claim);
+    let first = go(&claim.item, &Event::ClaimConfirmed);
+    let (attempt, spawn, _) = current(&first.item);
+    // The session crashes and is retried: a second session of the same attempt.
+    let retried = go(
+        &first.item,
+        &Event::Exited {
+            attempt,
+            spawn,
+            exit: Exit::Crash,
+            text: String::new(),
+        },
+    );
+    let (again, next, _) = current(&retried.item);
+    assert_eq!(again, attempt);
+    assert_ne!(next, spawn);
+    let child = |pid| Write::SessionChild {
+        item: id(),
+        attempt,
+        pid,
+        pid_started_ms: T0 + i64::from(pid),
+    };
+    store
+        .writer()
+        .write(vec![
+            transition(&claim),
+            transition(&first),
+            run_start(attempt, spawn, "session-a"),
+            child(5),
+            transition(&retried),
+            run_start(attempt, next, "session-b"),
+            child(9),
+        ])
+        .await
+        .unwrap();
+    // The first session's end is recorded late, after the second started.
+    store
+        .writer()
+        .write(vec![Write::RunEnded(RunEnd {
+            item: id(),
+            attempt,
+            spawn,
+            exit: Exit::Crash,
+            head_sha: None,
+            ended_ms: T0,
+        })])
+        .await
+        .unwrap();
+    let children = store.reader().children().await.unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].pid, 9);
+
+    // Reaped at start: no row names it any more.
+    store
+        .writer()
+        .write(vec![Write::ChildGone {
+            pid: 9,
+            started_ms: T0 + 9,
+        }])
+        .await
+        .unwrap();
+    assert_eq!(store.reader().children().await.unwrap(), []);
+
+    // Two starts never share a number.
+    let boot = |pid| Write::Boot {
+        number: 1,
+        started_ms: T0,
+        pid,
+    };
+    store.writer().write(vec![boot(1)]).await.unwrap();
+    store.writer().write(vec![boot(2)]).await.unwrap_err();
+    store.close().await.unwrap();
+}

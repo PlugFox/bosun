@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE attempt SET pid = NULL, pid_started_ms = NULL,\n                            head_sha = coalesce(?, head_sha)\n         WHERE id = ? AND spawn = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "fe8653b537abd1a4c25847211125ce1f811ccfced6aca1e00c5c3a63f45b876f"
+}

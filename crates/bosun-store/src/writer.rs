@@ -126,7 +126,11 @@ pub enum Write {
         names: Vec<String>,
         at_ms: i64,
     },
-    /// A start of the daemon, numbered after the last one ([`crate::Reader::last_boot`]).
+    /// A child process is gone (reaped, or found dead): the session or verdict run that named
+    /// it by pid and start time no longer does.
+    ChildGone { pid: u32, started_ms: i64 },
+    /// A start of the daemon, numbered after the last one ([`crate::Reader::last_boot`]). A
+    /// number already recorded fails the batch: two starts never share one.
     Boot {
         number: u32,
         started_ms: i64,
@@ -353,6 +357,7 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             names,
             at_ms,
         } => work::insert_flaky_tests(conn, &item, attempt, &names, at_ms).await,
+        Write::ChildGone { pid, started_ms } => work::child_gone(conn, pid, started_ms).await,
         Write::Boot {
             number,
             started_ms,

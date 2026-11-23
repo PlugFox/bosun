@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE attempt SET ended_ms = ?\n         WHERE item_id = ? AND ended_ms IS NULL AND number IS NOT ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "8dfd54ae28689edc27866bafa67ed2d2081e94b7ef86be9785d6705ceb85cc7e"
+}

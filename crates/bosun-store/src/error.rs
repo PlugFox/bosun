@@ -39,6 +39,8 @@ pub enum Error {
     },
     /// A write ends a session or a verdict run that was not started.
     UnknownRow(String),
+    /// A transition that does not follow the recorded item: computed from a stale state.
+    Stale(String),
     /// Two records with different keys reached the merge.
     Merge(bosun_core::KeyMismatch),
     /// The price rows do not form a valid table.
@@ -75,6 +77,7 @@ impl fmt::Display for Error {
                 write!(f, "unknown attempt {attempt} of item {item}")
             }
             Self::UnknownRow(what) => write!(f, "unknown {what}"),
+            Self::Stale(what) => write!(f, "stale transition: {what}"),
             Self::Merge(e) => e.fmt(f),
             Self::Prices(e) => write!(f, "price table: {e}"),
             Self::PriceChange(why) => write!(f, "price change refused: {why}"),

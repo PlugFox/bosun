@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT seq AS \"seq!: i64\" FROM item WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "seq!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "seq"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "47768b15b9a002d02aa5c1512efb879a0b8b6e52719ab292e592c18c12c48578"
+}

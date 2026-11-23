@@ -106,7 +106,10 @@ pub(crate) async fn insert_snapshot(
 }
 
 /// Records one arrow: the transition row under its key, then the item and attempt it produced
-/// and its board writes. A transition whose key is stored is a replay and changes nothing.
+/// and its board writes. A transition whose key is stored is a replay and changes nothing; a
+/// different arrow under that key, or one that does not follow the recorded item, is stale.
+// Long because the mutant repeats the insert as its own checked query.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn record_transition(
     conn: &mut SqliteConnection,
     stepped: &Stepped,
@@ -176,11 +179,53 @@ pub(crate) async fn record_transition(
         .await?
     };
     if inserted.is_none() {
+        // A replay is the same arrow; another arrow under the key was computed from a stale
+        // item, and its effects must not run.
+        let stored = sqlx::query!(
+            "SELECT from_state, to_state, cause FROM transition WHERE transition_key = ?",
+            key
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if (
+            stored.from_state.as_str(),
+            stored.to_state.as_str(),
+            stored.cause.as_str(),
+        ) != (from, to, t.cause)
+        {
+            return Err(Error::Stale(format!(
+                "{key} is stored as {} -> {} ({}), not {from} -> {to} ({})",
+                stored.from_state, stored.to_state, stored.cause, t.cause
+            )));
+        }
         return Ok(());
+    }
+    // The arrow must follow the recorded item; one from an older state is stale.
+    let recorded = sqlx::query_scalar!(
+        r#"SELECT seq AS "seq!: i64" FROM item WHERE id = ?"#,
+        item_row
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if recorded + 1 != i64::from(t.key.seq) {
+        return Err(Error::Stale(format!(
+            "{key} does not follow the recorded transition {recorded}"
+        )));
     }
     if let Some(attempt) = &item.attempt {
         upsert_attempt(conn, item_row, attempt, at_ms).await?;
     }
+    // An attempt that is no longer current (a restart or a requeue dropped it) has ended.
+    let current = item.attempt.as_ref().map(|a| a.number);
+    sqlx::query!(
+        "UPDATE attempt SET ended_ms = ?
+         WHERE item_id = ? AND ended_ms IS NULL AND number IS NOT ?",
+        at_ms,
+        item_row,
+        current,
+    )
+    .execute(&mut *conn)
+    .await?;
     update_item(conn, item_row, item, at_ms).await?;
     for effect in &t.effects {
         enqueue(conn, item_row, effect, at_ms).await?;
@@ -450,12 +495,40 @@ pub(crate) async fn end_run(conn: &mut SqliteConnection, end: &RunEnd) -> Result
             end.spawn, end.attempt, end.item
         )));
     }
+    // A late end of an earlier session of the attempt leaves the current session's child.
     sqlx::query!(
         "UPDATE attempt SET pid = NULL, pid_started_ms = NULL,
                             head_sha = coalesce(?, head_sha)
-         WHERE id = ?",
+         WHERE id = ? AND spawn = ?",
         end.head_sha,
         attempt,
+        end.spawn,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// A child process is gone (reaped at start, or found dead): no row names it any more. A
+/// verdict run abandoned by a restart keeps no result.
+pub(crate) async fn child_gone(
+    conn: &mut SqliteConnection,
+    pid: u32,
+    started_ms: i64,
+) -> Result<(), Error> {
+    sqlx::query!(
+        "UPDATE attempt SET pid = NULL, pid_started_ms = NULL
+         WHERE pid = ? AND pid_started_ms = ?",
+        pid,
+        started_ms,
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query!(
+        "UPDATE verdict_run SET pid = NULL, pid_started_ms = NULL
+         WHERE pid = ? AND pid_started_ms = ?",
+        pid,
+        started_ms,
     )
     .execute(conn)
     .await?;
@@ -614,8 +687,7 @@ pub(crate) async fn insert_boot(
     pid: u32,
 ) -> Result<(), Error> {
     sqlx::query!(
-        "INSERT INTO boot (number, started_ms, pid) VALUES (?, ?, ?)
-         ON CONFLICT (number) DO NOTHING",
+        "INSERT INTO boot (number, started_ms, pid) VALUES (?, ?, ?)",
         number,
         started_ms,
         pid,

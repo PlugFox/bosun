@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE attempt SET pid = NULL, pid_started_ms = NULL\n         WHERE pid = ? AND pid_started_ms = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "63026e161c8f653dba8cbb166e1ce8abdf4945e5593b6f14789e8cc1a8cee0b7"
+}

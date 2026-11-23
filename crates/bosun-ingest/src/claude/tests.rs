@@ -424,3 +424,68 @@ fn a_record_of_another_session_is_a_gap() {
     let outcome = Parser.parse_line(&source(), 0, line.to_string().as_bytes());
     assert!(matches!(outcome, Outcome::Gap(_)), "{outcome:?}");
 }
+
+/// #46: the provider's window of a check is its `startTime` to the last timestamp before its
+/// line, of any record type; a check in a sub-agent's file yields nothing.
+#[test]
+fn a_check_carries_the_provider_window() {
+    let parsed = parse_case(&case("resumed-cost-state"));
+    let checks: Vec<&SessionCheck> = parsed.assembly.checks().collect();
+    assert_eq!(checks.len(), 1);
+    let check = checks[0];
+    // 2000-01-11T01:00:00Z; the last record before the line is the `system` one at 01:00:09.
+    assert_eq!(check.start_ms, Some(947_552_400_000));
+    assert_eq!(check.end_ms, Some(947_552_409_000));
+    assert_eq!(check.total_cost_usd, None);
+    assert_eq!(check.models["claude-haiku-5-5"].cost_usd, None);
+    let subagent = parsed
+        .batches
+        .iter()
+        .find(|(key, _)| key.contains("subagents"))
+        .unwrap();
+    assert_eq!(
+        subagent
+            .1
+            .records()
+            .filter(|r| matches!(r, Record::SessionCheck(_)))
+            .count(),
+        0,
+        "a sub-agent's cost-state is not the session's check"
+    );
+}
+
+/// #46: a read that begins at a `cost-state` line ends its window at the timestamp carried in
+/// from the read before; with nothing carried and no line before it, the end is unknown.
+#[test]
+fn a_check_at_the_start_of_a_read_ends_at_the_carried_timestamp() {
+    let line = json!({"type": "cost-state", "sessionId": SESSION, "startTime": 946_857_600_000_i64,
+                      "modelUsage": {}})
+    .to_string()
+        + "\n";
+    let end = |batch: &Batch| {
+        batch
+            .records()
+            .find_map(|r| match r {
+                Record::SessionCheck(check) => Some(check.end_ms),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let batch = crate::line::parse_lines_after(&Parser, &source(), 100, line.as_bytes(), Some(7));
+    assert_eq!(end(&batch), Some(7));
+    assert_eq!(batch.last_ts_ms, Some(7));
+    let batch = parse_lines(&Parser, &source(), 0, line.as_bytes());
+    assert_eq!(end(&batch), None);
+
+    // A record of any type with a timestamp moves the end; one without does not.
+    let mut text = assistant_line("msg_000000000000000009000001", 5).to_string() + "\n";
+    text.push_str(&json!({"type": "system", "timestamp": "2000-01-09T00:00:09.000Z"}).to_string());
+    text.push('\n');
+    text.push_str(&json!({"type": "mode", "mode": "normal"}).to_string());
+    text.push('\n');
+    text.push_str(&line);
+    let batch = parse_lines(&Parser, &source(), 0, text.as_bytes());
+    let nine = crate::time::parse_ms("2000-01-09T00:00:09.000Z");
+    assert_eq!(end(&batch), nine);
+    assert_eq!(batch.last_ts_ms, nine);
+}

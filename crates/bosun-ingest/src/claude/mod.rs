@@ -5,8 +5,12 @@
 //! - `assistant` yields a [`Record::Message`] (usage, model, cwd, timestamp, and a tool call
 //!   per `tool_use` or `server_tool_use` block) and a [`Record::FileTouch`] per file tool call;
 //! - `user` yields a [`Record::ToolResult`] per `tool_result` block;
-//! - `cost-state` yields a [`Record::SessionCheck`];
+//! - `cost-state` yields a [`Record::SessionCheck`] in a main transcript, and nothing in a
+//!   sub-agent's: the root session's check is the main transcript's (#46);
 //! - the others yield nothing.
+//!
+//! Every line that is a JSON object with an RFC 3339 `timestamp` gives its timestamp, whatever
+//! its type or outcome: the end of a session check's window is the last one before it.
 //!
 //! A type not in the list is skipped and counted. A known type in an unexpected shape is a gap
 //! with a fixed reason. The shapes checked are those the records above are built from: the
@@ -39,7 +43,10 @@ pub const PROVIDER: &str = "claude";
 
 /// The version of this parser, recorded on every row it writes. Bump it whenever what a line
 /// yields changes.
-pub const PARSER_VERSION: u32 = 1;
+///
+/// - 2: a `cost-state` record carries its window, and yields nothing in a sub-agent's file
+///   (#46).
+pub const PARSER_VERSION: u32 = 2;
 
 /// The record types this parser knows. Any other type is skipped and counted.
 pub const KNOWN_TYPES: &[&str] = &[
@@ -76,6 +83,10 @@ impl LineParser for Parser {
     }
 
     fn parse_line(&self, source: &Source, offset: u64, line: &[u8]) -> Outcome {
+        parse_line(source, offset, line).0
+    }
+
+    fn parse_timed(&self, source: &Source, offset: u64, line: &[u8]) -> (Outcome, Option<i64>) {
         parse_line(source, offset, line)
     }
 }
@@ -199,15 +210,31 @@ fn meta(window: &WindowKey, object: &Object) -> Result<WindowMeta, Reason> {
     })
 }
 
-fn parse_line(source: &Source, offset: u64, line: &[u8]) -> Outcome {
+/// The outcome of a line and its timestamp, when it is an object with one.
+fn parse_line(source: &Source, offset: u64, line: &[u8]) -> (Outcome, Option<i64>) {
     let object = match serde_json::from_slice::<Value>(line) {
         Ok(Value::Object(object)) => object,
-        Ok(_) => return Outcome::Gap(gap(offset, line, None, Vec::new(), "not a JSON object")),
-        Err(_) => return Outcome::Gap(gap(offset, line, None, Vec::new(), "not JSON")),
+        Ok(_) => {
+            let gap = gap(offset, line, None, Vec::new(), "not a JSON object");
+            return (Outcome::Gap(gap), None);
+        }
+        Err(_) => {
+            return (
+                Outcome::Gap(gap(offset, line, None, Vec::new(), "not JSON")),
+                None,
+            );
+        }
     };
+    let ts_ms = object
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(time::parse_ms);
     let Some(record_type) = object.get("type").and_then(Value::as_str) else {
         let reason = "no string `type`";
-        return Outcome::Gap(gap(offset, line, None, keys(&object), reason));
+        return (
+            Outcome::Gap(gap(offset, line, None, keys(&object), reason)),
+            ts_ms,
+        );
     };
     let parsed = match record_type {
         "assistant" => assistant(source, &object),
@@ -215,15 +242,17 @@ fn parse_line(source: &Source, offset: u64, line: &[u8]) -> Outcome {
         "cost-state" => cost_state(source, offset, &object),
         known if KNOWN_TYPES.contains(&known) => Ok(Vec::new()),
         unknown => {
-            return Outcome::Skipped {
+            let skipped = Outcome::Skipped {
                 record_type: unknown.to_owned(),
             };
+            return (skipped, ts_ms);
         }
     };
-    match parsed {
+    let outcome = match parsed {
         Ok(records) => Outcome::Records(records),
         Err(reason) => Outcome::Gap(gap(offset, line, Some(record_type), keys(&object), reason)),
-    }
+    };
+    (outcome, ts_ms)
 }
 
 /// The record's `sessionId` and `agentId`, when present, must name the file's window: one
@@ -456,8 +485,19 @@ fn result_bytes(content: Option<&Value>) -> u64 {
     }
 }
 
+/// The provider's totals of the session, from the main transcript only. A sub-agent's file
+/// may hold a `cost-state` line too; it is not the root session's check, which it would
+/// replace (#46), so it yields nothing.
 fn cost_state(source: &Source, offset: u64, object: &Object) -> Result<Vec<Record>, Reason> {
     check_window(source, object)?;
+    if source.window.agent_id.is_some() && !cfg!(mutant_ingest_subagent_cost_state) {
+        // Mutant `mutant_ingest_subagent_cost_state`: a sub-agent's line is the session's check.
+        return Ok(Vec::new());
+    }
+    let start_ms = match object.get("startTime") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_i64().ok_or("`startTime` is not an integer")?),
+    };
     let usage = object
         .get("modelUsage")
         .and_then(Value::as_object)
@@ -491,6 +531,9 @@ fn cost_state(source: &Source, offset: u64, object: &Object) -> Result<Vec<Recor
         provider: PROVIDER.to_owned(),
         session_id: source.window.session_id.clone(),
         offset,
+        start_ms,
+        // Set by the reader of the file, which knows the lines before this one.
+        end_ms: None,
         total_cost_usd: optional_number(object, "totalCostUSD")?,
         models,
     })])

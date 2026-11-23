@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bosun_api::{
-    Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan, Comparison, Health,
-    KindRow, ModelRow, OldMethod, PerCommit, Picodollars, RepoRef, Report, SessionAgreement,
-    TokenSums, Trend, UnpricedModel, VersionRow,
+    AbsentModel, Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan,
+    Comparison, Health, KindRow, ModelRow, OldMethod, PerCommit, Picodollars, RepoRef, Report,
+    SessionAgreement, TokenSums, Trend, Undercount, UnpricedModel, VersionRow,
 };
 use bosun_core::{Cost, PriceTable, Pricing, Rates, Tokens};
 use bosun_store::{CheckRow, Reader, UsageRow, VersionHealth, WindowSums};
@@ -422,17 +422,23 @@ fn trend(current: CommitPeriod, previous: CommitPeriod) -> Trend {
     }
 }
 
-/// The agreement of the root sessions in `ranged` that have the provider's totals.
+/// The agreement of the root sessions in `ranged` that have the provider's totals, over the
+/// messages inside the provider's window (#46).
 fn agreement(
     ranged: &BTreeSet<(&str, &str)>,
     checks: &[CheckRow],
     windows: &[WindowSums],
 ) -> Agreement {
-    let mut provider: BTreeMap<(&str, &str), CheckTokens> = BTreeMap::new();
+    // Per session, per model as the provider names it without its label.
+    let mut provider: BTreeMap<(&str, &str), BTreeMap<&str, CheckTokens>> = BTreeMap::new();
     for check in checks {
         let key = (check.provider.as_str(), check.session.as_str());
         if ranged.contains(&key) {
-            let sums = provider.entry(key).or_default();
+            let sums = provider
+                .entry(key)
+                .or_default()
+                .entry(base_model(&check.model))
+                .or_default();
             sums.input += check.input;
             sums.cache_write += check.cache_write;
             sums.cache_read += check.cache_read;
@@ -440,19 +446,24 @@ fn agreement(
         }
     }
     // Main transcript plus every sub-agent: the provider's totals include sub-agents (#3).
-    let mut transcripts: BTreeMap<(&str, &str), (u64, u64, CheckTokens)> = BTreeMap::new();
+    let mut transcripts: BTreeMap<(&str, &str), Transcripts> = BTreeMap::new();
     for window in windows {
         if cfg!(mutant_report_main_only) && window.agent.is_some() {
             // Mutant: the agreement sees the main transcript only.
+            continue;
+        }
+        if !window.in_window && !cfg!(mutant_report_no_window) {
+            // Mutant `mutant_report_no_window`: every message of the session is compared.
             continue;
         }
         let key = (window.provider.as_str(), window.session.as_str());
         if !provider.contains_key(&key) {
             continue;
         }
-        let (count, messages, sums) = transcripts.entry(key).or_default();
-        *count += 1;
-        *messages += window.messages;
+        let found = transcripts.entry(key).or_default();
+        found.windows.insert(window.agent.as_deref());
+        found.messages += window.messages;
+        let sums = found.models.entry(base_model(&window.model)).or_default();
         let t = &window.tokens;
         sums.input += t.input;
         sums.cache_write += t.cache_write_5m + t.cache_write_1h;
@@ -461,26 +472,80 @@ fn agreement(
     }
 
     let mut total = (CheckTokens::default(), CheckTokens::default());
+    let mut absent: BTreeMap<&str, AbsentModel> = BTreeMap::new();
+    let mut excluded = 0;
     let mut rows = Vec::with_capacity(provider.len());
-    for (key, mut theirs) in provider {
-        let (windows, messages, mut ours) = transcripts.remove(&key).unwrap_or_default();
+    for (key, theirs_by_model) in provider {
+        let Some(found) = transcripts.remove(&key) else {
+            // No message inside the provider's window: nothing to compare.
+            excluded += 1;
+            continue;
+        };
+        let mut ours = CheckTokens::default();
+        for sums in found.models.values() {
+            add(&mut ours, sums);
+        }
+        let mut theirs = CheckTokens::default();
+        let mut absent_total = 0;
+        for (model, sums) in &theirs_by_model {
+            let mut sums = sums.clone();
+            finish(&mut sums);
+            add(&mut theirs, &sums);
+            if !found.models.contains_key(model) && sums.total > 0 {
+                absent_total += sums.total;
+                let entry = absent.entry(model).or_insert_with(|| AbsentModel {
+                    model: (*model).to_owned(),
+                    sessions: 0,
+                    total: 0,
+                });
+                entry.sessions += 1;
+                entry.total += sums.total;
+            }
+        }
         finish(&mut ours);
         finish(&mut theirs);
         add(&mut total.0, &ours);
         add(&mut total.1, &theirs);
-        rows.push(SessionAgreement {
-            session: key.1.to_owned(),
-            windows,
-            messages,
-            comparison: compare(ours, theirs),
-        });
+        rows.push((
+            SessionAgreement {
+                session: key.1.to_owned(),
+                windows: found.windows.len() as u64,
+                messages: found.messages,
+                comparison: compare(ours, theirs, absent_total),
+            },
+            absent_total,
+        ));
     }
+    let absent_total = rows.iter().map(|(_, absent)| absent).sum();
+    let rows: Vec<SessionAgreement> = rows.into_iter().map(|(row, _)| row).collect();
     Agreement {
         tolerance_percent: TOLERANCE_PERCENT,
         sessions: rows.len() as u64,
         within: rows.iter().filter(|r| r.comparison.within).count() as u64,
-        total: compare(total.0, total.1),
+        exceeding: rows.iter().filter(|r| r.comparison.exceeds).count() as u64,
+        excluded,
+        total: compare(total.0, total.1, absent_total),
+        absent_models: absent.into_values().collect(),
         rows,
+    }
+}
+
+/// What the transcripts of one session hold inside the provider's window.
+#[derive(Debug, Default)]
+struct Transcripts<'a> {
+    /// The context windows with a message: `None` for the main transcript.
+    windows: BTreeSet<Option<&'a str>>,
+    messages: u64,
+    /// Sums per model, named without a bracketed suffix.
+    models: BTreeMap<&'a str, CheckTokens>,
+}
+
+/// A model id without a bracketed suffix: Claude Code's `cost-state` names a model with its
+/// context label (`[1m]`), which is not a model of its own (#3).
+fn base_model(name: &str) -> &str {
+    match name.strip_suffix(']').and_then(|rest| rest.rfind('[')) {
+        Some(at) => &name[..at],
+        None => name,
     }
 }
 
@@ -496,14 +561,27 @@ fn add(into: &mut CheckTokens, sums: &CheckTokens) {
     into.total += sums.total;
 }
 
-/// Within the tolerance: `|ours - theirs| * 100 <= tolerance * theirs`, in exact integers.
-fn compare(transcripts: CheckTokens, provider: CheckTokens) -> Comparison {
-    let difference = u128::from(transcripts.total.abs_diff(provider.total));
-    let within = difference * 100 <= u128::from(TOLERANCE_PERCENT) * u128::from(provider.total);
+/// The comparison of the transcripts' sums with the provider's, in exact integers: within
+/// the tolerance when `|ours - theirs| * 100 <= tolerance * theirs`, exceeding it when
+/// `(ours - theirs) * 100 > tolerance * theirs`. `absent` is the provider's total of the
+/// models the transcripts do not hold.
+fn compare(transcripts: CheckTokens, provider: CheckTokens, absent: u64) -> Comparison {
+    let (ours, theirs) = (i128::from(transcripts.total), i128::from(provider.total));
+    let tolerance = i128::from(TOLERANCE_PERCENT) * theirs;
+    let difference = ours - theirs;
+    let within = difference.abs() * 100 <= tolerance;
+    let exceeds = difference * 100 > tolerance;
+    let saturate = |n: i128| i64::try_from(n).unwrap_or(if n < 0 { i64::MIN } else { i64::MAX });
     Comparison {
         transcripts,
         provider,
+        difference: saturate(difference),
         within,
+        exceeds,
+        undercount: Undercount {
+            absent_models: absent,
+            shared_models: saturate(-difference - i128::from(absent)),
+        },
     }
 }
 

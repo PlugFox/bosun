@@ -232,6 +232,59 @@ mod tests {
         found
     }
 
+    /// #46: migration 3 rebuilds `session_check` to make its cost nullable; a check stored by
+    /// version 2 survives it, and has no window row, so its window stays open.
+    #[tokio::test]
+    async fn a_check_of_version_2_survives_migration_3() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let earlier = MIGRATOR
+            .migrations
+            .iter()
+            .filter(|m| m.version <= 2)
+            .cloned()
+            .collect();
+        let store = open(
+            &path,
+            &Options::default(),
+            &Migrator::with_migrations(earlier),
+        )
+        .await
+        .unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO session (id, provider, session_key) VALUES (7, 'claude', 's');
+             INSERT INTO session_check (root_session_id, model, input_tokens, cache_write_tokens,
+                                        cache_read_tokens, output_tokens, cost_usd, recorded_ms)
+             VALUES (7, 'm', 1, 2, 3, 4, 0.5, 9);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let mut conn = store.reader().pool.acquire().await.unwrap();
+        let row: (i64, String, i64, i64, i64, i64, Option<f64>, i64) = sqlx::query_as(
+            "SELECT root_session_id, model, input_tokens, cache_write_tokens, cache_read_tokens,
+                    output_tokens, cost_usd, recorded_ms FROM session_check",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(row, (7, "m".to_owned(), 1, 2, 3, 4, Some(0.5), 9));
+        let windows: i64 = sqlx::query_scalar("SELECT count(*) FROM session_check_window")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(windows, 0);
+        drop(conn);
+        store.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn a_newer_database_is_refused_untouched() {
         let dir = tempfile::tempdir().unwrap();
@@ -247,7 +300,7 @@ mod tests {
                 err,
                 Error::NewerDatabase {
                     found: 9_000,
-                    supported: 2,
+                    supported: 3,
                     ..
                 }
             ),
@@ -285,8 +338,8 @@ mod tests {
         let copies = backups(path.parent().unwrap());
         assert_eq!(copies.len(), 1, "{copies:?}");
         let name = copies[0].file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("bosun.db.v2-"), "{name}");
-        // The copy is the file as it was: version 2, the data, no table of the later version.
+        assert!(name.starts_with("bosun.db.v3-"), "{name}");
+        // The copy is the file as it was: version 3, the data, no table of the later version.
         let mut conn = SqliteConnection::connect_with(
             &SqliteConnectOptions::new()
                 .filename(&copies[0])
@@ -299,7 +352,7 @@ mod tests {
                 .fetch_all(&mut conn)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2]);
+        assert_eq!(versions, [1, 2, 3]);
         let files = sqlx::query_scalar!(r#"SELECT count(*) AS "n!: i64" FROM source_file"#)
             .fetch_one(&mut conn)
             .await

@@ -1,8 +1,54 @@
 {
   "$defs": {
-    "Agreement": {
-      "description": "The agreement with the provider's own totals (Claude Code's `cost-state`, the last record\nof each session): for each root session that has them and a message in the range, the\ntoken sums of all its messages, main transcript and sub-agents, over all time (the\nprovider's totals are cumulative), against the provider's.\n\nA session is within the tolerance when `|transcripts - provider| * 100 <= tolerance *\nprovider` on the total of the four categories; the categories are shown for reading.",
+    "AbsentModel": {
+      "description": "A model of the provider's totals that the transcripts do not hold.",
       "properties": {
+        "model": {
+          "description": "The model id as the provider names it, without a bracketed suffix.",
+          "type": "string"
+        },
+        "sessions": {
+          "description": "Compared sessions whose provider totals have it and whose transcripts do not.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "description": "The provider's total of the four categories for it over those sessions.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model",
+        "sessions",
+        "total"
+      ],
+      "type": "object"
+    },
+    "Agreement": {
+      "description": "The agreement with the provider's own totals (Claude Code's `cost-state`, the last record\nof each root transcript): for each root session that has them and a message in the range,\nthe token sums of its messages inside the provider's window, main transcript and\nsub-agents, against the provider's (#46).\n\nThe provider's window runs from when its counter started (`startTime`: the counter starts\nagain when a session is resumed in a new process) to the timestamp of the last record\nbefore the `cost-state` line (records after it are not in it), both inclusive. A check\nstored before the window was (#46) has an open window until `bosun reingest`.\n\nA session is within the tolerance when `|transcripts - provider| * 100 <= tolerance *\nprovider` on the total of the four categories, and exceeds it when `(transcripts -\nprovider) * 100 > tolerance * provider`. The criterion is one-sided: the provider also\ncounts calls the transcripts never hold, so it may be larger ([`Undercount`]); the\ntranscripts may not. The categories are shown for reading.",
+      "properties": {
+        "absent_models": {
+          "description": "The models of the provider's totals that no compared session's transcripts hold inside\nthe window, sorted by model.",
+          "items": {
+            "$ref": "#/$defs/AbsentModel"
+          },
+          "type": "array"
+        },
+        "exceeding": {
+          "description": "Sessions whose transcripts exceed the provider by more than the tolerance.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "excluded": {
+          "description": "Sessions with the provider's totals and a message in the range but no message inside\nthe provider's window: not compared, and not a mismatch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "rows": {
           "description": "One row per compared session, sorted by session.",
           "items": {
@@ -37,7 +83,10 @@
         "tolerance_percent",
         "sessions",
         "within",
+        "exceeding",
+        "excluded",
         "total",
+        "absent_models",
         "rows"
       ],
       "type": "object"
@@ -246,11 +295,24 @@
     "Comparison": {
       "description": "The transcripts' sums against the provider's.",
       "properties": {
+        "difference": {
+          "description": "`transcripts.total - provider.total`: negative when the provider is larger.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "exceeds": {
+          "description": "Whether the transcripts exceed the provider by more than the tolerance.",
+          "type": "boolean"
+        },
         "provider": {
           "$ref": "#/$defs/CheckTokens"
         },
         "transcripts": {
           "$ref": "#/$defs/CheckTokens"
+        },
+        "undercount": {
+          "$ref": "#/$defs/Undercount",
+          "description": "The provider's excess over the transcripts, split by model kind."
         },
         "within": {
           "description": "Whether the totals agree within the tolerance.",
@@ -260,7 +322,10 @@
       "required": [
         "transcripts",
         "provider",
-        "within"
+        "difference",
+        "within",
+        "exceeds",
+        "undercount"
       ],
       "type": "object"
     },
@@ -1263,7 +1328,7 @@
           "$ref": "#/$defs/Comparison"
         },
         "messages": {
-          "description": "Messages over those windows.",
+          "description": "Messages inside the provider's window over those windows.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -1273,7 +1338,7 @@
           "type": "string"
         },
         "windows": {
-          "description": "Context windows with messages: the main transcript and each sub-agent.",
+          "description": "Context windows with messages inside the provider's window: the main transcript and\neach sub-agent.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -1552,6 +1617,27 @@
       "required": [
         "current",
         "previous"
+      ],
+      "type": "object"
+    },
+    "Undercount": {
+      "description": "The provider's excess over the transcripts (`-difference`), split by model kind: the\nknown undercount of the transcript method, which cannot see calls its transcripts never\nhold. `absent_models + shared_models = provider.total - transcripts.total`.\n\nModels are matched by name without a bracketed suffix: Claude Code's `[1m]` is a label.",
+      "properties": {
+        "absent_models": {
+          "description": "The provider's total of the models the transcripts hold no message of inside the\nwindow (side calls such as Haiku's).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shared_models": {
+          "description": "The rest: the provider's total of the other models less the transcripts' total. It is\nnegative when the transcripts are larger on them.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "absent_models",
+        "shared_models"
       ],
       "type": "object"
     },

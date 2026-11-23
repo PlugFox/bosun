@@ -364,16 +364,16 @@
     ]
   },
   "health": {
-    "files": 14,
-    "files_counted": 14,
-    "lines": 88,
+    "files": 16,
+    "files_counted": 16,
+    "lines": 104,
     "gaps": 3,
     "versions": [
       {
-        "parser_version": 1,
-        "files": 14,
-        "files_counted": 14,
-        "lines": 88,
+        "parser_version": 2,
+        "files": 16,
+        "files_counted": 16,
+        "lines": 104,
         "gaps": 3
       }
     ],
@@ -381,6 +381,8 @@
       "tolerance_percent": 5,
       "sessions": 1,
       "within": 1,
+      "exceeding": 0,
+      "excluded": 0,
       "total": {
         "transcripts": {
           "input": 12,
@@ -396,8 +398,15 @@
           "output": 51310,
           "total": 76942
         },
-        "within": true
+        "difference": 0,
+        "within": true,
+        "exceeds": false,
+        "undercount": {
+          "absent_models": 0,
+          "shared_models": 0
+        }
       },
+      "absent_models": [],
       "rows": [
         {
           "session": "00000000-0000-4000-8000-003100000000",
@@ -418,7 +427,13 @@
               "output": 51310,
               "total": 76942
             },
-            "within": true
+            "difference": 0,
+            "within": true,
+            "exceeds": false,
+            "undercount": {
+              "absent_models": 0,
+              "shared_models": 0
+            }
           }
         }
       ]

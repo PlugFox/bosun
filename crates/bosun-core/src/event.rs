@@ -213,12 +213,24 @@ pub struct ModelTotals {
 
 /// The provider's own per-model totals for a session (Claude Code's `cost-state`). A session
 /// may hold several; the last one, by offset, is the cumulative total (#3).
+///
+/// The totals cover a window of the session, not all of it: the provider's counter starts
+/// again when a session is resumed in a new process, and records written after the line are
+/// not in it (#46). The window is `start_ms ..= end_ms`; a bound that is `None` is unknown and
+/// leaves that side open.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionCheck {
     pub provider: String,
     pub session_id: String,
     /// The offset of the line, so that the last record of a file wins.
     pub offset: u64,
+    /// When the provider's counter started (Claude Code's `startTime`), milliseconds since the
+    /// Unix epoch, UTC.
+    pub start_ms: Option<i64>,
+    /// The timestamp of the last timestamped record before the line in the same file, of any
+    /// type. A line parser leaves it `None`; the reader of the file, which sees its lines in
+    /// order, fills it.
+    pub end_ms: Option<i64>,
     pub total_cost_usd: Option<f64>,
     pub models: BTreeMap<String, ModelTotals>,
 }

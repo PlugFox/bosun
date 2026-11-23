@@ -243,12 +243,20 @@ pub struct VersionRow {
 }
 
 /// The agreement with the provider's own totals (Claude Code's `cost-state`, the last record
-/// of each session): for each root session that has them and a message in the range, the
-/// token sums of all its messages, main transcript and sub-agents, over all time (the
-/// provider's totals are cumulative), against the provider's.
+/// of each root transcript): for each root session that has them and a message in the range,
+/// the token sums of its messages inside the provider's window, main transcript and
+/// sub-agents, against the provider's (#46).
+///
+/// The provider's window runs from when its counter started (`startTime`: the counter starts
+/// again when a session is resumed in a new process) to the timestamp of the last record
+/// before the `cost-state` line (records after it are not in it), both inclusive. A check
+/// stored before the window was (#46) has an open window until `bosun reingest`.
 ///
 /// A session is within the tolerance when `|transcripts - provider| * 100 <= tolerance *
-/// provider` on the total of the four categories; the categories are shown for reading.
+/// provider` on the total of the four categories, and exceeds it when `(transcripts -
+/// provider) * 100 > tolerance * provider`. The criterion is one-sided: the provider also
+/// counts calls the transcripts never hold, so it may be larger ([`Undercount`]); the
+/// transcripts may not. The categories are shown for reading.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Agreement {
     /// The tolerance, in percent.
@@ -257,8 +265,16 @@ pub struct Agreement {
     pub sessions: u64,
     /// Sessions within the tolerance.
     pub within: u64,
+    /// Sessions whose transcripts exceed the provider by more than the tolerance.
+    pub exceeding: u64,
+    /// Sessions with the provider's totals and a message in the range but no message inside
+    /// the provider's window: not compared, and not a mismatch.
+    pub excluded: u64,
     /// The sums over every compared session.
     pub total: Comparison,
+    /// The models of the provider's totals that no compared session's transcripts hold inside
+    /// the window, sorted by model.
+    pub absent_models: Vec<AbsentModel>,
     /// One row per compared session, sorted by session.
     pub rows: Vec<SessionAgreement>,
 }
@@ -268,9 +284,10 @@ pub struct Agreement {
 pub struct SessionAgreement {
     /// The provider's session id.
     pub session: String,
-    /// Context windows with messages: the main transcript and each sub-agent.
+    /// Context windows with messages inside the provider's window: the main transcript and
+    /// each sub-agent.
     pub windows: u64,
-    /// Messages over those windows.
+    /// Messages inside the provider's window over those windows.
     pub messages: u64,
     pub comparison: Comparison,
 }
@@ -280,8 +297,40 @@ pub struct SessionAgreement {
 pub struct Comparison {
     pub transcripts: CheckTokens,
     pub provider: CheckTokens,
+    /// `transcripts.total - provider.total`: negative when the provider is larger.
+    pub difference: i64,
     /// Whether the totals agree within the tolerance.
     pub within: bool,
+    /// Whether the transcripts exceed the provider by more than the tolerance.
+    pub exceeds: bool,
+    /// The provider's excess over the transcripts, split by model kind.
+    pub undercount: Undercount,
+}
+
+/// The provider's excess over the transcripts (`-difference`), split by model kind: the
+/// known undercount of the transcript method, which cannot see calls its transcripts never
+/// hold. `absent_models + shared_models = provider.total - transcripts.total`.
+///
+/// Models are matched by name without a bracketed suffix: Claude Code's `[1m]` is a label.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Undercount {
+    /// The provider's total of the models the transcripts hold no message of inside the
+    /// window (side calls such as Haiku's).
+    pub absent_models: u64,
+    /// The rest: the provider's total of the other models less the transcripts' total. It is
+    /// negative when the transcripts are larger on them.
+    pub shared_models: i64,
+}
+
+/// A model of the provider's totals that the transcripts do not hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AbsentModel {
+    /// The model id as the provider names it, without a bracketed suffix.
+    pub model: String,
+    /// Compared sessions whose provider totals have it and whose transcripts do not.
+    pub sessions: u64,
+    /// The provider's total of the four categories for it over those sessions.
+    pub total: u64,
 }
 
 /// Token sums in the provider's categories: cache writes are not split by duration.

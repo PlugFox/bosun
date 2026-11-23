@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use bosun_core::WindowKey;
 
 use crate::layout::{FileKind, Provider};
-use crate::line::{Batch, LineParser, parse_lines};
+use crate::line::{Batch, LineParser, parse_lines_after};
 use crate::meter::Gauge;
 use crate::record::Source;
 
@@ -211,12 +211,13 @@ pub(crate) struct Chunk {
     pub(crate) read: u64,
 }
 
-/// Reads up to `limit` bytes of `file` from `offset` and parses every complete line of them.
+/// Reads up to `limit` bytes of `file` from `offset` and parses every complete line of them;
+/// `last_ts_ms` is the last timestamp of the lines before `offset`.
 pub(crate) fn read_chunk<P: LineParser>(
     parser: &P,
     source: &Source,
     file: &mut File,
-    offset: u64,
+    (offset, last_ts_ms): (u64, Option<i64>),
     limit: u64,
 ) -> io::Result<Chunk> {
     file.seek(SeekFrom::Start(offset))?;
@@ -228,7 +229,7 @@ pub(crate) fn read_chunk<P: LineParser>(
         // Mutant: a last line still being written is parsed as if it were complete.
         bytes.push(b'\n');
     }
-    let batch = parse_lines(parser, source, offset, &bytes);
+    let batch = parse_lines_after(parser, source, offset, &bytes, last_ts_ms);
     let last_hash = batch.lines.last().map(|line| {
         let start = usize::try_from(line.offset - offset).unwrap_or(usize::MAX);
         let end = usize::try_from(line.end - offset).unwrap_or(usize::MAX);

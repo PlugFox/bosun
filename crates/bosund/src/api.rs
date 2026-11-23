@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 
 use bosun_api::rpc::{self, ErrorObject, Request, Response, code};
 use bosun_api::{
-    API_VERSION, CommitScan, DaemonStatus, FailedFile, HelloResult, IngestStatus, LastPass, Method,
-    ModelRow, PassReport, Picodollars, ReingestResult, RepoRef, RepoRow, Report, ReportParams,
-    SessionRow, TokenSums, TokensByModel, TokensByRepo, TokensBySession, TokensParams,
-    TokensSummary, UnpricedModel, Wide, method,
+    API_VERSION, CommitScan, DaemonStatus, Estimates, FailedFile, HelloResult, IngestStatus,
+    LastPass, Method, ModelRow, PassReport, Picodollars, ReingestResult, RepoRef, RepoRow, Report,
+    ReportParams, SessionRow, TokenSums, TokensByModel, TokensByRepo, TokensBySession,
+    TokensParams, TokensSummary, UnpricedModel, Wide, method,
 };
 use bosun_core::{Cost, PriceTable};
 use bosun_store::{Bill, By, Group};
@@ -136,26 +136,10 @@ async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObj
             .await
         }
         method::TokensByRepo::NAME => {
-            call::<method::TokensByRepo, _, _>(p, |p| async move {
-                let served = state.identity(&p.identity)?;
-                let (summary, bills) = tokens(state, &p, By::Repo).await?;
-                let mut rows: Vec<RepoRow> = bills
-                    .into_iter()
-                    .filter_map(|(group, bill)| match group {
-                        Group::Repo(key) => Some(RepoRow {
-                            repo: key.map(|key| served.repo(&key)),
-                            sums: sums(&bill),
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                // By path, with messages in no repository last.
-                rows.sort_by(|a, b| match (&a.repo, &b.repo) {
-                    (Some(a), Some(b)) => a.path.cmp(&b.path),
-                    (a, b) => a.is_none().cmp(&b.is_none()),
-                });
-                Ok(TokensByRepo { summary, rows })
-            })
+            call::<method::TokensByRepo, _, _>(
+                p,
+                |p| async move { tokens_by_repo(state, &p).await },
+            )
             .await
         }
         method::TokensByModel::NAME => {
@@ -181,11 +165,38 @@ async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObj
             })
             .await
         }
+        method::ReportEstimates::NAME => {
+            call::<method::ReportEstimates, _, _>(p, |p| async move {
+                estimates(state.identity(&p.identity)?, &p).await
+            })
+            .await
+        }
         _ => Err(ErrorObject::new(
             code::METHOD_NOT_FOUND,
             format!("no method {name}"),
         )),
     }
+}
+
+async fn tokens_by_repo(state: &State, p: &TokensParams) -> Result<TokensByRepo, ErrorObject> {
+    let served = state.identity(&p.identity)?;
+    let (summary, bills) = tokens(state, p, By::Repo).await?;
+    let mut rows: Vec<RepoRow> = bills
+        .into_iter()
+        .filter_map(|(group, bill)| match group {
+            Group::Repo(key) => Some(RepoRow {
+                repo: key.map(|key| served.repo(&key)),
+                sums: sums(&bill),
+            }),
+            _ => None,
+        })
+        .collect();
+    // By path, with messages in no repository last.
+    rows.sort_by(|a, b| match (&a.repo, &b.repo) {
+        (Some(a), Some(b)) => a.path.cmp(&b.path),
+        (a, b) => a.is_none().cmp(&b.is_none()),
+    });
+    Ok(TokensByRepo { summary, rows })
 }
 
 pub(crate) fn hello() -> HelloResult {
@@ -246,16 +257,22 @@ async fn reingest(served: &Served) -> Result<ReingestResult, ErrorObject> {
     })
 }
 
-/// The exact sections of the report of one identity. Reads only: the commits are those the
-/// commit reader has stored.
-async fn report(served: &Served, p: &ReportParams) -> Result<Report, ErrorObject> {
+/// A configured repository: its name and configuration.
+type NamedRepo = (String, bosun_config::Repo);
+
+/// The configured repositories a report covers (the one `p` names, else every one) and its
+/// scope.
+fn report_scope<'a>(
+    served: &'a Served,
+    p: &ReportParams,
+) -> Result<(Vec<&'a NamedRepo>, bosun_heat::Scope<'a>), ErrorObject> {
     if p.from_ms >= p.to_ms {
         return Err(ErrorObject::new(
             code::INVALID_PARAMS,
             "from_ms must be before to_ms: the range is empty",
         ));
     }
-    let repos: Vec<&(String, bosun_config::Repo)> = match &p.repo {
+    let repos: Vec<&NamedRepo> = match &p.repo {
         None => served.repos.iter().collect(),
         Some(name) => {
             let found = served
@@ -271,6 +288,18 @@ async fn report(served: &Served, p: &ReportParams) -> Result<Report, ErrorObject
             vec![found]
         }
     };
+    let scope = bosun_heat::Scope {
+        from_ms: p.from_ms,
+        to_ms: p.to_ms,
+        repo: p.repo.as_ref().map(|_| repos[0].1.key.as_str()),
+    };
+    Ok((repos, scope))
+}
+
+/// The exact sections of the report of one identity. Reads only: the commits are those the
+/// commit reader has stored.
+async fn report(served: &Served, p: &ReportParams) -> Result<Report, ErrorObject> {
+    let (repos, scope) = report_scope(served, p)?;
     let scans = repos
         .iter()
         .map(|(name, repo)| CommitScan {
@@ -278,11 +307,6 @@ async fn report(served: &Served, p: &ReportParams) -> Result<Report, ErrorObject
             state: served.commits.state(name),
         })
         .collect();
-    let scope = bosun_heat::Scope {
-        from_ms: p.from_ms,
-        to_ms: p.to_ms,
-        repo: p.repo.as_ref().map(|_| repos[0].1.key.as_str()),
-    };
     bosun_heat::exact(
         served.store.reader(),
         &served.name,
@@ -290,6 +314,16 @@ async fn report(served: &Served, p: &ReportParams) -> Result<Report, ErrorObject
         |key| served.repo(key),
         scans,
     )
+    .await
+    .map_err(failed)
+}
+
+/// The estimate sections of the report of one identity. Reads only.
+async fn estimates(served: &Served, p: &ReportParams) -> Result<Estimates, ErrorObject> {
+    let (_, scope) = report_scope(served, p)?;
+    bosun_heat::estimates(served.store.reader(), &served.name, scope, |key| {
+        served.repo(key)
+    })
     .await
     .map_err(failed)
 }

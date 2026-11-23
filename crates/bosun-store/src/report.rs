@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use bosun_core::{PriceTable, Tokens};
+use bosun_core::{PriceTable, Tokens, TouchKind};
 
 use crate::error::{Error, from_db};
 use crate::read::{Reader, load_price_table};
@@ -12,6 +12,8 @@ use crate::read::{Reader, load_price_table};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRow {
     pub provider: String,
+    /// The provider's message id.
+    pub message: String,
     /// The provider's session id: the key of the root session the message belongs to.
     pub session: String,
     /// The sub-agent id; `None` for the session's main transcript.
@@ -65,6 +67,23 @@ pub struct VersionHealth {
     pub gaps: u64,
 }
 
+/// One tool call of a message, with the files it touched (#27: the estimates).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRow {
+    pub provider: String,
+    /// The provider's id of the message that made the call.
+    pub message: String,
+    /// The provider's id of the call.
+    pub tool_use: String,
+    pub name: String,
+    /// The size of the result: its text, and the base64 data of its images.
+    pub result_bytes: u64,
+    pub is_error: bool,
+    /// The files the call touched, sorted: repository-relative paths (absolute outside a
+    /// repository) and the kind of each touch.
+    pub touches: Vec<(String, TouchKind)>,
+}
+
 /// The five stored counts, in the order of the `message` columns (the 5-minute cache write
 /// is the short one, the 1-hour one the long), as [`Tokens`].
 fn tokens([input, short, long, read, output]: [i64; 5]) -> Result<Tokens, Error> {
@@ -94,7 +113,7 @@ impl Reader {
         let mut tx = sqlx::Connection::begin(&mut *conn).await?;
         let table = load_price_table(&mut tx).await?;
         let rows = sqlx::query!(
-            r#"SELECT m.provider, s.session_key, s.agent_key,
+            r#"SELECT m.provider, m.message_key, s.session_key, s.agent_key,
                       coalesce(root.kind, s.kind) AS "kind!: String",
                       md.name AS model, m.ts_ms, r.path AS "repo?: String",
                       m.input_tokens, m.cache_write_5m_tokens, m.cache_write_1h_tokens,
@@ -118,6 +137,7 @@ impl Reader {
             .map(|row| {
                 Ok(UsageRow {
                     provider: row.provider,
+                    message: row.message_key,
                     session: row.session_key,
                     agent: row.agent_key,
                     kind: row.kind,
@@ -246,6 +266,68 @@ impl Reader {
                 from_db(row.gaps, "gap count")?;
         }
         Ok(out)
+    }
+
+    /// Every tool call of the messages with `from_ms <= ts < to_ms`, with its file touches,
+    /// sorted by message (time, then key), then call id.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn tool_calls(&self, from_ms: i64, to_ms: i64) -> Result<Vec<ToolRow>, Error> {
+        let mut conn = self.pool.acquire().await?;
+        let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+        let calls = sqlx::query!(
+            r#"SELECT t.id AS "id!: i64", m.provider, m.message_key, t.tool_use_key, t.name,
+                      t.result_bytes, t.is_error
+               FROM tool_call t JOIN message m ON m.id = t.message_id
+               WHERE m.ts_ms >= ? AND m.ts_ms < ?
+               ORDER BY m.ts_ms, m.provider, m.message_key, t.tool_use_key"#,
+            from_ms,
+            to_ms,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let touches = sqlx::query!(
+            r#"SELECT f.tool_call_id, f.path, f.kind
+               FROM file_touch f
+               JOIN tool_call t ON t.id = f.tool_call_id
+               JOIN message m ON m.id = t.message_id
+               WHERE m.ts_ms >= ? AND m.ts_ms < ?
+               ORDER BY f.tool_call_id, f.path, f.kind"#,
+            from_ms,
+            to_ms,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let mut by_call: BTreeMap<i64, Vec<(String, TouchKind)>> = BTreeMap::new();
+        for row in touches {
+            let kind = match row.kind.as_str() {
+                "read" => TouchKind::Read,
+                "write" => TouchKind::Write,
+                "search" => TouchKind::Search,
+                other => return Err(Error::Corrupt(format!("file touch kind {other:?}"))),
+            };
+            by_call
+                .entry(row.tool_call_id)
+                .or_default()
+                .push((row.path, kind));
+        }
+        calls
+            .into_iter()
+            .map(|row| {
+                Ok(ToolRow {
+                    provider: row.provider,
+                    message: row.message_key,
+                    tool_use: row.tool_use_key,
+                    name: row.name,
+                    result_bytes: from_db(row.result_bytes, "result bytes")?,
+                    is_error: row.is_error != 0,
+                    touches: by_call.remove(&row.id).unwrap_or_default(),
+                })
+            })
+            .collect()
     }
 
     /// The number of stored commits per repository path key with `from_ms <= ts < to_ms`.

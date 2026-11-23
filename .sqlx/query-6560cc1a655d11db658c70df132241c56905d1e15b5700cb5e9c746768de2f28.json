@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id AS \"id!: i64\", m.provider, m.message_key, t.tool_use_key, t.name,\n                      t.result_bytes, t.is_error\n               FROM tool_call t JOIN message m ON m.id = t.message_id\n               WHERE m.ts_ms >= ? AND m.ts_ms < ?\n               ORDER BY m.ts_ms, m.provider, m.message_key, t.tool_use_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "provider",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "message_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "message_key"
+          }
+        }
+      },
+      {
+        "name": "tool_use_key",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "tool_use_key"
+          }
+        }
+      },
+      {
+        "name": "name",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "result_bytes",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_bytes"
+          }
+        }
+      },
+      {
+        "name": "is_error",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "is_error"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6560cc1a655d11db658c70df132241c56905d1e15b5700cb5e9c746768de2f28"
+}

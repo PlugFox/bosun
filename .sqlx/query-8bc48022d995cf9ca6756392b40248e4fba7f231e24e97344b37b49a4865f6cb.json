@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT m.provider, s.session_key, s.agent_key,\n                      coalesce(root.kind, s.kind) AS \"kind!: String\",\n                      md.name AS model, m.ts_ms, r.path AS \"repo?: String\",\n                      m.input_tokens, m.cache_write_5m_tokens, m.cache_write_1h_tokens,\n                      m.cache_read_tokens, m.output_tokens\n               FROM message m\n               JOIN model md ON md.id = m.model_id\n               JOIN session s ON s.id = m.session_id\n               LEFT JOIN session root ON root.provider = s.provider\n                    AND root.session_key = s.session_key AND root.agent_key IS NULL\n               LEFT JOIN repo r ON r.id = m.repo_id\n               WHERE m.ts_ms >= ? AND m.ts_ms < ?\n               ORDER BY m.ts_ms, m.provider, m.message_key",
+  "query": "SELECT m.provider, m.message_key, s.session_key, s.agent_key,\n                      coalesce(root.kind, s.kind) AS \"kind!: String\",\n                      md.name AS model, m.ts_ms, r.path AS \"repo?: String\",\n                      m.input_tokens, m.cache_write_5m_tokens, m.cache_write_1h_tokens,\n                      m.cache_read_tokens, m.output_tokens\n               FROM message m\n               JOIN model md ON md.id = m.model_id\n               JOIN session s ON s.id = m.session_id\n               LEFT JOIN session root ON root.provider = s.provider\n                    AND root.session_key = s.session_key AND root.agent_key IS NULL\n               LEFT JOIN repo r ON r.id = m.repo_id\n               WHERE m.ts_ms >= ? AND m.ts_ms < ?\n               ORDER BY m.ts_ms, m.provider, m.message_key",
   "describe": {
     "columns": [
       {
@@ -15,8 +15,19 @@
         }
       },
       {
-        "name": "session_key",
+        "name": "message_key",
         "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "message_key"
+          }
+        }
+      },
+      {
+        "name": "session_key",
+        "ordinal": 2,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -27,7 +38,7 @@
       },
       {
         "name": "agent_key",
-        "ordinal": 2,
+        "ordinal": 3,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -38,13 +49,13 @@
       },
       {
         "name": "kind!: String",
-        "ordinal": 3,
+        "ordinal": 4,
         "type_info": "Text",
         "origin": "Expression"
       },
       {
         "name": "model",
-        "ordinal": 4,
+        "ordinal": 5,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -55,7 +66,7 @@
       },
       {
         "name": "ts_ms",
-        "ordinal": 5,
+        "ordinal": 6,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -66,7 +77,7 @@
       },
       {
         "name": "repo?: String",
-        "ordinal": 6,
+        "ordinal": 7,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -77,7 +88,7 @@
       },
       {
         "name": "input_tokens",
-        "ordinal": 7,
+        "ordinal": 8,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -88,7 +99,7 @@
       },
       {
         "name": "cache_write_5m_tokens",
-        "ordinal": 8,
+        "ordinal": 9,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -99,7 +110,7 @@
       },
       {
         "name": "cache_write_1h_tokens",
-        "ordinal": 9,
+        "ordinal": 10,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -110,7 +121,7 @@
       },
       {
         "name": "cache_read_tokens",
-        "ordinal": 10,
+        "ordinal": 11,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -121,7 +132,7 @@
       },
       {
         "name": "output_tokens",
-        "ordinal": 11,
+        "ordinal": 12,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -137,6 +148,7 @@
     "nullable": [
       false,
       false,
+      false,
       true,
       false,
       false,
@@ -149,5 +161,5 @@
       false
     ]
   },
-  "hash": "09c8deaa2d3f2d0d62035832966c41f52f97aee1257999eb7e1bb4fd5299c630"
+  "hash": "8bc48022d995cf9ca6756392b40248e4fba7f231e24e97344b37b49a4865f6cb"
 }

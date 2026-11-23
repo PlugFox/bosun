@@ -1,16 +1,21 @@
 //! The types of `report.exact` (#6, "The report"; #26): the exact sections of the report.
 //!
 //! Every number here is exact: a raw token count, a sum of them, or a cost and eqv computed from
-//! them with the stored prices. Estimates (cost by tool and by file, the cost of finding, the
-//! context curve) are another method (#27) and never appear here. The report prints numbers; it
-//! draws no conclusions.
+//! them with the stored prices. Estimates (cost by tool and by file, repeated reads, the cost of
+//! finding) are another method, `report.estimates` (#27, [`crate::Estimates`]), and never
+//! appear here. The report prints numbers; it draws no conclusions.
+//!
+//! The context curve ([`ContextCurve`]) is here, not with the estimates: its numbers are the
+//! measured prompt sizes of messages (input plus cache reads and writes, from the provider's
+//! usage), their maximum, and a count of drops between consecutive messages. Nothing in it is
+//! converted from bytes or apportioned, and it holds no cost, so no total includes it.
 //!
 //! Scopes differ by section, and each type says which it has:
 //!
 //! - **range and repository**: the messages with `from_ms <= ts < to_ms`, and, with a
 //!   repository given, only those whose working directory is in it: [`Report::total`],
 //!   [`Report::by_category`], [`Report::by_model`], [`Report::by_kind`],
-//!   [`Report::old_method`], [`Report::per_commit`];
+//!   [`Report::old_method`], [`Report::per_commit`], [`Report::context`];
 //! - **range only**: the sessions the agreement compares ([`Agreement`]);
 //! - **the whole store**: the ingest counts of [`Health`].
 
@@ -60,6 +65,8 @@ pub struct Report {
     pub by_kind: Vec<KindRow>,
     /// Eqv per commit, per repository, against the previous period.
     pub per_commit: PerCommit,
+    /// The context curve of each context window.
+    pub context: ContextCurve,
     /// The ingest's counts and the agreement with the provider's own totals.
     pub health: Health,
     /// Models with no price at the time of some messages of the scope: their tokens are in
@@ -151,6 +158,40 @@ pub struct CommitPeriod {
     pub eqv: f64,
     /// `eqv / commits`; `null` without commits.
     pub eqv_per_commit: Option<f64>,
+}
+
+/// The context curve per context window (#6): its prompt size at the start, its peak, and its
+/// compactions.
+///
+/// The prompt size of a message is `input + cache read + cache write 5 min + cache write 1 h`
+/// of its usage. A compaction is a drop of the prompt size between consecutive messages of one
+/// window (#3): `prompt(next) < prompt(previous)`, messages ordered by time, then id. Over the
+/// messages of the scope only: a window's messages before the range are not seen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextCurve {
+    /// Windows with a message in the scope.
+    pub windows: u64,
+    /// Compactions over every window.
+    pub compactions: u64,
+    /// One row per window, sorted by session, then the main transcript before its sub-agents
+    /// by agent id.
+    pub rows: Vec<WindowCurve>,
+}
+
+/// One context window of [`ContextCurve`]: a session's main transcript or one sub-agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WindowCurve {
+    /// The provider's session id.
+    pub session: String,
+    /// The sub-agent id; `null` for the main transcript.
+    pub agent: Option<String>,
+    pub messages: u64,
+    /// The prompt size of the window's first message in the scope.
+    pub start: u64,
+    /// The largest prompt size of its messages in the scope.
+    pub peak: u64,
+    /// The drops of the prompt size between its consecutive messages.
+    pub compactions: u64,
 }
 
 /// The commit reader's last scan of one repository.

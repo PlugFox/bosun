@@ -35,7 +35,7 @@ impl Scope<'_> {
         (self.from_ms.saturating_sub(length), self.from_ms)
     }
 
-    fn holds_repo(&self, repo: Option<&str>) -> bool {
+    pub(crate) fn holds_repo(&self, repo: Option<&str>) -> bool {
         self.repo.is_none_or(|key| repo == Some(key))
     }
 }
@@ -68,6 +68,13 @@ pub async fn exact(
     let mut sections = Sections::default();
     for row in &in_scope {
         sections.add(&table, row);
+    }
+    #[cfg(mutant_report_merge_estimates)]
+    {
+        // Mutant: the estimated cost of tool results folded into the exact total.
+        let calls = reader.tool_calls(scope.from_ms, scope.to_ms).await?;
+        sections.total.cost =
+            sections.total.cost + crate::estimate::total_cost(&table, &in_scope, &calls);
     }
 
     let commits = (
@@ -103,6 +110,7 @@ pub async fn exact(
         by_model: sections.models(&table),
         by_kind: sections.kinds(&table),
         per_commit,
+        context: crate::curve::context_curve(&in_scope),
         health,
         unpriced: sections.unpriced(),
     })
@@ -220,7 +228,7 @@ impl<'a> Sections<'a> {
 }
 
 /// The rates that price `row`: zero for the synthetic model, `None` when no row prices it.
-fn rates(table: &PriceTable, row: &UsageRow) -> Option<Rates> {
+pub(crate) fn rates(table: &PriceTable, row: &UsageRow) -> Option<Rates> {
     match table.select(&row.model, row.ts_ms, row.tokens.prompt_size()) {
         Pricing::Synthetic => Some(Rates::default()),
         Pricing::Row(price) => Some(price.rates),
@@ -521,4 +529,4 @@ fn health(versions: &BTreeMap<u32, VersionHealth>, agreement: Agreement) -> Heal
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

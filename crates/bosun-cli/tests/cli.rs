@@ -573,7 +573,12 @@ async fn the_report_through_the_daemon() {
         &range,
     ]
     .concat());
-    let report: Value = serde_json::from_str(&json).unwrap();
+    let document: Value = serde_json::from_str(&json).unwrap();
+    // The exact part and the estimates, apart.
+    let estimates = &document["estimates"];
+    assert_eq!(estimates["estimate"], true, "{json}");
+    assert_eq!(estimates["by_tool"]["estimate"], true, "{json}");
+    let report = &document["exact"];
     assert_eq!(report["total"]["messages"], 4, "{json}");
     let agreement = &report["health"]["agreement"];
     assert_eq!(agreement["sessions"], 1, "{json}");
@@ -595,6 +600,7 @@ async fn the_report_through_the_daemon() {
     // Markdown, one document per identity; with --repo, only its owner is asked.
     let text = home.ok(&[&["report"][..], &range].concat());
     assert_eq!(titles(&text), ["personal", "work"], "{text}");
+    assert_eq!(text.matches("\n## Estimates\n").count(), 2, "{text}");
     let md = home.ok(&[&["report", "--format", "md"][..], &range].concat());
     assert_eq!(md, text);
     let scoped = home.ok(&[&["report", "--repo", "code"][..], &range].concat());

@@ -1,15 +1,38 @@
-//! The report as Markdown (#26): one document per identity, the sections of `report.exact` in
-//! order, as GitHub-flavoured tables. It prints numbers and draws no conclusions.
+//! The report as Markdown (#26, #27): one document per identity, the sections of
+//! `report.exact` in order, then, under a heading of their own, those of `report.estimates`,
+//! as GitHub-flavoured tables. It prints numbers and draws no conclusions.
 //!
 //! Token and message counts are printed in full; eqv is rounded to a whole token, the cost in
-//! USD to 1/100 of a cent, shares and changes to a tenth of a percent.
+//! USD to 1/100 of a cent, shares and changes to a tenth of a percent. Long lists (context
+//! windows, files, sessions) print their first [`LIMIT`] rows; the JSON has them all.
 
 use std::fmt::Write as _;
 
-use bosun_api::{CheckTokens, CommitPeriod, Comparison, RepoRef, Report, ScanState, TokenSums};
+use bosun_api::{
+    CheckTokens, CommitPeriod, Comparison, Estimates, RepoRef, Report, ResultCost, ScanState,
+    TokenSums,
+};
+use serde::Serialize;
 
 use crate::render::usd;
 use crate::time;
+
+/// The rows a long list prints.
+const LIMIT: usize = 20;
+
+/// The report of one identity, as `bosun report` prints it in JSON: the exact part and the
+/// estimates, side by side and never mixed.
+#[derive(Debug, Serialize)]
+pub(crate) struct Document {
+    pub(crate) exact: Report,
+    pub(crate) estimates: Estimates,
+}
+
+/// One identity's report: the exact sections, then the estimates.
+pub(crate) fn document(document: &Document, out: &mut String) {
+    report(&document.exact, out);
+    estimates(&document.estimates, out);
+}
 
 /// A Markdown table: a header row, an alignment row, the body.
 struct Table {
@@ -138,6 +161,7 @@ pub(crate) fn report(report: &Report, out: &mut String) {
     models(report, out);
     kinds(report, out);
     per_commit(report, out);
+    context(report, out);
     health(report, out);
     unpriced(report, out);
 }
@@ -431,6 +455,217 @@ fn unpriced(report: &Report, out: &mut String) {
     table.render(out);
 }
 
+/// Says how many rows of `total` were left out after the first [`LIMIT`].
+fn more(total: usize, out: &mut String) {
+    if total > LIMIT {
+        let _ = writeln!(
+            out,
+            "{} more rows are in the JSON (`--format json`).\n",
+            total - LIMIT
+        );
+    }
+}
+
+fn context(report: &Report, out: &mut String) {
+    let curve = &report.context;
+    out.push_str("## Context curve\n\n");
+    let _ = writeln!(
+        out,
+        "Prompt size (input plus cache reads and writes) per context window; a compaction is a \
+         drop of it between consecutive messages. Windows: {}; compactions: {}.\n",
+        curve.windows, curve.compactions
+    );
+    if curve.rows.is_empty() {
+        return;
+    }
+    let mut rows: Vec<_> = curve.rows.iter().collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.peak));
+    let mut table = Table::new(&[
+        ("session", false),
+        ("agent", false),
+        ("messages", true),
+        ("start", true),
+        ("peak", true),
+        ("compactions", true),
+    ]);
+    for row in rows.iter().take(LIMIT) {
+        table.row(vec![
+            row.session.clone(),
+            row.agent.clone().unwrap_or_default(),
+            row.messages.to_string(),
+            row.start.to_string(),
+            row.peak.to_string(),
+            row.compactions.to_string(),
+        ]);
+    }
+    table.render(out);
+    more(rows.len(), out);
+}
+
+/// One identity's estimates, apart from the exact sections.
+pub(crate) fn estimates(estimates: &Estimates, out: &mut String) {
+    out.push_str("---\n\n## Estimates\n\n");
+    let _ = writeln!(
+        out,
+        "Every number below is an estimate and is never added to the exact figures above. \
+         Each prices tool results (bytes_per_token = {}): {}.\n",
+        estimates.bytes_per_token, estimates.formula
+    );
+    out.push_str("Known gaps:\n\n");
+    for gap in &estimates.known_gaps {
+        let _ = writeln!(out, "- {gap}");
+    }
+    out.push('\n');
+    by_tool(estimates, out);
+    by_file(estimates, out);
+    repeated_reads(estimates, out);
+    finding(estimates, out);
+}
+
+const RESULT_COLUMNS: [(&str, bool); 5] = [
+    ("calls", true),
+    ("est. tokens", true),
+    ("carry turns", true),
+    ("est. eqv", true),
+    ("of it carry", true),
+];
+
+fn result_cells(results: &ResultCost) -> Vec<String> {
+    vec![
+        results.calls.to_string(),
+        results.tokens.to_string(),
+        results.carry_turns.to_string(),
+        eqv(results.eqv),
+        eqv(results.carry_eqv),
+    ]
+}
+
+fn by_tool(estimates: &Estimates, out: &mut String) {
+    let section = &estimates.by_tool;
+    out.push_str("### Cost by tool (estimate)\n\n");
+    let mut columns = vec![("tool", false), ("errors", true)];
+    columns.extend(RESULT_COLUMNS);
+    let mut table = Table::new(&columns);
+    for row in &section.rows {
+        let mut cells = vec![row.name.clone(), row.errors.to_string()];
+        cells.extend(result_cells(&row.results));
+        table.row(cells);
+    }
+    let errors: u64 = section.rows.iter().map(|r| r.errors).sum();
+    let mut cells = vec!["all tools".to_owned(), errors.to_string()];
+    cells.extend(result_cells(&section.total));
+    table.row(cells);
+    table.render(out);
+}
+
+fn by_file(estimates: &Estimates, out: &mut String) {
+    let section = &estimates.by_file;
+    out.push_str("### Cost by file (estimate)\n\n");
+    if section.rows.is_empty() {
+        out.push_str("No file was touched.\n\n");
+        return;
+    }
+    let mut columns = vec![
+        ("repository", false),
+        ("path", false),
+        ("reads", true),
+        ("searches", true),
+        ("writes", true),
+        ("sessions", true),
+    ];
+    columns.extend(RESULT_COLUMNS);
+    let mut table = Table::new(&columns);
+    for row in section.rows.iter().take(LIMIT) {
+        let mut cells = vec![
+            repo(row.repo.as_ref()),
+            row.path.clone(),
+            row.reads.to_string(),
+            row.searches.to_string(),
+            row.writes.to_string(),
+            row.sessions.to_string(),
+        ];
+        cells.extend(result_cells(&row.results));
+        table.row(cells);
+    }
+    table.render(out);
+    more(section.rows.len(), out);
+}
+
+fn repeated_reads(estimates: &Estimates, out: &mut String) {
+    let section = &estimates.repeated_reads;
+    out.push_str("### Repeated reads (estimate)\n\n");
+    let _ = writeln!(
+        out,
+        "Within a session: {} reads, {} est. eqv. Across sessions: {} reads, {} est. eqv.\n",
+        section.within.calls,
+        eqv(section.within.eqv),
+        section.across.calls,
+        eqv(section.across.eqv)
+    );
+    if section.rows.is_empty() {
+        return;
+    }
+    let mut table = Table::new(&[
+        ("repository", false),
+        ("path", false),
+        ("reads", true),
+        ("sessions", true),
+        ("repeats within", true),
+        ("est. eqv within", true),
+        ("repeats across", true),
+        ("est. eqv across", true),
+    ]);
+    for row in section.rows.iter().take(LIMIT) {
+        table.row(vec![
+            repo(row.repo.as_ref()),
+            row.path.clone(),
+            row.reads.to_string(),
+            row.sessions.to_string(),
+            row.within.calls.to_string(),
+            eqv(row.within.eqv),
+            row.across.calls.to_string(),
+            eqv(row.across.eqv),
+        ]);
+    }
+    table.render(out);
+    more(section.rows.len(), out);
+}
+
+fn finding(estimates: &Estimates, out: &mut String) {
+    let section = &estimates.finding;
+    out.push_str("### Cost of finding (estimate)\n\n");
+    let _ = writeln!(
+        out,
+        "Reads and searches before a session's first write: {} sessions, {} calls, {} est. \
+         eqv. Sessions that wrote nothing: {}, {} calls, {} est. eqv.\n",
+        section.sessions_with_write,
+        section.before_write.calls,
+        eqv(section.before_write.eqv),
+        section.sessions_without_write,
+        section.without_write.calls,
+        eqv(section.without_write.eqv)
+    );
+    if section.rows.is_empty() {
+        return;
+    }
+    let mut rows: Vec<_> = section.rows.iter().collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.results.cost.0));
+    let mut columns = vec![("session", false), ("first write", false)];
+    columns.extend(RESULT_COLUMNS);
+    let mut table = Table::new(&columns);
+    for row in rows.iter().take(LIMIT) {
+        let mut cells = vec![
+            row.session.clone(),
+            row.first_write_ms
+                .map_or_else(|| "none".to_owned(), time::format),
+        ];
+        cells.extend(result_cells(&row.results));
+        table.row(cells);
+    }
+    table.render(out);
+    more(rows.len(), out);
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -441,15 +676,20 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
     }
 
-    /// The Markdown snapshot of the golden report of `bosun-heat` (the result of `report.exact`
-    /// over the synthetic corpus). Run with `BOSUN_BLESS=1` to rewrite it.
+    /// The Markdown snapshot of the golden report of `bosun-heat` (the results of
+    /// `report.exact` and `report.estimates` over the synthetic corpus). Run with
+    /// `BOSUN_BLESS=1` to rewrite it.
     #[test]
     fn the_golden_report_renders_as_the_snapshot() {
-        let json =
-            std::fs::read_to_string(golden("../bosun-heat/tests/golden/report.json")).unwrap();
-        let data: Report = serde_json::from_str(&json).unwrap();
+        let read = |name: &str| {
+            std::fs::read_to_string(golden(&format!("../bosun-heat/tests/golden/{name}"))).unwrap()
+        };
+        let data = Document {
+            exact: serde_json::from_str(&read("report.json")).unwrap(),
+            estimates: serde_json::from_str(&read("estimates.json")).unwrap(),
+        };
         let mut text = String::new();
-        report(&data, &mut text);
+        document(&data, &mut text);
         let snapshot = golden("tests/golden/report.md");
         if std::env::var_os("BOSUN_BLESS").is_some() {
             std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();

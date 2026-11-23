@@ -1,6 +1,6 @@
 [package]
 name = "bosun-heat"
-description = "Metrics and the report of bosun: the exact sections of the stage-0 report over the store."
+description = "Metrics and the report of bosun: the exact and the estimate sections of the stage-0 report over the store."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

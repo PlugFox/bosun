@@ -10,8 +10,9 @@ usage: cargo xtask <task>
 
 tasks:
   check-deps          check the workspace dependency rules (#12)
-  mutants [NAME...]   run every registered mutant (or the named ones) and assert that its
-                      check is green without it and red with it";
+  mutants [--shard K/N] [--platform-only] [NAME...]
+                      run the registered mutants (or the named ones): each one's tests must
+                      build, and its check must be green without it and red with it";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

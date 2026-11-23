@@ -21,7 +21,10 @@ missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 # Mutants are cfg-only, never features, so --all-features cannot enable one (#12).
 # Every mutant registered in xtask/src/mutants.rs is declared here.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mutant_core_async_runtime)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(mutant_core_async_runtime)",
+  "cfg(mutant_xtask_no_build_step)",
+] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

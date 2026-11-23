@@ -98,6 +98,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_report_no_window)",
   "cfg(mutant_ingest_subagent_cost_state)",
   "cfg(mutant_xtask_mcp_not_client)",
+  "cfg(mutant_core_trust_done)",
+  "cfg(mutant_core_limit_is_failure)",
+  "cfg(mutant_core_no_park_cap)",
+  "cfg(mutant_core_flaky_is_fail)",
+  "cfg(mutant_core_ignore_blockers)",
 ] }
 
 [workspace.lints.clippy]

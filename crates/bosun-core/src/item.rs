@@ -1,0 +1,1701 @@
+//! The item machine of #7.
+//!
+//! ```text
+//! ready -> claimed -> running -> verifying -> landing -> done
+//!             |          |           |            +-> needs_you   (push or PR refused)
+//!             |          |           +-> running        (verdict failed, attempts left)
+//!             |          |           +-> needs_you      (attempts exhausted, guard)
+//!             |          +-> parked -> running          (limit, pause, kill, daily cap)
+//!             |          +-> needs_you                  (question, auth, budget,
+//!             |                                          uncounted-park cap, config changed)
+//!             +-> ready                                 (user won the claim race)
+//! any daemon-owned state -> cancelled | ready | done    (user command, #5)
+//! ```
+//!
+//! [`step`] is a pure function of the item, the event and a [`Ctx`] (the time and the active
+//! hold are inputs, never read from a clock). Every arrow yields one [`Transition`]: an
+//! idempotence key, the from and to states, the cause and the side effects as data, each with
+//! its own key. The keys derive from the item and its transition count only, so replaying an
+//! event from a recorded state yields the same keys, and the executor (#62) and the store (#57)
+//! turn a replay into a no-op. Events address the attempt, session and verdict run they are
+//! about; an event that is no longer current, or that has no arrow from the current state, is
+//! ignored ([`step`] returns `None`), so applying an event twice adds nothing.
+//!
+//! Counting (#7): two failing verdict runs are one failed attempt; fail then pass is `flaky`
+//! and passes; two failed attempts are Needs you. A limit, a pause, the kill switch, the daily
+//! cap, a crash retry and a lost daemon do not count. The uncounted parks and resumes that the
+//! agent can provoke (a limit, a crash, a failed resume, a lost session) are capped per item;
+//! the cap is Needs you, so a printed fake limit cannot park an item forever.
+//!
+//! Invariant 2 of #1: an agent-originated event ([`Actor::Agent`]: a question, a summary, a
+//! note) and the text of an exit can move an item to Needs you or nowhere. Only a verdict run
+//! leads toward Done; the user may also put a card there by hand ([`Outcome::UserClosed`]).
+
+use std::fmt;
+
+use crate::attempt::{Attempt, AttemptEvent, AttemptState, RunResult};
+
+/// The identity of an item: its key in the store, unique across repositories.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ItemId(pub String);
+
+impl ItemId {
+    /// An item id from its key.
+    #[must_use]
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
+    }
+}
+
+impl fmt::Display for ItemId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A daemon-owned board column (#5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Column {
+    /// In progress: claimed, running or parked.
+    InProgress,
+    /// Verify: verifying or landing.
+    Verify,
+    /// Done.
+    Done,
+    /// Needs you; the reason is an issue comment.
+    NeedsYou,
+}
+
+/// A gate that holds new work back: no session starts while one is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Hold {
+    /// A global or per-repository pause: the current attempt finishes, nothing new starts.
+    Pause,
+    /// The kill switch: every child is stopped and every item parks.
+    Kill,
+    /// The daily eqv cap is reached; the queue parks until local midnight.
+    DailyCap,
+}
+
+/// Why an item is parked. None of these counts as a failed attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParkReason {
+    /// The provider's limit; resumes at the reset time.
+    Limit,
+    /// A pause was active when a session would have started.
+    Paused,
+    /// The kill switch.
+    Killed,
+    /// The daily cap.
+    DailyCap,
+}
+
+impl From<Hold> for ParkReason {
+    fn from(hold: Hold) -> Self {
+        match hold {
+            Hold::Pause => Self::Paused,
+            Hold::Kill => Self::Killed,
+            Hold::DailyCap => Self::DailyCap,
+        }
+    }
+}
+
+/// What a parked item does when it wakes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Next {
+    /// Start a new attempt.
+    NewAttempt,
+    /// Resume the attempt's last session by id.
+    Resume,
+    /// Reset the working tree to the last commit and start a fresh session of the attempt.
+    Reset,
+    /// Go on verifying the attempt.
+    Verify,
+}
+
+/// A parked item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Park {
+    /// Why it parked.
+    pub reason: ParkReason,
+    /// The earliest wake time (ms since the Unix epoch); `None` wakes when no hold is active.
+    pub until_ms: Option<i64>,
+    /// What it does on waking.
+    pub next: Next,
+}
+
+/// How an item reached Done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Outcome {
+    /// The verdict passed.
+    Pass,
+    /// The verdict failed once and passed on its re-run.
+    Flaky,
+    /// The user moved the card into Done by hand; no verdict (#5).
+    UserClosed,
+}
+
+/// A check before the verdict whose failure is Needs you rather than a failed attempt (#7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Guard {
+    /// The item's commits touch a protected path.
+    ProtectedPath,
+    /// A new ignored file outside the declared build directories.
+    IgnoredFile,
+    /// Git's own configuration (hooks, config, excludes, attributes) changed.
+    GitConfig,
+}
+
+/// Why an item needs the user. Each is posted as a new comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Reason {
+    /// The card failed lint.
+    Lint,
+    /// The card is in a `blocked-by` cycle.
+    Cycle,
+    /// The agent asked a blocking question.
+    Question,
+    /// The provider's authentication expired; retrying cannot help.
+    Auth,
+    /// A per-item eqv or wall-clock cap was exceeded.
+    Budget,
+    /// The uncounted parks and resumes reached their per-item cap.
+    ParkCap,
+    /// The configuration or the permission policy changed during the item.
+    ConfigChanged,
+    /// The failed attempts reached the limit.
+    AttemptsExhausted,
+    /// A guard before the verdict refused the attempt.
+    Guard(Guard),
+    /// Landing was refused (push or pull request refused, conflict).
+    LandingRefused,
+}
+
+/// The state of an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum State {
+    /// In Ready, not claimed: user-owned.
+    Ready,
+    /// The claim is being written and re-read; the snapshot is taken.
+    Claimed,
+    /// A session of the current attempt is running.
+    Running,
+    /// Parked; does not count.
+    Parked(Park),
+    /// The verdict (its preconditions, then its runs) is in progress.
+    Verifying,
+    /// The landing step is in progress.
+    Landing,
+    /// Done.
+    Done(Outcome),
+    /// Needs the user.
+    NeedsYou(Reason),
+    /// Cancelled by the user.
+    Cancelled,
+}
+
+impl State {
+    /// The stable name stored in the `item` and `transition` tables (#3).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Claimed => "claimed",
+            Self::Running => "running",
+            Self::Parked(_) => "parked",
+            Self::Verifying => "verifying",
+            Self::Landing => "landing",
+            Self::Done(_) => "done",
+            Self::NeedsYou(_) => "needs_you",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// The board column the daemon projects this state to; `None` for the user's states.
+    #[must_use]
+    pub fn column(self) -> Option<Column> {
+        match self {
+            Self::Ready | Self::Cancelled => None,
+            Self::Claimed | Self::Running | Self::Parked(_) => Some(Column::InProgress),
+            Self::Verifying | Self::Landing => Some(Column::Verify),
+            Self::Done(_) => Some(Column::Done),
+            Self::NeedsYou(_) => Some(Column::NeedsYou),
+        }
+    }
+
+    /// The daemon owns the item and has work in flight: claimed, running, parked, verifying or
+    /// landing. These are the states crash recovery visits.
+    #[must_use]
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Claimed | Self::Running | Self::Parked(_) | Self::Verifying | Self::Landing
+        )
+    }
+
+    /// A child process (a session or a verdict run) may be alive in this state.
+    fn has_child(self) -> bool {
+        matches!(self, Self::Running | Self::Verifying)
+    }
+}
+
+/// How a session ended, as the runner classified it (#7, `classify_exit`). A blocking question
+/// is not an exit kind: it is [`Event::Question`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Exit {
+    /// A normal exit; the verdict decides.
+    Ok,
+    /// A provider limit, with the reset time if one was parsed.
+    Limit {
+        /// The reset time, ms since the Unix epoch.
+        reset_ms: Option<i64>,
+    },
+    /// Authentication expired.
+    Auth,
+    /// The session died (a crash, a dead child after sleep, a missing MCP handshake).
+    Crash,
+}
+
+/// A user action on a card (#5): a command, not a conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UserCommand {
+    /// The card left the board or went to Backlog, or the issue was closed: cancel.
+    Cancel,
+    /// The card is in Ready again: start over when its turn comes, with a fresh attempt counter.
+    Requeue,
+    /// The `restart` label: kill the current session, re-snapshot, start again.
+    Restart,
+    /// The card was moved into Done by hand: accepted, recorded as user-closed, no verdict.
+    ManualDone,
+}
+
+/// Who an event comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Actor {
+    /// The daemon's own observation: the board, a process, the verdict, the clock.
+    Daemon,
+    /// The agent, through its MCP calls. May move an item to Needs you only (#1, invariant 2).
+    Agent,
+    /// The user, through the board.
+    User,
+}
+
+/// Something that happened to an item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// The scheduler picked the item; the claim procedure starts.
+    Claim,
+    /// The claim was written, re-read, linted and snapshotted.
+    ClaimConfirmed,
+    /// The re-read showed a user move in between: the user wins and the claim is released.
+    ClaimLost,
+    /// The card failed lint.
+    LintFailed,
+    /// The card is in a `blocked-by` cycle.
+    Cycle,
+    /// A session exited.
+    Exited {
+        /// The attempt it belonged to.
+        attempt: u32,
+        /// The session's number.
+        spawn: u32,
+        /// The runner's classification.
+        exit: Exit,
+        /// The session's final text. The agent writes it, so the machine never reads it.
+        text: String,
+    },
+    /// Resuming a session by id failed.
+    ResumeFailed {
+        /// The attempt.
+        attempt: u32,
+        /// The session that failed to resume.
+        spawn: u32,
+    },
+    /// A blocking `ask_question` call (agent).
+    Question {
+        /// The attempt of the session that asked.
+        attempt: u32,
+    },
+    /// A `submit_summary` call (agent). Recorded with its attempt; moves nothing.
+    Summary {
+        /// The attempt.
+        attempt: u32,
+    },
+    /// A `note` call (agent). Recorded with its attempt; moves nothing.
+    Note {
+        /// The attempt.
+        attempt: u32,
+    },
+    /// The verdict's preconditions were checked.
+    Preconditions {
+        /// The attempt.
+        attempt: u32,
+        /// All held; `false` fails the attempt.
+        passed: bool,
+    },
+    /// A guard refused the attempt before its verdict.
+    Refused {
+        /// The attempt.
+        attempt: u32,
+        /// Which guard.
+        guard: Guard,
+    },
+    /// A verdict run finished.
+    Verdict {
+        /// The attempt.
+        attempt: u32,
+        /// The run's number.
+        run: u32,
+        /// Its result.
+        result: RunResult,
+    },
+    /// The landing step finished.
+    Landed,
+    /// The landing step was refused.
+    LandingRefused,
+    /// The clock: a parked item wakes once its time has come and no hold is active.
+    Tick,
+    /// The kill switch was thrown.
+    KillSwitch,
+    /// A per-item budget cap was exceeded.
+    BudgetExceeded,
+    /// The configuration or the policy hash changed during the item.
+    ConfigChanged,
+    /// The daemon restarted; the work in flight in the current state is gone (crash recovery).
+    Restarted {
+        /// The daemon's boot number, increasing across starts.
+        boot: u32,
+        /// For a running item, the exit classified from the transcript tail, if any.
+        tail: Option<Exit>,
+    },
+    /// A user command.
+    User(UserCommand),
+}
+
+impl Event {
+    /// The stable name recorded as the transition's cause.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::ClaimConfirmed => "claim_confirmed",
+            Self::ClaimLost => "claim_lost",
+            Self::LintFailed => "lint_failed",
+            Self::Cycle => "cycle",
+            Self::Exited { .. } => "exited",
+            Self::ResumeFailed { .. } => "resume_failed",
+            Self::Question { .. } => "question",
+            Self::Summary { .. } => "summary",
+            Self::Note { .. } => "note",
+            Self::Preconditions { .. } => "preconditions",
+            Self::Refused { .. } => "refused",
+            Self::Verdict { .. } => "verdict",
+            Self::Landed => "landed",
+            Self::LandingRefused => "landing_refused",
+            Self::Tick => "tick",
+            Self::KillSwitch => "kill_switch",
+            Self::BudgetExceeded => "budget_exceeded",
+            Self::ConfigChanged => "config_changed",
+            Self::Restarted { .. } => "restarted",
+            Self::User(UserCommand::Cancel) => "user_cancel",
+            Self::User(UserCommand::Requeue) => "user_requeue",
+            Self::User(UserCommand::Restart) => "user_restart",
+            Self::User(UserCommand::ManualDone) => "user_done",
+        }
+    }
+
+    /// Who the event comes from.
+    #[must_use]
+    pub fn actor(&self) -> Actor {
+        match self {
+            Self::Question { .. } | Self::Summary { .. } | Self::Note { .. } => Actor::Agent,
+            Self::User(_) => Actor::User,
+            _ => Actor::Daemon,
+        }
+    }
+}
+
+/// The counting rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rules {
+    /// Failed attempts that send the item to Needs you.
+    pub max_attempts: u32,
+    /// Uncounted parks and resumes allowed per item; one more is Needs you.
+    pub park_cap: u32,
+    /// Crash retries per attempt; one more crash fails the attempt.
+    pub crash_retries: u32,
+    /// How long a limit parks when no reset time was parsed, in ms.
+    pub default_backoff_ms: i64,
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Self {
+            max_attempts: 2,
+            park_cap: 6,
+            crash_retries: 1,
+            default_backoff_ms: 15 * 60 * 1000,
+        }
+    }
+}
+
+/// The inputs of a step besides the item and the event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ctx {
+    /// The time, ms since the Unix epoch.
+    pub now_ms: i64,
+    /// The hold active for the item's repository, if any (see [`crate::Gates::hold`]).
+    pub hold: Option<Hold>,
+    /// The counting rules.
+    pub rules: Rules,
+}
+
+impl Ctx {
+    /// A context at `now_ms` with no hold and the default rules.
+    #[must_use]
+    pub fn at(now_ms: i64) -> Self {
+        Self {
+            now_ms,
+            hold: None,
+            rules: Rules::default(),
+        }
+    }
+}
+
+/// An item and its counters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Item {
+    /// The item's id.
+    pub id: ItemId,
+    /// Its state.
+    pub state: State,
+    /// The current (or last) attempt.
+    pub attempt: Option<Attempt>,
+    /// Transitions recorded so far; the next one is `seq + 1`.
+    pub seq: u32,
+    /// Attempt numbers issued (item-wide, never reset).
+    pub attempts: u32,
+    /// Session numbers issued (item-wide, never reset).
+    pub spawns: u32,
+    /// Verdict run numbers issued (item-wide, never reset).
+    pub runs: u32,
+    /// Failed attempts since the counter was last reset.
+    pub failed: u32,
+    /// Uncounted parks and resumes since the counter was last reset.
+    pub uncounted: u32,
+    /// The last daemon boot whose recovery this item went through.
+    pub boot: u32,
+}
+
+impl Item {
+    /// A new item in Ready.
+    #[must_use]
+    pub fn new(id: ItemId) -> Self {
+        Self {
+            id,
+            state: State::Ready,
+            attempt: None,
+            seq: 0,
+            attempts: 0,
+            spawns: 0,
+            runs: 0,
+            failed: 0,
+            uncounted: 0,
+            boot: 0,
+        }
+    }
+
+    fn attempt_number(&self) -> u32 {
+        self.attempt.as_ref().map_or(0, |a| a.number)
+    }
+}
+
+/// The idempotence key of a transition: the item and its transition number.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TransitionKey {
+    /// The item.
+    pub item: ItemId,
+    /// The transition's number within the item, from 1.
+    pub seq: u32,
+}
+
+impl fmt::Display for TransitionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/t{}", self.item, self.seq)
+    }
+}
+
+/// The key of a side effect: the item, the attempt, the transition and the effect's index in
+/// it. Redoing an effect with the same key after a crash is a no-op.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EffectKey {
+    /// The item.
+    pub item: ItemId,
+    /// The attempt current after the transition (0 before the first).
+    pub attempt: u32,
+    /// The transition's number.
+    pub seq: u32,
+    /// The effect's index within the transition.
+    pub index: u32,
+}
+
+impl fmt::Display for EffectKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/a{}/t{}/e{}",
+            self.item, self.attempt, self.seq, self.index
+        )
+    }
+}
+
+/// How a session starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpawnMode {
+    /// A fresh session of a new attempt.
+    Fresh,
+    /// Resume the attempt's last session by id.
+    Resume,
+    /// Reset the working tree to the last commit, then a fresh session of the same attempt.
+    Reset,
+}
+
+/// A side effect, as data; the executor (#62) performs it after the transition is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffectKind {
+    /// The claim procedure (#5, #62): fail-closed checks, snapshot, lint, hashes, base capture,
+    /// write the In progress status, re-read; it removes a `restart` label if present. Reports
+    /// [`Event::ClaimConfirmed`], [`Event::ClaimLost`] or [`Event::LintFailed`].
+    Claim,
+    /// Start a session.
+    Spawn {
+        /// The attempt.
+        attempt: u32,
+        /// The new session's number.
+        spawn: u32,
+        /// How.
+        mode: SpawnMode,
+    },
+    /// Kill the item's child (session or verdict run) now; a question's session after a grace.
+    Kill,
+    /// Check the verdict's preconditions and guards.
+    CheckPreconditions {
+        /// The attempt.
+        attempt: u32,
+    },
+    /// Run the verdict from the snapshot.
+    RunVerdict {
+        /// The attempt.
+        attempt: u32,
+        /// The run's number.
+        run: u32,
+    },
+    /// The landing step (stage 1: `local`, trailers and the item report).
+    Land {
+        /// The attempt whose verdict passed.
+        attempt: u32,
+    },
+    /// Write a daemon-owned column to the board.
+    Project(Column),
+    /// Post a new comment for the user: the reason (a question carries its text).
+    Comment(Reason),
+    /// Create or edit the sticky item report; coalesces per [`Effect::coalesce_key`].
+    Report,
+}
+
+/// A keyed side effect.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Effect {
+    /// Its key.
+    pub key: EffectKey,
+    /// What to do.
+    pub kind: EffectKind,
+}
+
+impl Effect {
+    /// The outbox key under which pending rows of this effect coalesce, if they do: the sticky
+    /// report is one per item and is rendered from the database at send time (#5).
+    #[must_use]
+    pub fn coalesce_key(&self) -> Option<String> {
+        match self.kind {
+            EffectKind::Report => Some(format!("{}/report", self.key.item)),
+            _ => None,
+        }
+    }
+}
+
+/// One arrow taken: recorded before any of its effects is performed (#1, invariant 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transition {
+    /// Its idempotence key.
+    pub key: TransitionKey,
+    /// The attempt current after the transition (0 before the first).
+    pub attempt: u32,
+    /// The item's state before.
+    pub from: State,
+    /// The item's state after.
+    pub to: State,
+    /// The attempt's state before, if there was an attempt.
+    pub attempt_from: Option<AttemptState>,
+    /// The attempt's state after, if there is an attempt.
+    pub attempt_to: Option<AttemptState>,
+    /// The event's name ([`Event::name`]).
+    pub cause: &'static str,
+    /// The side effects, in order.
+    pub effects: Vec<Effect>,
+}
+
+/// The result of a step that took an arrow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stepped {
+    /// The item after the transition.
+    pub item: Item,
+    /// The transition to record.
+    pub transition: Transition,
+}
+
+/// Applies `event` to `item`. `None` when the event is stale or has no arrow from the item's
+/// state: nothing is recorded and nothing is done.
+#[must_use]
+pub fn step(item: &Item, event: &Event, ctx: &Ctx) -> Option<Stepped> {
+    let mut draft = Draft {
+        item: item.clone(),
+        effects: Vec::new(),
+        ctx: *ctx,
+    };
+    draft.apply(event)?;
+    Some(draft.finish(item, event))
+}
+
+/// The item being changed by one step, and the effects so far.
+struct Draft {
+    item: Item,
+    effects: Vec<EffectKind>,
+    ctx: Ctx,
+}
+
+impl Draft {
+    fn apply(&mut self, event: &Event) -> Option<()> {
+        match event {
+            Event::Claim => {
+                self.expect(&[State::Ready])?;
+                self.item.state = State::Claimed;
+                self.effects.push(EffectKind::Claim);
+            }
+            Event::ClaimConfirmed => {
+                self.expect(&[State::Claimed])?;
+                self.start(Next::NewAttempt);
+            }
+            Event::ClaimLost => {
+                self.expect(&[State::Claimed])?;
+                self.item.state = State::Ready;
+            }
+            Event::LintFailed => {
+                self.expect(&[State::Ready, State::Claimed])?;
+                self.needs_you(Reason::Lint);
+            }
+            Event::Cycle => {
+                self.expect(&[State::Ready])?;
+                self.needs_you(Reason::Cycle);
+            }
+            Event::Exited {
+                attempt,
+                spawn,
+                exit,
+                text,
+            } => {
+                self.expect(&[State::Running])?;
+                self.session(*attempt, *spawn)?;
+                self.exited(*exit, text);
+            }
+            Event::ResumeFailed { attempt, spawn } => {
+                self.expect(&[State::Running])?;
+                self.session(*attempt, *spawn)?;
+                if !self.uncounted() {
+                    self.start(Next::Reset);
+                }
+            }
+            Event::Question { attempt } => {
+                self.expect(&[State::Running, State::Verifying])?;
+                self.current(*attempt)?;
+                self.kill_child();
+                self.needs_you(Reason::Question);
+            }
+            // Recorded as the attempt's agent calls (#57), never a transition.
+            Event::Summary { .. } | Event::Note { .. } => return None,
+            Event::Preconditions { .. } | Event::Refused { .. } | Event::Verdict { .. } => {
+                self.verification(event)?;
+            }
+            Event::Landed => {
+                self.expect(&[State::Landing])?;
+                let outcome = match self.item.attempt.as_ref()?.state {
+                    AttemptState::Flaky => Outcome::Flaky,
+                    _ => Outcome::Pass,
+                };
+                self.item.state = State::Done(outcome);
+            }
+            Event::LandingRefused => {
+                self.expect(&[State::Landing])?;
+                self.needs_you(Reason::LandingRefused);
+            }
+            Event::Tick => self.tick()?,
+            Event::KillSwitch => self.kill_switch()?,
+            Event::BudgetExceeded => {
+                self.expect(&[State::Running, State::Parked(PARKED), State::Verifying])?;
+                self.kill_child();
+                self.needs_you(Reason::Budget);
+            }
+            Event::ConfigChanged => {
+                self.expect(&[
+                    State::Claimed,
+                    State::Running,
+                    State::Parked(PARKED),
+                    State::Verifying,
+                ])?;
+                self.kill_child();
+                self.needs_you(Reason::ConfigChanged);
+            }
+            Event::Restarted { boot, tail } => self.restarted(*boot, *tail)?,
+            Event::User(command) => self.user(*command)?,
+        }
+        Some(())
+    }
+
+    /// The verification events: preconditions, guards and verdict runs.
+    fn verification(&mut self, event: &Event) -> Option<()> {
+        match event {
+            Event::Preconditions { attempt, passed } => {
+                self.expect(&[State::Verifying])?;
+                self.current(*attempt)?;
+                if self.item.attempt.as_ref()?.state != AttemptState::VerdictPending {
+                    return None;
+                }
+                if *passed {
+                    self.attempt_step(AttemptEvent::VerdictStarted)?;
+                    self.run_verdict();
+                } else {
+                    self.attempt_step(AttemptEvent::Failed)?;
+                    self.attempt_failed();
+                }
+            }
+            Event::Refused { attempt, guard } => {
+                self.expect(&[State::Verifying])?;
+                self.current(*attempt)?;
+                self.needs_you(Reason::Guard(*guard));
+            }
+            Event::Verdict {
+                attempt,
+                run,
+                result,
+            } => {
+                self.expect(&[State::Verifying])?;
+                self.current(*attempt)?;
+                if self.item.attempt.as_ref()?.run != *run {
+                    return None;
+                }
+                self.attempt_step(AttemptEvent::VerdictFinished(*result))?;
+                self.verdict_finished();
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// Succeeds when the item is in one of `states`; any parked state matches `PARKED`.
+    fn expect(&self, states: &[State]) -> Option<()> {
+        let matches = |s: &State| match (s, self.item.state) {
+            (State::Parked(_), State::Parked(_)) => true,
+            (s, current) => *s == current,
+        };
+        states.iter().any(matches).then_some(())
+    }
+
+    /// Succeeds when `attempt` is the current attempt.
+    fn current(&self, attempt: u32) -> Option<()> {
+        (self.item.attempt.as_ref()?.number == attempt).then_some(())
+    }
+
+    /// Succeeds when `attempt` and `spawn` name the current session.
+    fn session(&self, attempt: u32, spawn: u32) -> Option<()> {
+        let a = self.item.attempt.as_ref()?;
+        (a.number == attempt && a.spawn == spawn).then_some(())
+    }
+
+    fn attempt_step(&mut self, event: AttemptEvent) -> Option<()> {
+        let next = self.item.attempt.as_ref()?.step(event)?;
+        self.item.attempt = Some(next);
+        Some(())
+    }
+
+    fn attempt_mut(&mut self) -> &mut Attempt {
+        self.item
+            .attempt
+            .as_mut()
+            .expect("an item past its claim has an attempt")
+    }
+
+    fn exited(&mut self, exit: Exit, text: &str) {
+        // Invariant 2 of #1: the text of an exit is the agent's and never leads toward Done.
+        let trusted_done = cfg!(mutant_core_trust_done) && text.to_lowercase().contains("done");
+        match exit {
+            Exit::Ok if trusted_done => {
+                self.attempt_mut().state = AttemptState::Pass;
+                self.item.state = State::Landing;
+                let attempt = self.item.attempt_number();
+                self.effects.push(EffectKind::Land { attempt });
+            }
+            Exit::Ok => {
+                self.attempt_mut().state = AttemptState::Exited;
+                self.start(Next::Verify);
+            }
+            Exit::Limit { reset_ms } => {
+                if cfg!(mutant_core_limit_is_failure) {
+                    self.attempt_mut().state = AttemptState::Fail;
+                    self.attempt_failed();
+                    return;
+                }
+                self.attempt_mut().state = AttemptState::Limited;
+                if self.uncounted() {
+                    return;
+                }
+                let until = reset_ms
+                    .unwrap_or(self.ctx.now_ms + self.ctx.rules.default_backoff_ms)
+                    .max(self.ctx.now_ms);
+                self.item.state = State::Parked(Park {
+                    reason: ParkReason::Limit,
+                    until_ms: Some(until),
+                    next: Next::Resume,
+                });
+            }
+            Exit::Auth => {
+                self.attempt_mut().state = AttemptState::Exited;
+                self.needs_you(Reason::Auth);
+            }
+            Exit::Crash => {
+                let retries = self.ctx.rules.crash_retries;
+                let attempt = self.attempt_mut();
+                attempt.state = AttemptState::Exited;
+                if attempt.crash_retries < retries {
+                    attempt.crash_retries += 1;
+                    if !self.uncounted() {
+                        self.start(Next::Resume);
+                    }
+                } else {
+                    attempt.state = AttemptState::Fail;
+                    self.attempt_failed();
+                }
+            }
+        }
+    }
+
+    /// Counts one uncounted park or resume. `true` when it exceeds the cap; the item then
+    /// needs the user.
+    fn uncounted(&mut self) -> bool {
+        self.item.uncounted += 1;
+        let over = self.item.uncounted > self.ctx.rules.park_cap;
+        if over && !cfg!(mutant_core_no_park_cap) {
+            self.needs_you(Reason::ParkCap);
+            return true;
+        }
+        false
+    }
+
+    /// The current attempt has failed (its state is already `fail` or `timeout`).
+    fn attempt_failed(&mut self) {
+        self.item.failed += 1;
+        if self.item.failed >= self.ctx.rules.max_attempts {
+            self.needs_you(Reason::AttemptsExhausted);
+        } else {
+            self.start(Next::NewAttempt);
+        }
+    }
+
+    fn verdict_finished(&mut self) {
+        let state = self.item.attempt.as_ref().map(|a| a.state);
+        match state {
+            Some(s) if s.passed() => {
+                self.item.state = State::Landing;
+                let attempt = self.item.attempt_number();
+                self.effects.push(EffectKind::Land { attempt });
+            }
+            Some(s) if s.failed() => self.attempt_failed(),
+            // A non-passing first run: re-run once, with no session in between.
+            _ => {
+                self.attempt_mut().state = AttemptState::VerdictRunning;
+                self.run_verdict();
+            }
+        }
+    }
+
+    fn run_verdict(&mut self) {
+        self.item.runs += 1;
+        let run = self.item.runs;
+        let attempt = self.attempt_mut();
+        attempt.run = run;
+        let attempt = attempt.number;
+        self.effects.push(EffectKind::RunVerdict { attempt, run });
+    }
+
+    /// Starts `next`, or parks with it when a hold is active. A pause and the daily cap hold
+    /// sessions only: the current attempt still finishes its verdict.
+    fn start(&mut self, next: Next) {
+        let held = match (self.ctx.hold, next) {
+            (Some(Hold::Kill), _) => Some(Hold::Kill),
+            (_, Next::Verify) => None,
+            (hold, _) => hold,
+        };
+        if let Some(hold) = held {
+            self.item.state = State::Parked(Park {
+                reason: hold.into(),
+                until_ms: None,
+                next,
+            });
+            return;
+        }
+        match next {
+            Next::NewAttempt => {
+                self.item.attempts += 1;
+                self.item.spawns += 1;
+                let (attempt, spawn) = (self.item.attempts, self.item.spawns);
+                self.item.attempt = Some(Attempt::new(attempt, spawn));
+                self.item.state = State::Running;
+                self.effects.push(EffectKind::Spawn {
+                    attempt,
+                    spawn,
+                    mode: SpawnMode::Fresh,
+                });
+            }
+            Next::Resume | Next::Reset => {
+                self.item.spawns += 1;
+                let spawn = self.item.spawns;
+                let attempt = self.attempt_mut();
+                attempt.spawn = spawn;
+                attempt.state = AttemptState::Spawned;
+                let attempt = attempt.number;
+                let mode = if next == Next::Resume {
+                    SpawnMode::Resume
+                } else {
+                    SpawnMode::Reset
+                };
+                self.item.state = State::Running;
+                self.effects.push(EffectKind::Spawn {
+                    attempt,
+                    spawn,
+                    mode,
+                });
+            }
+            Next::Verify => {
+                self.item.state = State::Verifying;
+                let attempt = self.attempt_mut();
+                if attempt.state == AttemptState::Exited {
+                    attempt.state = AttemptState::VerdictPending;
+                }
+                if attempt.state == AttemptState::VerdictRunning {
+                    self.run_verdict();
+                } else {
+                    let attempt = attempt.number;
+                    self.effects
+                        .push(EffectKind::CheckPreconditions { attempt });
+                }
+            }
+        }
+    }
+
+    fn tick(&mut self) -> Option<()> {
+        let State::Parked(park) = self.item.state else {
+            return None;
+        };
+        if self.ctx.hold.is_some() || park.until_ms.is_some_and(|t| self.ctx.now_ms < t) {
+            return None;
+        }
+        self.start(park.next);
+        Some(())
+    }
+
+    fn kill_switch(&mut self) -> Option<()> {
+        let next = match self.item.state {
+            State::Running => {
+                self.attempt_step(AttemptEvent::Killed)?;
+                Next::Resume
+            }
+            State::Verifying => Next::Verify,
+            _ => return None,
+        };
+        self.effects.push(EffectKind::Kill);
+        self.item.state = State::Parked(Park {
+            reason: ParkReason::Killed,
+            until_ms: None,
+            next,
+        });
+        Some(())
+    }
+
+    fn restarted(&mut self, boot: u32, tail: Option<Exit>) -> Option<()> {
+        if boot <= self.item.boot {
+            return None;
+        }
+        match self.item.state {
+            State::Claimed => self.effects.push(EffectKind::Claim),
+            State::Running => match tail {
+                Some(exit @ (Exit::Ok | Exit::Limit { .. } | Exit::Auth)) => {
+                    self.exited(exit, "");
+                }
+                // A lost session costs one uncounted resume (#7, D1).
+                Some(Exit::Crash) | None => {
+                    if !self.uncounted() {
+                        self.start(Next::Resume);
+                    }
+                }
+            },
+            State::Verifying => self.start(Next::Verify),
+            State::Landing => {
+                let attempt = self.item.attempt_number();
+                self.effects.push(EffectKind::Land { attempt });
+            }
+            _ => return None,
+        }
+        self.item.boot = boot;
+        Some(())
+    }
+
+    fn user(&mut self, command: UserCommand) -> Option<()> {
+        let state = self.item.state;
+        match command {
+            UserCommand::Cancel => {
+                if !(state.is_active() || matches!(state, State::NeedsYou(_))) {
+                    return None;
+                }
+                self.kill_child();
+                self.item.state = State::Cancelled;
+            }
+            UserCommand::Requeue => {
+                if matches!(state, State::Ready | State::Done(_)) {
+                    return None;
+                }
+                self.kill_child();
+                self.reset_counters();
+                self.item.state = State::Ready;
+            }
+            UserCommand::Restart => {
+                if !(state.is_active() && state != State::Claimed) {
+                    return None;
+                }
+                self.kill_child();
+                self.reset_counters();
+                self.item.state = State::Claimed;
+                self.effects.push(EffectKind::Claim);
+            }
+            UserCommand::ManualDone => {
+                if matches!(state, State::Done(_)) {
+                    return None;
+                }
+                self.kill_child();
+                self.item.state = State::Done(Outcome::UserClosed);
+            }
+        }
+        Some(())
+    }
+
+    /// A fresh attempt counter (#5). Attempt, session and run numbers stay unique.
+    fn reset_counters(&mut self) {
+        self.item.failed = 0;
+        self.item.uncounted = 0;
+        self.item.attempt = None;
+    }
+
+    fn kill_child(&mut self) {
+        if self.item.state.has_child() {
+            self.effects.push(EffectKind::Kill);
+        }
+    }
+
+    fn needs_you(&mut self, reason: Reason) {
+        self.item.state = State::NeedsYou(reason);
+        self.effects.push(EffectKind::Comment(reason));
+    }
+
+    fn finish(mut self, before: &Item, event: &Event) -> Stepped {
+        let to = self.item.state;
+        // The user moved the card themselves; the claim procedure writes its own status.
+        let projects = event.actor() != Actor::User && *event != Event::Claim;
+        if projects
+            && to.column() != before.state.column()
+            && let Some(column) = to.column()
+        {
+            self.effects.push(EffectKind::Project(column));
+        }
+        self.effects.push(EffectKind::Report);
+
+        self.item.seq = before.seq + 1;
+        let seq = self.item.seq;
+        let attempt = self.item.attempt_number();
+        let effects = self
+            .effects
+            .into_iter()
+            .zip(0..)
+            .map(|(kind, index)| Effect {
+                key: EffectKey {
+                    item: self.item.id.clone(),
+                    attempt,
+                    seq,
+                    index,
+                },
+                kind,
+            })
+            .collect();
+        let transition = Transition {
+            key: TransitionKey {
+                item: self.item.id.clone(),
+                seq,
+            },
+            attempt,
+            from: before.state,
+            to,
+            attempt_from: before.attempt.as_ref().map(|a| a.state),
+            attempt_to: self.item.attempt.as_ref().map(|a| a.state),
+            cause: event.name(),
+            effects,
+        };
+        Stepped {
+            item: self.item,
+            transition,
+        }
+    }
+}
+
+/// Any parked state, for [`Draft::expect`].
+const PARKED: Park = Park {
+    reason: ParkReason::Limit,
+    until_ms: None,
+    next: Next::Resume,
+};
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use proptest::prelude::*;
+
+    use super::*;
+
+    const T0: i64 = 1_800_000_000_000;
+
+    fn ctx() -> Ctx {
+        Ctx::at(T0)
+    }
+
+    /// Applies `event`, which must take an arrow.
+    fn go(item: &Item, event: &Event, ctx: &Ctx) -> Stepped {
+        step(item, event, ctx).unwrap_or_else(|| panic!("{event:?} ignored in {:?}", item.state))
+    }
+
+    fn apply(item: Item, events: &[Event]) -> Item {
+        events
+            .iter()
+            .fold(item, |item, e| go(&item, e, &ctx()).item)
+    }
+
+    fn running() -> Item {
+        apply(
+            Item::new(ItemId::new("local:demo#1")),
+            &[Event::Claim, Event::ClaimConfirmed],
+        )
+    }
+
+    fn cur(item: &Item) -> (u32, u32, u32) {
+        let a = item.attempt.as_ref().unwrap();
+        (a.number, a.spawn, a.run)
+    }
+
+    fn exit(item: &Item, exit: Exit) -> Event {
+        let (attempt, spawn, _) = cur(item);
+        Event::Exited {
+            attempt,
+            spawn,
+            exit,
+            text: String::new(),
+        }
+    }
+
+    fn preconditions(item: &Item, passed: bool) -> Event {
+        Event::Preconditions {
+            attempt: cur(item).0,
+            passed,
+        }
+    }
+
+    fn verdict(item: &Item, result: RunResult) -> Event {
+        let (attempt, _, run) = cur(item);
+        Event::Verdict {
+            attempt,
+            run,
+            result,
+        }
+    }
+
+    /// Runs one attempt of `item` from its session's exit through the verdict runs `results`.
+    fn attempt(mut item: Item, results: &[RunResult]) -> Item {
+        item = go(&item, &exit(&item, Exit::Ok), &ctx()).item;
+        item = go(&item, &preconditions(&item, true), &ctx()).item;
+        for &r in results {
+            item = go(&item, &verdict(&item, r), &ctx()).item;
+        }
+        item
+    }
+
+    #[test]
+    fn a_passing_verdict_lands_and_is_done() {
+        let item = attempt(running(), &[RunResult::Pass]);
+        assert_eq!(item.state, State::Landing);
+        let done = go(&item, &Event::Landed, &ctx());
+        assert_eq!(done.item.state, State::Done(Outcome::Pass));
+        assert!(
+            done.transition
+                .effects
+                .iter()
+                .any(|e| e.kind == EffectKind::Project(Column::Done))
+        );
+    }
+
+    #[test]
+    fn fail_then_pass_is_flaky_and_done() {
+        let item = attempt(running(), &[RunResult::Fail, RunResult::Pass]);
+        assert_eq!(item.state, State::Landing);
+        assert_eq!(item.failed, 0, "a flaky verdict is not a failed attempt");
+        let item = go(&item, &Event::Landed, &ctx()).item;
+        assert_eq!(item.state, State::Done(Outcome::Flaky));
+    }
+
+    #[test]
+    fn fail_fail_twice_is_needs_you() {
+        let item = attempt(running(), &[RunResult::Fail, RunResult::Fail]);
+        assert_eq!(item.state, State::Running, "one failed attempt, one left");
+        assert_eq!((item.failed, cur(&item).0), (1, 2));
+        let item = attempt(item, &[RunResult::Fail, RunResult::Fail]);
+        assert_eq!(item.state, State::NeedsYou(Reason::AttemptsExhausted));
+        assert_eq!(item.failed, 2);
+    }
+
+    #[test]
+    fn a_failing_run_is_rerun_with_no_session_in_between() {
+        let item = attempt(running(), &[]);
+        let first = go(&item, &verdict(&item, RunResult::Fail), &ctx());
+        assert_eq!(first.item.state, State::Verifying);
+        let kinds: Vec<_> = first.transition.effects.iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&EffectKind::RunVerdict { attempt: 1, run: 2 }));
+        assert!(!kinds.iter().any(|k| matches!(k, EffectKind::Spawn { .. })));
+    }
+
+    #[test]
+    fn a_limit_exit_parks_and_resumes_uncounted() {
+        let item = running();
+        let reset = T0 + 60_000;
+        let parked = go(
+            &item,
+            &exit(
+                &item,
+                Exit::Limit {
+                    reset_ms: Some(reset),
+                },
+            ),
+            &ctx(),
+        )
+        .item;
+        assert_eq!(
+            parked.state,
+            State::Parked(Park {
+                reason: ParkReason::Limit,
+                until_ms: Some(reset),
+                next: Next::Resume,
+            })
+        );
+        assert_eq!(parked.failed, 0);
+        assert_eq!(
+            step(&parked, &Event::Tick, &ctx()),
+            None,
+            "not before the reset"
+        );
+
+        let resumed = go(&parked, &Event::Tick, &Ctx::at(reset));
+        assert_eq!(resumed.item.state, State::Running);
+        assert_eq!(resumed.item.failed, 0, "the attempt counter did not move");
+        assert_eq!(cur(&resumed.item).0, cur(&item).0, "still the same attempt");
+        assert!(resumed.transition.effects.iter().any(|e| matches!(
+            e.kind,
+            EffectKind::Spawn {
+                mode: SpawnMode::Resume,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn fake_limits_in_a_row_end_in_needs_you() {
+        // The bound is far above the cap: without the cap the item parks forever.
+        const STEPS: usize = 1_000;
+        let mut item = running();
+        let mut now = T0;
+        for _ in 0..STEPS {
+            if let State::NeedsYou(reason) = item.state {
+                assert_eq!(reason, Reason::ParkCap);
+                assert_eq!(item.failed, 0);
+                return;
+            }
+            let ctx = Ctx::at(now);
+            item = if item.state == State::Running {
+                go(&item, &exit(&item, Exit::Limit { reset_ms: None }), &ctx)
+            } else {
+                now += Rules::default().default_backoff_ms;
+                go(&item, &Event::Tick, &Ctx::at(now))
+            }
+            .item;
+        }
+        panic!("no Needs you within {STEPS} steps: {:?}", item.state);
+    }
+
+    #[test]
+    fn a_crash_is_retried_once_uncounted_then_fails_the_attempt() {
+        let item = running();
+        let retried = go(&item, &exit(&item, Exit::Crash), &ctx()).item;
+        assert_eq!((retried.state, retried.failed), (State::Running, 0));
+        assert_eq!(cur(&retried).0, 1);
+        let failed = go(&retried, &exit(&retried, Exit::Crash), &ctx()).item;
+        assert_eq!((failed.failed, cur(&failed).0), (1, 2));
+    }
+
+    #[test]
+    fn expired_auth_is_needs_you_at_once() {
+        let item = running();
+        let next = go(&item, &exit(&item, Exit::Auth), &ctx()).item;
+        assert_eq!(next.state, State::NeedsYou(Reason::Auth));
+    }
+
+    #[test]
+    fn a_pause_lets_the_attempt_finish_and_starts_nothing_new() {
+        let paused = Ctx {
+            hold: Some(Hold::Pause),
+            ..ctx()
+        };
+        let item = running();
+        let verifying = go(&item, &exit(&item, Exit::Ok), &paused).item;
+        assert_eq!(verifying.state, State::Verifying, "the verdict still runs");
+        let v = go(&verifying, &preconditions(&verifying, true), &paused).item;
+        let v = go(&v, &verdict(&v, RunResult::Fail), &paused).item;
+        let held = go(&v, &verdict(&v, RunResult::Fail), &paused).item;
+        assert!(matches!(
+            held.state,
+            State::Parked(Park {
+                reason: ParkReason::Paused,
+                next: Next::NewAttempt,
+                ..
+            })
+        ));
+        assert_eq!(step(&held, &Event::Tick, &paused), None);
+        let woke = go(&held, &Event::Tick, &ctx()).item;
+        assert_eq!((woke.state, cur(&woke).0), (State::Running, 2));
+    }
+
+    #[test]
+    fn the_kill_switch_parks_and_kills() {
+        let item = running();
+        let killed = go(&item, &Event::KillSwitch, &ctx());
+        assert!(
+            killed
+                .transition
+                .effects
+                .iter()
+                .any(|e| e.kind == EffectKind::Kill)
+        );
+        let kill = Ctx {
+            hold: Some(Hold::Kill),
+            ..ctx()
+        };
+        assert_eq!(step(&killed.item, &Event::Tick, &kill), None);
+        let resumed = go(&killed.item, &Event::Tick, &ctx()).item;
+        assert_eq!(resumed.state, State::Running);
+        assert_eq!(cur(&resumed).0, 1);
+    }
+
+    #[test]
+    fn user_commands_on_daemon_owned_cards() {
+        let item = running();
+        let cancelled = go(&item, &Event::User(UserCommand::Cancel), &ctx());
+        assert_eq!(cancelled.item.state, State::Cancelled);
+        assert!(
+            !cancelled
+                .transition
+                .effects
+                .iter()
+                .any(|e| matches!(e.kind, EffectKind::Project(_))),
+            "the user moved the card; nothing is projected"
+        );
+
+        let exhausted = attempt(
+            attempt(running(), &[RunResult::Fail, RunResult::Fail]),
+            &[RunResult::Fail, RunResult::Fail],
+        );
+        let retried = go(&exhausted, &Event::User(UserCommand::Requeue), &ctx()).item;
+        assert_eq!((retried.state, retried.failed), (State::Ready, 0));
+
+        let restarted = go(&item, &Event::User(UserCommand::Restart), &ctx()).item;
+        assert_eq!(restarted.state, State::Claimed);
+
+        let done = go(&item, &Event::User(UserCommand::ManualDone), &ctx()).item;
+        assert_eq!(done.state, State::Done(Outcome::UserClosed));
+        assert_eq!(step(&done, &Event::User(UserCommand::Cancel), &ctx()), None);
+    }
+
+    #[test]
+    fn a_card_failing_lint_is_moved_to_needs_you_with_a_comment() {
+        let item = Item::new(ItemId::new("local:demo#2"));
+        let claimed = go(&item, &Event::Claim, &ctx());
+        assert!(
+            !claimed
+                .transition
+                .effects
+                .iter()
+                .any(|e| matches!(e.kind, EffectKind::Project(_))),
+            "the claim procedure writes its own status"
+        );
+        let linted = go(&claimed.item, &Event::LintFailed, &ctx());
+        let kinds: Vec<_> = linted.transition.effects.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                EffectKind::Comment(Reason::Lint),
+                EffectKind::Project(Column::NeedsYou),
+                EffectKind::Report,
+            ]
+        );
+        assert_eq!(linted.transition.key.to_string(), "local:demo#2/t2");
+        assert_eq!(
+            linted.transition.effects[1].key.to_string(),
+            "local:demo#2/a0/t2/e1"
+        );
+    }
+
+    #[test]
+    fn stale_events_are_ignored() {
+        let item = running();
+        let next = go(&item, &exit(&item, Exit::Crash), &ctx()).item;
+        assert_eq!(
+            step(&next, &exit(&item, Exit::Ok), &ctx()),
+            None,
+            "old session"
+        );
+        let v = attempt(next, &[]);
+        let old_run = verdict(&v, RunResult::Fail);
+        let v = go(&v, &old_run, &ctx()).item;
+        assert_eq!(step(&v, &old_run, &ctx()), None, "a run finishes once");
+    }
+
+    // ---- Properties over random event sequences ----
+
+    /// One step of a generated sequence: which event (chosen among those that fit the state,
+    /// so sequences make progress), whether it is addressed to a stale number, the hold.
+    type Pick = (u8, bool, u8);
+
+    fn events_for(item: &Item, stale: bool) -> Vec<Event> {
+        let (attempt, spawn, run) = item
+            .attempt
+            .as_ref()
+            .map_or((0, 0, 0), |a| (a.number, a.spawn, a.run));
+        let back = u32::from(stale);
+        let (attempt, spawn, run) = (
+            attempt.saturating_sub(back),
+            spawn.saturating_sub(back),
+            run.saturating_sub(back),
+        );
+        let exited = |exit, text: &str| Event::Exited {
+            attempt,
+            spawn,
+            exit,
+            text: text.to_owned(),
+        };
+        let mut events = vec![
+            Event::Tick,
+            Event::Summary { attempt },
+            Event::Note { attempt },
+            Event::Restarted {
+                boot: item.boot + 1,
+                tail: None,
+            },
+        ];
+        match item.state {
+            State::Ready => events.extend([Event::Claim, Event::Claim, Event::LintFailed]),
+            State::Claimed => events.extend([
+                Event::ClaimConfirmed,
+                Event::ClaimConfirmed,
+                Event::ClaimLost,
+            ]),
+            State::Running => events.extend([
+                exited(Exit::Ok, "done"),
+                exited(Exit::Ok, "All tasks are done; the verdict passes."),
+                exited(Exit::Ok, ""),
+                exited(Exit::Limit { reset_ms: None }, ""),
+                exited(Exit::Crash, "done"),
+                Event::ResumeFailed { attempt, spawn },
+                Event::KillSwitch,
+            ]),
+            State::Verifying => events.extend([
+                Event::Preconditions {
+                    attempt,
+                    passed: true,
+                },
+                Event::Preconditions {
+                    attempt,
+                    passed: false,
+                },
+                Event::Verdict {
+                    attempt,
+                    run,
+                    result: RunResult::Fail,
+                },
+                Event::Verdict {
+                    attempt,
+                    run,
+                    result: RunResult::Timeout,
+                },
+            ]),
+            State::Landing => events.extend([Event::Landed, Event::Landed]),
+            _ => {}
+        }
+        // Rare: these end the item or need the user.
+        events.extend([
+            Event::Question { attempt },
+            Event::Refused {
+                attempt,
+                guard: Guard::IgnoredFile,
+            },
+            Event::BudgetExceeded,
+            Event::User(UserCommand::Requeue),
+            Event::User(UserCommand::Restart),
+            Event::User(UserCommand::ManualDone),
+        ]);
+        events
+    }
+
+    fn hold(choice: u8) -> Option<Hold> {
+        match choice % 16 {
+            0 => Some(Hold::Pause),
+            1 => Some(Hold::Kill),
+            2 => Some(Hold::DailyCap),
+            _ => None,
+        }
+    }
+
+    fn picks() -> impl Strategy<Value = Vec<Pick>> {
+        prop::collection::vec((any::<u8>(), prop::bool::weighted(0.1), any::<u8>()), 1..80)
+    }
+
+    /// Runs a generated sequence; calls `check` after every step that took an arrow with the
+    /// item before, the event, the context and the result.
+    fn run(picks: &[Pick], mut check: impl FnMut(&Item, &Event, &Ctx, &Stepped)) {
+        let mut item = Item::new(ItemId::new("local:demo#7"));
+        for (i, &(choice, stale, h)) in picks.iter().enumerate() {
+            let events = events_for(&item, stale);
+            let event = &events[usize::from(choice) % events.len()];
+            let now = T0 + i64::try_from(i).unwrap() * 3_600_000;
+            let ctx = Ctx {
+                hold: hold(h),
+                ..Ctx::at(now)
+            };
+            if let Some(stepped) = step(&item, event, &ctx) {
+                check(&item, event, &ctx, &stepped);
+                item = stepped.item;
+            }
+        }
+    }
+
+    proptest! {
+        // No regression files: a mutant run fails these tests on purpose and must not write
+        // into the source tree.
+        #![proptest_config(ProptestConfig {
+            cases: 512,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        /// Invariant 2 of #1. The generator never produces a passing verdict run; whatever the
+        /// agent says (in a question, a summary, a note or the text of its exit), the only way
+        /// into Done is the user's own move.
+        #[test]
+        fn no_sequence_without_a_passing_verdict_reaches_done(picks in picks()) {
+            let mut bad = None;
+            run(&picks, |_, event, _, stepped| {
+                if let State::Done(outcome) = stepped.item.state
+                    && outcome != Outcome::UserClosed
+                    && bad.is_none()
+                {
+                    bad = Some((event.clone(), outcome));
+                }
+            });
+            prop_assert_eq!(bad, None);
+        }
+
+        /// An agent-originated event moves an item to Needs you or nowhere.
+        #[test]
+        fn agent_events_lead_to_needs_you_only(picks in picks()) {
+            let mut bad = None;
+            run(&picks, |before, event, _, stepped| {
+                if event.actor() == Actor::Agent
+                    && !matches!(stepped.item.state, State::NeedsYou(_))
+                    && bad.is_none()
+                {
+                    bad = Some((before.state, event.clone(), stepped.item.state));
+                }
+            });
+            prop_assert_eq!(bad, None);
+        }
+
+        /// Applying the same event twice yields the same keys and no new effect; every key is
+        /// unique over a sequence.
+        #[test]
+        fn the_same_event_twice_adds_nothing(picks in picks()) {
+            let mut problems = Vec::new();
+            let mut transitions = BTreeSet::new();
+            let mut effects = BTreeSet::new();
+            run(&picks, |before, event, ctx, stepped| {
+                if step(before, event, ctx).as_ref() != Some(stepped) {
+                    problems.push(format!("not deterministic: {event:?}"));
+                }
+                if let Some(again) = step(&stepped.item, event, ctx) {
+                    problems.push(format!(
+                        "{event:?} applied twice: {:?} -> {:?}",
+                        stepped.item.state, again.item.state
+                    ));
+                }
+                if !transitions.insert(stepped.transition.key.to_string()) {
+                    problems.push(format!("duplicate key {}", stepped.transition.key));
+                }
+                for effect in &stepped.transition.effects {
+                    if !effects.insert(effect.key.to_string()) {
+                        problems.push(format!("duplicate key {}", effect.key));
+                    }
+                }
+            });
+            prop_assert!(problems.is_empty(), "{problems:#?}");
+        }
+
+        /// The text of an exit never changes what the machine does.
+        #[test]
+        fn exit_text_is_never_read(picks in picks(), text in "[a-z ]{0,12}") {
+            let mut bad = None;
+            run(&picks, |before, event, ctx, stepped| {
+                if let Event::Exited { attempt, spawn, exit, .. } = event {
+                    let other = Event::Exited {
+                        attempt: *attempt,
+                        spawn: *spawn,
+                        exit: *exit,
+                        text: format!("{text} done"),
+                    };
+                    let alt = step(before, &other, ctx).map(|s| s.item);
+                    if alt.as_ref() != Some(&stepped.item) && bad.is_none() {
+                        bad = Some(other);
+                    }
+                }
+            });
+            prop_assert_eq!(bad, None);
+        }
+    }
+}

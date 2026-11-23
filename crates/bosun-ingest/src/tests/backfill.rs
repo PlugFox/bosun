@@ -332,7 +332,10 @@ async fn a_pass_joined_by_a_rescan_counts_each_file_once() {
     // The first pass has planned its files and is reading them.
     let start = Instant::now();
     while handle.stats().queued_backfill == 0 {
-        assert!(start.elapsed() < Duration::from_secs(60), "no backfill queued");
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no backfill queued"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let report = handle.rescan().await.unwrap();
@@ -342,7 +345,7 @@ async fn a_pass_joined_by_a_rescan_counts_each_file_once() {
     store.close().await.unwrap();
 }
 
-const KILL_TEST: &str ="tests::backfill::a_killed_backfill_resumes_without_parsing_a_byte_twice";
+const KILL_TEST: &str = "tests::backfill::a_killed_backfill_resumes_without_parsing_a_byte_twice";
 const KILL_CHILD: &str = "BOSUN_INGEST_KILL_CHILD";
 
 /// The options of every run of the kill test: small reads, so files take several commits and

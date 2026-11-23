@@ -165,6 +165,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_queue_skip_claim_reread)",
   "cfg(mutant_queue_no_comment_key)",
   "cfg(mutant_queue_recreate_always)",
+  # #59: the ignored-file and configuration snapshots, protected paths, trailers.
+  "cfg(mutant_git_ignored_is_warning)",
+  "cfg(mutant_git_skip_protected_paths)",
+  "cfg(mutant_git_skip_config_snapshot)",
+  "cfg(mutant_git_trailer_all_commits)",
 ] }
 
 [workspace.lints.clippy]

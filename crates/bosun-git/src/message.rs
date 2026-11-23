@@ -80,17 +80,27 @@ pub(crate) fn problems(sha: &str, body: &str, expected: &Expected) -> Vec<Reason
             text: found.as_str().trim().to_owned(),
         });
     }
-    for captures in TRAILER.captures_iter(body) {
-        let (_, [key, value]) = captures.extract();
-        if !expected.allows(key, value) {
+    for (key, value) in trailers(body) {
+        if !expected.allows(&key, &value) {
             reasons.push(Reason::ForgedTrailer {
                 sha: sha.to_owned(),
-                key: key.to_owned(),
-                value: value.to_owned(),
+                key,
+                value,
             });
         }
     }
     reasons
+}
+
+/// Every line of `body` that reads as a guarded trailer: its name as written and its value.
+pub(crate) fn trailers(body: &str) -> Vec<(String, String)> {
+    TRAILER
+        .captures_iter(body)
+        .map(|captures| {
+            let (_, [key, value]) = captures.extract();
+            (key.to_owned(), value.to_owned())
+        })
+        .collect()
 }
 
 #[cfg(test)]

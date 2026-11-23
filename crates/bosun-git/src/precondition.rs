@@ -243,6 +243,15 @@ pub fn messages(git: &Git, base: &Base, expected: &Expected) -> Result<Vec<Reaso
     if cfg!(mutant_git_skip_message_check) {
         return Ok(Vec::new());
     }
+    let mut reasons = Vec::new();
+    for (sha, body) in log(git, base)? {
+        reasons.extend(message::problems(&sha, &body, expected));
+    }
+    Ok(reasons)
+}
+
+/// The sha and message of every commit since the base (`base..HEAD`), newest first.
+pub(crate) fn log(git: &Git, base: &Base) -> Result<Vec<(String, String)>, Error> {
     let range = format!("{}..HEAD", base.head);
     let log = git.run(
         &[
@@ -257,13 +266,13 @@ pub fn messages(git: &Git, base: &Base, expected: &Expected) -> Result<Vec<Reaso
         ],
         None,
     )?;
-    let mut reasons = Vec::new();
+    let mut commits = Vec::new();
     for record in log.split('\0').filter(|r| !r.trim().is_empty()) {
         let record = record.trim_start_matches('\n');
         let Some((sha, body)) = record.split_once('\n') else {
             return Err(git.unexpected(format!("a log record {record:?}")));
         };
-        reasons.extend(message::problems(sha, body, expected));
+        commits.push((sha.to_owned(), body.to_owned()));
     }
-    Ok(reasons)
+    Ok(commits)
 }

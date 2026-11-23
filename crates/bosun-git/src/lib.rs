@@ -19,8 +19,34 @@
 //!
 //! [`Base::capture`] records the repository at claim. Before a verdict runs, [`check`] (or each
 //! of [`clean_tree`], [`ancestry`], [`refs`] and [`messages`]) compares the repository with it
-//! and returns a [`Reason`] for every precondition that fails. The ignored-file and
-//! configuration snapshots are #59.
+//! and returns a [`Reason`] for every precondition that fails.
+//!
+//! # Needs you before the verdict (#59)
+//!
+//! These send the item to Needs you with a [`Refusal`] instead of failing the attempt:
+//!
+//! - [`ignored`]: ignored files that appeared during the session (compared with an [`Ignored`]
+//!   recorded before it) outside the repository's declared build directories; nothing is
+//!   deleted;
+//! - [`config`]: a change to git's own configuration since the [`GitConfig`] recorded at claim
+//!   (hooks, `.git/config`, `config.worktree`, `include.path` targets, `info/exclude`,
+//!   `info/attributes`);
+//! - [`protected`]: protected paths the item's commits touched that the item's snapshot does
+//!   not allow, with the diff stat.
+//!
+//! # Trailers (D6 of #7)
+//!
+//! [`Hooks`] is the hooks directory injected into the agent's git that adds the `Item:`,
+//! `Run:` and `Session:` trailers and chains to the repository's own hooks; [`missing`] lists
+//! the commits without them for the report; a trailer with a wrong value is forged and fails
+//! [`messages`]. Nothing is installed in the repository and nothing is ever amended.
+//!
+//! The hooks reach only the agent's git, through command-scope configuration in its
+//! environment (`GIT_CONFIG_COUNT`/`KEY`/`VALUE`, `core.hooksPath`), which overrides a
+//! repository-local `core.hooksPath` (confirmed with Git for Windows by
+//! `tests::the_injected_hooks_path_overrides_a_repository_local_one`). [`Hooks::git_config`] is
+//! data: `bosun-identity`'s `Env::add_git_config` appends it after the identity's own entries
+//! (the `credential.helper` reset is entry 0), and `Env::add_session_var` sets [`Hooks::env`].
 //!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
 
@@ -28,10 +54,20 @@ mod base;
 mod invoke;
 mod message;
 mod precondition;
+mod protect;
+mod refusal;
+mod snapshot;
 #[cfg(test)]
 mod tests;
+mod trailer;
 
 pub use base::Base;
 pub use invoke::{Error, Git, NO_HOOKS};
 pub use message::Expected;
 pub use precondition::{Reason, ancestry, check, clean_tree, messages, refs};
+pub use protect::protected;
+pub use refusal::Refusal;
+pub use snapshot::{GitConfig, Ignored, config, ignored};
+pub use trailer::{
+    HOOK_NAMES, Hooks, ITEM_VAR, MARKER_VAR, Missing, RUN_VAR, SESSION_VAR, Trailers, missing,
+};

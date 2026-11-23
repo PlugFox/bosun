@@ -887,6 +887,46 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("projects_v2::tests::suite_a_sticky_deleted_twice_is_recreated_once"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_git_ignored_is_warning",
+        issue: 59,
+        breaks: "a new ignored file outside the build directories is a warning, not Needs you",
+        package: "bosun-git",
+        check: Check::Test(
+            "tests::a_hidden_file_behind_a_new_gitignore_line_is_refused_but_not_in_a_build_dir",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_skip_protected_paths",
+        issue: 59,
+        breaks: "commits touching protected paths reach the verdict",
+        package: "bosun-git",
+        check: Check::Test(
+            "tests::a_commit_touching_the_verdicts_test_is_refused_with_the_diff_stat",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_skip_config_snapshot",
+        issue: 59,
+        breaks: "a planted hook or an edit of git's configuration reaches the verdict",
+        package: "bosun-git",
+        check: Check::Test(
+            "tests::a_planted_hook_an_include_edit_and_an_exclude_edit_are_each_refused",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_trailer_all_commits",
+        issue: 59,
+        breaks: "the injected hook adds the trailers without the injection marker",
+        package: "bosun-git",
+        check: Check::Test(
+            "tests::a_commit_without_the_injection_carries_none_and_its_hooks_run_as_before",
+        ),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

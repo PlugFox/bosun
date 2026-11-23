@@ -122,6 +122,7 @@ name = "bosun-git"
 version = "0.0.0"
 dependencies = [
  "regex",
+ "sha2",
  "tempfile",
 ]
 

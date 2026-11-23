@@ -362,6 +362,34 @@ fn a_fake_credential_helper_in_the_global_config_is_never_invoked_by_the_agents_
 }
 
 #[test]
+fn appended_git_configuration_keeps_the_credential_helper_reset() {
+    let layout = Layout::new();
+    let mut env = layout.agent();
+    let hooks = layout
+        .dir
+        .path()
+        .join("hooks")
+        .to_string_lossy()
+        .replace('\\', "/");
+    env.add_git_config([("core.hooksPath", hooks.as_str())]);
+    env.add_session_var("BOSUN_SESSION", "s1");
+    env.add_session_var("GIT_DIR", "elsewhere");
+    env.add_session_var("SOME_TOKEN", "secret");
+    assert_eq!(env.get("GIT_CONFIG_COUNT"), Some("2".as_ref()));
+    assert_eq!(env.get("BOSUN_SESSION"), Some("s1".as_ref()));
+    assert_eq!(env.get("GIT_DIR"), None);
+    assert_eq!(env.denied(), &names(&["GIT_DIR", "SOME_TOKEN"])[..]);
+
+    let out = layout.git(&env, &["config", "--get", "core.hooksPath"], "");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), hooks);
+    // The helper list is still emptied: the agent's git calls no helper.
+    let ask = "protocol=https\nhost=example.test\npath=owner/repo.git\n\n";
+    let out = layout.git(&env, &["credential", "fill"], ask);
+    assert!(!layout.marker.exists(), "the agent's git called the helper");
+    assert!(!out.status.success(), "the agent's git found a credential");
+}
+
+#[test]
 fn the_agents_git_resolves_the_identitys_author() {
     let layout = Layout::new();
     let out = layout.git(&layout.agent(), &["var", "GIT_AUTHOR_IDENT"], "");

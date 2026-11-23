@@ -829,6 +829,36 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("items::tests::every_commit_of_the_runs_maps_to_one_session_and_item"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_runner_merge_streams",
+        issue: 58,
+        breaks: "the verdict line is the interleaved tail's last line, not stdout's",
+        package: "bosun-runner",
+        check: Check::Test(
+            "verdict::tests::a_stderr_line_after_stdouts_match_reports_the_stdout_line",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_no_flaky_names",
+        issue: 58,
+        breaks: "the libtest failure parser returns no names",
+        package: "bosun-runner",
+        check: Check::Test(
+            "verdict::tests::libtest_output_with_three_failures_yields_the_three_names",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_no_verdict_timeout",
+        issue: 58,
+        breaks: "the verdict timeout never fires, so a hanging verdict holds the attempt",
+        package: "bosun-runner",
+        check: Check::Test(
+            "verdict::tests::a_verdict_past_its_timeout_is_timeout_and_no_descendant_survives",
+        ),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

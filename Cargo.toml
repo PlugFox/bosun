@@ -14,6 +14,8 @@ publish = false
 
 [workspace.dependencies]
 cargo_metadata = "0.23.1"
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+serde_json = "1.0.154"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -24,6 +26,11 @@ unreachable_pub = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_core_async_runtime)",
   "cfg(mutant_xtask_no_build_step)",
+  "cfg(mutant_core_1h_as_5m)",
+  "cfg(mutant_core_final_blocks_only)",
+  "cfg(mutant_core_first_record_wins)",
+  "cfg(mutant_core_no_threshold)",
+  "cfg(mutant_core_case_sensitive)",
 ] }
 
 [workspace.lints.clippy]

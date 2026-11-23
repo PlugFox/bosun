@@ -78,6 +78,46 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("mutants::tests::a_build_failure_is_not_red"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_core_1h_as_5m",
+        issue: 17,
+        breaks: "1 h cache writes are priced as 5 min",
+        package: "bosun-core",
+        check: Check::Test("price::tests::cost_prices_each_category"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_final_blocks_only",
+        issue: 17,
+        breaks: "a merged message keeps the blocks of its final record only",
+        package: "bosun-core",
+        check: Check::Test("merge::tests::split_message_keeps_final_usage_and_every_tool_call"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_first_record_wins",
+        issue: 17,
+        breaks: "a merged message keeps the usage of the first record seen",
+        package: "bosun-core",
+        check: Check::Test("merge::tests::merge_is_order_independent"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_no_threshold",
+        issue: 17,
+        breaks: "the prompt-size price row is ignored",
+        package: "bosun-core",
+        check: Check::Test("price::tests::prompts_over_the_threshold_use_the_threshold_row"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_case_sensitive",
+        issue: 17,
+        breaks: "Windows path canonicalisation keeps case",
+        package: "bosun-core",
+        check: Check::Test("path::tests::windows_paths_differing_by_case_or_separator_share_a_key"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

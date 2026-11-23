@@ -1,6 +1,6 @@
 [package]
 name = "bosun-core"
-description = "Domain types, state machines and the scheduler of bosun; no I/O."
+description = "Domain types, the event model, the merge rule, prices and the bill of bosun; no I/O."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,10 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 # Mutant `mutant_core_async_runtime` (#12): bosun-core gains the async runtime, which the
 # dependency rules forbid. Active only under `--cfg mutant_core_async_runtime`.

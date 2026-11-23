@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", cwd, repo_id FROM message",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "cwd",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cwd"
+          }
+        }
+      },
+      {
+        "name": "repo_id",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "repo_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "9d60f8ef61bf13e5671a1c1d2e66afbfa56c08216a6fe311ca8b6c805c24dfb7"
+}

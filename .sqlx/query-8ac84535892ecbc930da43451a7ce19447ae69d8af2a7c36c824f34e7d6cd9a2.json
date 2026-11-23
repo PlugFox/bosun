@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT file_key, path, size, parsed_offset, parser_version, last_line_hash\n             FROM source_file WHERE provider = ? ORDER BY file_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "file_key"
+          }
+        }
+      },
+      {
+        "name": "path",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "size",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "name": "parsed_offset",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "parsed_offset"
+          }
+        }
+      },
+      {
+        "name": "parser_version",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "parser_version"
+          }
+        }
+      },
+      {
+        "name": "last_line_hash",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "last_line_hash"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "8ac84535892ecbc930da43451a7ce19447ae69d8af2a7c36c824f34e7d6cd9a2"
+}

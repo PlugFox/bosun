@@ -2,17 +2,7 @@
 
 use bosun_core::{PathStyle, canonical_path};
 
-/// The platform a path's text implies: Windows for a drive letter (`C:`) or a `\\` prefix,
-/// Unix otherwise. Transcripts from one machine can be read on another, so the host does not
-/// decide.
-#[must_use]
-pub fn style_of(path: &str) -> PathStyle {
-    if has_drive(path) || path.starts_with(r"\\") {
-        PathStyle::Windows
-    } else {
-        PathStyle::Unix
-    }
-}
+pub use bosun_core::style_of;
 
 fn has_drive(path: &str) -> bool {
     let bytes = path.as_bytes();

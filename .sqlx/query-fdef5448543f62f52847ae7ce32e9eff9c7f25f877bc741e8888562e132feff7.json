@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO session_check (root_session_id, model, input_tokens, cache_write_tokens,\n                                        cache_read_tokens, output_tokens, cost_usd, recorded_ms)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "fdef5448543f62f52847ae7ce32e9eff9c7f25f877bc741e8888562e132feff7"
+}

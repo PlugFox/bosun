@@ -19,6 +19,7 @@ use std::path::Path;
 use bosun_core::{Message, Origin, Tokens, ToolCall, Usage, WindowKey};
 use serde_json::{Map, Value};
 
+use crate::layout::{FileKind, Located, Provider};
 use crate::line::{LineParser, Outcome, gap, len64};
 use crate::normalise::{absolute, command_head};
 use crate::record::{FileTouch, Record, Source, ToolResult, TouchKind};
@@ -42,6 +43,15 @@ pub fn locate(path: &Path) -> Option<WindowKey> {
         session_id: stem.to_owned(),
         agent_id: None,
     })
+}
+
+impl Provider for Parser {
+    fn locate(&self, path: &Path) -> Option<Located> {
+        Some(Located {
+            window: locate(path)?,
+            kind: FileKind::Transcript,
+        })
+    }
 }
 
 impl LineParser for Parser {

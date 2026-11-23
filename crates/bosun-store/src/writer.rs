@@ -7,14 +7,17 @@
 
 use std::time::Duration;
 
-use bosun_core::{Commit, Gap, Message, Rates, WindowKey, default_table, merge};
+use bosun_core::{
+    Commit, FileTouch, Gap, Message, Rates, SessionCheck, ToolResult, WindowKey, WindowKind,
+    WindowMeta, canonical_path, default_table, merge, repo_root, strip_root, style_of,
+};
 use sqlx::sqlite::SqliteConnection;
 use sqlx::{Connection, Executor};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::error::{Error, to_db};
+use crate::error::{Error, from_db, to_db};
 use crate::read;
 
 /// How many batches may wait for the writer before senders wait too.
@@ -41,12 +44,33 @@ pub enum Write {
     },
     /// A new price for a model from a time on. Closes the current row; never touches a message.
     ChangePrice(PriceChange),
-    /// Registers a repository or records its origin and default branch. Keyed by path.
+    /// Registers a repository root or records its origin and default branch. Keyed by the
+    /// canonical path. Messages are attributed to the longest root that contains their cwd
+    /// ([`bosun_core::repo_root`]); a root seen for the first time re-attributes every stored
+    /// message.
     Repo(Repo),
     /// A commit of the repository with path key `repo`, which is registered if it is not yet.
     /// Keyed by (repository, sha): a stored commit is never changed, so writing it again
     /// changes nothing.
     Commit { repo: String, commit: Commit },
+    /// What the provider says about a context window: for a sub-agent, its parent, type, depth
+    /// and spawning call. Fields the meta leaves out keep their stored value.
+    Session { provider: String, meta: WindowMeta },
+    /// The result of a tool call, applied to the stored call with its `tool_use` id. A result
+    /// whose call is not stored is dropped.
+    ToolResult(ToolResult),
+    /// A file a stored tool call touched. A touch whose call is not stored is dropped.
+    FileTouch(FileTouch),
+    /// The provider's totals for a session; replaces what is stored for its root session.
+    SessionCheck {
+        check: SessionCheck,
+        /// When bosun recorded it.
+        recorded_ms: i64,
+    },
+    /// Mutant `mutant_ingest_reingest_truncates` (#21): deletes every ingested row, as a
+    /// reingest that truncates before it rebuilds would.
+    #[cfg(mutant_ingest_reingest_truncates)]
+    Truncate,
 }
 
 /// A configured repository. Keyed by `path`: writing it again updates the row.
@@ -213,21 +237,80 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
         Write::ChangePrice(change) => change_price(conn, &change).await,
         Write::Repo(repo) => upsert_repo(conn, &repo).await,
         Write::Commit { repo, commit } => insert_commit(conn, &repo, &commit).await,
+        Write::Session { provider, meta } => upsert_session(conn, &provider, &meta).await,
+        Write::ToolResult(result) => apply_tool_result(conn, &result).await,
+        Write::FileTouch(touch) => insert_file_touch(conn, &touch).await,
+        Write::SessionCheck { check, recorded_ms } => {
+            replace_session_check(conn, &check, recorded_ms).await
+        }
+        #[cfg(mutant_ingest_reingest_truncates)]
+        Write::Truncate => {
+            conn.execute(
+                "DELETE FROM file_touch; DELETE FROM tool_call; DELETE FROM message;
+                 DELETE FROM ingest_gap; DELETE FROM session_check;",
+            )
+            .await?;
+            Ok(())
+        }
     }
 }
 
+/// Every repository root: its id and canonical key.
+async fn repos(conn: &mut SqliteConnection) -> Result<Vec<(i64, String)>, Error> {
+    Ok(sqlx::query!(r#"SELECT id AS "id!: i64", path FROM repo"#)
+        .fetch_all(conn)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.path))
+        .collect())
+}
+
+/// The id of the repository whose root `cwd` belongs to, if any.
+fn repo_of(cwd: &str, repos: &[(i64, String)]) -> Option<i64> {
+    let root = repo_root(cwd, repos.iter().map(|(_, path)| path.as_str()))?;
+    repos
+        .iter()
+        .find(|(_, path)| path == root)
+        .map(|(id, _)| *id)
+}
+
 async fn upsert_repo(conn: &mut SqliteConnection, repo: &Repo) -> Result<(), Error> {
+    let key = canonical_path(&repo.path, style_of(&repo.path));
+    let known = sqlx::query_scalar!(r#"SELECT id AS "id!: i64" FROM repo WHERE path = ?"#, key)
+        .fetch_optional(&mut *conn)
+        .await?
+        .is_some();
     sqlx::query!(
         "INSERT INTO repo (path, remote, default_branch) VALUES (?, ?, ?)
          ON CONFLICT (path) DO UPDATE SET
-             remote = excluded.remote,
-             default_branch = excluded.default_branch",
-        repo.path,
+             remote = coalesce(excluded.remote, remote),
+             default_branch = coalesce(excluded.default_branch, default_branch)",
+        key,
         repo.remote,
         repo.default_branch,
     )
-    .execute(conn)
+    .execute(&mut *conn)
     .await?;
+    if known {
+        return Ok(());
+    }
+    // A new root may contain, or lie deeper than, the roots messages were attributed to.
+    let repos = repos(conn).await?;
+    let messages = sqlx::query!(r#"SELECT id AS "id!: i64", cwd, repo_id FROM message"#)
+        .fetch_all(&mut *conn)
+        .await?;
+    for message in messages {
+        let repo = repo_of(&message.cwd, &repos);
+        if repo != message.repo_id {
+            sqlx::query!(
+                "UPDATE message SET repo_id = ? WHERE id = ?",
+                repo,
+                message.id
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -236,14 +319,19 @@ async fn insert_commit(
     repo: &str,
     commit: &Commit,
 ) -> Result<(), Error> {
-    let repo_id = sqlx::query_scalar!(
-        r#"INSERT INTO repo (path) VALUES (?)
-           ON CONFLICT (path) DO UPDATE SET path = excluded.path
-           RETURNING id AS "id!: i64""#,
-        repo,
+    upsert_repo(
+        conn,
+        &Repo {
+            path: repo.to_owned(),
+            remote: None,
+            default_branch: None,
+        },
     )
-    .fetch_one(&mut *conn)
     .await?;
+    let key = canonical_path(repo, style_of(repo));
+    let repo_id = sqlx::query_scalar!(r#"SELECT id AS "id!: i64" FROM repo WHERE path = ?"#, key)
+        .fetch_one(&mut *conn)
+        .await?;
     let added = to_db(commit.lines_added, "lines added")?;
     let removed = to_db(commit.lines_removed, "lines removed")?;
     let trailers = serde_json::to_string(&commit.trailers)
@@ -263,6 +351,153 @@ async fn insert_commit(
     )
     .execute(conn)
     .await?;
+    Ok(())
+}
+
+async fn upsert_session(
+    conn: &mut SqliteConnection,
+    provider: &str,
+    meta: &WindowMeta,
+) -> Result<(), Error> {
+    let key = &meta.window.key;
+    let id = session_id(conn, provider, key).await?;
+    let root = WindowKey {
+        session_id: key.session_id.clone(),
+        agent_id: None,
+    };
+    let root = session_id(conn, provider, &root).await?;
+    let parent = match &meta.window.parent {
+        Some(parent) => Some(session_id(conn, provider, parent).await?),
+        None => None,
+    };
+    let kind = match meta.window.kind {
+        WindowKind::Run => "run",
+        WindowKind::Interactive => "interactive",
+    };
+    sqlx::query!(
+        "UPDATE session SET
+             kind = ?,
+             root_id = ?,
+             parent_id = coalesce(?, parent_id),
+             agent_type = coalesce(?, agent_type),
+             spawn_depth = coalesce(?, spawn_depth),
+             spawn_tool_use_id = coalesce(?, spawn_tool_use_id)
+         WHERE id = ?",
+        kind,
+        root,
+        parent,
+        meta.agent_type,
+        meta.spawn_depth,
+        meta.spawned_by,
+        id,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+async fn apply_tool_result(conn: &mut SqliteConnection, result: &ToolResult) -> Result<(), Error> {
+    let calls = sqlx::query!(
+        r#"SELECT tc.id AS "id!: i64", tc.result_bytes, tc.is_error
+           FROM tool_call tc JOIN message m ON m.id = tc.message_id
+           WHERE m.provider = ? AND tc.tool_use_key = ?"#,
+        result.provider,
+        result.tool_use_id,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for call in calls {
+        // The rule of `merge` for a call seen twice: the larger size, the error if either.
+        let bytes = from_db(call.result_bytes, "tool result bytes")?.max(result.result_bytes);
+        let bytes = to_db(bytes, "tool result bytes")?;
+        let is_error = call.is_error != 0 || result.is_error;
+        sqlx::query!(
+            "UPDATE tool_call SET result_bytes = ?, is_error = ? WHERE id = ?",
+            bytes,
+            is_error,
+            call.id,
+        )
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn insert_file_touch(conn: &mut SqliteConnection, touch: &FileTouch) -> Result<(), Error> {
+    let Some(call) = sqlx::query!(
+        r#"SELECT tc.id AS "id!: i64", r.path AS "repo?: String"
+           FROM tool_call tc
+           JOIN message m ON m.id = tc.message_id
+           LEFT JOIN repo r ON r.id = m.repo_id
+           WHERE m.provider = ? AND m.message_key = ? AND tc.tool_use_key = ?"#,
+        touch.provider,
+        touch.message_id,
+        touch.tool_use_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(());
+    };
+    // Relative to the message's repository when the file is inside it (`.` for its root);
+    // absolute otherwise.
+    let path = call
+        .repo
+        .as_deref()
+        .and_then(|root| strip_root(&touch.path, root, style_of(root)))
+        .map_or(touch.path.as_str(), |rest| {
+            if rest.is_empty() { "." } else { rest }
+        });
+    let kind = touch.kind.as_str();
+    sqlx::query!(
+        "INSERT INTO file_touch (tool_call_id, path, kind) VALUES (?, ?, ?)
+         ON CONFLICT (tool_call_id, path, kind) DO NOTHING",
+        call.id,
+        path,
+        kind,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+async fn replace_session_check(
+    conn: &mut SqliteConnection,
+    check: &SessionCheck,
+    recorded_ms: i64,
+) -> Result<(), Error> {
+    let root = WindowKey {
+        session_id: check.session_id.clone(),
+        agent_id: None,
+    };
+    let root = session_id(conn, &check.provider, &root).await?;
+    sqlx::query!("DELETE FROM session_check WHERE root_session_id = ?", root)
+        .execute(&mut *conn)
+        .await?;
+    for (model, totals) in &check.models {
+        let t = &totals.tokens;
+        let input = to_db(t.input, "input tokens")?;
+        let written = to_db(t.cache_write_5m + t.cache_write_1h, "cache write tokens")?;
+        let read = to_db(t.cache_read, "cache read tokens")?;
+        let output = to_db(t.output, "output tokens")?;
+        // The column is required; a provider that gives no cost for a model gives zero.
+        let cost = totals.cost_usd.unwrap_or(0.0);
+        sqlx::query!(
+            "INSERT INTO session_check (root_session_id, model, input_tokens, cache_write_tokens,
+                                        cache_read_tokens, output_tokens, cost_usd, recorded_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            root,
+            model,
+            input,
+            written,
+            read,
+            output,
+            cost,
+            recorded_ms,
+        )
+        .execute(&mut *conn)
+        .await?;
+    }
     Ok(())
 }
 
@@ -365,6 +600,7 @@ async fn upsert_message(
     let session = session_id(conn, &m.provider, &m.origin.window).await?;
     let file = source_file_id(conn, &m.provider, &m.origin.file).await?;
     let model = model_id(conn, &m.provider, &m.model).await?;
+    let repo = repo_of(&m.cwd, &repos(conn).await?);
     let t = &m.usage.tokens;
     let input = to_db(t.input, "input tokens")?;
     let five_minute = to_db(t.cache_write_5m, "cache write tokens")?;
@@ -374,16 +610,17 @@ async fn upsert_message(
     let usage = m.usage.raw.to_string();
     let id = sqlx::query_scalar!(
         r#"INSERT INTO message (
-               provider, message_key, session_id, source_file_id, ts_ms, model_id, cwd,
+               provider, message_key, session_id, source_file_id, ts_ms, model_id, cwd, repo_id,
                input_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cache_read_tokens,
                output_tokens, usage_json, parser_version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (provider, message_key) DO UPDATE SET
                session_id = excluded.session_id,
                source_file_id = excluded.source_file_id,
                ts_ms = excluded.ts_ms,
                model_id = excluded.model_id,
                cwd = excluded.cwd,
+               repo_id = excluded.repo_id,
                input_tokens = excluded.input_tokens,
                cache_write_5m_tokens = excluded.cache_write_5m_tokens,
                cache_write_1h_tokens = excluded.cache_write_1h_tokens,
@@ -399,6 +636,7 @@ async fn upsert_message(
         m.origin.ts_ms,
         model,
         m.cwd,
+        repo,
         input,
         five_minute,
         one_hour,
@@ -792,6 +1030,66 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(count(&store, "%").await, 1);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_new_repository_root_re_attributes_stored_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("bosun.db"), Options::default())
+            .await
+            .unwrap();
+        let mut nested = record("m2", "f1", 2, 1, &[]);
+        nested.cwd = "/work/repo/sub/x".to_owned();
+        store
+            .writer()
+            .write(vec![
+                Write::Repo(Repo {
+                    path: "/work/repo".to_owned(),
+                    remote: None,
+                    default_branch: None,
+                }),
+                source_file("f1"),
+                write(record("m1", "f1", 1, 1, &[])),
+                write(nested),
+            ])
+            .await
+            .unwrap();
+        let repos = || async {
+            sqlx::query!(
+                r#"SELECT m.message_key, r.path AS "repo?: String"
+                   FROM message m LEFT JOIN repo r ON r.id = m.repo_id
+                   ORDER BY m.message_key"#
+            )
+            .fetch_all(store.reader().pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.message_key, row.repo))
+            .collect::<Vec<_>>()
+        };
+        let repo = Some("/work/repo".to_owned());
+        assert_eq!(
+            repos().await,
+            [("m1".to_owned(), repo.clone()), ("m2".to_owned(), repo)]
+        );
+
+        // A deeper root, registered later, takes the messages under it; registering it again
+        // changes nothing.
+        let deeper = Write::Repo(Repo {
+            path: "/work//repo/sub/".to_owned(),
+            remote: None,
+            default_branch: None,
+        });
+        store.writer().write(vec![deeper.clone()]).await.unwrap();
+        store.writer().write(vec![deeper]).await.unwrap();
+        assert_eq!(
+            repos().await,
+            [
+                ("m1".to_owned(), Some("/work/repo".to_owned())),
+                ("m2".to_owned(), Some("/work/repo/sub".to_owned())),
+            ]
+        );
         store.close().await.unwrap();
     }
 

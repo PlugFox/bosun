@@ -12,10 +12,11 @@ mod price;
 
 pub use commit::Commit;
 pub use event::{
-    ContextWindow, Gap, Message, Origin, Tokens, ToolCall, Usage, WindowKey, WindowKind,
+    ContextWindow, FileTouch, Gap, Message, ModelTotals, Origin, SessionCheck, Tokens, ToolCall,
+    ToolResult, TouchKind, Usage, WindowKey, WindowKind, WindowMeta,
 };
 pub use merge::{KeyMismatch, merge};
-pub use path::{PathStyle, canonical_path};
+pub use path::{PathStyle, canonical_path, repo_root, strip_root, style_of};
 pub use price::{
     Cost, DEFAULT_REFERENCE_MODEL, Eqv, PriceRow, PriceTable, Pricing, Rates, SYNTHETIC_MODEL,
     TableError, UnknownModel, default_table,

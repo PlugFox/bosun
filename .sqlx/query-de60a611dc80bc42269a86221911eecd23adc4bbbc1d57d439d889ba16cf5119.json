@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO file_touch (tool_call_id, path, kind) VALUES (?, ?, ?)\n         ON CONFLICT (tool_call_id, path, kind) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "de60a611dc80bc42269a86221911eecd23adc4bbbc1d57d439d889ba16cf5119"
+}

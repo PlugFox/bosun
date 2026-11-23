@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM session_check WHERE root_session_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bde859afa0c433f01cec861ce4b44fea9b4e6bf37950a6d7f9e11127375c0a3f"
+}

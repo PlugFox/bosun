@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO session_check_window (root_session_id, start_ms, end_ms, total_cost_usd)\n         VALUES (?, ?, ?, ?)\n         ON CONFLICT (root_session_id) DO UPDATE SET\n             start_ms = excluded.start_ms,\n             end_ms = excluded.end_ms,\n             total_cost_usd = excluded.total_cost_usd",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "9a7cf9cd2f106032dd76eaacff5e2e298a7c7fe4e806c1072930b516a878110f"
+}

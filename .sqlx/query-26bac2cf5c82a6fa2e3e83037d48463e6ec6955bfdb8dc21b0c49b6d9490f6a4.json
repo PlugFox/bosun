@@ -1,0 +1,111 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.provider, s.session_key, s.agent_key, md.name AS model,\n                      (w.start_ms IS NULL OR m.ts_ms >= w.start_ms)\n                          AND (w.end_ms IS NULL OR m.ts_ms <= w.end_ms) AS \"in_window!: bool\",\n                      count(*) AS \"messages!: i64\",\n                      sum(m.input_tokens) AS \"input!: i64\",\n                      sum(m.cache_write_5m_tokens) AS \"cache_write_5m!: i64\",\n                      sum(m.cache_write_1h_tokens) AS \"cache_write_1h!: i64\",\n                      sum(m.cache_read_tokens) AS \"cache_read!: i64\",\n                      sum(m.output_tokens) AS \"output!: i64\"\n               FROM message m\n               JOIN session s ON s.id = m.session_id\n               JOIN model md ON md.id = m.model_id\n               JOIN session root ON root.provider = s.provider\n                    AND root.session_key = s.session_key AND root.agent_key IS NULL\n               LEFT JOIN session_check_window w ON w.root_session_id = root.id\n               WHERE EXISTS (SELECT 1 FROM session_check c WHERE c.root_session_id = root.id)\n               -- Column 5 is the side of the window.\n               GROUP BY s.id, md.name, 5\n               ORDER BY s.provider, s.session_key, ifnull(s.agent_key, ''), md.name, 5",
+  "describe": {
+    "columns": [
+      {
+        "name": "provider",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "session_key",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "session_key"
+          }
+        }
+      },
+      {
+        "name": "agent_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "agent_key"
+          }
+        }
+      },
+      {
+        "name": "model",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "in_window!: bool",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "messages!: i64",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "input!: i64",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "cache_write_5m!: i64",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "cache_write_1h!: i64",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "cache_read!: i64",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "output!: i64",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "26bac2cf5c82a6fa2e3e83037d48463e6ec6955bfdb8dc21b0c49b6d9490f6a4"
+}

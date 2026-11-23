@@ -66,7 +66,7 @@ impl Reader {
     pub async fn source_files(&self, provider: &str) -> Result<Vec<SourceFile>, Error> {
         let rows = sqlx::query!(
             "SELECT file_key, path, size, parsed_offset, parser_version, last_line_hash,
-                    parsed_lines
+                    parsed_lines, last_ts_ms
              FROM source_file WHERE provider = ? ORDER BY file_key",
             provider,
         )
@@ -88,6 +88,7 @@ impl Reader {
                         .parsed_lines
                         .map(|n| from_db(n, "parsed lines"))
                         .transpose()?,
+                    last_ts_ms: row.last_ts_ms,
                 })
             })
             .collect()

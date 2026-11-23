@@ -24,6 +24,13 @@ pub trait LineParser {
     /// Parses one complete line, without its line terminator, that starts at `offset` in
     /// `source`.
     fn parse_line(&self, source: &Source, offset: u64, line: &[u8]) -> Outcome;
+
+    /// Parses one line as [`LineParser::parse_line`] does, and says the line's own timestamp
+    /// (milliseconds since the Unix epoch, UTC) when it has one, whatever its outcome. The
+    /// default says none: a provider without a session check needs no timestamps.
+    fn parse_timed(&self, source: &Source, offset: u64, line: &[u8]) -> (Outcome, Option<i64>) {
+        (self.parse_line(source, offset, line), None)
+    }
 }
 
 /// What one line yielded.
@@ -45,6 +52,8 @@ pub struct ParsedLine {
     pub offset: u64,
     /// Where the next line starts: past this line's newline.
     pub end: u64,
+    /// The line's own timestamp, when it has one.
+    pub ts_ms: Option<i64>,
     pub outcome: Outcome,
 }
 
@@ -56,6 +65,9 @@ pub struct Batch {
     /// The offset after the last complete line: where the next read starts. Bytes past it are
     /// an incomplete line.
     pub end: u64,
+    /// The timestamp of the last timestamped line up to [`Batch::end`]: this batch's or, when
+    /// it has none, the one carried in from the lines before it.
+    pub last_ts_ms: Option<i64>,
 }
 
 impl Batch {
@@ -88,11 +100,30 @@ impl Batch {
     }
 }
 
-/// Parses every complete line of `bytes`, which start at `offset` in `source`.
+/// Parses every complete line of `bytes`, which start at `offset` in `source`, with no
+/// timestamp carried in from lines before them. See [`parse_lines_after`].
+pub fn parse_lines(parser: &impl LineParser, source: &Source, offset: u64, bytes: &[u8]) -> Batch {
+    parse_lines_after(parser, source, offset, bytes, None)
+}
+
+/// Parses every complete line of `bytes`, which start at `offset` in `source`; `last_ts_ms` is
+/// the timestamp of the last timestamped line before `offset` (the [`Batch::last_ts_ms`] of
+/// the read before).
 ///
 /// A line ends with `\n`; a `\r` before it is dropped. The bytes after the last `\n` are not
 /// parsed: they are a line still being written.
-pub fn parse_lines(parser: &impl LineParser, source: &Source, offset: u64, bytes: &[u8]) -> Batch {
+///
+/// A session check ends where the provider last wrote before it: its
+/// [`SessionCheck::end_ms`](bosun_core::SessionCheck::end_ms) is set to the timestamp of the
+/// last timestamped line before it in the file, of any type (#46). The carried timestamp keeps
+/// this true when a read begins right at the check's line.
+pub fn parse_lines_after(
+    parser: &impl LineParser,
+    source: &Source,
+    offset: u64,
+    bytes: &[u8],
+    last_ts_ms: Option<i64>,
+) -> Batch {
     let mut lines = Vec::new();
     let mut start = 0;
     while let Some(len) = bytes[start..].iter().position(|&b| b == b'\n') {
@@ -100,15 +131,16 @@ pub fn parse_lines(parser: &impl LineParser, source: &Source, offset: u64, bytes
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         let line_offset = offset + len64(start);
         start += len + 1;
-        let outcome = if line.iter().all(u8::is_ascii_whitespace) {
-            Outcome::Records(Vec::new())
+        let (outcome, ts_ms) = if line.iter().all(u8::is_ascii_whitespace) {
+            (Outcome::Records(Vec::new()), None)
         } else {
-            parser.parse_line(source, line_offset, line)
+            parser.parse_timed(source, line_offset, line)
         };
         let is_gap = matches!(outcome, Outcome::Gap(_));
         lines.push(ParsedLine {
             offset: line_offset,
             end: offset + len64(start),
+            ts_ms,
             outcome,
         });
         if cfg!(mutant_ingest_abort_on_gap) && is_gap {
@@ -120,7 +152,28 @@ pub fn parse_lines(parser: &impl LineParser, source: &Source, offset: u64, bytes
         last_block_only(&mut lines);
     }
     let end = lines.last().map_or(offset, |line| line.end);
-    Batch { lines, end }
+    let last_ts_ms = end_checks(&mut lines, last_ts_ms);
+    Batch {
+        lines,
+        end,
+        last_ts_ms,
+    }
+}
+
+/// Sets the end of every session check of `lines` to the timestamp of the last timestamped
+/// line before it, starting from `last_ts_ms`, and returns the last timestamp of all.
+fn end_checks(lines: &mut [ParsedLine], mut last_ts_ms: Option<i64>) -> Option<i64> {
+    for line in lines {
+        if let Outcome::Records(records) = &mut line.outcome {
+            for record in records {
+                if let Record::SessionCheck(check) = record {
+                    check.end_ms = last_ts_ms;
+                }
+            }
+        }
+        last_ts_ms = line.ts_ms.or(last_ts_ms);
+    }
+    last_ts_ms
 }
 
 /// Mutant `mutant_ingest_last_block`: keeps only the last message record of the batch, as the

@@ -61,7 +61,8 @@ pub enum Write {
     ToolResult(ToolResult),
     /// A file a stored tool call touched. A touch whose call is not stored is dropped.
     FileTouch(FileTouch),
-    /// The provider's totals for a session; replaces what is stored for its root session.
+    /// The provider's totals for a session and their window; replace what is stored for its
+    /// root session.
     SessionCheck {
         check: SessionCheck,
         /// When bosun recorded it.
@@ -98,6 +99,9 @@ pub struct SourceFile {
     /// The complete lines up to `parsed_offset`; `None` when they were not counted (a file
     /// parsed before the count existed keeps `None` until it is re-read from zero).
     pub parsed_lines: Option<u64>,
+    /// The timestamp of the last timestamped line up to `parsed_offset`, carried to the next
+    /// read: a read may begin right at a session check, whose window ends there (#46).
+    pub last_ts_ms: Option<i64>,
 }
 
 /// New rates for `model` (and `prompt_threshold`) valid from `from_ms` on.
@@ -250,7 +254,8 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
         Write::Truncate => {
             conn.execute(
                 "DELETE FROM file_touch; DELETE FROM tool_call; DELETE FROM message;
-                 DELETE FROM ingest_gap; DELETE FROM session_check;",
+                 DELETE FROM ingest_gap; DELETE FROM session_check;
+                 DELETE FROM session_check_window;",
             )
             .await?;
             Ok(())
@@ -477,14 +482,28 @@ async fn replace_session_check(
     sqlx::query!("DELETE FROM session_check WHERE root_session_id = ?", root)
         .execute(&mut *conn)
         .await?;
+    sqlx::query!(
+        "INSERT INTO session_check_window (root_session_id, start_ms, end_ms, total_cost_usd)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (root_session_id) DO UPDATE SET
+             start_ms = excluded.start_ms,
+             end_ms = excluded.end_ms,
+             total_cost_usd = excluded.total_cost_usd",
+        root,
+        check.start_ms,
+        check.end_ms,
+        check.total_cost_usd,
+    )
+    .execute(&mut *conn)
+    .await?;
     for (model, totals) in &check.models {
         let t = &totals.tokens;
         let input = to_db(t.input, "input tokens")?;
         let written = to_db(t.cache_write_5m + t.cache_write_1h, "cache write tokens")?;
         let read = to_db(t.cache_read, "cache read tokens")?;
         let output = to_db(t.output, "output tokens")?;
-        // The column is required; a provider that gives no cost for a model gives zero.
-        let cost = totals.cost_usd.unwrap_or(0.0);
+        // A cost the provider did not give stays missing.
+        let cost = totals.cost_usd;
         sqlx::query!(
             "INSERT INTO session_check (root_session_id, model, input_tokens, cache_write_tokens,
                                         cache_read_tokens, output_tokens, cost_usd, recorded_ms)
@@ -514,15 +533,16 @@ async fn upsert_source_file(conn: &mut SqliteConnection, file: &SourceFile) -> R
     sqlx::query!(
         "INSERT INTO source_file
              (provider, file_key, path, size, parsed_offset, parser_version, last_line_hash,
-              parsed_lines)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              parsed_lines, last_ts_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (provider, file_key) DO UPDATE SET
              path = excluded.path,
              size = excluded.size,
              parsed_offset = excluded.parsed_offset,
              parser_version = excluded.parser_version,
              last_line_hash = excluded.last_line_hash,
-             parsed_lines = excluded.parsed_lines",
+             parsed_lines = excluded.parsed_lines,
+             last_ts_ms = excluded.last_ts_ms",
         file.provider,
         file.file_key,
         file.path,
@@ -531,6 +551,7 @@ async fn upsert_source_file(conn: &mut SqliteConnection, file: &SourceFile) -> R
         file.parser_version,
         file.last_line_hash,
         lines,
+        file.last_ts_ms,
     )
     .execute(conn)
     .await?;
@@ -861,6 +882,7 @@ pub(crate) mod tests {
             parser_version: 1,
             last_line_hash: None,
             parsed_lines: Some(4),
+            last_ts_ms: None,
         })
     }
 

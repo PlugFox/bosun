@@ -299,7 +299,7 @@ async fn the_agreement_counts_subagents() {
 }
 
 /// A session with the provider's totals is compared only when it has a message in the range,
-/// and then with its sums over all time.
+/// and then with its sums over the provider's window, whatever the range.
 #[tokio::test]
 async fn the_agreement_selects_sessions_by_the_range() {
     let corpus = Corpus::new(&["subagent-cost-state"]).await;
@@ -312,7 +312,7 @@ async fn the_agreement_selects_sessions_by_the_range() {
     assert_eq!(report.health.agreement.sessions, 0);
     assert_eq!(report.total.messages, 0);
     // The last message of the session is at 00:00:08; a range holding only it still compares
-    // every message of the session.
+    // every message of the provider's window, here the whole session.
     let last = Scope {
         from_ms: day(3) + 8_000,
         to_ms: day(3) + 9_000,
@@ -395,4 +395,138 @@ async fn the_context_curve_counts_a_drop_as_a_compaction() {
         ]
     );
     assert_eq!((curve.windows, curve.compactions), (2, 1));
+}
+
+/// #46, acceptance: a resumed session (`startTime` after its first messages) with a message
+/// after the last `cost-state` line is compared over the provider's window only, and agrees;
+/// the signed difference splits into the model no transcript holds and the rest. Mutant
+/// `mutant_report_no_window`.
+#[tokio::test]
+async fn the_agreement_counts_the_provider_window_only() {
+    let corpus = Corpus::new(&["resumed-cost-state"]).await;
+    let scope = Scope {
+        from_ms: day(11),
+        to_ms: day(12),
+        repo: None,
+    };
+    let report = corpus.report(scope, Vec::new()).await;
+    corpus.close().await;
+
+    // Every message is in the bill, inside the window or not.
+    assert_eq!(report.total.messages, 6);
+    let agreement = &report.health.agreement;
+    assert_eq!(
+        (
+            agreement.sessions,
+            agreement.within,
+            agreement.exceeding,
+            agreement.excluded
+        ),
+        (1, 1, 0, 0),
+        "{agreement:?}"
+    );
+    let row = &agreement.rows[0];
+    assert_eq!(row.session, "00000000-0000-4000-8000-011100000000");
+    // `M2`, `M5` in the main transcript and `M3`, `M4` in the sub-agent; not `M1`, before the
+    // resume, nor the message after the line.
+    assert_eq!((row.windows, row.messages), (2, 4));
+    let c = &row.comparison;
+    assert_eq!(
+        c.transcripts,
+        CheckTokens {
+            input: 15,
+            cache_write: 1350,
+            cache_read: 27_000,
+            output: 1390,
+            total: 29_755,
+        }
+    );
+    assert_eq!(
+        c.provider,
+        CheckTokens {
+            input: 115,
+            cache_write: 1350,
+            cache_read: 27_500,
+            output: 1440,
+            total: 30_405,
+        }
+    );
+    assert_eq!(c.difference, -650);
+    assert!(c.within && !c.exceeds);
+    assert_eq!(
+        c.undercount,
+        Undercount {
+            absent_models: 150,
+            shared_models: 500,
+        }
+    );
+    assert_eq!(agreement.total, *c);
+    assert_eq!(
+        agreement.absent_models,
+        [AbsentModel {
+            model: "claude-haiku-5-5".to_owned(),
+            sessions: 1,
+            total: 150,
+        }]
+    );
+}
+
+/// #46: a session with the provider's totals but no message inside its window is excluded and
+/// counted, not compared.
+#[test]
+fn a_session_with_no_message_in_the_window_is_excluded() {
+    let check = CheckRow {
+        provider: "claude".to_owned(),
+        session: "s".to_owned(),
+        model: "m".to_owned(),
+        input: 1,
+        cache_write: 0,
+        cache_read: 0,
+        output: 1,
+        cost_usd: None,
+    };
+    let outside = WindowSums {
+        provider: "claude".to_owned(),
+        session: "s".to_owned(),
+        agent: None,
+        model: "m".to_owned(),
+        in_window: false,
+        messages: 1,
+        tokens: Tokens {
+            input: 1,
+            output: 1,
+            ..Tokens::default()
+        },
+    };
+    let ranged = BTreeSet::from([("claude", "s")]);
+    let agreement = agreement(&ranged, &[check], &[outside]);
+    assert_eq!((agreement.sessions, agreement.excluded), (0, 1));
+    assert_eq!(agreement.rows, []);
+}
+
+/// The criterion is one-sided: a provider larger by more than the tolerance is not within it
+/// but does not exceed; transcripts larger by more than the tolerance exceed it.
+#[test]
+fn only_the_transcripts_exceed() {
+    let sums = |total| CheckTokens {
+        input: total,
+        total,
+        ..CheckTokens::default()
+    };
+    let under = compare(sums(90), sums(100), 0);
+    assert_eq!(
+        (under.difference, under.within, under.exceeds),
+        (-10, false, false)
+    );
+    assert_eq!(under.undercount.shared_models, 10);
+    let over = compare(sums(106), sums(100), 0);
+    assert_eq!(
+        (over.difference, over.within, over.exceeds),
+        (6, false, true)
+    );
+    assert_eq!(over.undercount.shared_models, -6);
+    let edge = compare(sums(105), sums(100), 0);
+    assert_eq!((edge.within, edge.exceeds), (true, false));
+    assert_eq!(base_model("claude-opus-5-5[1m]"), "claude-opus-5-5");
+    assert_eq!(base_model("claude-opus-5-5"), "claude-opus-5-5");
 }

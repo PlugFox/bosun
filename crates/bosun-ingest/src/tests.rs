@@ -744,3 +744,137 @@ async fn small_reads_give_the_same_rows() {
     assert_eq!(ingest.scan().await.unwrap().parsed_bytes, 0);
     bench.close().await;
 }
+
+/// The stored check of the `resumed-cost-state` case: its window (start, end, total cost) and
+/// its per-model rows (model, input, cache write, cache read, output, cost).
+type StoredCheck = (
+    Vec<(Option<i64>, Option<i64>, Option<f64>)>,
+    Vec<(String, i64, i64, i64, i64, Option<f64>)>,
+);
+
+async fn stored_check(db: &Path) -> StoredCheck {
+    let mut conn = connect(db).await;
+    let window =
+        sqlx::query_as("SELECT start_ms, end_ms, total_cost_usd FROM session_check_window")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    let models = sqlx::query_as(
+        "SELECT model, input_tokens, cache_write_tokens, cache_read_tokens, output_tokens,
+                cost_usd
+         FROM session_check ORDER BY model",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    (window, models)
+}
+
+/// The last `cost-state` of the main transcript of `resumed-cost-state`, as the case's README
+/// row describes it.
+fn resumed_check() -> StoredCheck {
+    // 2000-01-11T01:00:00Z, the resume, and 01:00:09, the `system` record before the line.
+    let start = 947_552_400_000;
+    (
+        vec![(Some(start), Some(start + 9_000), None)],
+        vec![
+            ("claude-haiku-5-5".to_owned(), 100, 0, 0, 50, None),
+            (
+                "claude-opus-5-5[1m]".to_owned(),
+                10,
+                920,
+                16_500,
+                90,
+                Some(0.2),
+            ),
+            (
+                "claude-sonnet-5-5".to_owned(),
+                5,
+                430,
+                11_000,
+                1300,
+                Some(0.05),
+            ),
+        ],
+    )
+}
+
+const RESUMED_MAIN: &str = "-fixture-repo-a/00000000-0000-4000-8000-011100000000.jsonl";
+
+/// #46: the check's window ends at the last timestamp before its line, also when the file is
+/// read in pieces: the line starts a read, and the timestamp before it was read by an earlier
+/// pass of another ingest, so it comes from the stored file row.
+#[tokio::test]
+async fn the_check_window_ends_at_the_last_timestamp_before_its_line() {
+    let case = case("resumed-cost-state");
+    let text = std::fs::read_to_string(case.join("projects").join(RESUMED_MAIN)).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    // Up to the `system` record at 01:00:09; the last `cost-state` is the next line.
+    let cut = lines
+        .iter()
+        .rposition(|line| line.contains("\"type\":\"cost-state\""))
+        .unwrap();
+    for read_limit in [Options::default().read_limit, 16] {
+        let bench = Bench::new().await;
+        let main = bench.projects().join(RESUMED_MAIN);
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(&main, lines[..cut].join("\n") + "\n").unwrap();
+        let options = Options {
+            read_limit,
+            ..Options::default()
+        };
+        let first = bench
+            .ingest_with(claude::Parser, bench.projects(), &case, options.clone())
+            .await;
+        first.scan().await.unwrap();
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&main)
+            .unwrap();
+        std::io::Write::write_all(&mut file, (lines[cut..].join("\n") + "\n").as_bytes()).unwrap();
+        drop(file);
+        let second = bench
+            .ingest_with(claude::Parser, bench.projects(), &case, options)
+            .await;
+        let report = second.scan().await.unwrap();
+        assert_eq!(report.restarted, 0, "the file grew; it is not re-read");
+        assert_eq!(
+            stored_check(&bench.db()).await,
+            resumed_check(),
+            "{read_limit}"
+        );
+        bench.close().await;
+    }
+}
+
+/// #46: a `cost-state` line in a sub-agent's file does not replace the root session's check,
+/// though it is read after the root's. Mutant `mutant_ingest_subagent_cost_state`.
+#[tokio::test]
+async fn a_subagent_cost_state_is_not_the_session_check() {
+    let case = case("resumed-cost-state");
+    let bench = Bench::new().await;
+    let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+    let (main, subagent): (Vec<PathBuf>, Vec<PathBuf>) = relative_files(&case, "projects")
+        .into_iter()
+        .partition(|file| !file.to_string_lossy().contains("subagents"));
+    for file in &main {
+        copy_file(&case, "projects", file, &bench.projects());
+    }
+    ingest.scan().await.unwrap();
+    assert_eq!(stored_check(&bench.db()).await, resumed_check());
+
+    assert_eq!(subagent.len(), 2, "{subagent:?}");
+    for file in &subagent {
+        copy_file(&case, "projects", file, &bench.projects());
+    }
+    ingest.scan().await.unwrap();
+    assert_eq!(stored_totals(&bench.db()).await, want(&case));
+    assert_eq!(
+        stored_check(&bench.db()).await,
+        resumed_check(),
+        "the sub-agent's cost-state replaced the session's"
+    );
+    bench.close().await;
+}

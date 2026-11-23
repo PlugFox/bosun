@@ -28,13 +28,19 @@ pub struct UsageRow {
     pub tokens: Tokens,
 }
 
-/// The token sums of one context window over all time.
+/// The token sums of one model in one context window over all time, split by whether the
+/// messages are inside the provider's window of the root session's check (#46).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowSums {
     pub provider: String,
     pub session: String,
     /// The sub-agent id; `None` for the main transcript.
     pub agent: Option<String>,
+    /// The model id as the transcript names it.
+    pub model: String,
+    /// Whether these messages are inside the provider's window: `start <= ts <= end`, where a
+    /// bound the store does not have (a check stored before #46) leaves that side open.
+    pub in_window: bool,
     pub messages: u64,
     pub tokens: Tokens,
 }
@@ -51,7 +57,8 @@ pub struct CheckRow {
     pub cache_write: u64,
     pub cache_read: u64,
     pub output: u64,
-    pub cost_usd: f64,
+    /// The provider's cost of the model; `None` when it gave none.
+    pub cost_usd: Option<f64>,
 }
 
 /// What the store holds of one parser version.
@@ -159,7 +166,7 @@ impl Reader {
 
     /// The provider's totals of every root session that has them, with the token sums over
     /// all time of every context window of those sessions (the main transcript and each
-    /// sub-agent), in one snapshot. Sorted by key.
+    /// sub-agent) per model and side of the provider's window, in one snapshot. Sorted by key.
     ///
     /// # Errors
     ///
@@ -176,19 +183,25 @@ impl Reader {
         .fetch_all(&mut *tx)
         .await?;
         let windows = sqlx::query!(
-            r#"SELECT s.provider, s.session_key, s.agent_key,
+            r#"SELECT s.provider, s.session_key, s.agent_key, md.name AS model,
+                      (w.start_ms IS NULL OR m.ts_ms >= w.start_ms)
+                          AND (w.end_ms IS NULL OR m.ts_ms <= w.end_ms) AS "in_window!: bool",
                       count(*) AS "messages!: i64",
                       sum(m.input_tokens) AS "input!: i64",
                       sum(m.cache_write_5m_tokens) AS "cache_write_5m!: i64",
                       sum(m.cache_write_1h_tokens) AS "cache_write_1h!: i64",
                       sum(m.cache_read_tokens) AS "cache_read!: i64",
                       sum(m.output_tokens) AS "output!: i64"
-               FROM message m JOIN session s ON s.id = m.session_id
-               WHERE EXISTS (
-                   SELECT 1 FROM session_check c JOIN session root ON root.id = c.root_session_id
-                   WHERE root.provider = s.provider AND root.session_key = s.session_key)
-               GROUP BY s.id
-               ORDER BY s.provider, s.session_key, ifnull(s.agent_key, '')"#
+               FROM message m
+               JOIN session s ON s.id = m.session_id
+               JOIN model md ON md.id = m.model_id
+               JOIN session root ON root.provider = s.provider
+                    AND root.session_key = s.session_key AND root.agent_key IS NULL
+               LEFT JOIN session_check_window w ON w.root_session_id = root.id
+               WHERE EXISTS (SELECT 1 FROM session_check c WHERE c.root_session_id = root.id)
+               -- Column 5 is the side of the window.
+               GROUP BY s.id, md.name, 5
+               ORDER BY s.provider, s.session_key, ifnull(s.agent_key, ''), md.name, 5"#
         )
         .fetch_all(&mut *tx)
         .await?;
@@ -215,6 +228,8 @@ impl Reader {
                     provider: row.provider,
                     session: row.session_key,
                     agent: row.agent_key,
+                    model: row.model,
+                    in_window: row.in_window,
                     messages: from_db(row.messages, "message count")?,
                     tokens: tokens([
                         row.input,

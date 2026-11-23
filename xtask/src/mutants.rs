@@ -400,6 +400,22 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("estimate::tests::the_exact_total_holds_no_estimate"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_report_no_window",
+        issue: 46,
+        breaks: "the cost-state agreement compares every message of a session, not its window",
+        package: "bosun-heat",
+        check: Check::Test("exact::tests::the_agreement_counts_the_provider_window_only"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_subagent_cost_state",
+        issue: 46,
+        breaks: "a cost-state line in a sub-agent file replaces the root session's check",
+        package: "bosun-ingest",
+        check: Check::Test("tests::a_subagent_cost_state_is_not_the_session_check"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

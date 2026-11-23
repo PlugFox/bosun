@@ -9,8 +9,8 @@
 use std::fmt::Write as _;
 
 use bosun_api::{
-    CheckTokens, CommitPeriod, Comparison, Estimates, RepoRef, Report, ResultCost, ScanState,
-    TokenSums,
+    Agreement, CheckTokens, CommitPeriod, Comparison, Estimates, RepoRef, Report, ResultCost,
+    ScanState, TokenSums,
 };
 use serde::Serialize;
 
@@ -337,6 +337,11 @@ fn difference(ours: u64, theirs: u64) -> String {
     format!("{relative:+.1}%")
 }
 
+/// A signed count with its sign.
+fn signed(n: i64) -> String {
+    format!("{n:+}")
+}
+
 fn health(report: &Report, out: &mut String) {
     let health = &report.health;
     out.push_str("## Ingest health\n\n");
@@ -381,14 +386,24 @@ fn health(report: &Report, out: &mut String) {
         );
     }
 
-    let agreement = &health.agreement;
+    agreement(&health.agreement, out);
+}
+
+fn agreement(agreement: &Agreement, out: &mut String) {
     out.push_str("### Agreement with the provider's own totals\n\n");
     let _ = writeln!(
         out,
-        "Sessions with the provider's totals (the last `cost-state` record) and a message in \
-         the range, main transcript plus sub-agents, over all time: {}; within {}% on the \
-         total: {}.\n",
-        agreement.sessions, agreement.tolerance_percent, agreement.within
+        "Sessions with the provider's totals (the last `cost-state` record of the main \
+         transcript) and a message in the range, main transcript plus sub-agents, over the \
+         messages inside the provider's window (from its `startTime` to the last record before \
+         the line): {}; within {}% on the total: {}; transcripts larger by more than {}%: {}. \
+         Not compared, with no message inside the window: {}.\n",
+        agreement.sessions,
+        agreement.tolerance_percent,
+        agreement.within,
+        agreement.tolerance_percent,
+        agreement.exceeding,
+        agreement.excluded
     );
     if agreement.sessions == 0 {
         return;
@@ -415,6 +430,32 @@ fn health(report: &Report, out: &mut String) {
     ]);
     table.render(out);
 
+    let undercount = &total.undercount;
+    let _ = writeln!(
+        out,
+        "Signed difference, transcripts less provider: {} tokens. The provider's excess is the \
+         known undercount of the transcript method, calls its transcripts never hold: {} on \
+         models no transcript holds, {} on the other models.\n",
+        signed(total.difference),
+        undercount.absent_models,
+        signed(undercount.shared_models)
+    );
+    if !agreement.absent_models.is_empty() {
+        let mut table = Table::new(&[
+            ("model absent from the transcripts", false),
+            ("sessions", true),
+            ("provider total", true),
+        ]);
+        for model in &agreement.absent_models {
+            table.row(vec![
+                model.model.clone(),
+                model.sessions.to_string(),
+                model.total.to_string(),
+            ]);
+        }
+        table.render(out);
+    }
+
     let mut table = Table::new(&[
         ("session", false),
         ("windows", true),
@@ -422,18 +463,31 @@ fn health(report: &Report, out: &mut String) {
         ("transcripts", true),
         ("provider", true),
         ("difference", true),
+        ("relative", true),
+        ("absent models", true),
+        ("other models", true),
         ("within", false),
     ]);
     for row in &agreement.rows {
         let c = &row.comparison;
+        let within = if c.exceeds {
+            "no, transcripts larger"
+        } else if c.within {
+            "yes"
+        } else {
+            "no"
+        };
         table.row(vec![
             row.session.clone(),
             row.windows.to_string(),
             row.messages.to_string(),
             c.transcripts.total.to_string(),
             c.provider.total.to_string(),
+            signed(c.difference),
             difference(c.transcripts.total, c.provider.total),
-            if c.within { "yes" } else { "no" }.to_owned(),
+            c.undercount.absent_models.to_string(),
+            signed(c.undercount.shared_models),
+            within.to_owned(),
         ]);
     }
     table.render(out);

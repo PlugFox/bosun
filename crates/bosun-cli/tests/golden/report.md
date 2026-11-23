@@ -79,12 +79,12 @@ Over the whole store, whatever the range.
 
 | parser version | files | files with a line count | lines | gaps | gaps per line |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | 14 | 14 | 88 | 3 | 3.4% |
-| total | 14 | 14 | 88 | 3 | 3.4% |
+| 2 | 16 | 16 | 104 | 3 | 2.9% |
+| total | 16 | 16 | 104 | 3 | 2.9% |
 
 ### Agreement with the provider's own totals
 
-Sessions with the provider's totals (the last `cost-state` record) and a message in the range, main transcript plus sub-agents, over all time: 1; within 5% on the total: 1.
+Sessions with the provider's totals (the last `cost-state` record of the main transcript) and a message in the range, main transcript plus sub-agents, over the messages inside the provider's window (from its `startTime` to the last record before the line): 1; within 5% on the total: 1; transcripts larger by more than 5%: 0. Not compared, with no message inside the window: 0.
 
 | all sessions | input | cache write | cache read | output | total |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -92,9 +92,11 @@ Sessions with the provider's totals (the last `cost-state` record) and a message
 | provider | 12 | 1620 | 24000 | 51310 | 76942 |
 | difference | +0.0% | +0.0% | +0.0% | +0.0% | +0.0% |
 
-| session | windows | messages | transcripts | provider | difference | within |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 00000000-0000-4000-8000-003100000000 | 2 | 4 | 76942 | 76942 | +0.0% | yes |
+Signed difference, transcripts less provider: +0 tokens. The provider's excess is the known undercount of the transcript method, calls its transcripts never hold: 0 on models no transcript holds, +0 on the other models.
+
+| session | windows | messages | transcripts | provider | difference | relative | absent models | other models | within |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 00000000-0000-4000-8000-003100000000 | 2 | 4 | 76942 | 76942 | +0 | +0.0% | 0 | +0 | yes |
 
 ---
 

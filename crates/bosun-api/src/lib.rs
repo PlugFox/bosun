@@ -48,9 +48,9 @@ pub use estimates::{
     ResultCost, ToolRow,
 };
 pub use report::{
-    Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan, Comparison,
-    ContextCurve, Health, KindRow, OldMethod, PerCommit, Report, ReportParams, ScanState,
-    SessionAgreement, Trend, VersionRow, WindowCurve,
+    AbsentModel, Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan,
+    Comparison, ContextCurve, Health, KindRow, OldMethod, PerCommit, Report, ReportParams,
+    ScanState, SessionAgreement, Trend, Undercount, VersionRow, WindowCurve,
 };
 pub use wire::{Picodollars, Wide};
 

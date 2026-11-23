@@ -142,6 +142,24 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("fixtures::tests::a_bad_fixture_is_rejected"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_config_shared_dir",
+        issue: 18,
+        breaks: "two identities may share a configuration directory or a database file",
+        package: "bosun-config",
+        check: Check::Test(
+            "validate::tests::identities_sharing_a_directory_or_a_database_are_refused",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_skip_disk_probe",
+        issue: 18,
+        breaks: "the disk probe is ignored; a database may live on a network or synced folder",
+        package: "bosun-config",
+        check: Check::Test("validate::tests::a_database_on_a_network_or_synced_disk_is_refused"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

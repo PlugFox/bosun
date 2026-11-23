@@ -4,6 +4,9 @@
 //! bosun ingest status [--identity <name>]
 //! bosun tokens [--by session|repo|model] [--since <t>] [--until <t>] [--identity <name>]
 //! bosun reingest [--identity <name>]
+//! bosun install [--daemon <path>] [--name <name>]
+//! bosun uninstall [--name <name>]
+//! bosun doctor [--identity <name>] [--name <name>]
 //! ```
 //!
 //! Every command also takes `--format text|json` (default `text`), `--config <file>` (default
@@ -30,6 +33,18 @@
 //! - `reingest`: re-reads every transcript file of the identity from zero with the current
 //!   parser and answers when the pass is done (`ingest.reingest`). Nothing is deleted. Files
 //!   that could not be read are listed; they do not change the exit code.
+//! - `install`: registers the logon process that starts `bosund` for the current user, and
+//!   starts it now (`install.rs`). `bosund` is the one next to `bosun` unless `--daemon` names
+//!   another; `--config` and `--endpoint` (or `BOSUN_CONFIG` and `BOSUN_ENDPOINT`), when set,
+//!   are passed to it. Idempotent. When the daemon does not answer after the start, install
+//!   still succeeds and says so on stderr: the registration is in place.
+//! - `uninstall`: stops that daemon and removes everything install created.
+//! - `doctor`: checks the registration, the configuration, each identity's directories,
+//!   Claude Code's transcript retention, `git` and the endpoint, with the daemon up or down
+//!   (`doctor.rs`). It prints every check, failed or not; it exits 0 when none failed
+//!   (warnings allowed) and 7 when one did.
+//!
+//! `--name` names the registration (default `bosun`): a second daemon, or a test.
 //!
 //! # JSON
 //!
@@ -61,9 +76,15 @@
 //! | 4 | the daemon is not running |
 //! | 5 | the identity is unknown to the daemon |
 //! | 6 | the daemon speaks an API version this `bosun` does not know |
+//! | 7 | `doctor`: a check did not pass |
 //!
-//! Errors go to stderr, prefixed `bosun: `; nothing is printed on stdout then.
+//! Errors go to stderr, prefixed `bosun: `; nothing is printed on stdout then. `doctor`
+//! prints its checks with 0 and with 7 alike.
 
+mod admin;
+mod artefact;
+mod doctor;
+mod install;
 mod render;
 mod shape;
 mod time;
@@ -92,6 +113,7 @@ mod exit {
     pub(crate) const NOT_RUNNING: u8 = 4;
     pub(crate) const UNKNOWN_IDENTITY: u8 = 5;
     pub(crate) const VERSION: u8 = 6;
+    pub(crate) const CHECK_FAILED: u8 = 7;
 }
 
 /// The exit codes as `--help` prints them.
@@ -103,7 +125,8 @@ Exit codes:
   3  the configuration could not be read or is invalid
   4  the daemon is not running
   5  the identity is unknown to the daemon
-  6  the daemon speaks an API version this bosun does not know";
+  6  the daemon speaks an API version this bosun does not know
+  7  doctor: a check did not pass";
 
 /// The command line of bosun: token sums, ingest status and reingest, asked of the daemon.
 #[derive(Debug, Parser)]
@@ -150,6 +173,31 @@ enum Command {
     /// Re-reads every transcript file from zero with the current parser; deletes nothing.
     #[command(after_help = EXIT_CODES)]
     Reingest,
+    /// Registers the logon process that starts bosund for you, and starts it now.
+    #[command(after_help = EXIT_CODES)]
+    Install(InstallArgs),
+    /// Stops the daemon and removes the logon registration.
+    #[command(after_help = EXIT_CODES)]
+    Uninstall(NameArgs),
+    /// Checks the registration, configuration, directories, retention, git and the endpoint.
+    #[command(after_help = EXIT_CODES)]
+    Doctor(NameArgs),
+}
+
+#[derive(Debug, Args)]
+struct NameArgs {
+    /// The registration's name: the task, the label's last part, the unit.
+    #[arg(long, value_name = "NAME", default_value = install::DEFAULT_NAME, value_parser = install::parse_name)]
+    name: String,
+}
+
+#[derive(Debug, Args)]
+struct InstallArgs {
+    /// The daemon to register [default: bosund next to bosun].
+    #[arg(long, value_name = "PATH")]
+    daemon: Option<PathBuf>,
+    #[command(flatten)]
+    name: NameArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -400,6 +448,12 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
             "--since must be before --until: the range is empty",
         ));
     }
+    match &cli.command {
+        Command::Install(args) => return admin::install(global, args).await,
+        Command::Uninstall(args) => return admin::uninstall(global, args).await,
+        Command::Doctor(args) => return admin::doctor(global, args).await,
+        _ => {}
+    }
     let names = identities(global)?;
     if names.is_empty() {
         eprintln!("bosun: the configuration names no identity");
@@ -461,6 +515,8 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
                 });
             }
         }
+        // Answered above, before the configuration is required.
+        Command::Install(_) | Command::Uninstall(_) | Command::Doctor(_) => {}
     }
     Ok(output(global, sections))
 }
@@ -608,6 +664,7 @@ mod tests {
             exit::NOT_RUNNING,
             exit::UNKNOWN_IDENTITY,
             exit::VERSION,
+            exit::CHECK_FAILED,
         ] {
             assert!(EXIT_CODES.contains(&format!("\n  {code}  ")), "{code}");
         }

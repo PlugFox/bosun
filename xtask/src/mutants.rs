@@ -416,6 +416,14 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::a_subagent_cost_state_is_not_the_session_check"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_xtask_mcp_not_client",
+        issue: 48,
+        breaks: "bosun-mcp is dropped from the client list of the dependency rules",
+        package: "xtask",
+        check: Check::Test("deps::tests::mcp_is_a_client"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

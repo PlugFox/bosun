@@ -1,0 +1,12 @@
+[package]
+name = "bosun-proc"
+description = "Child processes of bosun: tracking, tree kill, reaping, the power request and the endpoint security descriptor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

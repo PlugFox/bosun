@@ -1,0 +1,12 @@
+[package]
+name = "bosun-mcp"
+description = "The MCP server of bosun for agent sessions, a client of the local API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

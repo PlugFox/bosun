@@ -1,0 +1,12 @@
+[package]
+name = "bosun-identity"
+description = "Identity bundles of bosun: the constructed environment and the fail-closed checks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

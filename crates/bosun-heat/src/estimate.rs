@@ -33,8 +33,9 @@ const FORMULA: &str = "tokens = ceil(result bytes / bytes_per_token); a result i
 
 const BY_TOOL: &str = "per tool name, the results of its calls, priced by the result formula";
 
-const BY_FILE: &str = "per file, the results of every call that read, searched or wrote it, \
-     priced by the result formula; a search touches the directory it searched";
+const BY_FILE: &str = "per file, the results of every call that read, searched, wrote, ran \
+     (exec) or named it with an unknown effect, priced by the result formula; a search touches \
+     the directory it searched";
 
 const REPEATED: &str = "per file read more than once: within = every read of a session after \
      that session's first read of the file; across = the first read in each session after the \
@@ -308,7 +309,7 @@ fn by_file(
 ) -> ByFile {
     #[derive(Default)]
     struct File<'a> {
-        kinds: [u64; 3],
+        kinds: [u64; 5],
         sessions: BTreeSet<(&'a str, &'a str)>,
         acc: Acc,
     }
@@ -321,6 +322,8 @@ fn by_file(
                     TouchKind::Read => 0,
                     TouchKind::Search => 1,
                     TouchKind::Write => 2,
+                    TouchKind::Exec => 3,
+                    TouchKind::Unknown => 4,
                 }] += 1;
             }
             file.sessions.insert(p.root());
@@ -340,6 +343,8 @@ fn by_file(
                 reads: file.kinds[0],
                 searches: file.kinds[1],
                 writes: file.kinds[2],
+                execs: file.kinds[3],
+                unknowns: file.kinds[4],
                 sessions: file.sessions.len() as u64,
                 results: file.acc.finish(table),
             })

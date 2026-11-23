@@ -121,6 +121,10 @@ pub struct FileRow {
     pub reads: u64,
     pub searches: u64,
     pub writes: u64,
+    /// Calls that ran it as a script (`python x.py`): neither reads nor writes (#76).
+    pub execs: u64,
+    /// Calls whose command named it with an effect not known: a gap, never a read (#76).
+    pub unknowns: u64,
     /// Root sessions with a call that touched it; a sub-agent counts with its session.
     pub sessions: u64,
     /// The results of every call that touched it.

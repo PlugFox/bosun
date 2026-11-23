@@ -464,6 +464,22 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("schedule::tests::order_is_board_order_skipping_open_blockers"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_ingest_exec_is_read",
+        issue: 76,
+        breaks: "a script run by an interpreter is recorded as a read of it",
+        package: "bosun-ingest",
+        check: Check::Test("tests::twelve_runs_of_a_script_are_execs_not_reads"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_unknown_is_read",
+        issue: 76,
+        breaks: "a file named by an unknown command is recorded as a read of it",
+        package: "bosun-ingest",
+        check: Check::Test("shell::tests::an_unknown_verb_names_an_unknown_touch"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

@@ -25,6 +25,7 @@ mod meter;
 mod normalise;
 mod record;
 mod schedule;
+mod shell;
 pub mod stub;
 mod tail;
 mod time;

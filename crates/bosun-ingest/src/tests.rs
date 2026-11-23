@@ -452,6 +452,96 @@ async fn tool_results_and_file_touches_are_stored() {
     bench.close().await;
 }
 
+/// #76, the twelve-runs fixture (`shell-touches`): one script run twelve times by commands
+/// that also read another file with `sed -n` is twelve execs of the script and no read of
+/// it. Mutant `mutant_ingest_exec_is_read`: the runs are twelve repeated reads.
+#[tokio::test]
+async fn twelve_runs_of_a_script_are_execs_not_reads() {
+    let case = case("shell-touches");
+    let bench = Bench::new().await;
+    copy_case(&case, &bench.projects());
+    let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+    ingest.scan().await.unwrap();
+
+    let mut conn = connect(&bench.db()).await;
+    let touches: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT kind, path, count(*) FROM file_touch GROUP BY kind, path ORDER BY kind, path",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    let touches: Vec<(&str, &str, i64)> = touches
+        .iter()
+        .map(|(kind, path, n)| (kind.as_str(), path.as_str(), *n))
+        .collect();
+    assert_eq!(
+        touches,
+        [
+            ("exec", "tool/check.py", 12),
+            ("read", "src/lib.rs", 12),
+            ("unknown", "src/lib.rs", 1),
+        ]
+    );
+    bench.close().await;
+}
+
+/// #2, #76: a path out of a command's text outside the message's repository, and every
+/// argument that is not a file, never reach the database. The last command of the fixture
+/// writes and reads files under `/fixture/elsewhere`, outside the repository.
+#[tokio::test]
+async fn a_command_stores_only_files_inside_the_repository() {
+    let case = case("shell-touches");
+    let bench = Bench::new().await;
+    copy_case(&case, &bench.projects());
+    let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+    ingest.scan().await.unwrap();
+
+    let mut conn = connect(&bench.db()).await;
+    let paths: Vec<String> = sqlx::query_scalar("SELECT DISTINCT path FROM file_touch")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    let targets: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT DISTINCT target FROM tool_call ORDER BY target")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    conn.close().await.unwrap();
+    for path in &paths {
+        assert!(!path.starts_with('/'), "{path}");
+        assert!(!path.contains("elsewhere"), "{path}");
+    }
+    // The command itself is kept as its head only.
+    assert_eq!(
+        targets,
+        [Some("rustfmt".to_owned()), Some("sed".to_owned())]
+    );
+    // No byte of the database holds an argument of a command.
+    let db = bench.db();
+    let dir = db.parent().unwrap().to_owned();
+    let mut dump = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.starts_with("bosun.db") && path.is_file() {
+            dump.extend(std::fs::read(&path).unwrap());
+        }
+    }
+    let dump = String::from_utf8_lossy(&dump);
+    for argument in [
+        "1,40p",
+        "cargo test",
+        "fmt.log",
+        "notes.md",
+        "--check",
+        "check.py --",
+    ] {
+        assert!(!dump.contains(argument), "{argument}");
+    }
+    bench.close().await;
+}
+
 #[tokio::test]
 async fn a_new_message_lands_within_one_rescan_interval() {
     let case = case("partial-last-line");

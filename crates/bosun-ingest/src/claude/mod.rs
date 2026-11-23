@@ -3,7 +3,8 @@
 //! Record types are an allowlist, [`KNOWN_TYPES`]. Of them:
 //!
 //! - `assistant` yields a [`Record::Message`] (usage, model, cwd, timestamp, and a tool call
-//!   per `tool_use` or `server_tool_use` block) and a [`Record::FileTouch`] per file tool call;
+//!   per `tool_use` or `server_tool_use` block), a [`Record::FileTouch`] per file tool call,
+//!   and one per distinct file and kind a `Bash` or `PowerShell` command names (#76);
 //! - `user` yields a [`Record::ToolResult`] per `tool_result` block;
 //! - `cost-state` yields a [`Record::SessionCheck`] in a main transcript, and nothing in a
 //!   sub-agent's: the root session's check is the main transcript's (#46);
@@ -17,7 +18,7 @@
 //! identity fields, the timestamp, `message`, its usage counts and its content blocks. Tool
 //! inputs are not checked: a tool call whose input lacks its path keeps no target.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use bosun_core::{
@@ -29,10 +30,11 @@ pub use crate::layout::{FileKind, Located};
 
 use crate::layout::Provider;
 use crate::line::{LineParser, Outcome, gap, len64};
-use crate::normalise::{absolute, command_head};
+use crate::normalise::{absolute, command_head, shell_absolute};
 use crate::record::{
     FileTouch, ModelTotals, Record, SessionCheck, Source, ToolResult, TouchKind, WindowMeta,
 };
+use crate::shell::{self, Dialect};
 use crate::time;
 
 #[cfg(test)]
@@ -46,7 +48,9 @@ pub const PROVIDER: &str = "claude";
 ///
 /// - 2: a `cost-state` record carries its window, and yields nothing in a sub-agent's file
 ///   (#46).
-pub const PARSER_VERSION: u32 = 2;
+/// - 3: a `Bash` or `PowerShell` call yields a file touch per file its command names, with
+///   the kinds `exec` and `unknown` (#76).
+pub const PARSER_VERSION: u32 = 3;
 
 /// The record types this parser knows. Any other type is skipped and counted.
 pub const KNOWN_TYPES: &[&str] = &[
@@ -367,14 +371,15 @@ fn assistant(source: &Source, object: &Object) -> Result<Vec<Record>, Reason> {
         let call_id = string(block, "id", "a `tool_use` block has no `id`")?;
         let name = string(block, "name", "a `tool_use` block has no `name`")?;
         let input = block.get("input").unwrap_or(&Value::Null);
-        let (target, touch) = target(name, input, cwd);
-        if let Some((path, kind)) = touch {
+        let (target, files) = target(name, input, cwd);
+        for (path, kind, confined) in files {
             touches.push(Record::FileTouch(FileTouch {
                 provider: PROVIDER.to_owned(),
                 message_id: id.to_owned(),
                 tool_use_id: call_id.to_owned(),
                 path,
                 kind,
+                confined,
             }));
         }
         tool_calls.insert(
@@ -410,14 +415,32 @@ fn assistant(source: &Source, object: &Object) -> Result<Vec<Record>, Reason> {
     Ok(records)
 }
 
-/// The normalised target of a tool call and, for a file tool, the file it touches.
-fn target(name: &str, input: &Value, cwd: &str) -> (Option<String>, Option<(String, TouchKind)>) {
+/// A file a tool call touches: its canonical absolute path, how, and whether it came out of a
+/// command's text (see [`FileTouch::confined`]).
+type Touched = (String, TouchKind, bool);
+
+/// The normalised target of a tool call and the files it touches: one for a file tool, every
+/// distinct (path, kind) a shell command names.
+fn target(name: &str, input: &Value, cwd: &str) -> (Option<String>, Vec<Touched>) {
     let field = |key: &str| input.get(key).and_then(Value::as_str);
     let file = |path: Option<&str>, kind: TouchKind| {
         path.map_or_default(|path| {
             let path = absolute(path, cwd);
-            (Some(path.clone()), Some((path, kind)))
+            (Some(path.clone()), vec![(path, kind, false)])
         })
+    };
+    let shell = |dialect: Dialect| {
+        let Some(command) = field("command") else {
+            return (None, Vec::new());
+        };
+        let mut seen = BTreeSet::new();
+        let touched = shell::touches(command, dialect)
+            .into_iter()
+            .map(|(path, kind)| (shell_absolute(&path, cwd), kind))
+            .filter(|touch| seen.insert(touch.clone()))
+            .map(|(path, kind)| (path, kind, true))
+            .collect();
+        (command_head(command), touched)
     };
     match name {
         "Read" => file(field("file_path"), TouchKind::Read),
@@ -425,8 +448,9 @@ fn target(name: &str, input: &Value, cwd: &str) -> (Option<String>, Option<(Stri
         "NotebookEdit" => file(field("notebook_path"), TouchKind::Write),
         // A search without a path searches the working directory.
         "Grep" | "Glob" | "LS" => file(field("path").or(Some(cwd)), TouchKind::Search),
-        "Bash" | "PowerShell" => (field("command").and_then(command_head), None),
-        _ => (None, None),
+        "Bash" => shell(Dialect::Posix),
+        "PowerShell" => shell(Dialect::PowerShell),
+        _ => (None, Vec::new()),
     }
 }
 

@@ -447,15 +447,21 @@ async fn insert_file_touch(conn: &mut SqliteConnection, touch: &FileTouch) -> Re
     else {
         return Ok(());
     };
-    // Relative to the message's repository when the file is inside it (`.` for its root);
-    // absolute otherwise.
-    let path = call
-        .repo
-        .as_deref()
-        .and_then(|root| strip_root(&touch.path, root, style_of(root)))
-        .map_or(touch.path.as_str(), |rest| {
-            if rest.is_empty() { "." } else { rest }
-        });
+    // Relative to the message's repository when the file is inside it (`.` for its root). A
+    // Unix key keeps `..`, which may lead out of the repository: a confined path with one is
+    // not inside.
+    let inside = call.repo.as_deref().and_then(|root| {
+        strip_root(&touch.path, root, style_of(root))
+            .filter(|rest| !touch.confined || !rest.split(['/', '\\']).any(|part| part == ".."))
+    });
+    let path = match inside {
+        Some("") => ".",
+        Some(rest) => rest,
+        // A path taken out of a command's text is stored only inside the repository (#2).
+        None if touch.confined => return Ok(()),
+        // Absolute otherwise.
+        None => touch.path.as_str(),
+    };
     let kind = touch.kind.as_str();
     sqlx::query!(
         "INSERT INTO file_touch (tool_call_id, path, kind) VALUES (?, ?, ?)
@@ -1123,6 +1129,50 @@ pub(crate) mod tests {
                 ("m2".to_owned(), Some("/work/repo/sub".to_owned())),
             ]
         );
+        store.close().await.unwrap();
+    }
+
+    /// #2, #76: a confined touch (out of a command's text) is stored only inside the message's
+    /// repository; a `..` that leads out of it is outside. A file tool's touch outside it
+    /// stays absolute.
+    #[tokio::test]
+    async fn a_confined_touch_is_stored_only_inside_the_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("bosun.db"), Options::default())
+            .await
+            .unwrap();
+        let touch = |path: &str, confined: bool| {
+            Write::FileTouch(FileTouch {
+                provider: PROVIDER.to_owned(),
+                message_id: "m1".to_owned(),
+                tool_use_id: "t1".to_owned(),
+                path: path.to_owned(),
+                kind: bosun_core::TouchKind::Unknown,
+                confined,
+            })
+        };
+        store
+            .writer()
+            .write(vec![
+                Write::Repo(Repo {
+                    path: "/work/repo".to_owned(),
+                    remote: None,
+                    default_branch: None,
+                }),
+                source_file("f1"),
+                write(record("m1", "f1", 1, 1, &["t1"])),
+                touch("/work/repo/src/a.rs", true),
+                touch("/work/repo/../secret/b.rs", true),
+                touch("/elsewhere/c.rs", true),
+                touch("/elsewhere/d.rs", false),
+            ])
+            .await
+            .unwrap();
+        let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM file_touch ORDER BY path")
+            .fetch_all(store.reader().pool())
+            .await
+            .unwrap();
+        assert_eq!(paths, ["/elsewhere/d.rs", "src/a.rs"]);
         store.close().await.unwrap();
     }
 

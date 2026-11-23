@@ -285,6 +285,77 @@ mod tests {
         store.close().await.unwrap();
     }
 
+    /// #76: migration 4 rebuilds `file_touch` to allow the kinds `exec` and `unknown`; a touch
+    /// stored by version 3 survives it, and the new kinds are accepted, others refused.
+    #[tokio::test]
+    async fn a_touch_of_version_3_survives_migration_4() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let earlier = MIGRATOR
+            .migrations
+            .iter()
+            .filter(|m| m.version <= 3)
+            .cloned()
+            .collect();
+        let store = open(
+            &path,
+            &Options::default(),
+            &Migrator::with_migrations(earlier),
+        )
+        .await
+        .unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO session (id, provider, session_key) VALUES (1, 'claude', 's');
+             INSERT INTO source_file (id, provider, file_key, path) VALUES (1, 'claude', 'f', 'p');
+             INSERT INTO model (id, provider, name) VALUES (1, 'claude', 'm');
+             INSERT INTO message (id, provider, message_key, session_id, source_file_id, ts_ms,
+                                  model_id, cwd, input_tokens, cache_write_5m_tokens,
+                                  cache_write_1h_tokens, cache_read_tokens, output_tokens,
+                                  usage_json, parser_version)
+             VALUES (1, 'claude', 'k', 1, 1, 0, 1, '/fixture', 0, 0, 0, 0, 0, '{}', 2);
+             INSERT INTO tool_call (id, message_id, tool_use_key, name, input_bytes,
+                                    result_bytes, is_error)
+             VALUES (1, 1, 't', 'Read', 0, 0, 0);
+             INSERT INTO file_touch (id, tool_call_id, path, kind) VALUES (5, 1, 'a.rs', 'read');",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let mut conn = store.reader().pool.acquire().await.unwrap();
+        let row: (i64, i64, String, String) =
+            sqlx::query_as("SELECT id, tool_call_id, path, kind FROM file_touch")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(row, (5, 1, "a.rs".to_owned(), "read".to_owned()));
+        drop(conn);
+        store.close().await.unwrap();
+
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for kind in ["exec", "unknown"] {
+            sqlx::query("INSERT INTO file_touch (tool_call_id, path, kind) VALUES (1, 'b.py', ?)")
+                .bind(kind)
+                .execute(&mut conn)
+                .await
+                .unwrap();
+        }
+        let refused =
+            sqlx::query("INSERT INTO file_touch (tool_call_id, path, kind) VALUES (1, 'c', 'x')")
+                .execute(&mut conn)
+                .await;
+        assert!(refused.is_err());
+        conn.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn a_newer_database_is_refused_untouched() {
         let dir = tempfile::tempdir().unwrap();
@@ -300,7 +371,7 @@ mod tests {
                 err,
                 Error::NewerDatabase {
                     found: 9_000,
-                    supported: 3,
+                    supported: 4,
                     ..
                 }
             ),
@@ -338,8 +409,8 @@ mod tests {
         let copies = backups(path.parent().unwrap());
         assert_eq!(copies.len(), 1, "{copies:?}");
         let name = copies[0].file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("bosun.db.v3-"), "{name}");
-        // The copy is the file as it was: version 3, the data, no table of the later version.
+        assert!(name.starts_with("bosun.db.v4-"), "{name}");
+        // The copy is the file as it was: version 4, the data, no table of the later version.
         let mut conn = SqliteConnection::connect_with(
             &SqliteConnectOptions::new()
                 .filename(&copies[0])
@@ -352,7 +423,7 @@ mod tests {
                 .fetch_all(&mut conn)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2, 3]);
+        assert_eq!(versions, [1, 2, 3, 4]);
         let files = sqlx::query_scalar!(r#"SELECT count(*) AS "n!: i64" FROM source_file"#)
             .fetch_one(&mut conn)
             .await

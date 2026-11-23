@@ -79,8 +79,8 @@ Over the whole store, whatever the range.
 
 | parser version | files | files with a line count | lines | gaps | gaps per line |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 2 | 16 | 16 | 104 | 3 | 2.9% |
-| total | 16 | 16 | 104 | 3 | 2.9% |
+| 3 | 17 | 17 | 131 | 3 | 2.3% |
+| total | 17 | 17 | 131 | 3 | 2.3% |
 
 ### Agreement with the provider's own totals
 
@@ -125,11 +125,11 @@ Known gaps:
 
 ### Cost by file (estimate)
 
-| repository | path | reads | searches | writes | sessions | calls | est. tokens | carry turns | est. eqv | of it carry |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| a | src/lib.rs | 3 | 0 | 1 | 2 | 4 | 23 | 3 | 21 | 1 |
-| a | src | 0 | 1 | 0 | 1 | 1 | 3 | 3 | 4 | 0 |
-| a | src/new.rs | 0 | 0 | 1 | 1 | 1 | 4 | 0 | 0 | 0 |
+| repository | path | reads | searches | writes | execs | unknown | sessions | calls | est. tokens | carry turns | est. eqv | of it carry |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| a | src/lib.rs | 3 | 0 | 1 | 0 | 0 | 2 | 4 | 23 | 3 | 21 | 1 |
+| a | src | 0 | 1 | 0 | 0 | 0 | 1 | 1 | 3 | 3 | 4 | 0 |
+| a | src/new.rs | 0 | 0 | 1 | 0 | 0 | 1 | 1 | 4 | 0 | 0 | 0 |
 
 ### Repeated reads (estimate)
 

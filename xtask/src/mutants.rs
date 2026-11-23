@@ -424,6 +424,46 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("deps::tests::mcp_is_a_client"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_core_trust_done",
+        issue: 49,
+        breaks: "an exit text saying \"done\" skips the verdict",
+        package: "bosun-core",
+        check: Check::Test("item::tests::no_sequence_without_a_passing_verdict_reaches_done"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_limit_is_failure",
+        issue: 49,
+        breaks: "a limit exit counts as a failed attempt",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_limit_exit_parks_and_resumes_uncounted"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_no_park_cap",
+        issue: 49,
+        breaks: "uncounted parks and resumes have no per-item cap",
+        package: "bosun-core",
+        check: Check::Test("item::tests::fake_limits_in_a_row_end_in_needs_you"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_flaky_is_fail",
+        issue: 49,
+        breaks: "a verdict that fails then passes is a failed attempt",
+        package: "bosun-core",
+        check: Check::Test("item::tests::fail_then_pass_is_flaky_and_done"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_ignore_blockers",
+        issue: 49,
+        breaks: "the scheduler claims cards with an open blocked-by",
+        package: "bosun-core",
+        check: Check::Test("schedule::tests::order_is_board_order_skipping_open_blockers"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

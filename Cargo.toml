@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+# Latest stable only (#1): equal to the toolchain in rust-toolchain.toml; bump both together.
+rust-version = "1.100"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PlugFox/bosun"
+# Nothing is published to crates.io (#1).
+publish = false
+
+[workspace.dependencies]
+cargo_metadata = "0.23.1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+# Mutants are cfg-only, never features, so --all-features cannot enable one (#12).
+# Every mutant registered in xtask/src/mutants.rs is declared here.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mutant_core_async_runtime)"] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

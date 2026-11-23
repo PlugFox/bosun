@@ -1,0 +1,23 @@
+[package]
+name = "bosun-core"
+description = "Domain types, state machines and the scheduler of bosun; no I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+# Mutant `mutant_core_async_runtime` (#12): bosun-core gains the async runtime, which the
+# dependency rules forbid. Active only under `--cfg mutant_core_async_runtime`.
+[target.'cfg(mutant_core_async_runtime)'.dependencies]
+tokio = { version = "1", default-features = false }
+
+[package.metadata.cargo-machete]
+# Used only by the mutant above, never by code.
+ignored = ["tokio"]
+
+[lints]
+workspace = true

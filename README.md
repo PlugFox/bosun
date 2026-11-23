@@ -52,11 +52,11 @@ the daemon's release binary; its API types are generated from `bosun-api`. A pla
 | Stage | Delivers | Issue |
 | --- | --- | --- |
 | 0 | Accounting only: transcripts into the database, the correct bill | #6 |
-| 1 | The loop: board, headless sessions, verdict, TUI and CLI | #7 |
+| 1 | The loop: board, headless sessions, verdict, MCP server for agents, TUI and CLI | #7 |
 | 2 | Worktrees, resource leases, process cleanup | #8 |
 | 3 | Web dashboard, Telegram and webhook notifications | #9 |
 | 4 | Limits across providers, more runners, many repositories | #10 |
-| 5 | MCP, device thermals, propose-only supervisor, heat proposals | #11 |
+| 5 | Further MCP tools, device thermals, propose-only supervisor, heat proposals | #11 |
 
 ## Platforms
 

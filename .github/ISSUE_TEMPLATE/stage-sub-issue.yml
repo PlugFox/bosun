@@ -1,0 +1,32 @@
+name: Stage sub-issue
+description: One piece of a stage, split off when the stage starts.
+body:
+  - type: input
+    id: parent
+    attributes:
+      label: Parent
+      description: The stage or contract issue this belongs to; also link it as a sub-issue.
+      placeholder: "#6"
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What this delivers, quoted or narrowed from the parent's Work list.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Checkable items, each observable from outside the code.
+    validations:
+      required: true
+  - type: textarea
+    id: mutants
+    attributes:
+      label: Mutants
+      description: For each acceptance item, the cfg that disables the mechanism and the check that must go red.
+    validations:
+      required: true

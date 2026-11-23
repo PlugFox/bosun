@@ -1,0 +1,5 @@
+# Spell checking (#12): `typos` in CI.
+
+[default.extend-words]
+# The TUI library.
+ratatui = "ratatui"

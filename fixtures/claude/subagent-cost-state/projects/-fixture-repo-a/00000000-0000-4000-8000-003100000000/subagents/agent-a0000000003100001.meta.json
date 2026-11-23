@@ -1,0 +1,9 @@
+{
+  "agentType": "general-purpose",
+  "description": "Synthetic task",
+  "model": "claude-sonnet-5-5",
+  "requestNonInteractive": false,
+  "spawnDepth": 1,
+  "toolUseId": "toolu_000000000000000003190001",
+  "isFork": false
+}

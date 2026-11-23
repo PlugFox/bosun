@@ -30,6 +30,10 @@ const CLIENT_ALLOWED: &[&str] = &["bosun-client", "bosun-api"];
 /// a client.
 const CLIENT_FORBIDDEN: &[&str] = &["bosun-store", "bosun-queue", "bosun-runner", "bosund"];
 
+/// Crates that may reach no workspace crate at all: the independent recount (#16) shares no
+/// code with the parser it checks.
+const STANDALONE: &[&str] = &["recount"];
+
 /// The dependency graph of the workspace, normal and build edges only: dev-dependencies never
 /// end up in a binary.
 #[derive(Debug, Default)]
@@ -110,6 +114,21 @@ pub(crate) fn violations(graph: &Graph) -> Vec<String> {
         for dep in graph.reachable(client) {
             if CLIENT_FORBIDDEN.contains(&dep) {
                 out.push(format!("{client} reaches {dep}; a client never links it"));
+            }
+        }
+    }
+
+    for standalone in STANDALONE
+        .iter()
+        .copied()
+        .filter(|c| graph.members.contains(*c))
+    {
+        for dep in graph.reachable(standalone) {
+            if graph.members.contains(dep) {
+                out.push(format!(
+                    "{standalone} reaches workspace crate {dep}; it may share no code with the \
+                     workspace"
+                ));
             }
         }
     }
@@ -278,6 +297,23 @@ mod tests {
     fn a_client_may_not_depend_on_other_workspace_crates() {
         let g = graph(&["bosun-cli", "bosun-heat"], &[("bosun-cli", "bosun-heat")]);
         assert_eq!(violations(&g).len(), 1);
+    }
+
+    #[test]
+    fn recount_may_not_depend_on_a_workspace_crate() {
+        let clean = graph(
+            &["recount", "bosun-core"],
+            &[("recount", "serde_json"), ("serde_json", "serde_core")],
+        );
+        assert_eq!(violations(&clean), Vec::<String>::new());
+
+        let g = graph(
+            &["recount", "bosun-core", "bosun-ingest"],
+            &[("recount", "bosun-ingest"), ("bosun-ingest", "bosun-core")],
+        );
+        let found = violations(&g);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].contains("recount reaches workspace crate bosun-core"));
     }
 
     #[test]

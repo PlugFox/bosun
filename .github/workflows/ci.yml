@@ -58,6 +58,8 @@ jobs:
           cache: true
       - name: Dependency rules
         run: cargo xtask check-deps
+      - name: Fixtures are synthetic
+        run: cargo xtask lint-fixtures
       - name: Licences, bans, advisories, sources
         run: cargo-deny check
       - name: Unused dependencies

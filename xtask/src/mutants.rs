@@ -300,6 +300,32 @@ const MUTANTS: &[Mutant] = &[
         // The mode bits exist on Unix only; Windows has no such test.
         platform: Some(Platform::Linux),
     },
+    Mutant {
+        name: "mutant_ingest_backfill_first",
+        issue: 22,
+        breaks: "backfill work is taken before live tails",
+        package: "bosun-ingest",
+        check: Check::Test("tests::backfill::a_live_file_is_tailed_during_the_backfill"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_backfill_from_zero",
+        issue: 22,
+        breaks: "a restarted ingest ignores the stored offsets and backfills from zero",
+        package: "bosun-ingest",
+        check: Check::Test(
+            "tests::backfill::a_killed_backfill_resumes_without_parsing_a_byte_twice",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_unbounded",
+        issue: 22,
+        breaks: "the cap on open files is removed",
+        package: "bosun-ingest",
+        check: Check::Test("tests::backfill::the_backfill_holds_its_bounds"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

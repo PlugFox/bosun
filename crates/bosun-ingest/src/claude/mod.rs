@@ -14,7 +14,7 @@
 //! inputs are not checked: a tool call whose input lacks its path keeps no target.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bosun_core::{
     ContextWindow, Gap, Message, Origin, Tokens, ToolCall, Usage, WindowKey, WindowKind,
@@ -88,6 +88,14 @@ impl Provider for Parser {
     fn descend(&self, dir: &str) -> bool {
         // Spilled tool outputs: many files, none a transcript.
         dir != "tool-results"
+    }
+
+    fn meta_path(&self, transcript: &Path) -> Option<PathBuf> {
+        // `agent-<id>.jsonl` is described by `agent-<id>.meta.json` beside it.
+        let name = transcript.file_name()?.to_str()?;
+        let stem = name.strip_suffix(".jsonl")?;
+        stem.starts_with("agent-")
+            .then(|| transcript.with_file_name(format!("{stem}.meta.json")))
     }
 
     fn parse_meta(&self, window: &WindowKey, bytes: &[u8]) -> Result<WindowMeta, Gap> {

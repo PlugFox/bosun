@@ -22,6 +22,11 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # The Boost licence, permissive and with no notice required in binaries: `xxhash-rust`,
+    # which `notify` uses (#22).
+    "BSL-1.0",
+    # A public-domain dedication: `notify`, the file watcher of ingest (#22).
+    "CC0-1.0",
     "ISC",
     "MIT",
     "Unicode-3.0",

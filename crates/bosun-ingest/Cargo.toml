@@ -13,6 +13,7 @@ bosun-config = { path = "../bosun-config" }
 bosun-core = { path = "../bosun-core" }
 bosun-store = { path = "../bosun-store" }
 file-id.workspace = true
+notify.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
@@ -20,6 +21,8 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 [dev-dependencies]
 sqlx.workspace = true
 tempfile.workspace = true
+# The watch and backfill tests run the ingest task on several workers (#22).
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true

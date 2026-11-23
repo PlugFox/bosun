@@ -48,4 +48,4 @@ mod helper;
 
 pub use key::{ProcessKey, StartTime, is_running, reap, start_time};
 pub use power::{FakePower, Power, PowerGuard, SystemPower};
-pub use spawn::{ChildSpec, NativeSpawner, Output, Spawned, Spawner, Tree, WaitFuture};
+pub use spawn::{ChildSpec, Input, NativeSpawner, Output, Spawned, Spawner, Tree, WaitFuture};

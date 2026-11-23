@@ -171,6 +171,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_git_skip_config_snapshot)",
   "cfg(mutant_git_trailer_all_commits)",
   "cfg(mutant_ingest_no_session_span)",
+  "cfg(mutant_loop_skip_base_verdict)",
+  "cfg(mutant_loop_live_verdict)",
+  "cfg(mutant_loop_effect_before_transition)",
+  "cfg(mutant_loop_ignore_hash_change)",
 ] }
 
 [workspace.lints.clippy]

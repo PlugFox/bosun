@@ -8,6 +8,7 @@
 //! claude -p --output-format stream-json --verbose
 //!        --session-id <pre-assigned uuid>            (resume: --resume <uuid>)
 //!        --mcp-config <per-session file> --strict-mcp-config
+//!        --setting-sources project
 //!        --append-system-prompt-file <file>
 //!        --permission-mode dontAsk
 //!        --allowedTools <rule>... --disallowedTools <rule>...
@@ -18,6 +19,8 @@
 //!   the user's nor the repository's own MCP configuration (`.mcp.json`) reaches the session.
 //!   The file, from [`mcp_config`], holds `bosun` (the `bosun-mcp` server of #7) and the
 //!   repository's `repo.<name>.mcp_servers` (#4), nothing else.
+//! - `--setting-sources project` ([`SETTING_SOURCES`]): the user's own settings and hooks are
+//!   not loaded into an unattended session, only the repository's shared settings.
 //! - The tools of `bosun` and of the repository's servers are pre-allowed; the policy's
 //!   rules follow. Push is denied unless the policy allows it ([`PUSH_RULES`]).
 //! - Each rule is one argument: a rule with a space (`Bash(git push:*)`) stays one rule.
@@ -95,6 +98,13 @@ pub const BOSUN_TOOLS: &[&str] = &["ask_question", "submit_summary", "note"];
 /// (#54).
 pub const PUSH_RULES: &[&str] = &["Bash(git push:*)", "PowerShell(git push:*)"];
 
+/// The setting sources an unattended session loads (`--setting-sources`): the repository's
+/// shared `.claude/settings.json` only. Neither the user's settings under the identity's
+/// `CLAUDE_CONFIG_DIR` (their hooks, allow rules and default mode are for interactive work) nor
+/// the repository's git-ignored `settings.local.json` (also the user's) reach a run session;
+/// the permission lists come from the policy on the command line (#62).
+pub const SETTING_SOURCES: &str = "project";
+
 /// The prompt a resumed session receives.
 pub const RESUME_PROMPT: &str = "The session was interrupted (a usage limit, a sleep or a \
 restart). Continue the task where you left off, and end as the exit protocol says.";
@@ -123,6 +133,7 @@ impl ClaudeRunner {
         args.push(ctx.mcp_config_file.clone().into());
         #[cfg(not(mutant_runner_loose_mcp))]
         args.push("--strict-mcp-config".into());
+        args.extend(["--setting-sources", SETTING_SOURCES].map(OsString::from));
         args.push("--append-system-prompt-file".into());
         args.push(ctx.system_prompt_file.clone().into());
         args.extend(["--permission-mode", "dontAsk"].map(OsString::from));

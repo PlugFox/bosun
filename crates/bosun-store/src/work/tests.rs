@@ -1007,3 +1007,60 @@ async fn a_commit_belongs_to_the_first_session_range_that_lists_it() {
     assert_eq!(store.reader().item_histories(0, T0).await.unwrap(), []);
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_attempt_dropped_after_two_failed_runs_is_stored_as_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    store.writer().write(vec![register()]).await.unwrap();
+    let mut item = Item::new(id());
+    let mut writes = Vec::new();
+    let fail = |item: &Item| {
+        let (attempt, _, run) = current(item);
+        Event::Verdict {
+            attempt,
+            run,
+            result: RunResult::Fail,
+        }
+    };
+    let events: Vec<fn(&Item) -> Event> = vec![
+        |_| Event::Claim,
+        |_| Event::ClaimConfirmed,
+        |item| {
+            let (attempt, spawn, _) = current(item);
+            Event::Exited {
+                attempt,
+                spawn,
+                exit: Exit::Ok,
+                text: String::new(),
+            }
+        },
+        |item| Event::Preconditions {
+            attempt: current(item).0,
+            passed: true,
+        },
+    ];
+    for event in events {
+        let stepped = go(&item, &event(&item));
+        writes.push(transition(&stepped));
+        item = stepped.item;
+    }
+    for _ in 0..2 {
+        let stepped = go(&item, &fail(&item));
+        writes.push(transition(&stepped));
+        item = stepped.item;
+    }
+    assert_eq!(
+        current(&item).0,
+        2,
+        "the second failed run starts attempt 2"
+    );
+    store.writer().write(writes).await.unwrap();
+    let attempts = store.reader().attempts(&id()).await.unwrap();
+    let states: Vec<_> = attempts
+        .iter()
+        .map(|a| (a.attempt.number, a.attempt.state.as_str()))
+        .collect();
+    assert_eq!(states, [(1, "fail"), (2, "spawned")]);
+    assert!(attempts[0].ended_ms.is_some());
+}

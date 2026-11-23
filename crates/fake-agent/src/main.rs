@@ -5,7 +5,10 @@
 //! # Invocation
 //!
 //! The script is named by `--fake-script <path>` anywhere in argv, or else by the variable
-//! `FAKE_AGENT_SCRIPT`. Every other argument is ignored, so a runner's real argv (the `claude`
+//! `FAKE_AGENT_SCRIPT`. With `--fake-script-dir <dir>` instead, the script is
+//! `<dir>/<item>.script`, where `<item>` is the variable `BOSUN_ITEM` (the item the daemon
+//! spawned the session for) with every character but ASCII letters, digits, `-` and `_` turned
+//! into `_`: one fake agent can play a different part for each item of a run. Every other argument is ignored, so a runner's real argv (the `claude`
 //! flags) can be passed unchanged. The working directory is the one the spawner gives.
 //!
 //! # Script
@@ -25,6 +28,7 @@
 //! | `stdin <path>` | copies standard input to the file (to check the prompt) |
 //! | `argv <path>` | writes the arguments, one per line (to check the command) |
 //! | `sleep <ms>` | sleeps |
+//! | `wait <path>` | waits until the file exists (at most 60 s, then a script error) |
 //! | `exit <code>` | exits with the code; the end of the script exits with 0 |
 //!
 //! A script error (a missing script, an unknown command, a failed git command) is reported on
@@ -49,6 +53,24 @@ fn main() -> ExitCode {
 }
 
 fn script_path(args: &[String]) -> Result<PathBuf, String> {
+    if let Some(at) = args.iter().position(|a| a == "--fake-script-dir") {
+        let dir = args
+            .get(at + 1)
+            .ok_or_else(|| "--fake-script-dir needs a directory".to_owned())?;
+        let item = std::env::var("BOSUN_ITEM")
+            .map_err(|_| "--fake-script-dir needs BOSUN_ITEM".to_owned())?;
+        let name: String = item
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        return Ok(Path::new(dir).join(format!("{name}.script")));
+    }
     if let Some(at) = args.iter().position(|a| a == "--fake-script") {
         return args
             .get(at + 1)
@@ -129,6 +151,16 @@ fn step(command: &str, rest: &str, base: &Path, args: &[String]) -> Result<(), S
         "sleep" => {
             let ms: u64 = rest.parse().map_err(|_| format!("bad sleep {rest:?}"))?;
             std::thread::sleep(Duration::from_millis(ms));
+            Ok(())
+        }
+        "wait" => {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            while !Path::new(rest).exists() {
+                if std::time::Instant::now() > deadline {
+                    return Err(format!("{rest} did not appear within 60 s"));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
             Ok(())
         }
         other => Err(format!("unknown command {other:?}")),

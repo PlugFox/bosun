@@ -32,7 +32,9 @@
 
 mod api;
 mod commits;
+mod config_watch;
 mod events;
+mod executor;
 mod listen;
 mod state;
 #[cfg(test)]
@@ -142,7 +144,7 @@ fn main() -> ExitCode {
             return ExitCode::from(exit::FAILED);
         }
     };
-    match runtime.block_on(state::run(config, endpoint, stop_signal())) {
+    match runtime.block_on(state::run(config, config_path, endpoint, stop_signal())) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Running { endpoint, pid }) => {
             let pid = pid.map_or_default(|pid| format!(" (pid {pid})"));

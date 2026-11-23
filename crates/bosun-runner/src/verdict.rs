@@ -383,6 +383,7 @@ pub async fn run(spawner: &dyn Spawner, spec: &VerdictSpec) -> io::Result<Verdic
         args: vec!["-c".into(), spec.command.clone().into()],
         env: spec.env.clone(),
         cwd: spec.cwd.clone(),
+        stdin: false,
     };
     let timeout = if cfg!(mutant_runner_no_verdict_timeout) {
         // Never: a verdict that hangs holds the attempt forever.
@@ -395,6 +396,7 @@ pub async fn run(spawner: &dyn Spawner, spec: &VerdictSpec) -> io::Result<Verdic
         mut tree,
         stdout,
         stderr,
+        ..
     } = spawner.spawn(&child)?;
     let mut capture = Capture {
         stdout: ByteTail::new(spec.limits.stream),

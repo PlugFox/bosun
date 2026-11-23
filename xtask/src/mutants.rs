@@ -506,6 +506,31 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::planted_hooks_never_run_under_the_invoker"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_proc_kill_parent_only",
+        issue: 50,
+        breaks: "kill_tree kills the direct child only, not its container",
+        package: "bosun-proc",
+        check: Check::Test("spawn::tests::kill_tree_kills_a_child_and_its_grandchild"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_proc_skip_start_time",
+        issue: 50,
+        breaks: "reap kills a process by pid alone, whatever its start time",
+        package: "bosun-proc",
+        check: Check::Test("key::tests::reap_spares_a_process_whose_start_time_differs"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_proc_no_kill_on_close",
+        issue: 50,
+        breaks: "the Job Object lacks kill-on-close; a dead holder's descendants live on",
+        package: "bosun-proc",
+        check: Check::Test("spawn::tests::a_dead_holder_leaves_no_descendant"),
+        // Job Objects exist on Windows only.
+        platform: Some(Platform::Windows),
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

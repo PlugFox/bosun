@@ -1,10 +1,47 @@
-//! Child processes (#7, #50): child tracking, tree kill, reaping, the power request and the
-//! security descriptor of the local endpoint. Containment back ends and the session shim come
-//! in stage 2 (#8).
+//! Child processes (#7, #50): spawning into a container, tree kill, reaping by pid and start
+//! time, and the power request. Containment back ends and the session shim come in stage 2 (#8);
+//! the security descriptor of the local endpoint (D2) comes with the endpoint's hardening.
 //!
-//! Empty until #50.
+//! - [`Spawner`] starts a child from a [`ChildSpec`] (argv, a constructed environment, a working
+//!   directory) inside a container, with separate stdout and stderr pipes, and hands back a
+//!   [`Tree`]: the child's [`ProcessKey`] (pid and start time), [`Tree::kill_tree`] and an async
+//!   wait. [`NativeSpawner`] is the in-process implementation; the session shim of #8 becomes a
+//!   second one behind the same trait.
+//! - [`reap`] kills a recorded process after a restart only if its pid and its start time both
+//!   still match, so a reused pid is never killed.
+//! - [`Power`] holds the machine awake while work runs: [`PowerGuard`] issues one request on
+//!   acquire and one release on drop. [`SystemPower`] is the platform's, [`FakePower`] counts.
+//!
+//! # Containers
+//!
+//! On Windows the container is a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The child
+//! is created suspended, assigned to the job and only then resumed, so nothing it starts can
+//! run outside the job. Killing the job kills every process in it, and when the last handle to
+//! the job closes (the daemon exits, cleanly or not) Windows kills them too.
+//!
+//! On Unix the container is a process group: the child leads a new group and its descendants
+//! inherit it, so `kill(-pgid, SIGKILL)` kills the tree. A descendant that calls `setsid` or
+//! `setpgid` leaves the group and escapes; cgroups (#8) close that gap. On Linux the child also
+//! gets `PR_SET_PDEATHSIG(SIGKILL)`, so it dies with the daemon; its own descendants do not
+//! (the signal is not inherited), and they stay in the group for [`Tree::kill_tree`] only while
+//! the daemon lives. The signal fires when the *thread* that spawned the child exits, so the
+//! daemon spawns from a thread that lives as long as it does. macOS has no parent-death signal:
+//! a child of a daemon that dies without warning lives on, and the daemon's [`reap`] at the next
+//! start is the only cleanup.
 //!
 //! The only crate where `unsafe` is allowed (#12): every block carries its justification in a
 //! `// SAFETY:` comment. `cargo xtask check-deps` fails when any other crate lifts the
 //! workspace's `unsafe_code = "deny"`.
 #![allow(unsafe_code)]
+
+mod key;
+mod power;
+mod spawn;
+mod sys;
+
+#[cfg(test)]
+mod helper;
+
+pub use key::{ProcessKey, StartTime, is_running, reap, start_time};
+pub use power::{FakePower, Power, PowerGuard, SystemPower};
+pub use spawn::{ChildSpec, NativeSpawner, Output, Spawned, Spawner, Tree, WaitFuture};

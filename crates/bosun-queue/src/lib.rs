@@ -9,8 +9,10 @@
 //!   runs the verdict and lives with the claim, D7 of #7), with the #44 B warnings. Program
 //!   resolution is injectable ([`Resolve`]); [`ShellResolver`] asks the verdict shell (D4).
 //! - [`snapshot`]: what an item is claimed with, and its hash.
+//! - [`claim`](mod@claim): the claim of #5 for every backend: write, claim marker, re-read; the
+//!   user wins, and a second daemon's marker refuses the repository.
 //! - [`marker`]: the hidden key that makes a comment idempotent on a backend with plain-text
-//!   comments.
+//!   comments, in the format of `bosun_core::publish` (#56).
 //! - [`local`] (feature `local_file`, on by default): the board as one TOML file the user edits
 //!   while the daemon runs; its module docs give the format and the concurrency rules.
 //! - [`projects_v2`] (feature `projects_v2`, on by default): the GitHub Projects v2 backend,
@@ -22,6 +24,7 @@
 //! This crate never reaches `bosun-store` or the other side-effect crates (#12).
 
 mod card;
+pub mod claim;
 pub mod contract;
 pub mod lint;
 pub mod marker;
@@ -37,6 +40,7 @@ pub mod projects_v2;
 pub mod testsuite;
 
 pub use card::{Card, Column, Comment, ItemId, Owned};
+pub use claim::{Claim, claim};
 pub use contract::{Budget, Contract, ContractError};
 pub use lint::{
     Code, Finding, FnResolver, Lint, LintContext, Resolve, Severity, ShellResolver, lint,
@@ -45,7 +49,7 @@ pub use lint::{
 pub use local::LocalFile;
 #[cfg(feature = "projects_v2")]
 pub use projects_v2::ProjectsV2;
-pub use queue::{Changes, Cursor, Queue, QueueError};
+pub use queue::{Changes, Cursor, Gone, Queue, QueueError, RateLimited};
 pub use snapshot::Snapshot;
 
 /// Lowercase hex of `bytes`.

@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use super::fake::{FakeComment, FakeGitHub, FakeItem};
+use super::fake::{FakeComment, FakeGitHub, FakeItem, Fault};
 use super::*;
+use crate::Claim;
 use crate::testsuite::{self, Harness};
 
 const REPO: &str = "example-org/widgets";
@@ -64,6 +65,8 @@ struct FakeHarness {
 impl FakeHarness {
     fn new() -> Self {
         let fake = Arc::new(FakeGitHub::new());
+        // The identity's token is the owner's, as with a personal account.
+        fake.set_viewer(OWNER);
         fake.add_project(ORG, 1, &COLUMNS);
         let queue = connect(&fake, &[1]);
         Self { fake, queue }
@@ -87,11 +90,11 @@ impl Harness for FakeHarness {
                     .iter()
                     .map(|c| FakeComment {
                         author: Some(c.author.clone()),
-                        editor: None,
                         body: match &c.key {
                             Some(key) => marker::embed(key, &c.body),
                             None => c.body.clone(),
                         },
+                        ..FakeComment::default()
                     })
                     .collect();
             });
@@ -104,7 +107,12 @@ impl Harness for FakeHarness {
     }
 }
 
-// The read half of the backend-agnostic suite (the write half is #61).
+// The backend-agnostic suite, every check (#5: the same suite as the local file).
+
+#[test]
+fn suite_runs_whole() {
+    testsuite::run(FakeHarness::new);
+}
 
 #[test]
 fn suite_edit_addition_and_reorder_appear_in_the_next_poll() {
@@ -114,6 +122,46 @@ fn suite_edit_addition_and_reorder_appear_in_the_next_poll() {
 #[test]
 fn suite_a_reorder_alone_appears_in_the_next_poll() {
     testsuite::a_reorder_alone_appears_in_the_next_poll(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_comment_replayed_with_one_key_leaves_one_comment() {
+    testsuite::comment_replayed_with_one_key_leaves_one_comment(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_upsert_replayed_with_one_key_leaves_one_comment() {
+    testsuite::upsert_replayed_with_one_key_leaves_one_comment(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_upsert_recreates_a_deleted_comment() {
+    testsuite::upsert_recreates_a_deleted_comment(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_a_sticky_deleted_twice_is_recreated_once() {
+    testsuite::a_sticky_deleted_twice_is_recreated_once(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_a_deleted_comment_is_not_posted_again() {
+    testsuite::a_deleted_comment_is_not_posted_again(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_a_body_with_its_marker_keeps_one_marker() {
+    testsuite::a_body_with_its_marker_keeps_one_marker(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_project_is_idempotent() {
+    testsuite::project_is_idempotent(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_unknown_items_and_keys_are_refused() {
+    testsuite::unknown_items_and_keys_are_refused(&mut FakeHarness::new());
 }
 
 #[test]
@@ -388,11 +436,13 @@ fn a_comment_from_a_login_off_the_allowlist_is_absent_and_counted() {
                 author: Some(OWNER.into()),
                 editor: Some(OUTSIDER.into()),
                 body: "Edited by someone else.".into(),
+                ..FakeComment::default()
             },
             FakeComment {
                 author: None,
                 editor: None,
                 body: "From a deleted account.".into(),
+                ..FakeComment::default()
             },
         ];
     });
@@ -520,23 +570,357 @@ fn daemon_keys_and_dependencies_are_read() {
     assert_eq!(next.edited, [ItemId(2)], "a dependency change is an edit");
 }
 
-#[test]
-fn writes_are_not_implemented_yet() {
-    let harness = FakeHarness::new();
-    let queue = harness.queue();
-    for result in [
-        queue.project(ItemId(1), Owned::InProgress, None),
-        queue.comment(ItemId(1), "x", "k"),
-        queue.upsert_comment(ItemId(1), "k", "x"),
-    ] {
-        let error = result.unwrap_err();
-        assert!(matches!(error, QueueError::Unsupported(_)), "{error}");
-        assert!(!error.is_transient());
-    }
-    assert!(
-        harness.fake.requests().iter().all(|r| r != "Mutation"),
-        "nothing is written"
+// Writes (#61).
+
+/// A board with issues 1 and 2 in Ready, the viewer being the owner.
+fn ready_board() -> (Arc<FakeGitHub>, ProjectsV2<Arc<FakeGitHub>>) {
+    let fake = Arc::new(FakeGitHub::new());
+    fake.set_viewer(OWNER);
+    let project = fake.add_project(ORG, 1, &COLUMNS);
+    put_issue(&fake, 1);
+    put_issue(&fake, 2);
+    fake.set_items(
+        project,
+        &[
+            FakeItem::Issue(REPO, 1, Some("Ready")),
+            FakeItem::Issue(REPO, 2, Some("Ready")),
+        ],
     );
+    let queue = connect(&fake, &[1]);
+    (fake, queue)
+}
+
+fn keyed_comments(fake: &FakeGitHub, number: u64, key: &str) -> Vec<String> {
+    fake.issue_now(REPO, number)
+        .comments
+        .into_iter()
+        .filter(|c| marker::extract(&c.body).is_some_and(|(k, _)| k == key))
+        .map(|c| c.body)
+        .collect()
+}
+
+#[test]
+fn a_status_write_already_in_place_sends_no_mutation() {
+    let (fake, queue) = ready_board();
+    queue
+        .project(ItemId(1), Owned::InProgress, Some("attempt 1"))
+        .unwrap();
+    assert_eq!(fake.status_of(0, REPO, 1).as_deref(), Some("In progress"));
+    assert_eq!(fake.status_of(0, REPO, 2).as_deref(), Some("Ready"));
+    for _ in 0..3 {
+        queue.project(ItemId(1), Owned::InProgress, None).unwrap();
+    }
+    assert_eq!(fake.count("UpdateStatus"), 1, "{:?}", fake.requests());
+    queue.project(ItemId(1), Owned::Verify, None).unwrap();
+    assert_eq!(fake.status_of(0, REPO, 1).as_deref(), Some("Verify"));
+}
+
+#[test]
+fn a_status_write_goes_to_the_first_bound_project_with_the_card() {
+    let fake = Arc::new(FakeGitHub::new());
+    fake.set_viewer(OWNER);
+    let first = fake.add_project(ORG, 1, &COLUMNS);
+    let second = fake.add_project(ORG, 2, &COLUMNS);
+    put_issue(&fake, 1);
+    fake.set_items(first, &[FakeItem::Issue(REPO, 1, Some("Ready"))]);
+    fake.set_items(second, &[FakeItem::Issue(REPO, 1, Some("Ready"))]);
+    let queue = connect(&fake, &[2, 1]);
+    queue.project(ItemId(1), Owned::InProgress, None).unwrap();
+    assert_eq!(
+        fake.status_of(second, REPO, 1).as_deref(),
+        Some("In progress")
+    );
+    assert_eq!(fake.status_of(first, REPO, 1).as_deref(), Some("Ready"));
+}
+
+#[test]
+fn a_comment_whose_response_was_lost_is_found_by_key_on_replay() {
+    let (fake, queue) = ready_board();
+    // The create succeeds on GitHub, and the response never arrives (a crash, a timeout).
+    fake.fail_next("AddComment", Fault::LoseResponse);
+    let error = queue
+        .comment(ItemId(1), "Needs you: the verdict fails.", "needs-you:1:1")
+        .unwrap_err();
+    assert!(error.is_transient(), "the outbox replays it: {error}");
+    assert_eq!(keyed_comments(&fake, 1, "needs-you:1:1").len(), 1);
+
+    // The outbox replays the row, in this daemon and after a restart.
+    queue
+        .comment(ItemId(1), "Needs you: the verdict fails.", "needs-you:1:1")
+        .unwrap();
+    let restarted = connect(&fake, &[1]);
+    restarted
+        .comment(ItemId(1), "Needs you: the verdict fails.", "needs-you:1:1")
+        .unwrap();
+    assert_eq!(
+        keyed_comments(&fake, 1, "needs-you:1:1").len(),
+        1,
+        "one comment, found by key"
+    );
+    assert_eq!(fake.count("AddComment"), 1);
+}
+
+#[test]
+fn a_sticky_whose_response_was_lost_is_found_and_edited_after_a_restart() {
+    let (fake, queue) = ready_board();
+    fake.fail_next("AddComment", Fault::LoseResponse);
+    assert!(
+        queue
+            .upsert_comment(ItemId(1), "report:1", "Claimed.")
+            .is_err()
+    );
+    drop(queue);
+    let restarted = connect(&fake, &[1]);
+    restarted
+        .upsert_comment(ItemId(1), "report:1", "Attempt 1: running.")
+        .unwrap();
+    let sticky = keyed_comments(&fake, 1, "report:1");
+    assert_eq!(sticky.len(), 1, "{sticky:?}");
+    assert!(
+        sticky[0].ends_with("\nAttempt 1: running."),
+        "{}",
+        sticky[0]
+    );
+    assert_eq!(fake.count("AddComment"), 1);
+    assert_eq!(fake.count("UpdateComment"), 1);
+}
+
+#[test]
+fn a_marker_in_someone_elses_comment_is_not_the_daemons() {
+    let (fake, queue) = ready_board();
+    // An allowlisted collaborator pastes a marker: the daemon neither edits that comment nor
+    // takes it for its own.
+    fake.issue(REPO, 1, |i| {
+        i.comments.push(FakeComment::by(
+            "Bob-Example",
+            &marker::embed("report:1", "Forged."),
+        ));
+        i.comments.push(FakeComment::by(
+            "Bob-Example",
+            &marker::embed("needs-you:1:1", "Forged."),
+        ));
+    });
+    queue
+        .upsert_comment(ItemId(1), "report:1", "Claimed.")
+        .unwrap();
+    queue
+        .comment(ItemId(1), "Needs you.", "needs-you:1:1")
+        .unwrap();
+    let comments = fake.issue_now(REPO, 1).comments;
+    assert_eq!(comments.len(), 4, "{comments:?}");
+    assert!(comments[..2].iter().all(|c| c.body.ends_with("Forged.")));
+    assert!(
+        comments[2..]
+            .iter()
+            .all(|c| c.author.as_deref() == Some(OWNER))
+    );
+}
+
+#[test]
+fn a_claim_marks_the_item_once_and_re_reads_it() {
+    let (fake, queue) = ready_board();
+    let card = queue.poll(None).unwrap().card(ItemId(1)).cloned().unwrap();
+    for _ in 0..2 {
+        match crate::claim(&queue, &card, "host-a/fox").unwrap() {
+            Claim::Claimed(now) => assert_eq!(now.column, Column::InProgress),
+            other @ Claim::Released(_) => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(keyed_comments(&fake, 1, "claim:host-a/fox").len(), 1);
+    assert_eq!(fake.count("UpdateStatus"), 1);
+    assert_eq!(fake.count("AddComment"), 1);
+}
+
+#[test]
+fn a_user_move_between_the_claim_write_and_the_re_read_releases_the_claim() {
+    let (fake, queue) = ready_board();
+    let card = queue.poll(None).unwrap().card(ItemId(1)).cloned().unwrap();
+    // The user drags the card back right after the daemon's Status write lands.
+    fake.after_next("UpdateStatus", |github| {
+        github.move_item(0, REPO, 1, Some("Backlog"));
+    });
+    match crate::claim(&queue, &card, "host-a/fox").unwrap() {
+        Claim::Released(now) => assert_eq!(now.column, Column::Backlog),
+        other @ Claim::Claimed(_) => panic!("the user's move must win: {other:?}"),
+    }
+    assert_eq!(
+        fake.status_of(0, REPO, 1).as_deref(),
+        Some("Backlog"),
+        "the user's move is not reverted"
+    );
+}
+
+#[test]
+fn a_second_daemons_marker_is_detected_and_the_repository_refused() {
+    let (fake, first) = ready_board();
+    let second = connect(&fake, &[1]);
+    let card = first.poll(None).unwrap().card(ItemId(1)).cloned().unwrap();
+    assert!(matches!(
+        crate::claim(&first, &card, "host-a/fox"),
+        Ok(Claim::Claimed(_))
+    ));
+    let error = crate::claim(&second, &card, "host-a/other-user").unwrap_err();
+    assert!(
+        error.pauses_repository() && !error.is_transient(),
+        "{error}"
+    );
+    match error {
+        QueueError::Contested { item, others } => {
+            assert_eq!(item, ItemId(1));
+            assert_eq!(others, ["host-a/fox"]);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Two daemons claiming at once: each re-read sees the other's marker, and both refuse.
+    let card = first.poll(None).unwrap().card(ItemId(2)).cloned().unwrap();
+    let racer = Arc::new(connect(&fake, &[1]));
+    let racing_card = card.clone();
+    let outcome = Arc::new(Mutex::new(None));
+    let (racer_in, outcome_in) = (Arc::clone(&racer), Arc::clone(&outcome));
+    fake.after_next("AddComment", move |_| {
+        let result = crate::claim(&*racer_in, &racing_card, "host-b/fox");
+        *outcome_in.lock().unwrap() = Some(result);
+    });
+    let mine = crate::claim(&first, &card, "host-a/fox");
+    assert!(
+        matches!(&mine, Err(QueueError::Contested { others, .. }) if others == &["host-b/fox"]),
+        "{mine:?}"
+    );
+    let theirs = outcome.lock().unwrap().take().expect("the racer ran");
+    assert!(
+        matches!(&theirs, Err(QueueError::Contested { others, .. }) if others == &["host-a/fox"]),
+        "{theirs:?}"
+    );
+}
+
+#[test]
+fn a_secondary_rate_limit_is_typed_and_the_replay_succeeds() {
+    let (fake, queue) = ready_board();
+    fake.fail_next(
+        "UpdateStatus",
+        Fault::SecondaryRateLimit { retry_after: 90 },
+    );
+    let error = queue
+        .project(ItemId(1), Owned::InProgress, None)
+        .unwrap_err();
+    match &error {
+        QueueError::RateLimited(limit) => {
+            assert!(limit.secondary);
+            assert_eq!(limit.retry_after, Some(std::time::Duration::from_secs(90)));
+            assert_eq!(limit.wait(0), std::time::Duration::from_secs(90));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(error.is_transient() && !error.pauses_repository());
+    assert_eq!(
+        fake.status_of(0, REPO, 1).as_deref(),
+        Some("Ready"),
+        "nothing written"
+    );
+    queue.project(ItemId(1), Owned::InProgress, None).unwrap();
+    assert_eq!(fake.status_of(0, REPO, 1).as_deref(), Some("In progress"));
+}
+
+#[test]
+fn a_rate_limit_without_retry_after_is_still_typed() {
+    for (status, message, remaining, secondary) in [
+        (403, "You have exceeded a secondary rate limit.", 4000, true),
+        (429, "You have exceeded a secondary rate limit.", 4000, true),
+        (403, "API rate limit exceeded for user.", 0, false),
+    ] {
+        let error = transport_error(TransportError::Status {
+            status,
+            message: message.into(),
+            rate_limit: Some(RateLimit {
+                limit: 5000,
+                remaining,
+                used: 5000 - remaining,
+                reset: 1_000,
+            }),
+            retry_after: None,
+        });
+        match error {
+            QueueError::RateLimited(limit) => {
+                assert_eq!(limit.secondary, secondary, "{message}");
+                let wait = if secondary { 60 } else { 600 };
+                assert_eq!(limit.wait(400), std::time::Duration::from_secs(wait));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    let other = transport_error(TransportError::Status {
+        status: 403,
+        message: "Resource not accessible by personal access token".into(),
+        rate_limit: None,
+        retry_after: None,
+    });
+    assert!(matches!(other, QueueError::Scope(_)), "{other}");
+    let down = transport_error(TransportError::Status {
+        status: 502,
+        message: "Bad gateway".into(),
+        rate_limit: None,
+        retry_after: None,
+    });
+    assert!(matches!(down, QueueError::Remote(_)), "{down}");
+}
+
+#[test]
+fn a_lost_scope_is_typed_and_pauses_the_repository() {
+    let (fake, queue) = ready_board();
+    fake.fail_next("Items", Fault::LostScope);
+    let error = queue.poll(None).unwrap_err();
+    assert!(matches!(error, QueueError::Scope(_)), "{error}");
+    assert!(error.pauses_repository() && !error.is_transient());
+    fake.fail_next("Issue", Fault::LostScope);
+    let error = queue
+        .upsert_comment(ItemId(1), "report:1", "x")
+        .unwrap_err();
+    assert!(matches!(error, QueueError::Scope(_)), "{error}");
+}
+
+#[test]
+fn an_issue_transferred_converted_or_deleted_mid_item_is_a_cancel() {
+    let (fake, queue) = ready_board();
+    put_issue(&fake, 3);
+    fake.set_items(
+        0,
+        &[
+            FakeItem::Issue(REPO, 1, Some("In progress")),
+            FakeItem::Issue(REPO, 2, Some("In progress")),
+            FakeItem::Issue(REPO, 3, Some("In progress")),
+        ],
+    );
+    let before = queue.poll(None).unwrap();
+    fake.transfer_issue(REPO, 1, OTHER_REPO, 40);
+    fake.convert_issue(REPO, 2);
+    fake.delete_issue(REPO, 3);
+
+    let after = queue.poll(Some(&before.cursor)).unwrap();
+    assert_eq!(after.removed, [ItemId(1), ItemId(2), ItemId(3)]);
+    for item in [ItemId(1), ItemId(2), ItemId(3)] {
+        for result in [
+            queue.project(item, Owned::Verify, None),
+            queue.upsert_comment(item, "report:1", "x"),
+            queue.lint_target(item).map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert!(error.is_cancel() && !error.is_transient(), "{error}");
+        }
+    }
+    assert!(matches!(
+        queue.project(ItemId(1), Owned::Done, None),
+        Err(QueueError::Gone(_, Gone::Transferred(to))) if to == OTHER_REPO
+    ));
+    assert!(matches!(
+        queue.project(ItemId(2), Owned::Done, None),
+        Err(QueueError::Gone(_, Gone::Converted))
+    ));
+    assert!(matches!(
+        queue.project(ItemId(3), Owned::Done, None),
+        Err(QueueError::NotFound(_))
+    ));
+    assert_eq!(fake.count("UpdateStatus"), 0, "nothing is written");
 }
 
 #[test]

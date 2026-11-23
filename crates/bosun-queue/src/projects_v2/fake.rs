@@ -4,12 +4,22 @@
 //! synthetic.
 //!
 //! The model is edited as the user would edit the board ([`FakeGitHub::issue`],
-//! [`FakeGitHub::set_items`], [`FakeGitHub::set_options`]); every change to an issue moves its
-//! `updatedAt`, as on GitHub, and a reorder or a Status change does not. Every request is
-//! logged by operation name ([`FakeGitHub::requests`]).
+//! [`FakeGitHub::set_items`], [`FakeGitHub::move_item`], [`FakeGitHub::set_options`],
+//! [`FakeGitHub::delete_issue`], [`FakeGitHub::transfer_issue`],
+//! [`FakeGitHub::convert_issue`]); every change to an issue moves its `updatedAt`, as on
+//! GitHub, and a reorder or a Status change does not. Every request is logged by operation name
+//! ([`FakeGitHub::requests`]).
+//!
+//! The mutations the backend sends (`UpdateStatus`, `AddComment`, `UpdateComment`) are carried
+//! out as the viewer ([`FakeGitHub::set_viewer`]), the login the token belongs to. Faults are
+//! injected per operation: [`FakeGitHub::fail_next`] (a lost response, a secondary rate limit,
+//! a lost scope) and [`FakeGitHub::after_next`] (the user acting right after a request, before
+//! the backend's next one).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -17,6 +27,9 @@ use super::transport::{GraphQl, RateLimit, Reply, TransportError};
 
 /// The quota of the fake's rate limit; each request spends one point.
 pub const QUOTA: u64 = 5000;
+
+/// The viewer of a new fake: the login its token belongs to.
+pub const VIEWER: &str = "viewer-example";
 
 /// An issue of the fake.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -40,6 +53,8 @@ pub struct FakeIssue {
 /// A comment of the fake.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FakeComment {
+    /// The node id; left empty, the fake assigns one.
+    pub id: String,
     /// The login that wrote it.
     pub author: Option<String>,
     /// The login that last edited it, if anyone did.
@@ -53,6 +68,7 @@ impl FakeComment {
     #[must_use]
     pub fn by(author: &str, body: &str) -> Self {
         Self {
+            id: String::new(),
             author: Some(author.to_owned()),
             editor: None,
             body: body.to_owned(),
@@ -70,6 +86,30 @@ pub enum FakeItem<'a> {
     Draft(&'a str, Option<&'a str>),
     /// The issue, archived.
     Archived(&'a str, u64),
+}
+
+/// A fault for [`FakeGitHub::fail_next`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The request is carried out, but its response never arrives (a crash, a timeout): the
+    /// backend sees a transport error.
+    LoseResponse,
+    /// Refused with a secondary rate limit: a 403 with `Retry-After`, nothing carried out.
+    SecondaryRateLimit {
+        /// The `Retry-After` header, in seconds.
+        retry_after: u64,
+    },
+    /// Refused because the token lost the scope the request needs, nothing carried out.
+    LostScope,
+}
+
+/// Something the user does right after a request; see [`FakeGitHub::after_next`].
+struct Hook(Box<dyn FnOnce(&FakeGitHub) + Send>);
+
+impl fmt::Debug for Hook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Hook")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +149,15 @@ struct Stored {
 struct State {
     projects: Vec<Project>,
     issues: BTreeMap<(String, u64), Stored>,
+    /// Every repository that ever had an issue.
+    repositories: BTreeSet<String>,
+    /// Old (repository, number) to new, for transferred issues.
+    transferred: BTreeMap<(String, u64), (String, u64)>,
+    /// (repository, number) of discussions converted from issues.
+    discussions: BTreeSet<(String, u64)>,
+    viewer: String,
+    faults: Vec<(String, Fault)>,
+    hooks: Vec<(String, Hook)>,
     clock: u64,
     next_id: u64,
     log: Vec<String>,
@@ -145,19 +194,64 @@ impl State {
     fn issue_by_node(&self, id: &str) -> Option<(&(String, u64), &Stored)> {
         self.issues.iter().find(|(_, s)| s.id == id)
     }
+
+    /// Gives every comment without an id one.
+    fn number_comments(&mut self, key: &(String, u64)) {
+        let missing = self.issues[key]
+            .issue
+            .comments
+            .iter()
+            .filter(|c| c.id.is_empty())
+            .count();
+        let ids: Vec<String> = (0..missing).map(|_| self.id("IC")).collect();
+        let mut ids = ids.into_iter();
+        if let Some(stored) = self.issues.get_mut(key) {
+            for comment in &mut stored.issue.comments {
+                if comment.id.is_empty() {
+                    comment.id = ids.next().unwrap_or_default();
+                }
+            }
+        }
+    }
+
+    /// Removes the issue and its project items.
+    fn remove_issue(&mut self, key: &(String, u64)) -> Option<Stored> {
+        let content = Content::Issue(key.0.clone(), key.1);
+        for project in &mut self.projects {
+            project.items.retain(|i| i.content != content);
+        }
+        self.issues.remove(key)
+    }
 }
 
 /// The fake GitHub; see the module docs.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FakeGitHub {
     state: Mutex<State>,
 }
 
+impl Default for FakeGitHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FakeGitHub {
-    /// An empty GitHub.
+    /// An empty GitHub, seen by [`VIEWER`].
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            state: Mutex::new(State {
+                viewer: VIEWER.to_owned(),
+                ..State::default()
+            }),
+        }
+    }
+
+    /// Makes `login` the viewer: the login the backend's token belongs to, which writes its
+    /// comments.
+    pub fn set_viewer(&self, login: &str) {
+        login.clone_into(&mut self.lock().viewer);
     }
 
     /// Adds project `number` of `owner`, with a single-select Status field holding `options`
@@ -208,10 +302,11 @@ impl FakeGitHub {
     }
 
     /// Edits (or creates, from the default) issue `number` of `repository`. When the edit
-    /// changes anything, the issue's `updatedAt` moves.
+    /// changes anything, the issue's `updatedAt` moves. Comments added without an id get one.
     pub fn issue(&self, repository: &str, number: u64, edit: impl FnOnce(&mut FakeIssue)) {
         let mut state = self.lock();
         let key = (repository.to_owned(), number);
+        state.repositories.insert(repository.to_owned());
         if !state.issues.contains_key(&key) {
             let id = state.id("I");
             let updated_at = state.tick();
@@ -233,7 +328,20 @@ impl FakeGitHub {
                 stored.issue = after;
                 stored.updated_at = updated_at;
             }
+            state.number_comments(&key);
         }
+    }
+
+    /// Issue `number` of `repository` as it is now.
+    ///
+    /// # Panics
+    ///
+    /// The issue does not exist.
+    #[must_use]
+    pub fn issue_now(&self, repository: &str, number: u64) -> FakeIssue {
+        self.lock().issues[&(repository.to_owned(), number)]
+            .issue
+            .clone()
     }
 
     /// Makes the project hold exactly `items`, in this order. An issue already on the project
@@ -277,10 +385,109 @@ impl FakeGitHub {
         state.projects[project].items = new;
     }
 
+    /// Moves the card of issue `number` of `repository` on the project into the Status option
+    /// named `status` (`None`: no Status), as the user dragging it.
+    ///
+    /// # Panics
+    ///
+    /// The issue has no card on the project, or the project has no such option.
+    pub fn move_item(&self, project: usize, repository: &str, number: u64, status: Option<&str>) {
+        let mut state = self.lock();
+        let option = status.map(|name| state.option_id(project, name));
+        let content = Content::Issue(repository.to_owned(), number);
+        let item = state.projects[project]
+            .items
+            .iter_mut()
+            .find(|i| i.content == content)
+            .unwrap_or_else(|| panic!("{repository}#{number} has no card on the project"));
+        item.status = option;
+    }
+
+    /// The name of the Status option of the card of issue `number` of `repository` on the
+    /// project; `None` when it has no card or no Status.
+    #[must_use]
+    pub fn status_of(&self, project: usize, repository: &str, number: u64) -> Option<String> {
+        let state = self.lock();
+        let project = &state.projects[project];
+        let content = Content::Issue(repository.to_owned(), number);
+        let option = project
+            .items
+            .iter()
+            .find(|i| i.content == content)?
+            .status
+            .clone()?;
+        project
+            .options
+            .iter()
+            .find(|(id, _)| *id == option)
+            .map(|(_, name)| name.clone())
+    }
+
+    /// Deletes issue `number` of `repository`, and with it its cards.
+    pub fn delete_issue(&self, repository: &str, number: u64) {
+        self.lock().remove_issue(&(repository.to_owned(), number));
+    }
+
+    /// Transfers issue `number` of `repository` to `to`, where it gets the number `new_number`.
+    /// Its cards stay on the projects, now holding the issue of `to`; asked by its old number,
+    /// GitHub answers with the issue in its new repository.
+    ///
+    /// # Panics
+    ///
+    /// The issue does not exist.
+    pub fn transfer_issue(&self, repository: &str, number: u64, to: &str, new_number: u64) {
+        let mut state = self.lock();
+        let old = (repository.to_owned(), number);
+        let new = (to.to_owned(), new_number);
+        let mut stored = state
+            .issues
+            .remove(&old)
+            .unwrap_or_else(|| panic!("the fake has no issue {repository}#{number}"));
+        stored.updated_at = state.tick();
+        state.issues.insert(new.clone(), stored);
+        state.repositories.insert(to.to_owned());
+        for project in &mut state.projects {
+            for item in &mut project.items {
+                if item.content == Content::Issue(old.0.clone(), old.1) {
+                    item.content = Content::Issue(new.0.clone(), new.1);
+                }
+            }
+        }
+        state.transferred.insert(old, new);
+    }
+
+    /// Converts issue `number` of `repository` to a discussion with the same number; the issue
+    /// and its cards are gone.
+    pub fn convert_issue(&self, repository: &str, number: u64) {
+        let mut state = self.lock();
+        let key = (repository.to_owned(), number);
+        state.remove_issue(&key);
+        state.discussions.insert(key);
+    }
+
+    /// The next request of `operation` meets `fault`.
+    pub fn fail_next(&self, operation: &str, fault: Fault) {
+        self.lock().faults.push((operation.to_owned(), fault));
+    }
+
+    /// Right after the next request of `operation` is carried out, and before its response
+    /// reaches the backend, `then` runs: the user acting between two of the backend's requests.
+    pub fn after_next(&self, operation: &str, then: impl FnOnce(&Self) + Send + 'static) {
+        self.lock()
+            .hooks
+            .push((operation.to_owned(), Hook(Box::new(then))));
+    }
+
     /// The operation names of every request so far, in order.
     #[must_use]
     pub fn requests(&self) -> Vec<String> {
         self.lock().log.clone()
+    }
+
+    /// How many requests of `operation` were made so far.
+    #[must_use]
+    pub fn count(&self, operation: &str) -> usize {
+        self.lock().log.iter().filter(|o| *o == operation).count()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -291,32 +498,78 @@ impl FakeGitHub {
 impl GraphQl for FakeGitHub {
     fn execute(&self, query: &str, variables: &Value) -> Result<Reply, TransportError> {
         let mut state = self.lock();
-        let operation = query
-            .trim_start()
+        let trimmed = query.trim_start();
+        let operation = trimmed
             .strip_prefix("query ")
+            .or_else(|| trimmed.strip_prefix("mutation "))
             .and_then(|rest| rest.split(['(', ' ', '{']).next())
             .unwrap_or("anonymous")
             .to_owned();
         state.log.push(operation.clone());
         let used = state.log.len() as u64;
-        let body = match operation.as_str() {
-            "Resolve" => resolve(&state, variables),
-            "Items" => items(&state, variables),
-            "Details" => details(&state, variables),
-            "Comments" => comments_of(&state, variables),
-            "Issue" => issue_query(&state, variables),
-            other => {
-                return Err(TransportError::Malformed(format!(
-                    "the fake does not know the operation `{other}`"
-                )));
-            }
-        };
         let rate_limit = RateLimit {
             limit: QUOTA,
             remaining: QUOTA.saturating_sub(used),
             used,
             reset: 1_900_000_000,
         };
+        let fault = state
+            .faults
+            .iter()
+            .position(|(op, _)| *op == operation)
+            .map(|at| state.faults.remove(at).1);
+        match fault {
+            Some(Fault::SecondaryRateLimit { retry_after }) => {
+                return Err(TransportError::Status {
+                    status: 403,
+                    message: "You have exceeded a secondary rate limit. Please wait a few \
+                              minutes before you try again."
+                        .into(),
+                    rate_limit: Some(rate_limit),
+                    retry_after: Some(retry_after),
+                });
+            }
+            Some(Fault::LostScope) => {
+                let body = json!({
+                    "data": null,
+                    "errors": [{
+                        "type": "INSUFFICIENT_SCOPES",
+                        "message": "Your token has not been granted the required scopes to \
+                                    execute this query.",
+                    }],
+                });
+                return Reply::from_body(&body.to_string(), Some(rate_limit));
+            }
+            Some(Fault::LoseResponse) | None => {}
+        }
+        let body = match operation.as_str() {
+            "Resolve" => resolve(&state, variables),
+            "Items" => items(&state, variables),
+            "Details" => details(&state, variables),
+            "Comments" => comments_of(&state, variables),
+            "Issue" => issue_query(&state, variables),
+            "Discussion" => discussion(&state, variables),
+            "UpdateStatus" => update_status(&mut state, variables),
+            "AddComment" => add_comment(&mut state, variables),
+            "UpdateComment" => update_comment(&mut state, variables),
+            other => {
+                return Err(TransportError::Malformed(format!(
+                    "the fake does not know the operation `{other}`"
+                )));
+            }
+        };
+        let hook = state
+            .hooks
+            .iter()
+            .position(|(op, _)| *op == operation)
+            .map(|at| state.hooks.remove(at).1);
+        drop(state);
+        if let Some(Hook(then)) = hook {
+            then(self);
+        }
+        if fault == Some(Fault::LoseResponse) {
+            return Err(TransportError::Timeout(Duration::from_secs(60)));
+        }
         Reply::from_body(&body.to_string(), Some(rate_limit))
     }
 }
@@ -369,9 +622,9 @@ fn resolve(state: &State, variables: &Value) -> Value {
     let field = var(variables, "field").as_str().unwrap_or_default();
     let known_owner = state.projects.iter().any(|p| p.owner == owner)
         || state
-            .issues
-            .keys()
-            .any(|(r, _)| r.split('/').next() == Some(owner));
+            .repositories
+            .iter()
+            .any(|r| r.split('/').next() == Some(owner));
     if !known_owner {
         return json!({ "data": { "repositoryOwner": null } });
     }
@@ -445,8 +698,10 @@ fn items(state: &State, variables: &Value) -> Value {
     } } })
 }
 
-fn comment_json(comment: &FakeComment) -> Value {
+fn comment_json(state: &State, comment: &FakeComment) -> Value {
     json!({
+        "id": comment.id,
+        "viewerDidAuthor": comment.author.as_deref() == Some(state.viewer.as_str()),
         "author": comment.author.as_ref().map(|l| json!({ "login": l })),
         "editor": comment.editor.as_ref().map(|l| json!({ "login": l })),
         "body": comment.body,
@@ -455,7 +710,11 @@ fn comment_json(comment: &FakeComment) -> Value {
 
 fn issue_json(state: &State, key: &(String, u64), stored: &Stored, variables: &Value) -> Value {
     let issue = &stored.issue;
-    let comments: Vec<Value> = issue.comments.iter().map(comment_json).collect();
+    let comments: Vec<Value> = issue
+        .comments
+        .iter()
+        .map(|c| comment_json(state, c))
+        .collect();
     let comments_page = page(&comments, &json!({ "first": var(variables, "first") }));
     let blocked_by: Vec<Value> = issue
         .blocked_by
@@ -476,6 +735,7 @@ fn issue_json(state: &State, key: &(String, u64), stored: &Stored, variables: &V
             .collect::<Vec<_>>() },
         "blockedBy": { "nodes": blocked_by },
         "comments": comments_page,
+        "repository": { "nameWithOwner": key.0 },
     });
     let field = var(variables, "field").as_str().unwrap_or_default();
     let project_items: Vec<Value> = state
@@ -488,6 +748,7 @@ fn issue_json(state: &State, key: &(String, u64), stored: &Stored, variables: &V
                 .filter(|i| i.content == Content::Issue(key.0.clone(), key.1))
                 .map(move |item| {
                     json!({
+                        "id": item.id,
                         "isArchived": item.archived,
                         "project": { "id": project.id },
                         "status": if project.field == field {
@@ -524,24 +785,36 @@ fn comments_of(state: &State, variables: &Value) -> Value {
     match state.issue_by_node(id) {
         None => json!({ "data": { "node": null } }),
         Some((_, stored)) => {
-            let comments: Vec<Value> = stored.issue.comments.iter().map(comment_json).collect();
+            let comments: Vec<Value> = stored
+                .issue
+                .comments
+                .iter()
+                .map(|c| comment_json(state, c))
+                .collect();
             json!({ "data": { "node": { "comments": page(&comments, variables) } } })
         }
     }
 }
 
-fn issue_query(state: &State, variables: &Value) -> Value {
+fn repository_of(variables: &Value) -> String {
     let owner = var(variables, "owner").as_str().unwrap_or_default();
     let name = var(variables, "name").as_str().unwrap_or_default();
+    format!("{owner}/{name}")
+}
+
+fn issue_query(state: &State, variables: &Value) -> Value {
+    let repository = repository_of(variables);
     let number = var(variables, "number").as_u64().unwrap_or_default();
-    let repository = format!("{owner}/{name}");
-    if !state.issues.keys().any(|(r, _)| *r == repository) {
+    if !state.repositories.contains(&repository) {
         return json!({
             "data": { "repository": null },
             "errors": not_found("Could not resolve to a Repository."),
         });
     }
-    let key = (repository, number);
+    let mut key = (repository, number);
+    if let Some(new) = state.transferred.get(&key) {
+        key = new.clone();
+    }
     match state.issues.get(&key) {
         None => json!({
             "data": { "repository": { "issue": null } },
@@ -551,4 +824,101 @@ fn issue_query(state: &State, variables: &Value) -> Value {
             "data": { "repository": { "issue": issue_json(state, &key, stored, variables) } }
         }),
     }
+}
+
+fn discussion(state: &State, variables: &Value) -> Value {
+    let key = (
+        repository_of(variables),
+        var(variables, "number").as_u64().unwrap_or_default(),
+    );
+    if state.discussions.contains(&key) {
+        json!({ "data": { "repository": { "discussion": {
+            "id": format!("D_fake_{}_{}", key.0, key.1),
+        } } } })
+    } else {
+        json!({
+            "data": { "repository": { "discussion": null } },
+            "errors": not_found("Could not resolve to a Discussion."),
+        })
+    }
+}
+
+fn update_status(state: &mut State, variables: &Value) -> Value {
+    let gone = || {
+        json!({
+            "data": { "updateProjectV2ItemFieldValue": null },
+            "errors": not_found("Could not resolve to a node."),
+        })
+    };
+    let text = |name: &str| var(variables, name).as_str().unwrap_or_default().to_owned();
+    let (project, item, field, option) =
+        (text("project"), text("item"), text("field"), text("option"));
+    let Some(project) = state.projects.iter_mut().find(|p| p.id == project) else {
+        return gone();
+    };
+    if field != format!("{}_status", project.id)
+        || !project.options.iter().any(|(id, _)| *id == option)
+    {
+        return gone();
+    }
+    let Some(found) = project.items.iter_mut().find(|i| i.id == item) else {
+        return gone();
+    };
+    found.status = Some(option);
+    json!({ "data": { "updateProjectV2ItemFieldValue": { "projectV2Item": { "id": item } } } })
+}
+
+fn add_comment(state: &mut State, variables: &Value) -> Value {
+    let subject = var(variables, "subject").as_str().unwrap_or_default();
+    let body = var(variables, "body")
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let Some(key) = state.issue_by_node(subject).map(|(key, _)| key.clone()) else {
+        return json!({
+            "data": { "addComment": null },
+            "errors": not_found("Could not resolve to a node."),
+        });
+    };
+    let id = state.id("IC");
+    let updated_at = state.tick();
+    let author = Some(state.viewer.clone());
+    if let Some(stored) = state.issues.get_mut(&key) {
+        stored.issue.comments.push(FakeComment {
+            id: id.clone(),
+            author,
+            editor: None,
+            body,
+        });
+        stored.updated_at = updated_at;
+    }
+    json!({ "data": { "addComment": { "commentEdge": { "node": { "id": id } } } } })
+}
+
+fn update_comment(state: &mut State, variables: &Value) -> Value {
+    let id = var(variables, "id").as_str().unwrap_or_default();
+    let body = var(variables, "body")
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let viewer = state.viewer.clone();
+    let updated_at = state.tick();
+    for stored in state.issues.values_mut() {
+        if let Some(comment) = stored.issue.comments.iter_mut().find(|c| c.id == id) {
+            if comment.author.as_deref() != Some(viewer.as_str()) {
+                return json!({
+                    "data": { "updateIssueComment": null },
+                    "errors": [{ "type": "FORBIDDEN", "message": "Viewer cannot update." }],
+                });
+            }
+            comment.body = body;
+            comment.editor = Some(viewer);
+            stored.updated_at = updated_at;
+            return json!({ "data": { "updateIssueComment": { "issueComment": { "id": id } } } });
+        }
+    }
+    json!({
+        "data": { "updateIssueComment": null },
+        "errors": not_found("Could not resolve to a node."),
+    })
 }

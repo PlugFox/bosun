@@ -176,6 +176,8 @@ pub enum TransportError {
         message: String,
         /// The rate limit the headers reported (a 403 for an exhausted quota carries it).
         rate_limit: Option<RateLimit>,
+        /// The `Retry-After` header, in seconds (a secondary rate limit sends it).
+        retry_after: Option<u64>,
     },
     /// The output could not be read as an HTTP response with a JSON body.
     Malformed(String),
@@ -373,10 +375,15 @@ pub fn parse_include(output: &str) -> Result<Reply, TransportError> {
             .ok()
             .and_then(|v| v.get("message").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| body.trim().chars().take(200).collect());
+        let retry_after = headers
+            .iter()
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case("retry-after"))
+            .and_then(|(_, value)| value.trim().parse().ok());
         return Err(TransportError::Status {
             status,
             message,
             rate_limit,
+            retry_after,
         });
     }
     Reply::from_body(body, rate_limit)
@@ -436,10 +443,28 @@ mod tests {
                 status: 403,
                 message,
                 rate_limit: Some(limit),
+                retry_after: None,
             }) => {
                 assert_eq!(message, "API rate limit exceeded");
                 assert_eq!(limit.remaining, 0);
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_secondary_rate_limit_carries_its_retry_after() {
+        // The shape GitHub documents for a secondary rate limit; values synthetic.
+        let text = "HTTP/2.0 403 Forbidden\r\nRetry-After: 60\r\nX-Ratelimit-Remaining: 4000\r\n\r\n\
+            {\"message\":\"You have exceeded a secondary rate limit. Please wait a few minutes \
+            before you try again.\"}";
+        match parse_include(text) {
+            Err(TransportError::Status {
+                status: 403,
+                message,
+                retry_after: Some(60),
+                ..
+            }) => assert!(message.contains("secondary rate limit"), "{message}"),
             other => panic!("{other:?}"),
         }
     }

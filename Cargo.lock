@@ -178,6 +178,7 @@ dependencies = [
 name = "bosun-queue"
 version = "0.0.0"
 dependencies = [
+ "bosun-core",
  "serde_json",
  "sha2",
  "tempfile",

@@ -53,6 +53,18 @@ pub const CHECKS: &[(&str, Check)] = &[
         "upsert_recreates_a_deleted_comment",
         upsert_recreates_a_deleted_comment,
     ),
+    (
+        "a_sticky_deleted_twice_is_recreated_once",
+        a_sticky_deleted_twice_is_recreated_once,
+    ),
+    (
+        "a_deleted_comment_is_not_posted_again",
+        a_deleted_comment_is_not_posted_again,
+    ),
+    (
+        "a_body_with_its_marker_keeps_one_marker",
+        a_body_with_its_marker_keeps_one_marker,
+    ),
     ("project_is_idempotent", project_is_idempotent),
     (
         "unknown_items_and_keys_are_refused",
@@ -243,6 +255,89 @@ pub fn upsert_recreates_a_deleted_comment(harness: &mut dyn Harness) {
     let sticky = keyed(&changes, 1, "item-1/sticky");
     assert_eq!(sticky.len(), 1);
     assert_eq!(normalise(&sticky[0].body), "Attempt 2.");
+}
+
+/// A sticky comment the user deleted is recreated once; deleted again, it stays deleted, so
+/// the daemon and the user never fight over it (#5, #61).
+///
+/// # Panics
+///
+/// When the backend fails the check.
+pub fn a_sticky_deleted_twice_is_recreated_once(harness: &mut dyn Harness) {
+    let plain = card(1, Column::InProgress, "true");
+    harness.user_writes(std::slice::from_ref(&plain));
+    let upsert = |harness: &dyn Harness, body: &str| {
+        harness
+            .queue()
+            .upsert_comment(ItemId(1), "report:1", body)
+            .expect("upsert");
+    };
+    upsert(harness, "Claimed.");
+    harness.user_writes(std::slice::from_ref(&plain));
+    upsert(harness, "Attempt 1.");
+    let changes = poll(harness, None);
+    assert_eq!(keyed(&changes, 1, "report:1").len(), 1, "recreated once");
+
+    harness.user_writes(std::slice::from_ref(&plain));
+    for body in ["Attempt 2.", "Verdict passed."] {
+        upsert(harness, body);
+    }
+    let changes = poll(harness, None);
+    assert_eq!(
+        keyed(&changes, 1, "report:1").len(),
+        0,
+        "deleted a second time, the sticky comment stays deleted"
+    );
+}
+
+/// A keyed comment the user deleted is not posted again by a replay of `comment` (#5).
+///
+/// # Panics
+///
+/// When the backend fails the check.
+pub fn a_deleted_comment_is_not_posted_again(harness: &mut dyn Harness) {
+    let plain = card(1, Column::NeedsYou, "true");
+    harness.user_writes(std::slice::from_ref(&plain));
+    let queue = harness.queue();
+    queue
+        .comment(ItemId(1), "Needs you: the verdict fails.", "needs-you:1:1")
+        .expect("comment");
+    harness.user_writes(std::slice::from_ref(&plain));
+    harness
+        .queue()
+        .comment(ItemId(1), "Needs you: the verdict fails.", "needs-you:1:1")
+        .expect("comment");
+    let changes = poll(harness, None);
+    assert_eq!(
+        keyed(&changes, 1, "needs-you:1:1").len(),
+        0,
+        "not posted again"
+    );
+}
+
+/// A body that already starts with the marker of its key (the sticky report as the renderer of
+/// #56 writes it) reads back with the key, and without the marker in its text.
+///
+/// # Panics
+///
+/// When the backend fails the check.
+pub fn a_body_with_its_marker_keeps_one_marker(harness: &mut dyn Harness) {
+    harness.user_writes(&[card(1, Column::InProgress, "true")]);
+    let rendered = format!(
+        "{}\n### bosun: Card 1\n\nClaimed.",
+        bosun_core::publish::marker("report:1")
+    );
+    let queue = harness.queue();
+    queue
+        .upsert_comment(ItemId(1), "report:1", &rendered)
+        .expect("upsert");
+    queue
+        .upsert_comment(ItemId(1), "report:1", &rendered)
+        .expect("upsert");
+    let changes = poll(harness, None);
+    let sticky = keyed(&changes, 1, "report:1");
+    assert_eq!(sticky.len(), 1);
+    assert_eq!(normalise(&sticky[0].body), "### bosun: Card 1\n\nClaimed.");
 }
 
 /// `project` moves the card, and writing the same state again changes nothing.

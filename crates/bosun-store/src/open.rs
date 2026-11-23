@@ -361,6 +361,55 @@ mod tests {
         conn.close().await.unwrap();
     }
 
+    /// #95: migration 7 backfills the span of every window that owns messages, sub-agents
+    /// included, from its first and last message; a window without messages keeps none.
+    #[tokio::test]
+    async fn migration_7_backfills_the_session_spans() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = open(&path, &Options::default(), &up_to(6)).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO source_file (id, provider, file_key, path) VALUES (1, 'claude', 'f', 'p');
+             INSERT INTO model (id, provider, name) VALUES (1, 'claude', 'm');
+             INSERT INTO session (id, provider, session_key) VALUES (1, 'claude', 's1');
+             INSERT INTO session (id, provider, session_key, agent_key, parent_id, root_id)
+                 VALUES (2, 'claude', 's1', 'agent-1', 1, 1);
+             INSERT INTO session (id, provider, session_key) VALUES (3, 'claude', 'empty');
+             INSERT INTO message (provider, message_key, session_id, source_file_id, ts_ms,
+                                  model_id, cwd, input_tokens, cache_write_5m_tokens,
+                                  cache_write_1h_tokens, cache_read_tokens, output_tokens,
+                                  usage_json, parser_version)
+             VALUES ('claude', 'm1', 1, 1, 200, 1, '/w', 0, 0, 0, 0, 0, '{}', 2),
+                    ('claude', 'm2', 1, 1, 100, 1, '/w', 0, 0, 0, 0, 0, '{}', 2),
+                    ('claude', 'm3', 1, 1, 900, 1, '/w', 0, 0, 0, 0, 0, '{}', 2),
+                    ('claude', 'm4', 2, 1, 400, 1, '/w', 0, 0, 0, 0, 0, '{}', 2);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let spans: Vec<(i64, Option<i64>, Option<i64>)> =
+            sqlx::query_as("SELECT id, started_ms, ended_ms FROM session ORDER BY id")
+                .fetch_all(store.reader().pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            spans,
+            [
+                (1, Some(100), Some(900)),
+                (2, Some(400), Some(400)),
+                (3, None, None)
+            ]
+        );
+        store.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn a_newer_database_is_refused_untouched() {
         let dir = tempfile::tempdir().unwrap();

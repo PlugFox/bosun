@@ -927,6 +927,14 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_ingest_no_session_span",
+        issue: 95,
+        breaks: "the store's writer never sets a window's span from its messages",
+        package: "bosun-ingest",
+        check: Check::Test("tests::an_ingested_session_links_a_commit_inside_its_span"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

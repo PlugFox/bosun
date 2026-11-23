@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE session SET\n             started_ms = (SELECT min(ts_ms) FROM message WHERE session_id = session.id),\n             ended_ms = (SELECT max(ts_ms) FROM message WHERE session_id = session.id)\n         WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bd48edc14d4f6796ee322718d0f6a1eb2a65f7669725ab2c160fe86845ee05e3"
+}

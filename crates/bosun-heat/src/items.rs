@@ -14,10 +14,11 @@ use bosun_store::{ItemHistory, Reader, RunCommitRow, UsageRow};
 use crate::exact::{Fold, Scope, rates};
 
 /// The rule of [`InferredItems`].
-const RULE: &str = "an interactive session is inferred for an item when its messages of the \
-    range in a repository span the time of a commit there that no run's commit range holds and \
-    whose Item: trailer names the item (the time-and-repository link of #3); the whole session \
-    counts, main transcript and sub-agents, so the figure is an upper bound";
+const RULE: &str = "an interactive session is inferred for an item when one of its windows \
+    contains a commit that no run's commit range holds and whose Item: trailer names the item, \
+    by the time-and-repository link of #3 (the window's span, from its first to its last \
+    message, holds the commit's time, and its messages are in the commit's repository); the \
+    whole session counts, main transcript and sub-agents, so the figure is an upper bound";
 
 /// The trailers the daemon writes, in report order.
 const TRAILERS: [&str; 3] = ["Item", "Run", "Session"];
@@ -428,20 +429,6 @@ pub(crate) async fn inferred(
         .into_iter()
         .map(|stored| (stored.item.id.0, stored.repo))
         .collect();
-    // The span of each interactive session in each repository, from its messages of the
-    // range (main transcript and sub-agents).
-    let (_, usage) = reader.usage(scope.from_ms, scope.to_ms).await?;
-    let mut spans: BTreeMap<(&str, &str, &str), (i64, i64)> = BTreeMap::new();
-    for row in usage.iter().filter(|row| row.kind != "run") {
-        let Some(repo) = row.repo.as_deref() else {
-            continue;
-        };
-        let span = spans
-            .entry((repo, row.provider.as_str(), row.session.as_str()))
-            .or_insert((row.ts_ms, row.ts_ms));
-        span.0 = span.0.min(row.ts_ms);
-        span.1 = span.1.max(row.ts_ms);
-    }
     // Item -> session -> the shas that link them.
     let mut found: BTreeMap<String, BTreeMap<SessionKey, BTreeSet<String>>> = BTreeMap::new();
     for link in reader.commit_links(scope.from_ms, scope.to_ms).await? {
@@ -450,14 +437,12 @@ pub(crate) async fn inferred(
         {
             continue;
         }
-        let ts = link.commit.ts_ms;
-        // Git keeps whole seconds: the commit was made within [ts, ts + 1 s).
-        let sessions: Vec<SessionKey> = spans
+        // The windows the stored spans link the commit to (#23), main transcripts and
+        // sub-agents, as sessions; run sessions are dropped below.
+        let sessions: BTreeSet<SessionKey> = link
+            .sessions
             .iter()
-            .filter(|((repo, _, _), (start, end))| {
-                *repo == link.repo && *start < ts.saturating_add(1000) && *end >= ts
-            })
-            .map(|((_, provider, session), _)| ((*provider).to_owned(), (*session).to_owned()))
+            .map(|s| (s.provider.clone(), s.session_key.clone()))
             .collect();
         for named in trailer(&link.commit.trailers, "Item") {
             let named = named.trim();

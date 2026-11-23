@@ -238,8 +238,9 @@ pub struct InferredSession {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Evidence {
-    /// The session is linked by time and repository (the inferred commit link of #3: its
-    /// messages of the range in the commit's repository span the commit's time) to a commit
-    /// outside every run's range whose `Item:` trailer names the item.
+    /// The session is linked by time and repository (the inferred commit link of #3: one of
+    /// its windows spans the commit's time, from its first to its last message, and has
+    /// messages in the commit's repository) to a commit outside every run's range whose
+    /// `Item:` trailer names the item.
     CommitTrailer { sha: String },
 }

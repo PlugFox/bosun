@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT session_id AS \"session_id!: i64\" FROM message\n           WHERE provider = ? AND message_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "session_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "session_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b554b3f80699a4cb8602c60d0bed673247fbdd3af6de52fa745a0e72b916616d"
+}

@@ -2,12 +2,13 @@
 //! corpus in temporary directories (#21). Sums are read back with SQL and compared with each
 //! case's hand-computed `expected.json`.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bosun_core::Tokens;
-use bosun_store::{Options as StoreOptions, Store};
+use bosun_core::{Commit, Tokens};
+use bosun_store::{Options as StoreOptions, Store, Write};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{Connection, Row};
 use tempfile::TempDir;
@@ -966,5 +967,161 @@ async fn a_subagent_cost_state_is_not_the_session_check() {
         resumed_check(),
         "the sub-agent's cost-state replaced the session's"
     );
+    bench.close().await;
+}
+
+/// Every window's stored span and its first and last message, by SQL: (session, agent, start,
+/// end, first, last).
+type SpanRow = (
+    String,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+async fn spans(db: &Path) -> Vec<SpanRow> {
+    let mut conn = connect(db).await;
+    let rows = sqlx::query_as(
+        "SELECT s.session_key, s.agent_key, s.started_ms, s.ended_ms,
+                (SELECT min(ts_ms) FROM message WHERE session_id = s.id),
+                (SELECT max(ts_ms) FROM message WHERE session_id = s.id)
+         FROM session s ORDER BY s.session_key, s.agent_key",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    rows
+}
+
+/// Asserts that every window of `rows` spans exactly its first and last message.
+fn assert_spans(rows: &[SpanRow], what: &str) {
+    assert!(
+        rows.iter().any(|r| r.4.is_some()),
+        "{what}: no window has messages"
+    );
+    for (session, agent, start, end, first, last) in rows {
+        assert_eq!(
+            (start, end),
+            (first, last),
+            "{what}: window {session} {agent:?}"
+        );
+    }
+}
+
+/// #95: after an ingest, every window with messages, sub-agents included, has both bounds,
+/// equal to its first and last message; also after a reingest, and when the files of a fork
+/// are scanned one at a time in either order.
+#[tokio::test]
+async fn every_window_spans_its_first_and_last_message() {
+    let mut agents = 0;
+    for case in cases("claude") {
+        let bench = Bench::new().await;
+        copy_case(&case, &bench.projects());
+        let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+        ingest.scan().await.unwrap();
+        let rows = spans(&bench.db()).await;
+        assert_spans(&rows, &case.display().to_string());
+        agents += rows
+            .iter()
+            .filter(|r| r.1.is_some() && r.2.is_some())
+            .count();
+        ingest.reingest().await.unwrap();
+        assert_eq!(
+            spans(&bench.db()).await,
+            rows,
+            "{}: reingest",
+            case.display()
+        );
+        bench.close().await;
+    }
+    assert!(agents > 0, "no sub-agent window was checked");
+
+    let case = case("fork-continue");
+    let files = relative_files(&case, "projects");
+    let mut seen = Vec::new();
+    for order in [files.clone(), files.into_iter().rev().collect()] {
+        let bench = Bench::new().await;
+        let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+        for file in &order {
+            copy_file(&case, "projects", file, &bench.projects());
+            ingest.scan().await.unwrap();
+        }
+        let rows = spans(&bench.db()).await;
+        assert_spans(&rows, &format!("{order:?}"));
+        seen.push(rows);
+        bench.close().await;
+    }
+    assert_eq!(seen[0], seen[1], "the scan order changed the spans");
+}
+
+/// #95, #23: on an ingested store (no span seeded), a commit inside an interactive window's
+/// span in the repository of its messages is linked to it; one after the span is not.
+#[tokio::test]
+async fn an_ingested_session_links_a_commit_inside_its_span() {
+    let case = case("cwd-change");
+    let bench = Bench::new().await;
+    copy_case(&case, &bench.projects());
+    let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+    ingest.scan().await.unwrap();
+    // A main window, the repository of its messages, and its first and last message there.
+    let mut conn = connect(&bench.db()).await;
+    let (session, repo, first, last): (String, String, i64, i64) = sqlx::query_as(
+        "SELECT s.session_key, r.path, min(m.ts_ms), max(m.ts_ms)
+         FROM message m JOIN session s ON s.id = m.session_id JOIN repo r ON r.id = m.repo_id
+         WHERE s.kind = 'interactive' AND s.agent_key IS NULL
+         GROUP BY s.id, r.id ORDER BY s.session_key, r.path LIMIT 1",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    // Git keeps whole seconds: the second that holds the middle of the span, and one after it.
+    let second = |ms: i64| ms.div_euclid(1000) * 1000;
+    let commit = |sha: &str, ts_ms: i64| Write::Commit {
+        repo: repo.clone(),
+        commit: Commit {
+            sha: sha.to_owned(),
+            ts_ms,
+            author: "Fixture <fixture@example.invalid>".to_owned(),
+            lines_added: 1,
+            lines_removed: 0,
+            trailers: BTreeMap::new(),
+        },
+    };
+    bench
+        .store
+        .writer()
+        .write(vec![
+            commit("inside", second(first + (last - first) / 2)),
+            commit("after", second(last) + 5_000),
+        ])
+        .await
+        .unwrap();
+
+    let links = bench
+        .store
+        .reader()
+        .commit_links(0, i64::MAX)
+        .await
+        .unwrap();
+    let linked = |sha: &str| -> Vec<String> {
+        links
+            .iter()
+            .find(|l| l.commit.sha == sha)
+            .unwrap()
+            .sessions
+            .iter()
+            .map(|s| s.session_key.clone())
+            .collect()
+    };
+    assert!(
+        linked("inside").contains(&session),
+        "{session} is not linked: {:?}",
+        linked("inside")
+    );
+    assert_eq!(linked("after"), Vec::<String>::new());
     bench.close().await;
 }

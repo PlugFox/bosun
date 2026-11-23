@@ -3,11 +3,12 @@
 //! The link is a query, never a stored column. In stage 0 every link is [`Link::Inferred`]: a
 //! commit is linked to each session whose time span and repository contain it.
 //!
-//! - **Time.** The session's span is `[started, ended]`, from its first to its last record. Git
-//!   keeps the commit time in whole seconds, so a commit stamped `t` was made somewhere in
-//!   `[t, t + 999 ms]`, and it is in the span when that second overlaps it. The time is the
-//!   committer's: a commit amended, rebased or cherry-picked in a session was made there.
-//!   A session without a start or an end has no span and links nothing.
+//! - **Time.** The session's span is `[started, ended]`, the times of the first and the last
+//!   message the window owns, kept by the writer as it merges them (#95). Git keeps the commit
+//!   time in whole seconds, so a commit stamped `t` was made somewhere in `[t, t + 999 ms]`,
+//!   and it is in the span when that second overlaps it. The time is the committer's: a commit
+//!   amended, rebased or cherry-picked in a session was made there. A window without messages
+//!   has no span and links nothing.
 //! - **Repository.** A session's repositories are those its messages are attributed to
 //!   (`message.repo_id`); a session none of whose messages is attributed falls back to the
 //!   repository that contains its first working directory (the innermost one, on whole path

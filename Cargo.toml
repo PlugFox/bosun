@@ -170,6 +170,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_git_skip_protected_paths)",
   "cfg(mutant_git_skip_config_snapshot)",
   "cfg(mutant_git_trailer_all_commits)",
+  "cfg(mutant_ingest_no_session_span)",
 ] }
 
 [workspace.lints.clippy]

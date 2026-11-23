@@ -174,7 +174,7 @@ Reads and searches before a session's first write: 2 sessions, 4 calls, 25 est. 
 
 ### Items: inferred sessions (estimate)
 
-Interactive sessions attributed to an item by inference: an interactive session is inferred for an item when its messages of the range in a repository span the time of a commit there that no run's commit range holds and whose Item: trailer names the item (the time-and-repository link of #3); the whole session counts, main transcript and sub-agents, so the figure is an upper bound. Their tokens are exact; the attribution is not, and these numbers are never added to an item's runs.
+Interactive sessions attributed to an item by inference: an interactive session is inferred for an item when one of its windows contains a commit that no run's commit range holds and whose Item: trailer names the item, by the time-and-repository link of #3 (the window's span, from its first to its last message, holds the commit's time, and its messages are in the commit's repository); the whole session counts, main transcript and sub-agents, so the figure is an upper bound. Their tokens are exact; the attribution is not, and these numbers are never added to an item's runs.
 
 None.
 

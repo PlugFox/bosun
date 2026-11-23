@@ -771,6 +771,16 @@ async fn upsert_message(
     let read = to_db(t.cache_read, "cache read tokens")?;
     let output = to_db(t.output, "output tokens")?;
     let usage = m.usage.raw.to_string();
+    // The window that owned the message before this record: the merge may move it to an
+    // earlier one, whose span then no longer counts it.
+    let previous = sqlx::query_scalar!(
+        r#"SELECT session_id AS "session_id!: i64" FROM message
+           WHERE provider = ? AND message_key = ?"#,
+        m.provider,
+        m.id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
     let id = sqlx::query_scalar!(
         r#"INSERT INTO message (
                provider, message_key, session_id, source_file_id, ts_ms, model_id, cwd, repo_id,
@@ -835,6 +845,30 @@ async fn upsert_message(
         .execute(&mut *conn)
         .await?;
     }
+    update_span(conn, session).await?;
+    if let Some(previous) = previous.filter(|&p| p != session) {
+        update_span(conn, previous).await?;
+    }
+    Ok(())
+}
+
+/// Sets the span of window `session` to the first and last time of the messages it owns now
+/// (#95), or clears it when it owns none. Recomputed from the rows rather than widened, so the
+/// span is the same whatever order the records were merged in (#17), and a rescan or a
+/// reingest of the same records leaves it as it was.
+async fn update_span(conn: &mut SqliteConnection, session: i64) -> Result<(), Error> {
+    if cfg!(mutant_ingest_no_session_span) {
+        return Ok(());
+    }
+    sqlx::query!(
+        "UPDATE session SET
+             started_ms = (SELECT min(ts_ms) FROM message WHERE session_id = session.id),
+             ended_ms = (SELECT max(ts_ms) FROM message WHERE session_id = session.id)
+         WHERE id = ?",
+        session,
+    )
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
@@ -1126,6 +1160,47 @@ pub(crate) mod tests {
             "the aborted batch is partial: {second} of {BATCH} rows"
         );
         store.close().await.unwrap();
+    }
+
+    /// The span of every window, by SQL: (session id, start, end).
+    async fn spans(store: &Store) -> Vec<(String, Option<i64>, Option<i64>)> {
+        sqlx::query_as("SELECT session_key, started_ms, ended_ms FROM session ORDER BY session_key")
+            .fetch_all(store.reader().pool())
+            .await
+            .unwrap()
+    }
+
+    /// #95: a window's span is its first and last message, in any merge order; a message that
+    /// moves to an earlier window leaves the span of the one it left.
+    #[tokio::test]
+    async fn a_windows_span_is_its_first_and_last_message_in_any_order() {
+        // `m` is seen in f2 first, then in f1 at an earlier time, which then owns it.
+        let records = [
+            record("a", "f2", 500, 1, &[]),
+            record("m", "f2", 900, 1, &[]),
+            record("b", "f1", 300, 1, &[]),
+            record("m", "f1", 100, 1, &[]),
+        ];
+        let want = [
+            ("session-f1".to_owned(), Some(100), Some(300)),
+            ("session-f2".to_owned(), Some(500), Some(500)),
+        ];
+        for order in [[0, 1, 2, 3], [3, 2, 1, 0], [2, 3, 0, 1]] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path().join("bosun.db"), Options::default())
+                .await
+                .unwrap();
+            let batch: Vec<Write> = [source_file("f1"), source_file("f2")]
+                .into_iter()
+                .chain(order.iter().map(|&i| write(records[i].clone())))
+                .collect();
+            store.writer().write(batch.clone()).await.unwrap();
+            assert_eq!(spans(&store).await, want, "order {order:?}");
+            // A rescan of the same records leaves the spans as they are.
+            store.writer().write(batch).await.unwrap();
+            assert_eq!(spans(&store).await, want, "order {order:?}, rescanned");
+            store.close().await.unwrap();
+        }
     }
 
     #[tokio::test]

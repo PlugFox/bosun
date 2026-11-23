@@ -1,0 +1,6 @@
+[toolchain]
+# Latest stable, pinned exactly. Bump deliberately, with the release notes read, together with
+# `rust-version` in Cargo.toml (#1, #12).
+channel = "1.100.0"
+components = ["rustfmt", "clippy", "rust-analyzer"]
+profile = "minimal"

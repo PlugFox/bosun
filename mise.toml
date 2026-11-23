@@ -1,0 +1,6 @@
+# Pinned non-Rust tools (#12). Rust itself is pinned in rust-toolchain.toml.
+# Node and the web package manager join here in stage 3 (#9).
+[tools]
+"aqua:EmbarkStudios/cargo-deny" = "0.22.0"
+"aqua:crate-ci/typos" = "1.52.2"
+"github:bnjbvr/cargo-machete" = "0.10.1"

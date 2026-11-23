@@ -1,0 +1,25 @@
+name: Design question
+description: A decision the design issues leave open or get wrong.
+labels: [design, needs-decision]
+body:
+  - type: input
+    id: issue
+    attributes:
+      label: Design issue
+      description: The issue and section the question is about.
+      placeholder: "#7, Verdict"
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Options and trade-offs
+      description: Each option with what it costs and what it breaks; a recommendation if you have one.
+    validations:
+      required: true

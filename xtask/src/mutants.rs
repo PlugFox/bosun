@@ -267,6 +267,39 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::subagents_are_ingested_and_agree_with_cost_state"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_api_skip_instance_check",
+        issue: 24,
+        breaks: "the daemon does not look for a running instance and removes a live socket",
+        package: "bosund",
+        check: Check::Test("a_second_instance_exits"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_first_identity",
+        issue: 24,
+        breaks: "methods ignore the identity argument and serve the first identity",
+        package: "bosund",
+        check: Check::Test("tokens_never_cross_identities"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_extra_field",
+        issue: 24,
+        breaks: "a protocol type gains a field without the schema being regenerated",
+        package: "bosun-api",
+        check: Check::Cargo(&["xtask", "gen-api", "--check"]),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_default_socket_mode",
+        issue: 24,
+        breaks: "the socket keeps the mode the umask gives it instead of 0600",
+        package: "bosund",
+        check: Check::Test("the_socket_is_private"),
+        // The mode bits exist on Unix only; Windows has no such test.
+        platform: Some(Platform::Linux),
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

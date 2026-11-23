@@ -1,0 +1,625 @@
+{
+  "$defs": {
+    "DaemonStatus": {
+      "description": "Result of `status.daemon`.",
+      "properties": {
+        "api_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "daemon_version": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_ms": {
+          "description": "When the daemon started.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "identity",
+        "api_version",
+        "daemon_version",
+        "pid",
+        "started_ms"
+      ],
+      "type": "object"
+    },
+    "FailedFile": {
+      "description": "A file a pass could not read.",
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "error"
+      ],
+      "type": "object"
+    },
+    "HelloParams": {
+      "description": "Params of `hello`: none yet.",
+      "type": "object"
+    },
+    "HelloResult": {
+      "description": "Result of `hello`.",
+      "properties": {
+        "api_version": {
+          "description": "The API version of the daemon (`bosun_api::API_VERSION`).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "daemon_version": {
+          "description": "The daemon's package version.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "The daemon's process id.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "api_version",
+        "daemon_version",
+        "pid"
+      ],
+      "type": "object"
+    },
+    "IdentityParams": {
+      "description": "Params of a method that names only an identity.",
+      "properties": {
+        "identity": {
+          "description": "The identity's name in the configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity"
+      ],
+      "type": "object"
+    },
+    "IngestStatus": {
+      "description": "Result of `ingest.status`.",
+      "properties": {
+        "database": {
+          "description": "The identity's database file.",
+          "type": "string"
+        },
+        "files": {
+          "description": "Source files known to the store (transcripts and their meta files).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "last_pass": {
+          "$ref": "#/$defs/LastPass",
+          "description": "The last timed pass."
+        },
+        "parsed": {
+          "$ref": "#/$defs/Wide",
+          "description": "Their parsed offsets, summed: what is in the store."
+        },
+        "parsed_since_start": {
+          "$ref": "#/$defs/Wide",
+          "description": "Bytes of complete lines parsed since the daemon started."
+        },
+        "size": {
+          "$ref": "#/$defs/Wide",
+          "description": "Their sizes when last seen, summed."
+        },
+        "transcripts": {
+          "description": "The directory its transcripts are discovered in.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "database",
+        "transcripts",
+        "files",
+        "size",
+        "parsed",
+        "parsed_since_start",
+        "last_pass"
+      ],
+      "type": "object"
+    },
+    "LastPass": {
+      "description": "The outcome of the last timed ingest pass.",
+      "oneOf": [
+        {
+          "description": "No pass has finished since the daemon started.",
+          "properties": {
+            "type": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/PassReport",
+          "description": "The pass finished; some files may have failed on their own.",
+          "properties": {
+            "type": {
+              "const": "done",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The pass stopped: the store failed.",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "type": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ModelRow": {
+      "description": "One model of `tokens.by_model`.",
+      "properties": {
+        "model": {
+          "description": "The model id as transcripts name it.",
+          "type": "string"
+        },
+        "sums": {
+          "$ref": "#/$defs/TokenSums"
+        }
+      },
+      "required": [
+        "model",
+        "sums"
+      ],
+      "type": "object"
+    },
+    "PassReport": {
+      "description": "What one pass over an identity's files did.",
+      "properties": {
+        "failed": {
+          "description": "Files that could not be read; the pass went on without them.",
+          "items": {
+            "$ref": "#/$defs/FailedFile"
+          },
+          "type": "array"
+        },
+        "files": {
+          "description": "Transcript files found.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parsed_bytes": {
+          "$ref": "#/$defs/Wide",
+          "description": "Bytes of complete lines parsed in the pass."
+        },
+        "restarted": {
+          "description": "Files re-read from zero.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "files",
+        "parsed_bytes",
+        "restarted",
+        "failed"
+      ],
+      "type": "object"
+    },
+    "Picodollars": {
+      "description": "An exact amount of money in picodollars (10^-12 USD), as a decimal string.",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "ReingestResult": {
+      "description": "Result of `ingest.reingest`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "pass": {
+          "$ref": "#/$defs/PassReport"
+        }
+      },
+      "required": [
+        "identity",
+        "pass"
+      ],
+      "type": "object"
+    },
+    "RepoRef": {
+      "description": "A repository as configured.",
+      "properties": {
+        "name": {
+          "description": "Its name in the configuration; `null` when the store knows a root the configuration no\nlonger names.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Its root as configured, or the store's key of it when the configuration no longer\nnames it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "RepoRow": {
+      "description": "One repository of `tokens.by_repo`.",
+      "properties": {
+        "repo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`null` for messages whose working directory is in no configured repository."
+        },
+        "sums": {
+          "$ref": "#/$defs/TokenSums"
+        }
+      },
+      "required": [
+        "sums"
+      ],
+      "type": "object"
+    },
+    "SessionRow": {
+      "description": "One context window of `tokens.by_session`. A message counts in the window where it was\nfirst seen. These fields are what `recount --compare` reads (shape version 1, #16).",
+      "properties": {
+        "agent": {
+          "description": "The sub-agent id; `null` for the session's main transcript.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session": {
+          "description": "The provider's session id.",
+          "type": "string"
+        },
+        "sums": {
+          "$ref": "#/$defs/TokenSums"
+        }
+      },
+      "required": [
+        "session",
+        "sums"
+      ],
+      "type": "object"
+    },
+    "TokenSums": {
+      "description": "Sums over a set of messages. Raw token counts are exact whatever the prices; the cost and\neqv cover the priced messages only.",
+      "properties": {
+        "cache_read": {
+          "description": "Input read from the cache.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_write_1h": {
+          "description": "Input written to the 1-hour cache.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_write_5m": {
+          "description": "Input written to the 5-minute cache.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cost": {
+          "$ref": "#/$defs/Picodollars",
+          "description": "The cost of the priced messages, each at the price valid at its time."
+        },
+        "eqv": {
+          "description": "`cost` in input-equivalent tokens of the reference model, rounded for display.",
+          "format": "double",
+          "type": "number"
+        },
+        "input": {
+          "description": "Uncached input.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "messages": {
+          "description": "API messages (distinct message ids), not transcript records.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unpriced_messages": {
+          "description": "Messages of a model with no price at their time: in the token counts, not in the cost.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "messages",
+        "input",
+        "cache_write_5m",
+        "cache_write_1h",
+        "cache_read",
+        "output",
+        "cost",
+        "eqv",
+        "unpriced_messages"
+      ],
+      "type": "object"
+    },
+    "TokensByModel": {
+      "description": "Result of `tokens.by_model`. Rows are sorted by model.",
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/ModelRow"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "$ref": "#/$defs/TokensSummary"
+        }
+      },
+      "required": [
+        "summary",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "TokensByRepo": {
+      "description": "Result of `tokens.by_repo`. Rows are sorted by path, with `null` last.",
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/RepoRow"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "$ref": "#/$defs/TokensSummary"
+        }
+      },
+      "required": [
+        "summary",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "TokensBySession": {
+      "description": "Result of `tokens.by_session`. Rows are sorted by session, then agent (`null` first).",
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/SessionRow"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "$ref": "#/$defs/TokensSummary"
+        }
+      },
+      "required": [
+        "summary",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "TokensParams": {
+      "description": "Params of `tokens.*`: an identity and a half-open time range of message timestamps.",
+      "properties": {
+        "from_ms": {
+          "description": "Messages at or after this time; unbounded when absent.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "identity": {
+          "type": "string"
+        },
+        "to_ms": {
+          "description": "Messages before this time; unbounded when absent.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity"
+      ],
+      "type": "object"
+    },
+    "TokensSummary": {
+      "description": "What every `tokens.*` result holds besides its rows.",
+      "properties": {
+        "from_ms": {
+          "description": "The range asked for.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "identity": {
+          "type": "string"
+        },
+        "reference_model": {
+          "description": "The model every eqv is measured against.",
+          "type": "string"
+        },
+        "to_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total": {
+          "$ref": "#/$defs/TokenSums",
+          "description": "The sums over every row."
+        },
+        "unpriced": {
+          "description": "Models with no price at the time of some of their messages, by name.",
+          "items": {
+            "$ref": "#/$defs/UnpricedModel"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "reference_model",
+        "total",
+        "unpriced"
+      ],
+      "type": "object"
+    },
+    "UnpricedModel": {
+      "description": "A model with no price at the time of some messages.",
+      "properties": {
+        "messages": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "messages"
+      ],
+      "type": "object"
+    },
+    "Wide": {
+      "description": "A 64-bit unsigned count that may exceed 2^53, as a decimal string.",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated from the bosun-api crate by `cargo xtask gen-api`; do not edit. Transport: JSON-RPC 2.0, one message per line, on a Unix socket or a Windows named pipe.",
+  "title": "bosun local API",
+  "x-api-version": 1,
+  "x-methods": {
+    "hello": {
+      "description": "The API version and the daemon's own version. The only method that names no identity.",
+      "params": {
+        "$ref": "#/$defs/HelloParams"
+      },
+      "result": {
+        "$ref": "#/$defs/HelloResult"
+      }
+    },
+    "ingest.reingest": {
+      "description": "Re-reads every transcript file of the identity from zero with the current parser and answers when the pass is done. Nothing is deleted.",
+      "params": {
+        "$ref": "#/$defs/IdentityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ReingestResult"
+      }
+    },
+    "ingest.status": {
+      "description": "The identity's transcript files, how far they are parsed, and the last ingest pass.",
+      "params": {
+        "$ref": "#/$defs/IdentityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/IngestStatus"
+      }
+    },
+    "status.daemon": {
+      "description": "The daemon's version, process and start time, and whether it serves the identity.",
+      "params": {
+        "$ref": "#/$defs/IdentityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DaemonStatus"
+      }
+    },
+    "tokens.by_model": {
+      "description": "Token sums of the identity's messages in the range, per model.",
+      "params": {
+        "$ref": "#/$defs/TokensParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TokensByModel"
+      }
+    },
+    "tokens.by_repo": {
+      "description": "Token sums of the identity's messages in the range, per repository the working directory is in.",
+      "params": {
+        "$ref": "#/$defs/TokensParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TokensByRepo"
+      }
+    },
+    "tokens.by_session": {
+      "description": "Token sums of the identity's messages in the range, per context window (a session's main transcript or one of its sub-agents).",
+      "params": {
+        "$ref": "#/$defs/TokensParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TokensBySession"
+      }
+    }
+  }
+}

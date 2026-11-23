@@ -11,7 +11,9 @@ changes, the issue changes with it.
   and the sqlx CLI.
 - Repository tasks are `cargo xtask <task>`: `check-deps` for the dependency rules,
   `lint-fixtures` for the synthetic-fixture templates (`fixtures/README.md`), `mutants` for the
-  mutant job, `sqlx-prepare` after changing a query or a migration of `bosun-store`. The build
+  mutant job, `sqlx-prepare` after changing a query or a migration of `bosun-store`, `gen-api`
+  after changing a protocol type of `bosun-api` (it rewrites `schema/bosun-api.schema.json`,
+  which CI checks). The build
   reads the committed query cache `.sqlx/` (`SQLX_OFFLINE=true` in `.cargo/config.toml`) and
   needs no database.
 - A check is not trusted until it has been seen failing: every acceptance item names a mutant

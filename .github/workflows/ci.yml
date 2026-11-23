@@ -70,6 +70,10 @@ jobs:
       # query or a migration changed without `cargo xtask sqlx-prepare`.
       - name: The sqlx offline cache is current
         run: cargo xtask sqlx-prepare --check
+      # The JSON Schema half of the contract job (#12, #24): a protocol type changed without
+      # `cargo xtask gen-api` fails here.
+      - name: The API schema is current
+        run: cargo xtask gen-api --check
 
   # Mutants (#12, #15): platform-independent ones are sharded on Linux; a mutant bound to a
   # platform runs only there. `mutants` is the required check that gathers them.

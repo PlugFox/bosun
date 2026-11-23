@@ -1,25 +1,33 @@
-//! What the daemon serves: one store and one ingest per identity (#2, rule 4), and the
-//! start-up and shutdown around them.
+//! What the daemon serves: one store, one ingest and one event stream per identity (#2, rule
+//! 4), and the start-up and shutdown around them.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bosun_api::rpc::{ErrorObject, code};
+use bosun_api::{EventBody, Wide};
 use bosun_client::framing;
 use bosun_client::{Endpoint, Stream};
 use bosun_config::{Config, Repo};
-use bosun_ingest::{Handle, Ingest, Options as IngestOptions, claude};
+use bosun_ingest::{Handle, Ingest, Options as IngestOptions, Report, claude};
 use bosun_store::{Options as StoreOptions, Store};
-use tokio::io::BufReader;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::api;
+use crate::api::{self, Answer};
 use crate::commits::Commits;
+use crate::events::{self, Batch, Events, Subscriber};
 use crate::listen::{self, ClaimError, Listener};
 
-/// One identity: its own store and its own ingest.
+/// How often the ingest's counters are compared for `ingest_progress` and `ingest_pass`.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The most events written to a subscriber in one batch.
+const BATCH: usize = 256;
+
+/// One identity: its own store, its own ingest and its own event stream.
 #[derive(Debug)]
 pub(crate) struct Served {
     pub(crate) name: String,
@@ -33,6 +41,8 @@ pub(crate) struct Served {
     pub(crate) commits: Commits,
     /// Its timer task; aborted at shutdown.
     pub(crate) commit_task: JoinHandle<()>,
+    /// The identity's events; the loop (#62) publishes here too.
+    pub(crate) events: Events,
 }
 
 /// Everything a request can reach.
@@ -103,7 +113,9 @@ pub(crate) async fn run(
         ClaimError::Io(e) => Failure::Other(format!("cannot listen: {e}")),
     })?;
 
-    let identities = match open(&config).await {
+    // A restart starts a new epoch, so a client's old sequence is never taken for a new one.
+    let epoch = format!("{}-{}", now_ms(), std::process::id());
+    let identities = match open(&config, &epoch, events::Options::default()).await {
         Ok(identities) => identities,
         Err((opened, e)) => {
             listener.close();
@@ -120,7 +132,10 @@ pub(crate) async fn run(
         identities,
     });
 
+    let progress = tokio::spawn(watch_ingest(state.clone()));
     serve(listener, &state, stop).await;
+    progress.abort();
+    let _ = progress.await;
     match Arc::try_unwrap(state) {
         Ok(state) => shut_down(state.identities).await,
         Err(_) => eprintln!("bosund: a connection outlived shutdown; stores left to the OS"),
@@ -131,8 +146,10 @@ pub(crate) async fn run(
 
 /// Opens each identity's store and starts its ingest. On failure, what was opened is returned
 /// with the error so it can be closed.
-async fn open(
+pub(crate) async fn open(
     config: &Config,
+    epoch: &str,
+    options: events::Options,
 ) -> Result<BTreeMap<String, Served>, (BTreeMap<String, Served>, String)> {
     let mut identities = BTreeMap::new();
     for plan in bosun_ingest::plans(config) {
@@ -180,13 +197,14 @@ async fn open(
                 ingest: bosun_ingest::spawn(ingest),
                 commits,
                 commit_task,
+                events: Events::new(epoch, options),
             },
         );
     }
     Ok(identities)
 }
 
-async fn shut_down(identities: BTreeMap<String, Served>) {
+pub(crate) async fn shut_down(identities: BTreeMap<String, Served>) {
     for (name, served) in identities {
         served.commit_task.abort();
         let _ = served.commit_task.await;
@@ -200,7 +218,11 @@ async fn shut_down(identities: BTreeMap<String, Served>) {
 }
 
 /// Accepts connections until `stop` completes, then ends every connection.
-async fn serve(mut listener: Listener, state: &Arc<State>, stop: impl Future<Output = ()>) {
+pub(crate) async fn serve(
+    mut listener: Listener,
+    state: &Arc<State>,
+    stop: impl Future<Output = ()>,
+) {
     let mut connections = JoinSet::new();
     tokio::pin!(stop);
     loop {
@@ -223,7 +245,8 @@ async fn serve(mut listener: Listener, state: &Arc<State>, stop: impl Future<Out
     while connections.join_next().await.is_some() {}
 }
 
-/// Answers the requests of one connection, one at a time, until it closes.
+/// Answers the requests of one connection, one at a time, until it closes or subscribes; a
+/// subscribed connection carries its events until either side ends it.
 async fn connection(state: Arc<State>, stream: Box<dyn Stream>) {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
@@ -231,10 +254,99 @@ async fn connection(state: Arc<State>, stream: Box<dyn Stream>) {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = api::handle_line(&state, &line).await
-            && framing::write_message(&mut write, &response).await.is_err()
-        {
-            return;
+        match api::handle_line(&state, &line).await {
+            Answer::Reply(None) => {}
+            Answer::Reply(Some(response)) => {
+                if framing::write_message(&mut write, &response).await.is_err() {
+                    return;
+                }
+            }
+            Answer::Subscribe(response, subscriber) => {
+                // The stream needs nothing else of the state; a shutdown need not wait for it.
+                drop(state);
+                if framing::write_message(&mut write, &response).await.is_ok() {
+                    stream_events(read, write, subscriber).await;
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// Writes a subscriber's events until the client goes away, falls behind the ring (it is sent
+/// a resync), or stalls a write beyond the stream's limit. Nothing here holds the ring while it
+/// writes, so a slow client slows nobody else.
+async fn stream_events(
+    mut read: impl AsyncRead + Unpin,
+    mut write: impl AsyncWrite + Unpin,
+    mut subscriber: Subscriber,
+) {
+    let stall = subscriber.stall();
+    // What the client sends after subscribing is read only to see the stream end.
+    let mut ignored = [0u8; 512];
+    loop {
+        match subscriber.take(BATCH) {
+            Batch::Lagged(resync) => {
+                let _ = tokio::time::timeout(stall, async {
+                    write.write_all(&resync).await?;
+                    write.flush().await
+                })
+                .await;
+                return;
+            }
+            Batch::Events(batch) if batch.is_empty() => {
+                tokio::select! {
+                    () = subscriber.changed() => {}
+                    read = read.read(&mut ignored) => {
+                        if matches!(read, Ok(0) | Err(_)) {
+                            return;
+                        }
+                    }
+                }
+            }
+            Batch::Events(batch) => {
+                let written = tokio::time::timeout(stall, async {
+                    for event in &batch {
+                        write.write_all(&event.line).await?;
+                    }
+                    write.flush().await
+                })
+                .await;
+                match (written, batch.last()) {
+                    (Ok(Ok(())), Some(last)) => subscriber.delivered(last.seq),
+                    // A broken or stalled client is dropped.
+                    _ => return,
+                }
+            }
+        }
+    }
+}
+
+/// Publishes each identity's ingest progress: `ingest_progress` when it parsed more bytes,
+/// `ingest_pass` or `ingest_failed` when the outcome of its last timed pass changed.
+async fn watch_ingest(state: Arc<State>) {
+    /// What was last published of an identity: bytes parsed, and the last pass's outcome.
+    type Seen = (u64, Option<Result<Report, String>>);
+    let mut seen: BTreeMap<&str, Seen> = BTreeMap::new();
+    let mut tick = tokio::time::interval(PROGRESS_INTERVAL);
+    loop {
+        tick.tick().await;
+        for (name, served) in &state.identities {
+            let (parsed, last) = seen.entry(name.as_str()).or_default();
+            let now = served.ingest.parsed_bytes();
+            if now != *parsed {
+                *parsed = now;
+                served.events.publish(EventBody::IngestProgress {
+                    parsed_since_start: Wide(now),
+                });
+            }
+            let pass = served.ingest.last_pass();
+            if pass != *last {
+                if let Some(outcome) = &pass {
+                    served.events.publish(api::pass_event(false, outcome));
+                }
+                *last = pass;
+            }
         }
     }
 }

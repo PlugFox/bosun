@@ -1,5 +1,5 @@
 //! The daemon binary against its endpoint (#24): a second instance, identity isolation, the
-//! socket's mode and a clean stop. Each test runs its own daemon on its own endpoint, over
+//! socket's mode, a clean stop, and the event stream of a reingest (#69). Each test runs its own daemon on its own endpoint, over
 //! copies of the synthetic fixtures (#16) in a temporary directory.
 
 use std::fmt::Write as _;
@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use bosun_api::rpc::code;
-use bosun_api::{IdentityParams, TokensParams, method};
-use bosun_client::{Client, Endpoint, Error};
+use bosun_api::{EventBody, EventFilter, IdentityParams, TokensParams, method};
+use bosun_client::{Client, Delivery, Endpoint, Error, Subscription};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -294,6 +294,55 @@ async fn the_socket_is_private() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600, "mode {mode:o}");
+}
+
+/// The producer stage 0's daemon has, end to end: a reingest is published to the identity's
+/// subscribers over the endpoint (#69).
+#[tokio::test]
+async fn a_reingest_reaches_a_subscriber() {
+    let home = Home::new(&[("personal", "cache-and-models")]);
+    let _daemon = home.start().await;
+    let mut subscription =
+        Subscription::open(home.endpoint.clone(), "personal", EventFilter::default())
+            .await
+            .unwrap();
+    let ask = IdentityParams {
+        identity: "personal".to_owned(),
+    };
+    let reingest = home
+        .client()
+        .await
+        .call::<method::IngestReingest>(&ask)
+        .await
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    let mut last_seq = 0;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let delivery = tokio::time::timeout(left, subscription.next())
+            .await
+            .expect("no reingest event in time")
+            .unwrap();
+        let Delivery::Event(event) = delivery else {
+            panic!("a resync on a fresh subscription");
+        };
+        assert!(event.seq > last_seq, "out of order");
+        last_seq = event.seq;
+        if let EventBody::IngestPass {
+            reingest: true,
+            pass,
+        } = event.body
+        {
+            assert_eq!(pass.files, reingest.pass.files);
+            assert!(pass.files > 0);
+            break;
+        }
+    }
+
+    match Subscription::open(home.endpoint.clone(), "nobody", EventFilter::default()).await {
+        Err(Error::Rpc(e)) => assert_eq!(e.code, code::UNKNOWN_IDENTITY),
+        other => panic!("an unknown identity was subscribed: {other:?}"),
+    }
 }
 
 #[cfg(unix)]

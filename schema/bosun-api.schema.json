@@ -473,6 +473,548 @@
       ],
       "type": "object"
     },
+    "Event": {
+      "description": "One event of an identity.",
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/EventBody"
+        },
+        "seq": {
+          "description": "The sequence number, from 1 within the identity and the epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ts_ms": {
+          "description": "When it was published.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "ts_ms",
+        "body"
+      ],
+      "type": "object"
+    },
+    "EventBody": {
+      "description": "What happened. States, causes and reasons are the stable names the store records (#3).",
+      "oneOf": [
+        {
+          "description": "An item took an arrow of its machine (#7).",
+          "properties": {
+            "attempt": {
+              "description": "The attempt current after the transition; 0 before the first.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "attempt_from": {
+              "description": "The attempt's state before and after, when there is an attempt (`spawned`,\n`exited`, `verdict_running`, `pass`, ...).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "attempt_to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cause": {
+              "description": "The event that caused it.",
+              "type": "string"
+            },
+            "from": {
+              "description": "The item's state before and after (`ready`, `claimed`, `running`, `parked`, ...).",
+              "type": "string"
+            },
+            "item": {
+              "type": "string"
+            },
+            "reason": {
+              "description": "Why the item is where it went, for `parked`, `done` and `needs_you`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "type": "string"
+            },
+            "transition": {
+              "description": "The transition's number within the item, from 1.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "item_transition",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "item",
+            "transition",
+            "attempt",
+            "from",
+            "to",
+            "cause"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A session of an attempt started.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "item": {
+              "type": "string"
+            },
+            "mode": {
+              "description": "`fresh`, `resume` or `reset`.",
+              "type": "string"
+            },
+            "session": {
+              "description": "The provider's session id, once known.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "spawn": {
+              "description": "The session's number within the item.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "session_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "item",
+            "attempt",
+            "spawn",
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A session ended.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "exit": {
+              "description": "How it ended: `ok`, `limit`, `auth`, `crash` or `killed`.",
+              "type": "string"
+            },
+            "item": {
+              "type": "string"
+            },
+            "spawn": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "session_ended",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "item",
+            "attempt",
+            "spawn",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One line a session printed: the live tail. Delivered only to subscriptions that opted\nin ([`EventFilter::tail`]).",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "item": {
+              "type": "string"
+            },
+            "line": {
+              "type": "string"
+            },
+            "spawn": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stream": {
+              "$ref": "#/$defs/OutputStream"
+            },
+            "type": {
+              "const": "session_output",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "item",
+            "attempt",
+            "spawn",
+            "stream",
+            "line"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Usage of a session's new messages since the last delta.",
+          "properties": {
+            "item": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session": {
+              "description": "The provider's session id.",
+              "type": "string"
+            },
+            "sums": {
+              "$ref": "#/$defs/TokenSums"
+            },
+            "type": {
+              "const": "usage_delta",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session",
+            "sums"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A verdict run started.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "item": {
+              "type": "string"
+            },
+            "run": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "verdict_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "item",
+            "attempt",
+            "run"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A verdict run finished.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "duration_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "item": {
+              "type": "string"
+            },
+            "result": {
+              "description": "`pass`, `fail` or `timeout`.",
+              "type": "string"
+            },
+            "run": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "verdict_finished",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "item",
+            "attempt",
+            "run",
+            "result",
+            "duration_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An item parked on a provider limit.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "item": {
+              "type": "string"
+            },
+            "type": {
+              "const": "limit_parked",
+              "type": "string"
+            },
+            "until_ms": {
+              "description": "When the limit resets, if the exit named it.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "item",
+            "attempt"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An item parked on a limit woke up.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "item": {
+              "type": "string"
+            },
+            "type": {
+              "const": "limit_resumed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "item",
+            "attempt"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The queue of a repository changed: cards added, removed, reordered or edited.",
+          "properties": {
+            "hash": {
+              "description": "The hash of the queue's new snapshot.",
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "type": {
+              "const": "queue_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "repo",
+            "hash"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The lint findings of a card changed; empty when it passes now.",
+          "properties": {
+            "card": {
+              "type": "string"
+            },
+            "findings": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "type": {
+              "const": "lint_findings",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "repo",
+            "card",
+            "findings"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Syncing a repository's board failed.",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "type": {
+              "const": "board_sync_error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "repo",
+            "error"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A pause, a resume or the kill switch.",
+          "properties": {
+            "repo": {
+              "description": "The repository paused or resumed; every repository when absent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "description": "`running`, `paused` or `killed`.",
+              "type": "string"
+            },
+            "type": {
+              "const": "control_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The ingest parsed more bytes.",
+          "properties": {
+            "parsed_since_start": {
+              "$ref": "#/$defs/Wide",
+              "description": "Bytes of complete lines parsed since the daemon started."
+            },
+            "type": {
+              "const": "ingest_progress",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "parsed_since_start"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An ingest pass finished: a timed pass whose outcome differs from the previous one's,\nor a reingest.",
+          "properties": {
+            "pass": {
+              "$ref": "#/$defs/PassReport"
+            },
+            "reingest": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "ingest_pass",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "reingest",
+            "pass"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An ingest pass stopped: the store failed.",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "reingest": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "ingest_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "reingest",
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EventFilter": {
+      "description": "Which events a subscription delivers.",
+      "properties": {
+        "kinds": {
+          "description": "Only these kinds (the `type` of [`EventBody`]); every kind when absent. Session output\nlines need [`EventFilter::tail`] as well.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Session output lines, the live tail: opt-in, because it is the heavy kind. Absent: no\noutput line is delivered."
+        }
+      },
+      "type": "object"
+    },
     "FailedFile": {
       "description": "A file a pass could not read.",
       "properties": {
@@ -881,6 +1423,35 @@
       ],
       "type": "object"
     },
+    "OutputStream": {
+      "description": "Which stream of a session a line came from.",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "stdout",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "stderr",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "PassReport": {
       "description": "What one pass over an identity's files did.",
       "properties": {
@@ -1287,6 +1858,73 @@
       ],
       "type": "object"
     },
+    "Resync": {
+      "description": "The params of an [`RESYNC`] notification: the subscriber missed events and is dropped.",
+      "properties": {
+        "epoch": {
+          "type": "string"
+        },
+        "head": {
+          "description": "The sequence of the last event published when the subscriber was dropped. A client\nthat refetches its state after this has seen everything up to `head`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/$defs/ResyncReason"
+        }
+      },
+      "required": [
+        "epoch",
+        "head",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ResyncReason": {
+      "description": "Why a client must refetch its state.",
+      "oneOf": [
+        {
+          "description": "The daemon no longer holds the sequence asked for: the ring moved past it.",
+          "properties": {
+            "type": {
+              "const": "gone",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The epoch asked for is not the daemon's: it restarted since.",
+          "properties": {
+            "type": {
+              "const": "restarted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The subscriber fell behind the ring while it was connected.",
+          "properties": {
+            "type": {
+              "const": "lagged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ScanState": {
       "description": "The outcome of a repository's last commit scan.",
       "oneOf": [
@@ -1388,6 +2026,87 @@
         "session",
         "sums"
       ],
+      "type": "object"
+    },
+    "SubscribeParams": {
+      "description": "Params of `events.subscribe`.",
+      "properties": {
+        "epoch": {
+          "description": "The epoch of `from_seq`, as a previous [`SubscribeResult`] or [`Resync`] named it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "filter": {
+          "$ref": "#/$defs/EventFilter",
+          "default": {},
+          "description": "Which events to deliver."
+        },
+        "from_seq": {
+          "description": "The first sequence wanted: one past the last the client has seen. Absent: only events\npublished from now on, with no replay.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "identity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity"
+      ],
+      "type": "object"
+    },
+    "SubscribeResult": {
+      "description": "Result of `events.subscribe`.",
+      "properties": {
+        "epoch": {
+          "description": "The daemon's epoch: a reconnect names it with its `from_seq`.",
+          "type": "string"
+        },
+        "head": {
+          "description": "The sequence of the last event published so far; 0 before the first.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "resync": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResyncReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present when the events asked for are not held: the client refetches its state, and the\nstream starts after `head`. Absent: the stream starts at `from_seq` (after `head` when\nnone was given), with no gap."
+        }
+      },
+      "required": [
+        "identity",
+        "epoch",
+        "head"
+      ],
+      "type": "object"
+    },
+    "Tail": {
+      "description": "The live tail a subscription opted into.",
+      "properties": {
+        "item": {
+          "description": "The output of this item's sessions only; of every item when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "TokenSums": {
@@ -1769,6 +2488,15 @@
   "title": "bosun local API",
   "x-api-version": 1,
   "x-methods": {
+    "events.subscribe": {
+      "description": "Subscribes to the identity's events from `from_seq` of `epoch`, or from now. The connection then carries the `events.event` and `events.resync` notifications in `x-notifications` and takes no more requests.",
+      "params": {
+        "$ref": "#/$defs/SubscribeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SubscribeResult"
+      }
+    },
     "hello": {
       "description": "The API version and the daemon's own version. The only method that names no identity.",
       "params": {
@@ -1848,6 +2576,20 @@
       },
       "result": {
         "$ref": "#/$defs/TokensBySession"
+      }
+    }
+  },
+  "x-notifications": {
+    "events.event": {
+      "description": "One event of the subscribed identity, in sequence order.",
+      "params": {
+        "$ref": "#/$defs/Event"
+      }
+    },
+    "events.resync": {
+      "description": "The subscriber missed events: it refetches its state; the daemon closes the connection.",
+      "params": {
+        "$ref": "#/$defs/Resync"
       }
     }
   }

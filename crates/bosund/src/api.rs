@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 
 use bosun_api::rpc::{self, ErrorObject, Request, Response, code};
 use bosun_api::{
-    API_VERSION, CommitScan, DaemonStatus, Estimates, FailedFile, HelloResult, IngestStatus,
-    LastPass, Method, ModelRow, PassReport, Picodollars, ReingestResult, RepoRef, RepoRow, Report,
-    ReportParams, SessionRow, TokenSums, TokensByModel, TokensByRepo, TokensBySession,
-    TokensParams, TokensSummary, UnpricedModel, Wide, method,
+    API_VERSION, CommitScan, DaemonStatus, Estimates, EventBody, FailedFile, HelloResult,
+    IngestStatus, LastPass, Method, ModelRow, PassReport, Picodollars, ReingestResult, RepoRef,
+    RepoRow, Report, ReportParams, SessionRow, TokenSums, TokensByModel, TokensByRepo,
+    TokensBySession, TokensParams, TokensSummary, UnpricedModel, Wide, method,
 };
 use bosun_core::{Cost, PriceTable};
 use bosun_store::{Bill, By, Group};
@@ -15,47 +15,102 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::events::Subscriber;
 use crate::state::{Served, State};
 
-/// Answers one line: `None` for a notification, which gets no response.
-pub(crate) async fn handle_line(state: &State, line: &str) -> Option<Response> {
-    let value: Value = match serde_json::from_str(line) {
-        Ok(value) => value,
-        Err(e) => {
-            return Some(Response::error(
-                Value::Null,
-                ErrorObject::new(code::PARSE_ERROR, format!("not JSON: {e}")),
-            ));
-        }
+/// The answer to one line.
+#[derive(Debug)]
+pub(crate) enum Answer {
+    /// A response; `None` for a notification, which gets none.
+    Reply(Option<Response>),
+    /// The response to `events.subscribe`: the connection carries the subscriber's events
+    /// from now on.
+    Subscribe(Response, Subscriber),
+}
+
+/// Answers one line.
+pub(crate) async fn handle_line(state: &State, line: &str) -> Answer {
+    let request = match request(line) {
+        Ok(request) => request,
+        Err(response) => return Answer::Reply(Some(*response)),
     };
+    if request.method == method::EventsSubscribe::NAME {
+        return subscribe(state, request);
+    }
+    let outcome = dispatch(state, &request.method, request.params).await;
+    let Some(id) = request.id else {
+        return Answer::Reply(None);
+    };
+    Answer::Reply(Some(match outcome {
+        Ok(result) => Response::result(id, result),
+        Err(error) => Response::error(id, error),
+    }))
+}
+
+/// Parses one line into a request, or the error response it gets.
+fn request(line: &str) -> Result<Request, Box<Response>> {
+    let refuse =
+        |id, code, message: String| Box::new(Response::error(id, ErrorObject::new(code, message)));
+    let value: Value = serde_json::from_str(line)
+        .map_err(|e| refuse(Value::Null, code::PARSE_ERROR, format!("not JSON: {e}")))?;
     if value.is_array() {
-        return Some(Response::error(
+        return Err(refuse(
             Value::Null,
-            ErrorObject::new(code::INVALID_REQUEST, "batches are not supported"),
+            code::INVALID_REQUEST,
+            "batches are not supported".to_owned(),
         ));
     }
     let id = value.get("id").cloned().unwrap_or(Value::Null);
-    let request = match serde_json::from_value::<Request>(value) {
-        Ok(request) if request.jsonrpc == rpc::JSONRPC => request,
-        Ok(_) => {
-            return Some(Response::error(
-                id,
-                ErrorObject::new(code::INVALID_REQUEST, "`jsonrpc` must be \"2.0\""),
-            ));
-        }
-        Err(e) => {
-            return Some(Response::error(
-                id,
-                ErrorObject::new(code::INVALID_REQUEST, format!("not a request: {e}")),
-            ));
-        }
+    match serde_json::from_value::<Request>(value) {
+        Ok(request) if request.jsonrpc == rpc::JSONRPC => Ok(request),
+        Ok(_) => Err(refuse(
+            id,
+            code::INVALID_REQUEST,
+            "`jsonrpc` must be \"2.0\"".to_owned(),
+        )),
+        Err(e) => Err(refuse(
+            id,
+            code::INVALID_REQUEST,
+            format!("not a request: {e}"),
+        )),
+    }
+}
+
+/// Subscribes the connection to the identity's events. A subscription asked for in a
+/// notification is not made: it could not say where the stream starts.
+fn subscribe(state: &State, request: Request) -> Answer {
+    let Some(id) = request.id else {
+        return Answer::Reply(None);
     };
-    let outcome = dispatch(state, &request.method, request.params).await;
-    let id = request.id?;
-    Some(match outcome {
-        Ok(result) => Response::result(id, result),
-        Err(error) => Response::error(id, error),
-    })
+    let made = params::<method::EventsSubscribe>(request.params).and_then(|p| {
+        let served = state.identity(&p.identity)?;
+        let (answer, subscriber) =
+            served
+                .events
+                .subscribe(&served.name, p.epoch.as_deref(), p.from_seq, p.filter);
+        Ok((result(&answer)?, subscriber))
+    });
+    match made {
+        Ok((answer, subscriber)) => Answer::Subscribe(Response::result(id, answer), subscriber),
+        Err(error) => Answer::Reply(Some(Response::error(id, error))),
+    }
+}
+
+/// The event of a finished ingest pass.
+pub(crate) fn pass_event(
+    reingest: bool,
+    outcome: &Result<bosun_ingest::Report, String>,
+) -> EventBody {
+    match outcome {
+        Ok(report) => EventBody::IngestPass {
+            reingest,
+            pass: pass_report(report),
+        },
+        Err(error) => EventBody::IngestFailed {
+            reingest,
+            error: error.clone(),
+        },
+    }
 }
 
 fn params<M: Method>(params: Value) -> Result<M::Params, ErrorObject> {
@@ -249,7 +304,9 @@ fn pass_report(report: &bosun_ingest::Report) -> PassReport {
 /// Re-reads every transcript, then the new commits, so that a report after a reingest sees
 /// both.
 async fn reingest(served: &Served) -> Result<ReingestResult, ErrorObject> {
-    let report = served.ingest.reingest().await.map_err(failed)?;
+    let outcome = served.ingest.reingest().await.map_err(|e| e.to_string());
+    served.events.publish(pass_event(true, &outcome));
+    let report = outcome.map_err(failed)?;
     served.commits.refresh().await;
     Ok(ReingestResult {
         identity: served.name.clone(),
@@ -428,9 +485,10 @@ mod tests {
 
     async fn answer(line: &str) -> Option<Value> {
         let state = State::empty();
-        handle_line(&state, line)
-            .await
-            .map(|r| serde_json::to_value(r).unwrap())
+        match handle_line(&state, line).await {
+            Answer::Reply(response) => response.map(|r| serde_json::to_value(r).unwrap()),
+            Answer::Subscribe(..) => panic!("subscribed with no identity"),
+        }
     }
 
     #[tokio::test]
@@ -462,6 +520,14 @@ mod tests {
             (
                 r#"{"jsonrpc":"2.0","id":1,"method":"ingest.status","params":{"identity":"x"}}"#,
                 code::UNKNOWN_IDENTITY,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"method":"events.subscribe","params":{"identity":"x"}}"#,
+                code::UNKNOWN_IDENTITY,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"method":"events.subscribe","params":{}}"#,
+                code::INVALID_PARAMS,
             ),
         ];
         for (line, expected) in cases {

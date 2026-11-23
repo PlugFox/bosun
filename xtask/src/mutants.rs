@@ -679,6 +679,32 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("work::tests::a_transcript_is_a_run_session_in_either_order"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_api_no_event_seq",
+        issue: 69,
+        breaks: "a subscription ignores the client's sequence: a reconnect starts from now",
+        package: "bosund",
+        check: Check::Test("stream_tests::a_reconnect_gets_every_missed_event_in_order"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_slow_subscriber_blocks",
+        issue: 69,
+        breaks: "the publisher waits for a subscriber that has fallen behind",
+        package: "bosund",
+        check: Check::Test(
+            "stream_tests::a_subscriber_that_stops_reading_is_dropped_and_never_slows_the_publisher",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_tail_always_on",
+        issue: 69,
+        breaks: "session output lines reach subscriptions that did not opt into the tail",
+        package: "bosund",
+        check: Check::Test("stream_tests::output_lines_reach_only_subscriptions_that_opted_in"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

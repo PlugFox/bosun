@@ -8,5 +8,21 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The local-file backend is on by default: it costs nothing beyond the TOML writer, and it is
+# the backend of tests and of repositories with no board (#5). `bosund` may still disable
+# default features and name it explicitly.
+default = ["local_file"]
+local_file = ["toml_edit/display"]
+# The backend-agnostic trait test suite, for other backends' tests (#60, #61).
+testsuite = []
+
+[dependencies]
+sha2.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

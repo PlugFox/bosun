@@ -210,6 +210,40 @@ impl Env {
         env
     }
 
+    /// Appends command-scope git configuration after the entries this environment already
+    /// carries: `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` from the current
+    /// `GIT_CONFIG_COUNT` on, and the count raised. This is how `bosun-git`'s injected trailer
+    /// hooks (`Hooks::git_config`, #59) reach the agent's git without displacing the
+    /// `credential.helper` reset at entry 0.
+    pub fn add_git_config<K, V>(&mut self, entries: impl IntoIterator<Item = (K, V)>)
+    where
+        K: AsRef<str>,
+        V: Into<OsString>,
+    {
+        let mut count: usize = self
+            .get("GIT_CONFIG_COUNT")
+            .and_then(OsStr::to_str)
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        for (key, value) in entries {
+            self.set(&format!("GIT_CONFIG_KEY_{count}"), key.as_ref());
+            self.set(&format!("GIT_CONFIG_VALUE_{count}"), value);
+            count += 1;
+            self.set("GIT_CONFIG_COUNT", count.to_string());
+        }
+    }
+
+    /// Sets a variable the daemon itself gives the session, such as the trailer values of #59
+    /// (`bosun-git`'s `Hooks::env`). A reserved or credential name is refused into
+    /// [`Env::denied`], as a repository's would be.
+    pub fn add_session_var(&mut self, name: &str, value: impl Into<OsString>) {
+        if reserved(name) || credential(name) {
+            self.denied.push(name.to_owned());
+        } else {
+            self.set(name, value);
+        }
+    }
+
     /// The variables, in the order they were first set.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &OsStr)> {
         self.vars.iter().map(|(k, v)| (k.as_str(), v.as_os_str()))

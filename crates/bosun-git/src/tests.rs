@@ -1,6 +1,7 @@
 //! The invoker and the preconditions against throwaway repositories built with the system git
 //! in temporary directories (#53).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -12,6 +13,11 @@ use crate::*;
 /// signing, but with the repository's own hooks and fsmonitor live. Returns the trimmed
 /// output.
 fn agent(dir: &Path, args: &[&str]) -> String {
+    agent_with(dir, &[], args)
+}
+
+/// [`agent`] with the variables `env` added.
+fn agent_with(dir: &Path, env: &[(String, String)], args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -22,6 +28,7 @@ fn agent(dir: &Path, args: &[&str]) -> String {
         .args(args)
         .env("GIT_CONFIG_GLOBAL", NO_HOOKS)
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .output()
         .expect("git runs");
     assert!(
@@ -366,4 +373,467 @@ fn planted_hooks_never_run_under_the_invoker() {
     git.optional(&["symbolic-ref", "--quiet", "HEAD"]).unwrap();
     check(&git, &base, &Expected::default()).unwrap();
     assert_eq!(markers(&all), Vec::<String>::new());
+}
+
+// ---- #59: the ignored-file and configuration snapshots, protected paths, trailers ----
+
+/// The environment of an agent session's git as `bosun-identity` builds it, reduced to what
+/// the trailers need: its `credential.helper` reset at entry 0, the injected hooks after it,
+/// and the trailer variables when `trailers` is given.
+fn session(hooks: &Hooks, trailers: Option<&Trailers>) -> Vec<(String, String)> {
+    let mut entries = vec![("credential.helper".to_owned(), String::new())];
+    entries.extend(hooks.git_config());
+    let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), entries.len().to_string())];
+    for (i, (key, value)) in entries.into_iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{i}"), key));
+        env.push((format!("GIT_CONFIG_VALUE_{i}"), value));
+    }
+    if let Some(trailers) = trailers {
+        env.extend(Hooks::env(trailers));
+    }
+    env
+}
+
+fn trailers(session: &str) -> Trailers {
+    Trailers {
+        item: "owner/repo#59".to_owned(),
+        run: "run-1".to_owned(),
+        session: session.to_owned(),
+    }
+}
+
+fn expected(trailers: &Trailers) -> Expected {
+    Expected {
+        item: [trailers.item.clone()].into(),
+        run: [trailers.run.clone()].into(),
+        session: [trailers.session.clone()].into(),
+        co_authored_by: BTreeSet::new(),
+    }
+}
+
+/// How many lines of the message of HEAD start with each of `Item:`, `Run:`, `Session:`.
+fn trailer_counts(dir: &Path) -> [usize; 3] {
+    let body = agent(dir, &["log", "-1", "--format=%B"]);
+    ["Item: ", "Run: ", "Session: "].map(|key| body.lines().filter(|l| l.starts_with(key)).count())
+}
+
+fn sh(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[test]
+fn the_injected_hooks_path_overrides_a_repository_local_one() {
+    let repo = repository();
+    let dir = repo.path();
+    let outside = tempfile::tempdir().unwrap();
+    let local_marker = outside.path().join("local.ran");
+    let injected_marker = outside.path().join("injected.ran");
+    std::fs::create_dir(dir.join(".githooks")).unwrap();
+    plant(&dir.join(".githooks").join("pre-commit"), &local_marker);
+    agent(dir, &["config", "core.hooksPath", ".githooks"]);
+    let injected = outside.path().join("hooks");
+    std::fs::create_dir(&injected).unwrap();
+    plant(&injected.join("pre-commit"), &injected_marker);
+    let env = vec![
+        ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()),
+        ("GIT_CONFIG_KEY_0".to_owned(), "core.hooksPath".to_owned()),
+        ("GIT_CONFIG_VALUE_0".to_owned(), sh(&injected)),
+    ];
+
+    assert_eq!(
+        agent_with(dir, &env, &["config", "--get", "core.hooksPath"]),
+        sh(&injected)
+    );
+    agent_with(
+        dir,
+        &env,
+        &["commit", "--quiet", "--allow-empty", "-m", "Probe"],
+    );
+    assert_eq!(
+        markers(&[&local_marker, &injected_marker]),
+        ["injected.ran"]
+    );
+    // The control: without the environment the repository's own hook runs.
+    std::fs::remove_file(&injected_marker).unwrap();
+    agent(dir, &["commit", "--quiet", "--allow-empty", "-m", "Probe"]);
+    assert_eq!(markers(&[&local_marker, &injected_marker]), ["local.ran"]);
+}
+
+#[test]
+fn a_hidden_file_behind_a_new_gitignore_line_is_refused_but_not_in_a_build_dir() {
+    let repo = repository();
+    let dir = repo.path();
+    let git = Git::new(dir);
+    std::fs::write(dir.join(".gitignore"), "old.log\n").unwrap();
+    commit(dir, "b.txt", "Ignore old logs");
+    std::fs::write(dir.join("old.log"), "already there").unwrap();
+    let build: BTreeSet<String> = ["target".to_owned()].into();
+    let before = Ignored::capture(&git).unwrap();
+    assert_eq!(before.paths, ["old.log".to_owned()].into());
+
+    // The session: a `.gitignore` line that hides the file making the verdict pass, and
+    // build output in the declared build directory.
+    std::fs::write(dir.join(".gitignore"), "old.log\nfixture.dat\ntarget/\n").unwrap();
+    commit(dir, "c.txt", "Ignore more");
+    std::fs::write(dir.join("fixture.dat"), "makes the verdict pass").unwrap();
+    std::fs::create_dir_all(dir.join("target").join("debug")).unwrap();
+    std::fs::write(dir.join("target").join("debug").join("out.o"), "build").unwrap();
+    std::fs::write(dir.join("old.log"), "rewritten, still the old file").unwrap();
+
+    assert_eq!(
+        ignored(&git, &before, &build).unwrap(),
+        [Refusal::NewIgnored {
+            paths: vec!["fixture.dat".to_owned()]
+        }]
+    );
+    assert!(dir.join("fixture.dat").exists(), "nothing is deleted");
+
+    // The same file inside the build directory is expected.
+    std::fs::rename(
+        dir.join("fixture.dat"),
+        dir.join("target").join("fixture.dat"),
+    )
+    .unwrap();
+    assert_eq!(ignored(&git, &before, &build).unwrap(), []);
+    // A new file in a directory that was ignored already counts too.
+    std::fs::create_dir(dir.join("cache")).unwrap();
+    std::fs::write(dir.join(".gitignore"), "old.log\ntarget/\ncache/\n").unwrap();
+    let before = Ignored::capture(&git).unwrap();
+    std::fs::write(dir.join("cache").join("x.bin"), "x").unwrap();
+    assert_eq!(
+        ignored(&git, &before, &build).unwrap(),
+        [Refusal::NewIgnored {
+            paths: vec!["cache/x.bin".to_owned()]
+        }]
+    );
+}
+
+/// The changed files of `refusals`, each as its last two path components.
+fn changed(refusals: &[Refusal]) -> Vec<String> {
+    refusals
+        .iter()
+        .map(|r| match r {
+            Refusal::ConfigChanged { path, .. } => {
+                let path = sh(path);
+                let parts: Vec<&str> = path.rsplit('/').take(2).collect();
+                format!("{}/{}", parts[1], parts[0])
+            }
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+/// One edit of git's configuration and the file it changes.
+type Step<'a> = (&'a str, Box<dyn Fn() + 'a>);
+
+#[test]
+fn a_planted_hook_an_include_edit_and_an_exclude_edit_are_each_refused() {
+    let repo = repository();
+    let dir = repo.path();
+    let git = Git::new(dir);
+    let outside = tempfile::tempdir().unwrap();
+    // An include target next to the configuration, one that does not exist yet, and a
+    // repository-local hooks directory.
+    std::fs::write(
+        dir.join(".git").join("extra.inc"),
+        "[alias]\n\tx = status\n",
+    )
+    .unwrap();
+    agent(dir, &["config", "--add", "include.path", "extra.inc"]);
+    agent(dir, &["config", "--add", "include.path", "later.inc"]);
+    std::fs::create_dir(dir.join(".githooks")).unwrap();
+    agent(dir, &["config", "core.hooksPath", ".githooks"]);
+    let marker = outside.path().join("ran");
+
+    let snapshot = GitConfig::capture(&git).unwrap();
+    // Capturing and comparing do not themselves change anything.
+    Base::capture(&git).unwrap();
+    Ignored::capture(&git).unwrap();
+    assert_eq!(config(&git, &snapshot).unwrap(), []);
+
+    let info = dir.join(".git").join("info");
+    let steps: [Step; 7] = [
+        (
+            "hooks/pre-commit",
+            Box::new(|| plant(&dir.join(".git").join("hooks").join("pre-commit"), &marker)),
+        ),
+        (
+            ".githooks/post-commit",
+            Box::new(|| plant(&dir.join(".githooks").join("post-commit"), &marker)),
+        ),
+        (
+            ".git/extra.inc",
+            Box::new(|| {
+                std::fs::write(
+                    dir.join(".git").join("extra.inc"),
+                    "[core]\n\tbare = false\n",
+                )
+                .unwrap();
+            }),
+        ),
+        (
+            ".git/later.inc",
+            Box::new(|| std::fs::write(dir.join(".git").join("later.inc"), "").unwrap()),
+        ),
+        (
+            "info/exclude",
+            Box::new(|| std::fs::write(info.join("exclude"), "fixture.dat\n").unwrap()),
+        ),
+        (
+            "info/attributes",
+            Box::new(|| std::fs::write(info.join("attributes"), "* -diff\n").unwrap()),
+        ),
+        (
+            ".git/config.worktree",
+            Box::new(|| std::fs::write(dir.join(".git").join("config.worktree"), "").unwrap()),
+        ),
+    ];
+    for (name, step) in steps {
+        let snapshot = GitConfig::capture(&git).unwrap();
+        step();
+        assert_eq!(changed(&config(&git, &snapshot).unwrap()), [name], "{name}");
+    }
+    // An edit of `.git/config` itself.
+    let snapshot = GitConfig::capture(&git).unwrap();
+    agent(dir, &["config", "core.fsmonitor", "false"]);
+    assert_eq!(changed(&config(&git, &snapshot).unwrap()), [".git/config"]);
+}
+
+#[test]
+fn each_configuration_file_is_one_entry_whatever_its_spelling() {
+    let repo = repository();
+    let dir = repo.path();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    // The same file under three spellings: built from git's directories, an origin git prints,
+    // and an include target written through `..`.
+    std::fs::write(dir.join(".git").join("extra.inc"), "").unwrap();
+    agent(dir, &["config", "include.path", "../.git/extra.inc"]);
+    let git = Git::new(dir.join("sub").join(".."));
+    let snapshot = GitConfig::capture(&git).unwrap();
+    for name in ["config", "extra.inc"] {
+        let count = snapshot
+            .files
+            .keys()
+            .filter(|p| p.file_name().is_some_and(|n| n == name))
+            .count();
+        assert_eq!(count, 1, "{name}: {:?}", snapshot.files.keys());
+    }
+
+    // Spellings of one path, existing or not, are one canonical path.
+    let a = crate::snapshot::canonical(&dir.join("sub").join("..").join("missing.inc"));
+    let b = crate::snapshot::canonical(&dir.join("missing.inc"));
+    assert_eq!(a, b);
+    let a = crate::snapshot::canonical(&dir.join(".").join(".git").join("config"));
+    let b = crate::snapshot::canonical(&dir.join(".git").join("config"));
+    assert_eq!(a, b);
+
+    // An edit of the file is reported once.
+    agent(dir, &["config", "core.fsmonitor", "false"]);
+    assert_eq!(changed(&config(&git, &snapshot).unwrap()), [".git/config"]);
+}
+
+#[test]
+fn a_commit_touching_the_verdicts_test_is_refused_with_the_diff_stat() {
+    let repo = repository();
+    let dir = repo.path();
+    let git = Git::new(dir);
+    std::fs::create_dir(dir.join("tests")).unwrap();
+    commit(dir, "tests/verdict.rs", "Add the verdict's test");
+    let base = Base::capture(&git).unwrap();
+    let protects = |path: &str| path.starts_with("tests/") || path.ends_with(".gitignore");
+
+    commit(dir, "src.rs", "Change the code");
+    assert_eq!(protected(&git, &base, protects, &[]).unwrap(), []);
+
+    commit(dir, "tests/verdict.rs", "Weaken the test");
+    let refusals = protected(&git, &base, protects, &[]).unwrap();
+    let [Refusal::Protected { paths, stat }] = refusals.as_slice() else {
+        panic!("{refusals:?}");
+    };
+    assert_eq!(paths, &["tests/verdict.rs"]);
+    assert!(stat.contains("tests/verdict.rs"), "{stat}");
+    assert!(stat.contains("1 file changed"), "{stat}");
+    assert!(!stat.contains("src.rs"), "{stat}");
+
+    // Listed as allowed in the snapshot, it is not refused; other entries do not cover it.
+    let allowed = ["tests/verdict.rs".to_owned()];
+    assert_eq!(protected(&git, &base, protects, &allowed).unwrap(), []);
+    let allowed = ["tests/verdict.rs.bak".to_owned()];
+    assert_eq!(protected(&git, &base, protects, &allowed).unwrap().len(), 1);
+
+    // Changed and changed back is still an edit; the stat shows the commits.
+    let base = Base::capture(&git).unwrap();
+    std::fs::write(dir.join(".gitignore"), "x\n").unwrap();
+    agent(dir, &["add", "--all"]);
+    agent(dir, &["commit", "--quiet", "-m", "Ignore x"]);
+    agent(dir, &["rm", "--quiet", ".gitignore"]);
+    agent(dir, &["commit", "--quiet", "-m", "Unignore x"]);
+    let refusals = protected(&git, &base, protects, &[]).unwrap();
+    let [Refusal::Protected { paths, stat }] = refusals.as_slice() else {
+        panic!("{refusals:?}");
+    };
+    assert_eq!(paths, &[".gitignore"]);
+    assert!(
+        stat.contains("Ignore x") && stat.contains("Unignore x"),
+        "{stat}"
+    );
+}
+
+/// Plants the repository's own `pre-commit` and `prepare-commit-msg` hooks, writing markers
+/// into `outside`: in `.git/hooks` or, with `hooks_path`, in a directory `core.hooksPath`
+/// names.
+fn with_own_hooks(dir: &Path, outside: &Path, hooks_path: bool) -> [PathBuf; 2] {
+    let hooks = if hooks_path {
+        agent(dir, &["config", "core.hooksPath", ".githooks"]);
+        dir.join(".githooks")
+    } else {
+        dir.join(".git").join("hooks")
+    };
+    std::fs::create_dir_all(&hooks).unwrap();
+    let markers = [
+        outside.join("pre-commit.ran"),
+        outside.join("prepare-commit-msg.ran"),
+    ];
+    plant(&hooks.join("pre-commit"), &markers[0]);
+    plant(&hooks.join("prepare-commit-msg"), &markers[1]);
+    markers
+}
+
+#[test]
+fn an_agent_commit_carries_the_three_trailers_once_also_after_amend() {
+    let repo = repository();
+    let dir = repo.path();
+    let git = Git::new(dir);
+    let outside = tempfile::tempdir().unwrap();
+    let own = with_own_hooks(dir, outside.path(), false);
+    let hooks = Hooks::install(outside.path().join("bosun-hooks")).unwrap();
+    let values = trailers("session-1");
+    let env = session(&hooks, Some(&values));
+    let base = Base::capture(&git).unwrap();
+
+    std::fs::write(dir.join("a.txt"), "changed").unwrap();
+    agent_with(dir, &env, &["commit", "--quiet", "--all", "-m", "Change a"]);
+    assert_eq!(trailer_counts(dir), [1, 1, 1]);
+    let body = agent(dir, &["log", "-1", "--format=%B"]);
+    assert!(
+        body.contains("Item: owner/repo#59\nRun: run-1\nSession: session-1"),
+        "{body}"
+    );
+    // The repository's own hooks ran, chained.
+    assert_eq!(
+        markers(&[&own[0], &own[1]]),
+        ["pre-commit.ran", "prepare-commit-msg.ran"]
+    );
+
+    agent_with(dir, &env, &["commit", "--quiet", "--amend", "--no-edit"]);
+    assert_eq!(trailer_counts(dir), [1, 1, 1]);
+    agent_with(
+        dir,
+        &env,
+        &["commit", "--quiet", "--amend", "-m", "Change a\n\nMore."],
+    );
+    assert_eq!(trailer_counts(dir), [1, 1, 1]);
+    // `--no-verify` skips pre-commit but not the trailers.
+    agent_with(
+        dir,
+        &env,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--no-verify",
+            "-m",
+            "Empty",
+        ],
+    );
+    assert_eq!(trailer_counts(dir), [1, 1, 1]);
+
+    let expected = expected(&values);
+    assert_eq!(messages(&git, &base, &expected).unwrap(), []);
+    assert_eq!(missing(&git, &base, &expected).unwrap(), []);
+}
+
+#[test]
+fn a_commit_without_the_injection_carries_none_and_its_hooks_run_as_before() {
+    for hooks_path in [false, true] {
+        let repo = repository();
+        let dir = repo.path();
+        let git = Git::new(dir);
+        let outside = tempfile::tempdir().unwrap();
+        let own = with_own_hooks(dir, outside.path(), hooks_path);
+        let hooks = Hooks::install(outside.path().join("bosun-hooks")).unwrap();
+        let base = Base::capture(&git).unwrap();
+
+        // The user's own commit: no injection at all.
+        agent(
+            dir,
+            &["commit", "--quiet", "--allow-empty", "-m", "User commit"],
+        );
+        assert_eq!(trailer_counts(dir), [0, 0, 0]);
+        assert_eq!(
+            markers(&[&own[0], &own[1]]),
+            ["pre-commit.ran", "prepare-commit-msg.ran"]
+        );
+        for marker in &own {
+            std::fs::remove_file(marker).unwrap();
+        }
+
+        // The injected hooks without the marker (the values left over in a shell, say): they
+        // only chain.
+        let mut env = session(&hooks, None);
+        env.extend(
+            Hooks::env(&trailers("session-1"))
+                .into_iter()
+                .filter(|(k, _)| k != MARKER_VAR),
+        );
+        agent_with(
+            dir,
+            &env,
+            &["commit", "--quiet", "--allow-empty", "-m", "Also user"],
+        );
+        assert_eq!(trailer_counts(dir), [0, 0, 0], "hooks_path {hooks_path}");
+        assert_eq!(
+            markers(&[&own[0], &own[1]]),
+            ["pre-commit.ran", "prepare-commit-msg.ran"]
+        );
+
+        // Both commits lack the trailers: a report line, not a refusal.
+        let found = missing(&git, &base, &expected(&trailers("session-1"))).unwrap();
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|m| m.keys == ["Item", "Run", "Session"]));
+    }
+}
+
+#[test]
+fn a_commit_with_a_wrong_session_is_refused_as_forged() {
+    let repo = repository();
+    let dir = repo.path();
+    let git = Git::new(dir);
+    let outside = tempfile::tempdir().unwrap();
+    let hooks = Hooks::install(outside.path().join("bosun-hooks")).unwrap();
+    let base = Base::capture(&git).unwrap();
+    let env = session(&hooks, Some(&trailers("someone-elses-session")));
+    agent_with(
+        dir,
+        &env,
+        &["commit", "--quiet", "--allow-empty", "-m", "Forged"],
+    );
+
+    let sha = agent(dir, &["rev-parse", "HEAD"]);
+    let right = expected(&trailers("session-1"));
+    assert_eq!(
+        messages(&git, &base, &right).unwrap(),
+        [Reason::ForgedTrailer {
+            sha: sha.clone(),
+            key: "Session".to_owned(),
+            value: "someone-elses-session".to_owned(),
+        }]
+    );
+    assert_eq!(
+        missing(&git, &base, &right).unwrap(),
+        [Missing {
+            sha,
+            keys: vec!["Session"]
+        }]
+    );
 }

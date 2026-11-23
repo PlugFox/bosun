@@ -1,22 +1,24 @@
 //! Discovery and the reads of one transcript file: blocking I/O, run on the blocking pool by
 //! [`crate::Ingest`] (#3, "Ingest contract").
 
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use bosun_core::WindowKey;
 
 use crate::layout::{FileKind, Provider};
 use crate::line::{Batch, LineParser, parse_lines};
+use crate::meter::Gauge;
 use crate::record::Source;
 
 /// How deep discovery walks below the provider's directory. Claude Code's deepest transcript
 /// is four levels down (`<project>/<session>/subagents/agent-<id>.jsonl`).
 const MAX_DEPTH: usize = 6;
 
-/// A transcript file found by discovery.
+/// A transcript file found by discovery, or examined by a tailer.
 #[derive(Debug, Clone)]
 pub(crate) struct Found {
     pub(crate) path: PathBuf,
@@ -24,6 +26,8 @@ pub(crate) struct Found {
     pub(crate) key: String,
     pub(crate) window: WindowKey,
     pub(crate) size: u64,
+    /// When the file was last written, where the platform says.
+    pub(crate) modified: Option<SystemTime>,
     /// The window's meta file, when there is one.
     pub(crate) meta: Option<PathBuf>,
 }
@@ -35,14 +39,14 @@ pub(crate) fn discover<P: Provider>(
     root: &Path,
 ) -> (Vec<Found>, Vec<(PathBuf, io::Error)>) {
     let mut transcripts = Vec::new();
-    let mut metas = BTreeMap::new();
     let mut failed = Vec::new();
-    walk(provider, root, 0, &mut |path| match provider.locate(path) {
-        Some(located) if located.kind == FileKind::Meta => {
-            metas.insert(located.window, path.to_owned());
+    walk(provider, root, 0, &mut |path| {
+        if provider
+            .locate(path)
+            .is_some_and(|located| located.kind == FileKind::Transcript)
+        {
+            transcripts.push(path.to_owned());
         }
-        Some(located) => transcripts.push((path.to_owned(), located.window)),
-        None => {}
     })
     .unwrap_or_else(|(path, e)| {
         if e.kind() != io::ErrorKind::NotFound || path != root {
@@ -51,27 +55,75 @@ pub(crate) fn discover<P: Provider>(
     });
 
     let mut found = Vec::new();
-    for (path, window) in transcripts {
-        if cfg!(mutant_ingest_skip_subagents) && window.agent_id.is_some() {
-            // Mutant: sub-agent transcripts are not discovered.
-            continue;
-        }
-        let examined = std::fs::metadata(&path).and_then(|meta| Ok((meta.len(), file_key(&path)?)));
-        match examined {
-            Ok((size, key)) => found.push(Found {
-                meta: metas.get(&window).cloned(),
-                path,
-                key,
-                window,
-                size,
-            }),
+    for path in transcripts {
+        match examine(provider, &path, None) {
+            Ok(Some(file)) => found.push(file),
             // Deleted since it was listed: its rows stay, as for any deleted file.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Ok(None) => {}
             Err(e) => failed.push((path, e)),
         }
     }
     found.sort_by(|a, b| a.path.cmp(&b.path));
     (found, failed)
+}
+
+/// The transcript at `path` as it is now, or `None` when it is gone or is not a transcript.
+/// On Windows the file id is read through a handle; `open` counts it while it is held.
+pub(crate) fn examine<P: Provider>(
+    provider: &P,
+    path: &Path,
+    open: Option<&Arc<Gauge>>,
+) -> io::Result<Option<Found>> {
+    let Some(located) = provider.locate(path) else {
+        return Ok(None);
+    };
+    if located.kind != FileKind::Transcript {
+        return Ok(None);
+    }
+    if cfg!(mutant_ingest_skip_subagents) && located.window.agent_id.is_some() {
+        // Mutant: sub-agent transcripts are not discovered.
+        return Ok(None);
+    }
+    let examined = std::fs::metadata(path).and_then(|meta| {
+        let _held = open.map(|open| Gauge::hold(open, 1));
+        Ok((meta, file_key(path)?))
+    });
+    let (meta, key) = match examined {
+        Ok(examined) => examined,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(Found {
+        meta: provider.meta_path(path).filter(|meta| meta.is_file()),
+        path: path.to_owned(),
+        key,
+        window: located.window,
+        size: meta.len(),
+        modified: meta.modified().ok(),
+    }))
+}
+
+/// Whether `path` is where discovery would look: under `root`, no deeper than [`MAX_DEPTH`],
+/// and only through directories the provider descends into. A watch event outside that is
+/// ignored, as discovery would ignore the file.
+pub(crate) fn within<P: Provider>(provider: &P, root: &Path, path: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix(root) else {
+        return false;
+    };
+    let parts: Vec<_> = rest.components().collect();
+    let Some((_, dirs)) = parts.split_last() else {
+        return false;
+    };
+    dirs.len() < MAX_DEPTH
+        && dirs.iter().all(|dir| match dir {
+            std::path::Component::Normal(name) => {
+                name.to_str().is_some_and(|name| provider.descend(name))
+            }
+            _ => false,
+        })
 }
 
 /// Calls `visit` for every file under `dir`, down to [`MAX_DEPTH`]. Unreadable subdirectories
@@ -130,9 +182,9 @@ pub(crate) fn line_hash(line: &[u8]) -> String {
     format!("{}:{hash:016x}", line.len())
 }
 
-/// Whether the line that ends at `offset` in `path` still hashes to `hash`: the file grew,
+/// Whether the line that ends at `offset` in `file` still hashes to `hash`: the file grew,
 /// rather than being rewritten.
-pub(crate) fn hash_matches(path: &Path, offset: u64, hash: &str) -> io::Result<bool> {
+pub(crate) fn hash_matches(file: &mut File, offset: u64, hash: &str) -> io::Result<bool> {
     let Some(len) = hash
         .split_once(':')
         .and_then(|(len, _)| len.parse::<u64>().ok())
@@ -142,7 +194,6 @@ pub(crate) fn hash_matches(path: &Path, offset: u64, hash: &str) -> io::Result<b
     let Some(start) = offset.checked_sub(len) else {
         return Ok(false);
     };
-    let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(start))?;
     let mut line = Vec::new();
     file.take(len).read_to_end(&mut line)?;
@@ -156,21 +207,23 @@ pub(crate) struct Chunk {
     pub(crate) last_hash: Option<String>,
     /// The read filled its limit: there may be more bytes past it.
     pub(crate) full: bool,
+    /// Bytes read into memory, complete lines or not.
+    pub(crate) read: u64,
 }
 
-/// Reads up to `limit` bytes of `path` from `offset` and parses every complete line of them.
+/// Reads up to `limit` bytes of `file` from `offset` and parses every complete line of them.
 pub(crate) fn read_chunk<P: LineParser>(
     parser: &P,
     source: &Source,
-    path: &Path,
+    file: &mut File,
     offset: u64,
     limit: u64,
 ) -> io::Result<Chunk> {
-    let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = Vec::new();
     file.take(limit).read_to_end(&mut bytes)?;
-    let full = bytes.len() as u64 >= limit;
+    let read = bytes.len() as u64;
+    let full = read >= limit;
     if cfg!(mutant_ingest_parse_partial) && !bytes.is_empty() && !bytes.ends_with(b"\n") {
         // Mutant: a last line still being written is parsed as if it were complete.
         bytes.push(b'\n');
@@ -185,6 +238,7 @@ pub(crate) fn read_chunk<P: LineParser>(
         batch,
         last_hash,
         full,
+        read,
     })
 }
 
@@ -199,10 +253,11 @@ mod tests {
         std::fs::write(&path, b"first\nsecond\n").unwrap();
         let hash = line_hash(b"second\n");
         assert!(hash.starts_with("7:"));
-        assert!(hash_matches(&path, 13, &hash).unwrap());
-        assert!(!hash_matches(&path, 6, &hash).unwrap());
-        assert!(!hash_matches(&path, 3, &hash).unwrap());
-        assert!(!hash_matches(&path, 13, "garbage").unwrap());
+        let mut file = File::open(&path).unwrap();
+        assert!(hash_matches(&mut file, 13, &hash).unwrap());
+        assert!(!hash_matches(&mut file, 6, &hash).unwrap());
+        assert!(!hash_matches(&mut file, 3, &hash).unwrap());
+        assert!(!hash_matches(&mut file, 13, "garbage").unwrap());
     }
 
     #[test]

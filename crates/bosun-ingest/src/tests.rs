@@ -15,6 +15,8 @@ use tempfile::TempDir;
 use crate::testing::{Totals, cases, expected, files, fixtures, roots};
 use crate::{Ingest, LineParser, Options, Outcome, Provider, Source, claude, spawn, stub};
 
+mod backfill;
+
 /// A temporary identity: a transcript directory and a database.
 struct Bench {
     dir: TempDir,
@@ -453,6 +455,8 @@ async fn a_new_message_lands_within_one_rescan_interval() {
     let every = Duration::from_millis(300);
     let options = Options {
         rescan_interval: every,
+        // Watching off: only the rescan can find the new line (#21).
+        watch: false,
         ..Options::default()
     };
     let ingest = bench

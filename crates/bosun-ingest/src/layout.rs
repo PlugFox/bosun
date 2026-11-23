@@ -1,7 +1,7 @@
 //! Where a provider keeps its transcripts: what discovery needs to know of a provider beyond
 //! its line parser.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bosun_core::{Gap, WindowKey, WindowMeta};
 
@@ -34,6 +34,13 @@ pub trait Provider: LineParser + Clone + Send + Sync + 'static {
     fn descend(&self, dir: &str) -> bool {
         let _ = dir;
         true
+    }
+
+    /// The meta file that describes the window of the transcript at `transcript`, if the
+    /// provider writes one there. Whether it exists is checked by the caller.
+    fn meta_path(&self, transcript: &Path) -> Option<PathBuf> {
+        let _ = transcript;
+        None
     }
 
     /// Reads a meta file of `window`.

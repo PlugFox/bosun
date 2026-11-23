@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "sessions": [
+    { "session": "00000000-0000-4000-8000-009100000000", "agent": null, "messages": 2, "input": 7, "cache_write_5m": 90, "cache_write_1h": 0, "cache_read": 13000, "output": 60 }
+  ],
+  "repos": [
+    { "repo": "/fixture/repo-a", "messages": 1, "input": 1, "cache_write_5m": 20, "cache_write_1h": 0, "cache_read": 4000, "output": 50 },
+    { "repo": null, "messages": 1, "input": 6, "cache_write_5m": 70, "cache_write_1h": 0, "cache_read": 9000, "output": 10 }
+  ],
+  "total": { "messages": 2, "input": 7, "cache_write_5m": 90, "cache_write_1h": 0, "cache_read": 13000, "output": 60 }
+}

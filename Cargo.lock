@@ -75,6 +75,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bosun-ingest"
+version = "0.0.0"
+dependencies = [
+ "bosun-core",
+ "serde_json",
+]
+
+[[package]]
 name = "bosun-store"
 version = "0.0.0"
 dependencies = [

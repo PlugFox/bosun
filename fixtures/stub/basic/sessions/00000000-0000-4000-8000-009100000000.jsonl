@@ -1,0 +1,6 @@
+{"event":"start","session":"00000000-0000-4000-8000-009100000000","at":"2000-01-09T00:00:00.000Z"}
+{"event":"turn","session":"00000000-0000-4000-8000-009100000000","id":"msg_000000000000000091000001","at":"2000-01-09T00:00:01.000Z","dir":"/fixture/repo-a","model":"stub-model-1","tokens":{"fresh":1,"cached":4000,"written":20,"generated":50},"calls":[{"id":"toolu_000000000000000091900001","tool":"open","arg":"src/lib.rs"}]}
+{"event":"result","session":"00000000-0000-4000-8000-009100000000","id":"toolu_000000000000000091900001","bytes":22,"failed":false}
+{"event":"telemetry","session":"00000000-0000-4000-8000-009100000000","at":"2000-01-09T00:00:02.000Z"}
+{"event":"turn","session":"00000000-0000-4000-8000-009100000000","id":"msg_000000000000000091000002","at":"2000-01-09T00:00:03.000Z","dir":"/fixture/repo-b","model":"stub-model-1","tokens":{"fresh":6,"cached":9000,"written":70,"generated":10},"calls":[{"id":"toolu_000000000000000091900002","tool":"shell","arg":"cargo test --all"}]}
+{"event":"result","session":"00000000-0000-4000-8000-009100000000","id":"toolu_000000000000000091900002","bytes":30,"failed":true}

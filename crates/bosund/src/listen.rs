@@ -107,6 +107,7 @@ mod windows {
     use std::path::PathBuf;
 
     use bosun_client::{Endpoint, Stream};
+    use bosun_proc::pipe::OwnerOnly;
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
     /// A named pipe server. One instance always waits for the next client.
@@ -114,25 +115,29 @@ mod windows {
     pub(crate) struct Listener {
         next: NamedPipeServer,
         path: PathBuf,
+        owner: OwnerOnly,
     }
 
     impl Listener {
         /// Creates the first instance of the pipe; fails with `PermissionDenied` when one
-        /// exists. Default security (the DACL is stage 1, #4); remote clients are refused.
+        /// exists. Every instance has a DACL with one entry, for the user the daemon runs as
+        /// (#4, #71); remote clients are refused.
         pub(crate) fn bind(endpoint: &Endpoint) -> io::Result<Self> {
             let path = endpoint.path().to_owned();
-            let next = ServerOptions::new()
+            let owner = OwnerOnly::new()?;
+            let mut options = ServerOptions::new();
+            options
                 .first_pipe_instance(!cfg!(mutant_api_skip_instance_check))
-                .reject_remote_clients(true)
-                .create(&path)?;
-            Ok(Self { next, path })
+                .reject_remote_clients(true);
+            let next = create(&owner, &options, &path)?;
+            Ok(Self { next, path, owner })
         }
 
         pub(crate) async fn accept(&mut self) -> io::Result<Box<dyn Stream>> {
             let connected = self.next.connect().await;
-            let following = ServerOptions::new()
-                .reject_remote_clients(true)
-                .create(&self.path)?;
+            let mut options = ServerOptions::new();
+            options.reject_remote_clients(true);
+            let following = create(&self.owner, &options, &self.path)?;
             // A failed instance is replaced too: a client that went away breaks it.
             let instance = std::mem::replace(&mut self.next, following);
             connected?;
@@ -142,6 +147,63 @@ mod windows {
         /// Stops listening; the pipe goes away with its last handle.
         pub(crate) fn close(self) {
             drop(self.next);
+        }
+
+        /// The instance waiting for the next client.
+        #[cfg(test)]
+        pub(crate) fn next(&self) -> &NamedPipeServer {
+            &self.next
+        }
+    }
+
+    /// One instance of the pipe, with the owner-only descriptor, read back before it is used:
+    /// an instance whose DACL admits anyone else is refused.
+    fn create(
+        owner: &OwnerOnly,
+        options: &ServerOptions,
+        path: &PathBuf,
+    ) -> io::Result<NamedPipeServer> {
+        // Mutant `mutant_api_default_pipe_acl` (#71): the default descriptor, which admits
+        // SYSTEM and the Administrators too.
+        let pipe = if cfg!(mutant_api_default_pipe_acl) {
+            options.create(path)?
+        } else {
+            owner.create_pipe(options, path)?
+        };
+        owner.verify(&pipe)?;
+        Ok(pipe)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use bosun_proc::pipe::{AceKind, current_user_sid, dacl};
+
+        use super::*;
+
+        #[tokio::test]
+        async fn every_instance_admits_only_the_owner() {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos();
+            let endpoint = Endpoint::new(format!("bosund-acl-test-{}-{nanos}", std::process::id()));
+            let mut listener = Listener::bind(&endpoint).unwrap();
+            let user = current_user_sid().unwrap();
+            let only_owner = |pipe: &NamedPipeServer| {
+                let aces = dacl(pipe).unwrap();
+                assert_eq!(aces.len(), 1, "{aces:?}");
+                assert_eq!(aces[0].kind, AceKind::Allow, "{aces:?}");
+                assert_eq!(aces[0].sid, user, "{aces:?}");
+            };
+            only_owner(listener.next());
+            // The instance created for the next client after one connects.
+            let client = tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(endpoint.path())
+                .unwrap();
+            let accepted = listener.accept().await.unwrap();
+            only_owner(listener.next());
+            drop((client, accepted));
+            listener.close();
         }
     }
 }

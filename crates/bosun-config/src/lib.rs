@@ -103,12 +103,18 @@
 //! [`Policy::hash`] and [`Config::repo_hash`] fingerprint the parsed values, never the text:
 //! the daemon records both at claim, and a change of either during a session sends the item to
 //! Needs you (#2). Reordering keys or editing a comment changes neither.
+//!
+//! # Tools
+//!
+//! [`tools`] finds the programs the configuration relies on (`git`, `gh`, the agent CLI, the
+//! verdict shell) on a given `PATH`, for `bosun doctor` and the daemon alike.
 
 mod disk;
 mod error;
 mod hash;
 mod policy;
 mod read;
+pub mod tools;
 mod validate;
 
 #[cfg(test)]

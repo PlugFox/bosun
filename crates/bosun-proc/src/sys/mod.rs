@@ -9,3 +9,8 @@ pub(crate) use unix::*;
 mod windows;
 #[cfg(windows)]
 pub(crate) use windows::*;
+
+#[cfg(windows)]
+mod security;
+#[cfg(windows)]
+pub(crate) use security::*;

@@ -12,23 +12,41 @@
 //! | `retention` | Claude Code deletes transcripts (`cleanupPeriodDays` of the directory's `settings.json`, 30 when absent) sooner than `retention.reingest_window` (warn, #3) |
 //! | `database_disk` | an identity's database directory is on a network or synced disk (fail) |
 //! | `git` | `git` is not on the `PATH` the daemon gets (fail) |
+//! | `sh` | the verdict shell (D4 of #7: `sh` of the Git installation on Windows, or a repository's `verdict.shell`) is not found (fail; warn when no repository has a queue) |
+//! | `claude` | the agent CLI is not on the daemon's `PATH` (fail; warn when no repository has a queue) |
+//! | `gh` | `gh` is not on the daemon's `PATH` (fail when a repository has a queue or an identity a `github_login`, else warn) |
+//! | `github_login` | an identity's `gh` (its `gh_config_dir`) is not logged in, or answers as another login than `github_login` (fail) |
 //! | `registration` | no logon registration (fail); its daemon is missing (fail); it is not loaded or enabled (warn) |
 //! | `endpoint` | nothing listens at the endpoint (fail) |
+//! | `endpoint_acl` | Unix: the socket's mode is not 0600 (fail). Windows: skipped, see below |
 //! | `daemon` | the daemon does not answer `hello`, or speaks another API version (fail) |
 //!
 //! The per-identity checks carry the identity's name. The `PATH` the daemon gets is the one
 //! the registration sets on macOS and Linux; on Windows, and with no registration, it is the
 //! `PATH` `bosun doctor` runs with, which approximates the environment the logon task gets.
 //!
+//! The tool checks (#71) look on that same `PATH`: a tool missing there is missing for the
+//! daemon, and its check fails, so `bosun doctor` exits 7 naming it. `github_login` runs
+//! `gh api graphql` for the viewer's login, as the GitHub transport does (D5 of #7), under the
+//! identity's `GH_CONFIG_DIR` and with every token variable removed, so only the identity's
+//! own login answers.
+//!
+//! On Windows `endpoint_acl` is skipped: reading a pipe's DACL takes a handle to it, which
+//! connects to one of the daemon's instances, and a client has no `unsafe` to read it with
+//! (#12). The daemon itself creates every instance with a DACL of one entry, for its user, and
+//! refuses to listen when the DACL it reads back differs (#71).
+//!
 //! The configuration is validated without the disk probe, so that a database on a network disk
 //! is reported by `database_disk` and not as an invalid file.
 
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use bosun_client::{Client, Endpoint, Error};
-use bosun_config::{Config, Disk, DiskProbe, SystemProbe};
+use bosun_config::{Config, Disk, DiskProbe, SystemProbe, tools};
 use serde::Serialize;
 
 use crate::install::{self, Platform};
@@ -133,8 +151,9 @@ impl DiskProbe for NoProbe {
 /// Runs every check, in the order of the table above.
 pub(crate) async fn run(inputs: &Inputs) -> Vec<Check> {
     let mut checks = Vec::new();
-    if let Some(config) = config(inputs, &mut checks) {
-        identities(inputs, &config, &mut checks);
+    let config = config(inputs, &mut checks);
+    if let Some(config) = &config {
+        identities(inputs, config, &mut checks);
     }
 
     let platform = Platform::host();
@@ -147,7 +166,15 @@ pub(crate) async fn run(inputs: &Inputs) -> Vec<Check> {
         .and_then(|r| r.as_ref().ok())
         .and_then(Option::as_ref)
         .and_then(|r| r.path_var.clone());
-    checks.push(git(registered_path));
+    let path = DaemonPath::new(registered_path);
+    checks.push(git(&path));
+    // Mutant `mutant_doctor_skip_tool_paths` (#71): only `git` is looked for.
+    if !cfg!(mutant_doctor_skip_tool_paths) {
+        let gh = tool_paths(config.as_ref(), &path, &mut checks);
+        if let (Some(config), Some(gh)) = (&config, gh) {
+            logins(inputs, config, &gh, &path, &mut checks);
+        }
+    }
     checks.push(match (platform, registration) {
         (Err(why), _) | (_, Some(Err(why))) => Check::skip("registration", why),
         (Ok(platform), Some(Ok(found))) => registration_check(platform, &inputs.name, found),
@@ -350,37 +377,291 @@ fn database_disk(probe: &SystemProbe, name: &str, database: &Path) -> Check {
     }
 }
 
-/// `git` on `registered` (the registration's `PATH`), else on this process's `PATH`.
-fn git(registered: Option<String>) -> Check {
-    let (path, source) = match registered {
-        Some(path) => (
-            Some(path.into()),
-            "the PATH the registration gives the daemon",
-        ),
-        None => (
-            std::env::var_os("PATH"),
-            if cfg!(windows) {
-                "this PATH, which the logon task inherits from your environment"
-            } else {
-                "this PATH, which bosun install gives the daemon"
+/// The `PATH` the daemon gets: the registration's, else this process's (see the module
+/// documentation), and how to name it.
+struct DaemonPath {
+    path: Option<OsString>,
+    source: &'static str,
+}
+
+impl DaemonPath {
+    fn new(registered: Option<String>) -> Self {
+        match registered {
+            Some(path) => Self {
+                path: Some(path.into()),
+                source: "the PATH the registration gives the daemon",
             },
-        ),
-    };
-    let exe = format!("git{}", std::env::consts::EXE_SUFFIX);
-    let found = path
-        .as_deref()
-        .into_iter()
-        .flat_map(std::env::split_paths)
-        .map(|dir| dir.join(&exe))
-        .find(|candidate| candidate.is_file());
-    match found {
-        Some(git) => Check::ok("git", format!("{} on {source}", git.display())),
+            None => Self {
+                path: std::env::var_os("PATH"),
+                source: if cfg!(windows) {
+                    "this PATH, which the logon task inherits from your environment"
+                } else {
+                    "this PATH, which bosun install gives the daemon"
+                },
+            },
+        }
+    }
+
+    fn find(&self, program: &str) -> Option<PathBuf> {
+        tools::find_program(program, self.path.as_deref())
+    }
+
+    fn shell(&self, configured: Option<&str>) -> Option<PathBuf> {
+        tools::verdict_shell(configured, self.path.as_deref())
+    }
+}
+
+/// `name` with the platform's executable suffix.
+fn exe(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// The fix of a tool missing from the daemon's `PATH`.
+fn on_path_fix(what: &str) -> String {
+    format!(
+        "install {what} and put its directory on PATH, then run bosun install again so the \
+         registration takes the new PATH"
+    )
+}
+
+/// `git` on the daemon's `PATH`.
+fn git(path: &DaemonPath) -> Check {
+    match path.find("git") {
+        Some(git) => Check::ok("git", format!("{} on {}", git.display(), path.source)),
         None => Check::fail(
             "git",
-            format!("no {exe} on {source}"),
-            "install git and put its directory on PATH, then run bosun install again so the \
-             registration takes the new PATH",
+            format!("no {} on {}", exe("git"), path.source),
+            on_path_fix("git"),
         ),
+    }
+}
+
+/// A tool that is missing: a failure when it is `required`, else a warning.
+fn missing(name: &'static str, required: bool, detail: String, fix: String) -> Check {
+    if required {
+        Check::fail(name, detail, fix)
+    } else {
+        Check::warn(name, format!("{detail}; not needed until it has work"), fix)
+    }
+}
+
+/// The verdict shell, the agent CLI and `gh` on the daemon's `PATH` (#71). Each is required
+/// when the configuration gives the daemon work (a repository with a queue) or could not be
+/// read; `gh` also when an identity names a `github_login`. Returns where `gh` is.
+fn tool_paths(
+    config: Option<&Config>,
+    path: &DaemonPath,
+    checks: &mut Vec<Check>,
+) -> Option<PathBuf> {
+    let queued: Vec<(&String, &bosun_config::Repo)> = config.map_or_else(Vec::new, |c| {
+        c.repos.iter().filter(|(_, r)| r.queue.is_some()).collect()
+    });
+    let works = config.is_none() || !queued.is_empty();
+
+    // The default shell, unless every repository with a queue names its own.
+    if queued.is_empty() || queued.iter().any(|(_, r)| r.verdict.shell.is_none()) {
+        let what = if cfg!(windows) {
+            "sh.exe of the Git installation"
+        } else {
+            "sh"
+        };
+        checks.push(match path.shell(None) {
+            Some(sh) => Check::ok("sh", format!("{} on {}", sh.display(), path.source)),
+            None => missing(
+                "sh",
+                works,
+                format!("no {what} for verdicts on {}", path.source),
+                if cfg!(windows) {
+                    "install Git for Windows, which provides sh.exe, or set \
+                     repo.<name>.verdict.shell"
+                        .to_owned()
+                } else {
+                    on_path_fix("sh")
+                },
+            ),
+        });
+    }
+    for (name, repo) in &queued {
+        let Some(shell) = repo.verdict.shell.as_deref() else {
+            continue;
+        };
+        checks.push(match path.shell(Some(shell)) {
+            Some(sh) => Check::ok(
+                "sh",
+                format!(
+                    "repo.{name}.verdict.shell: {} on {}",
+                    sh.display(),
+                    path.source
+                ),
+            ),
+            None => Check::fail(
+                "sh",
+                format!(
+                    "repo.{name}.verdict.shell `{shell}` is not found on {}",
+                    path.source
+                ),
+                format!("install {shell}, or correct repo.{name}.verdict.shell"),
+            ),
+        });
+    }
+
+    checks.push(match path.find("claude") {
+        Some(claude) => Check::ok("claude", format!("{} on {}", claude.display(), path.source)),
+        None => missing(
+            "claude",
+            works,
+            format!(
+                "no {} (the agent CLI, Claude Code) on {}",
+                exe("claude"),
+                path.source
+            ),
+            on_path_fix("Claude Code"),
+        ),
+    });
+
+    let logins = config.is_some_and(|c| c.identities.values().any(|i| i.github_login.is_some()));
+    let gh = path.find("gh");
+    checks.push(match &gh {
+        Some(gh) => Check::ok("gh", format!("{} on {}", gh.display(), path.source)),
+        None => missing(
+            "gh",
+            works || logins,
+            format!("no {} (the GitHub CLI) on {}", exe("gh"), path.source),
+            on_path_fix("the GitHub CLI (gh)"),
+        ),
+    });
+    gh
+}
+
+/// How long `gh` has to name the login.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The viewer's login, as the GitHub transport asks for it (D5 of #7).
+const VIEWER_QUERY: &str = "query{viewer{login}}";
+
+/// Variables through which `gh` would use another token or configuration than the identity's.
+const GH_OVERRIDES: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_HOST",
+];
+
+/// The `gh` command that names the login of `gh_config_dir` on `host`.
+fn login_command(gh: &Path, host: &str, gh_config_dir: &Path, path: &DaemonPath) -> Command {
+    let mut command = Command::new(gh);
+    command
+        .args(["api", "graphql", "--hostname", host, "-f"])
+        .arg(format!("query={VIEWER_QUERY}"))
+        .args(["--jq", ".data.viewer.login"]);
+    for var in GH_OVERRIDES {
+        command.env_remove(var);
+    }
+    command
+        .env("GH_CONFIG_DIR", gh_config_dir)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(dirs) = &path.path {
+        command.env("PATH", dirs);
+    }
+    command
+}
+
+/// Runs `command` for at most `timeout`: its trimmed stdout, or why not.
+fn login_of(mut command: Command, timeout: Duration) -> Result<String, String> {
+    let mut child = command.spawn().map_err(|e| format!("cannot run gh: {e}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("gh did not answer within {} s", timeout.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(format!("cannot wait for gh: {e}")),
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("cannot read the output of gh: {e}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        Err(format!(
+            "gh exited with {}: {}",
+            output.status,
+            first.trim()
+        ))
+    }
+}
+
+/// The `github_login` check of identity `name`, from what `gh` answered.
+fn login_check(
+    name: &str,
+    expected: &str,
+    host: &str,
+    gh_config_dir: &Path,
+    answer: Result<String, String>,
+) -> Check {
+    let dir = gh_config_dir.display();
+    let relogin =
+        format!("log in as {expected}: GH_CONFIG_DIR={dir} gh auth login --hostname {host}");
+    match answer {
+        // GitHub logins are case-insensitive.
+        Ok(login) if login.eq_ignore_ascii_case(expected) => Check::ok(
+            "github_login",
+            format!("{dir} answers as {login} on {host}"),
+        ),
+        Ok(login) if login.is_empty() => Check::fail(
+            "github_login",
+            format!("{dir} named no login on {host}"),
+            relogin,
+        ),
+        Ok(login) => Check::fail(
+            "github_login",
+            format!(
+                "{dir} answers as {login} on {host}, not as {expected} \
+                 (identity.{name}.github_login)"
+            ),
+            format!("{relogin}, or correct identity.{name}.github_login"),
+        ),
+        Err(why) => Check::fail("github_login", format!("{dir} on {host}: {why}"), relogin),
+    }
+}
+
+/// `github_login` of each identity that names one (#71).
+fn logins(inputs: &Inputs, config: &Config, gh: &Path, path: &DaemonPath, checks: &mut Vec<Check>) {
+    for (name, identity) in &config.identities {
+        if inputs.identity.as_ref().is_some_and(|only| only != name) {
+            continue;
+        }
+        let Some(expected) = &identity.github_login else {
+            continue;
+        };
+        let host = &identity.github_host;
+        let check = match &identity.gh_config_dir {
+            None => Check::fail(
+                "github_login",
+                format!("identity.{name}.github_login is set, but gh_config_dir is not"),
+                format!(
+                    "set identity.{name}.gh_config_dir to the GH_CONFIG_DIR where {expected} \
+                     is logged in"
+                ),
+            ),
+            Some(dir) => {
+                let answer = login_of(login_command(gh, host, dir, path), LOGIN_TIMEOUT);
+                login_check(name, expected, host, dir, answer)
+            }
+        };
+        checks.push(check.of(name));
     }
 }
 
@@ -432,6 +713,48 @@ fn registration_check(
     Check::ok("registration", format!("{}{runs}", found.place))
 }
 
+/// Who may open the endpoint (#4, #71): on Unix the socket's mode, which must be 0600.
+#[cfg(unix)]
+fn endpoint_acl(endpoint: &Endpoint) -> Check {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(endpoint.path()) {
+        Err(e) => Check::fail(
+            "endpoint_acl",
+            format!("cannot read the mode of {endpoint}: {e}"),
+            "make the socket's directory readable",
+        ),
+        Ok(meta) if meta.permissions().mode() & 0o777 == 0o600 => {
+            Check::ok("endpoint_acl", format!("{endpoint} has mode 0600"))
+        }
+        Ok(meta) => Check::fail(
+            "endpoint_acl",
+            format!(
+                "{endpoint} has mode {:04o}, not 0600: other users may connect",
+                meta.permissions().mode() & 0o777
+            ),
+            "stop whatever listens there and start bosund again; it creates the socket with \
+             mode 0600",
+        ),
+    }
+}
+
+/// Who may open the endpoint (#4, #71): on Windows the daemon checks it (see the module
+/// documentation).
+#[cfg(windows)]
+fn endpoint_acl(_: &Endpoint) -> Check {
+    Check::skip(
+        "endpoint_acl",
+        "bosund creates the pipe with a DACL of one entry, for its user, and refuses to \
+         listen when the DACL it reads back differs",
+    )
+}
+
+/// Other platforms have neither a socket mode nor a DACL to read here.
+#[cfg(not(any(unix, windows)))]
+fn endpoint_acl(_: &Endpoint) -> Check {
+    Check::skip("endpoint_acl", "not checked on this platform")
+}
+
 async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) {
     let start = "start it: log in again, or run bosun install, which starts it now; run \
                  bosund in a terminal to see why it stops";
@@ -459,6 +782,7 @@ async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) {
         }
     };
     checks.push(Check::ok("endpoint", format!("{endpoint} is reachable")));
+    checks.push(endpoint_acl(endpoint));
     let hello = tokio::time::timeout(bosun_client::CONNECT_TIMEOUT, Client::over(stream))
         .await
         .unwrap_or(Err(Error::Timeout));
@@ -574,6 +898,42 @@ mod tests {
         }
         // A window of part of a day rounds up.
         assert_eq!(days(Duration::from_hours(12)), 1);
+    }
+
+    #[test]
+    fn the_login_check_runs_gh_under_the_identity_s_directory_only() {
+        let path = DaemonPath {
+            path: Some("tools".into()),
+            source: "a test",
+        };
+        let command = login_command(
+            Path::new("gh"),
+            "github.example",
+            Path::new("gh-dir"),
+            &path,
+        );
+        let envs: Vec<_> = command.get_envs().collect();
+        let value = |key: &str| {
+            envs.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        for var in GH_OVERRIDES {
+            assert_eq!(value(var), Some(None), "{var} is removed");
+        }
+        assert_eq!(value("GH_CONFIG_DIR"), Some(Some("gh-dir".to_owned())));
+        assert_eq!(value("PATH"), Some(Some("tools".to_owned())));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args[..4],
+            ["api", "graphql", "--hostname", "github.example"]
+        );
+
+        let check = |answer| login_check("work", "me", "github.com", Path::new("d"), answer);
+        assert_eq!(check(Ok("ME".to_owned())).status, Status::Ok);
+        assert_eq!(check(Ok("other".to_owned())).status, Status::Fail);
+        assert_eq!(check(Ok(String::new())).status, Status::Fail);
+        assert_eq!(check(Err("offline".to_owned())).status, Status::Fail);
     }
 
     #[test]

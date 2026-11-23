@@ -50,8 +50,9 @@
 //!   still succeeds and says so on stderr: the registration is in place.
 //! - `uninstall`: stops that daemon and removes everything install created.
 //! - `doctor`: checks the registration, the configuration, each identity's directories,
-//!   Claude Code's transcript retention, `git` and the endpoint, with the daemon up or down
-//!   (`doctor.rs`). It prints every check, failed or not; it exits 0 when none failed
+//!   Claude Code's transcript retention, the tools on the daemon's PATH (`git`, `sh`, `claude`,
+//!   `gh`), each identity's GitHub login, and the endpoint and who may open it, with the daemon
+//!   up or down (`doctor.rs`). It prints every check, failed or not; it exits 0 when none failed
 //!   (warnings allowed) and 7 when one did.
 //!
 //! `--name` names the registration (default `bosun`): a second daemon, or a test.

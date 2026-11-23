@@ -15,9 +15,11 @@ tokio = { workspace = true, features = ["process"] }
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+tokio = { workspace = true, features = ["net"] }
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_JobObjects",
   "Win32_System_Power",

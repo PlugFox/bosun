@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use bosun_client::{Client, Endpoint};
 use serde_json::Value;
 
-/// The directory `bosun` was built into; `bosund` is built there too.
+/// The directory `bosun` was built into; `bosund` and `fake-agent` are built there too.
 fn bin_dir() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
@@ -25,12 +25,22 @@ fn bin_dir() -> &'static Path {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         let mut build = Command::new(cargo);
         build
-            .args(["build", "--locked", "--package", "bosund"])
+            .args([
+                "build",
+                "--locked",
+                "--package",
+                "bosund",
+                "--package",
+                "fake-agent",
+            ])
             .current_dir(env!("CARGO_MANIFEST_DIR"));
         if dir.file_name().is_some_and(|n| n == "release") {
             build.arg("--release");
         }
-        assert!(build.status().unwrap().success(), "building bosund failed");
+        assert!(
+            build.status().unwrap().success(),
+            "building bosund and fake-agent failed"
+        );
         dir
     })
 }
@@ -364,4 +374,158 @@ async fn logon_registration_registers_queries_and_unregisters() {
         String::from_utf8_lossy(&output.stdout).contains("nothing is registered"),
         "{output:?}"
     );
+}
+
+/// `fake-agent` copied into `dir` as each of `names`: a program that only exists there.
+fn fake_tools(dir: &Path, names: &[&str]) {
+    let fake = bin_dir().join(format!("fake-agent{}", std::env::consts::EXE_SUFFIX));
+    for name in names {
+        let to = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(&fake, to).unwrap();
+    }
+}
+
+/// `bosun doctor --format json` with `PATH` set to `path` and the extra variables `env`.
+fn doctor_on(
+    config: &Path,
+    endpoint: &Endpoint,
+    name: &str,
+    path: &Path,
+    env: &[(&str, &Path)],
+) -> (Output, Value) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bosun"));
+    command
+        .args(["doctor", "--format", "json", "--name", name, "--config"])
+        .arg(config)
+        .arg("--endpoint")
+        .arg(endpoint.path())
+        .env_remove("BOSUN_CONFIG")
+        .env_remove("BOSUN_ENDPOINT")
+        .env("PATH", path)
+        .stdin(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    let report =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {output:?}"));
+    (output, report)
+}
+
+/// A configuration with one identity and one repository with a local-file queue.
+fn queued_config(dir: &Path, identity_extra: &str) -> PathBuf {
+    let claude = dir.join("claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[identity.work]\nclaude_config_dir = '{}'\ndatabase = '{}'\n{identity_extra}\
+             [repo.app]\npath = '{}'\nidentity = 'work'\n\
+             queue = {{ kind = \"local_file\", file = '{}' }}\n",
+            claude.display(),
+            dir.join("work.db").display(),
+            repo.display(),
+            dir.join("queue.toml").display(),
+        ),
+    )
+    .unwrap();
+    config
+}
+
+#[test]
+fn doctor_fails_naming_a_missing_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = queued_config(dir.path(), "");
+    let tools = dir.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    fake_tools(&tools, &["gh"]);
+    let endpoint = endpoint(dir.path());
+    let name = unique("bosun-doctor-test");
+
+    let (output, report) = doctor_on(&config, &endpoint, &name, &tools, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(documented("a check did not pass")),
+        "{output:?}"
+    );
+    let claude = checks(&report, "claude");
+    assert_eq!(claude.len(), 1, "{report}");
+    assert_eq!(claude[0]["status"], "fail", "{report}");
+    let detail = claude[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(&format!("claude{}", std::env::consts::EXE_SUFFIX)),
+        "{detail}"
+    );
+    assert!(claude[0]["fix"].is_string(), "{report}");
+    let gh = checks(&report, "gh");
+    assert_eq!(gh.len(), 1, "{report}");
+    assert_eq!(gh[0]["status"], "ok", "{report}");
+    assert_eq!(checks(&report, "sh").len(), 1, "{report}");
+
+    // Present on the daemon's PATH: the check passes.
+    fake_tools(&tools, &["claude"]);
+    let (_, report) = doctor_on(&config, &endpoint, &name, &tools, &[]);
+    assert_eq!(checks(&report, "claude")[0]["status"], "ok", "{report}");
+}
+
+#[test]
+fn doctor_reports_a_login_that_differs() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh_dir = dir.path().join("gh-work");
+    std::fs::create_dir_all(&gh_dir).unwrap();
+    let config = queued_config(
+        dir.path(),
+        &format!(
+            "github_login = 'expected-login'\ngh_config_dir = '{}'\n",
+            gh_dir.display()
+        ),
+    );
+    let tools = dir.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    fake_tools(&tools, &["gh", "claude"]);
+    let endpoint = endpoint(dir.path());
+    let name = unique("bosun-doctor-test");
+    let script = dir.path().join("gh-script");
+    let recorded = dir.path().join("gh-argv");
+    let login = |answer: &str| {
+        std::fs::write(
+            &script,
+            format!("argv {}\nprint {answer}\n", recorded.display()),
+        )
+        .unwrap();
+        let (_, report) = doctor_on(
+            &config,
+            &endpoint,
+            &name,
+            &tools,
+            &[("FAKE_AGENT_SCRIPT", &script)],
+        );
+        let found = checks(&report, "github_login");
+        assert_eq!(found.len(), 1, "{report}");
+        assert_eq!(found[0]["identity"], "work", "{report}");
+        found[0].clone()
+    };
+
+    let other = login("someone-else");
+    assert_eq!(other["status"], "fail", "{other}");
+    let detail = other["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("someone-else") && detail.contains("expected-login"),
+        "{detail}"
+    );
+    assert!(other["fix"].is_string(), "{other}");
+    let args = std::fs::read_to_string(&recorded).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    assert_eq!(
+        &args[..4],
+        ["api", "graphql", "--hostname", "github.com"],
+        "{args:?}"
+    );
+
+    // Logins are case-insensitive.
+    let same = login("Expected-Login");
+    assert_eq!(same["status"], "ok", "{same}");
 }

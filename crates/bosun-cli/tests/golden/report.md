@@ -58,6 +58,21 @@ Commit reader:
 - win-a: not scanned yet
 - win-b: failed: not a git repository
 
+## Context curve
+
+Prompt size (input plus cache reads and writes) per context window; a compaction is a drop of it between consecutive messages. Windows: 8; compactions: 4.
+
+| session | agent | messages | start | peak | compactions |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 00000000-0000-4000-8000-007100000000 |  | 5 | 321 | 150532 | 2 |
+| 00000000-0000-4000-8000-008200000000 |  | 2 | 9087 | 10098 | 0 |
+| 00000000-0000-4000-8000-003100000000 |  | 2 | 4321 | 9876 | 0 |
+| 00000000-0000-4000-8000-004100000000 |  | 5 | 4321 | 9876 | 1 |
+| 00000000-0000-4000-8000-005100000000 |  | 2 | 4321 | 9876 | 0 |
+| 00000000-0000-4000-8000-006100000000 |  | 2 | 4321 | 9876 | 0 |
+| 00000000-0000-4000-8000-008100000000 |  | 6 | 4321 | 8065 | 1 |
+| 00000000-0000-4000-8000-003100000000 | a0000000003100001 | 2 | 5032 | 6403 | 0 |
+
 ## Ingest health
 
 Over the whole store, whatever the range.
@@ -80,4 +95,54 @@ Sessions with the provider's totals (the last `cost-state` record) and a message
 | session | windows | messages | transcripts | provider | difference | within |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | 00000000-0000-4000-8000-003100000000 | 2 | 4 | 76942 | 76942 | +0.0% | yes |
+
+---
+
+## Estimates
+
+Every number below is an estimate and is never added to the exact figures above. Each prices tool results (bytes_per_token = 4): tokens = ceil(result bytes / bytes_per_token); a result is carried by the messages after its call up to the first compaction after it; cost = tokens * cache-write rate of the first carrying message (1 h if it wrote more 1 h than 5 min tokens, else 5 min) + sum over the later carrying messages of tokens * their cache-read rate.
+
+Known gaps:
+
+- Tokens are bytes divided by one global ratio, the same for every tool, language and model.
+- Images are estimated from their base64 bytes, which says little about their real token count.
+- A call's input is part of the calling message's output and is not counted here; only results are.
+- A result is carried only within the range: messages of the window before or after it are not seen, nor what a compaction keeps of it in its summary.
+
+### Cost by tool (estimate)
+
+| tool | errors | calls | est. tokens | carry turns | est. eqv | of it carry |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Read | 0 | 3 | 16 | 3 | 21 | 1 |
+| Agent | 0 | 1 | 6 | 0 | 12 | 0 |
+| Bash | 1 | 1 | 9 | 0 | 11 | 0 |
+| Grep | 0 | 1 | 3 | 3 | 4 | 0 |
+| Edit | 0 | 1 | 7 | 0 | 0 | 0 |
+| Write | 0 | 1 | 4 | 0 | 0 | 0 |
+| all tools | 1 | 8 | 45 | 6 | 48 | 1 |
+
+### Cost by file (estimate)
+
+| repository | path | reads | searches | writes | sessions | calls | est. tokens | carry turns | est. eqv | of it carry |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| a | src/lib.rs | 3 | 0 | 1 | 2 | 4 | 23 | 3 | 21 | 1 |
+| a | src | 0 | 1 | 0 | 1 | 1 | 3 | 3 | 4 | 0 |
+| a | src/new.rs | 0 | 0 | 1 | 1 | 1 | 4 | 0 | 0 | 0 |
+
+### Repeated reads (estimate)
+
+Within a session: 1 reads, 6 est. eqv. Across sessions: 1 reads, 8 est. eqv.
+
+| repository | path | reads | sessions | repeats within | est. eqv within | repeats across | est. eqv across |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| a | src/lib.rs | 3 | 2 | 1 | 6 | 1 | 8 |
+
+### Cost of finding (estimate)
+
+Reads and searches before a session's first write: 2 sessions, 4 calls, 25 est. eqv. Sessions that wrote nothing: 0, 0 calls, 0 est. eqv.
+
+| session | first write | calls | est. tokens | carry turns | est. eqv | of it carry |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 00000000-0000-4000-8000-008100000000 | 2000-01-08T00:00:12Z | 3 | 13 | 6 | 17 | 1 |
+| 00000000-0000-4000-8000-008200000000 | 2000-01-08T01:00:04Z | 1 | 6 | 0 | 8 | 0 |
 

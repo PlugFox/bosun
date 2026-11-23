@@ -30,7 +30,9 @@
 //! | `tokens.by_repo` | [`TokensParams`] | [`TokensByRepo`] |
 //! | `tokens.by_model` | [`TokensParams`] | [`TokensByModel`] |
 //! | `report.exact` | [`ReportParams`] | [`Report`] |
+//! | `report.estimates` | [`ReportParams`] | [`Estimates`] |
 
+mod estimates;
 mod report;
 pub mod rpc;
 mod wire;
@@ -41,10 +43,14 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+pub use estimates::{
+    ByFile, ByTool, Estimates, FileRow, Finding, FindingRow, RepeatedRead, RepeatedReads,
+    ResultCost, ToolRow,
+};
 pub use report::{
-    Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan, Comparison, Health,
-    KindRow, OldMethod, PerCommit, Report, ReportParams, ScanState, SessionAgreement, Trend,
-    VersionRow,
+    Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan, Comparison,
+    ContextCurve, Health, KindRow, OldMethod, PerCommit, Report, ReportParams, ScanState,
+    SessionAgreement, Trend, VersionRow, WindowCurve,
 };
 pub use wire::{Picodollars, Wide};
 
@@ -140,7 +146,19 @@ pub mod method {
         "report.exact",
         crate::ReportParams,
         crate::Report,
-        "The exact sections of the report over the range: eqv by category, model and session      kind, eqv per commit against the previous period, the old method's number, and ingest      health with the agreement with the provider's own totals. No estimate."
+        "The exact sections of the report over the range: eqv by category, model and session \
+     kind, eqv per commit against the previous period, the old method's number, the context \
+     curve per context window, and ingest health with the agreement with the provider's own \
+     totals. No estimate."
+    );
+    method!(
+        ReportEstimates,
+        "report.estimates",
+        crate::ReportParams,
+        crate::Estimates,
+        "The estimate sections of the report over the range: the cost of tool results by tool \
+     and by file with cache carry, repeated reads of a file, and the cost of finding before a \
+     session's first write. Every number is an estimate and is never part of an exact total."
     );
 }
 
@@ -154,6 +172,7 @@ pub const METHODS: &[&str] = &[
     method::TokensByRepo::NAME,
     method::TokensByModel::NAME,
     method::ReportExact::NAME,
+    method::ReportEstimates::NAME,
 ];
 
 /// Params of `hello`: none yet.
@@ -393,6 +412,7 @@ pub fn schema() -> Value {
     add_method::<method::TokensByRepo>(&mut generator, &mut methods);
     add_method::<method::TokensByModel>(&mut generator, &mut methods);
     add_method::<method::ReportExact>(&mut generator, &mut methods);
+    add_method::<method::ReportEstimates>(&mut generator, &mut methods);
     let defs = generator.take_definitions(true);
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",

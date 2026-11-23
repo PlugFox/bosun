@@ -358,6 +358,22 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("exact::tests::the_agreement_counts_subagents"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_report_no_carry",
+        issue: 27,
+        breaks: "a tool result is costed once, by its first write, with no cache carry",
+        package: "bosun-heat",
+        check: Check::Test("estimate::tests::a_tool_result_is_carried_until_the_compaction"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_report_merge_estimates",
+        issue: 27,
+        breaks: "the estimated cost of tool results is folded into the exact total",
+        package: "bosun-heat",
+        check: Check::Test("estimate::tests::the_exact_total_holds_no_estimate"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

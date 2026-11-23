@@ -293,6 +293,76 @@
       }
     ]
   },
+  "context": {
+    "windows": 8,
+    "compactions": 4,
+    "rows": [
+      {
+        "session": "00000000-0000-4000-8000-003100000000",
+        "agent": null,
+        "messages": 2,
+        "start": 4321,
+        "peak": 9876,
+        "compactions": 0
+      },
+      {
+        "session": "00000000-0000-4000-8000-003100000000",
+        "agent": "a0000000003100001",
+        "messages": 2,
+        "start": 5032,
+        "peak": 6403,
+        "compactions": 0
+      },
+      {
+        "session": "00000000-0000-4000-8000-004100000000",
+        "agent": null,
+        "messages": 5,
+        "start": 4321,
+        "peak": 9876,
+        "compactions": 1
+      },
+      {
+        "session": "00000000-0000-4000-8000-005100000000",
+        "agent": null,
+        "messages": 2,
+        "start": 4321,
+        "peak": 9876,
+        "compactions": 0
+      },
+      {
+        "session": "00000000-0000-4000-8000-006100000000",
+        "agent": null,
+        "messages": 2,
+        "start": 4321,
+        "peak": 9876,
+        "compactions": 0
+      },
+      {
+        "session": "00000000-0000-4000-8000-007100000000",
+        "agent": null,
+        "messages": 5,
+        "start": 321,
+        "peak": 150532,
+        "compactions": 2
+      },
+      {
+        "session": "00000000-0000-4000-8000-008100000000",
+        "agent": null,
+        "messages": 6,
+        "start": 4321,
+        "peak": 8065,
+        "compactions": 1
+      },
+      {
+        "session": "00000000-0000-4000-8000-008200000000",
+        "agent": null,
+        "messages": 2,
+        "start": 9087,
+        "peak": 10098,
+        "compactions": 0
+      }
+    ]
+  },
   "health": {
     "files": 12,
     "files_counted": 12,

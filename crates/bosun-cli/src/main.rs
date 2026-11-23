@@ -37,8 +37,10 @@
 //!   that could not be read are listed; they do not change the exit code.
 //! - `report`: the exact sections of the report (`report.exact`, #6, #26): eqv by category,
 //!   model and session kind, eqv per commit against the previous period of the same length,
-//!   the old method's number next to the real total, and ingest health with the agreement
-//!   with the provider's own totals. `--until` defaults to now and `--since` to seven days
+//!   the old method's number next to the real total, the context curve per context window,
+//!   and ingest health with the agreement with the provider's own totals; then, apart, its
+//!   estimate sections (`report.estimates`, #27): the cost of tool results by tool and by file
+//!   with cache carry, repeated reads, and the cost of finding. `--until` defaults to now and `--since` to seven days
 //!   before `--until`. `--repo` limits the range sections to one configured repository; without
 //!   `--identity`, only the identity that owns it is asked.
 //! - `install`: registers the logon process that starts `bosund` for the current user, and
@@ -65,7 +67,7 @@
 //! | `tokens --by session` | `recount`'s compare shape version 1 (`shape.rs`), so that `recount --compare <file>` reads it |
 //! | `tokens --by repo` | the result of `tokens.by_repo` |
 //! | `tokens --by model` | the result of `tokens.by_model` |
-//! | `report` | the result of `report.exact` |
+//! | `report` | `{"exact": <the result of report.exact>, "estimates": <the result of report.estimates>}` |
 //!
 //! The results are those of `schema/bosun-api.schema.json`. Without `--identity`, the output
 //! is an object keyed by identity name whose values are those documents:
@@ -105,8 +107,8 @@ use std::process::ExitCode;
 
 use bosun_api::rpc::code;
 use bosun_api::{
-    IdentityParams, IngestStatus, ModelRow, ReingestResult, RepoRow, Report, ReportParams,
-    SessionRow, TokensParams, TokensSummary, method,
+    IdentityParams, IngestStatus, ModelRow, ReingestResult, RepoRow, ReportParams, SessionRow,
+    TokensParams, TokensSummary, method,
 };
 use bosun_client::{Client, Endpoint, Error};
 use bosun_config::SystemProbe;
@@ -186,8 +188,9 @@ enum Command {
     /// Re-reads every transcript file from zero with the current parser; deletes nothing.
     #[command(after_help = EXIT_CODES)]
     Reingest,
-    /// The exact sections of the report: eqv by category, model, session kind and commit,
-    /// the old method's number, and ingest health.
+    /// The report: exact eqv by category, model, session kind and commit, the old method's
+    /// number, the context curve and ingest health; then, apart, the estimates of tool and
+    /// file cost.
     #[command(after_help = EXIT_CODES)]
     Report(ReportArgs),
     /// Registers the logon process that starts bosund for you, and starts it now.
@@ -522,8 +525,14 @@ async fn report(
         to_ms,
         repo: args.repo.clone(),
     };
-    let result = client.call::<method::ReportExact>(&ask).await?;
-    Section::of::<Report>(&result.identity, &result, markdown::report)
+    let exact = client.call::<method::ReportExact>(&ask).await?;
+    let estimates = client.call::<method::ReportEstimates>(&ask).await?;
+    let document = markdown::Document { exact, estimates };
+    Section::of(
+        &document.exact.identity.clone(),
+        &document,
+        markdown::document,
+    )
 }
 
 /// Runs the command; the text to print on stdout.

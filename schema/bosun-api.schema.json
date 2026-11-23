@@ -42,6 +42,61 @@
       ],
       "type": "object"
     },
+    "ByFile": {
+      "description": "Cost by file: the results of the calls that touched each file.",
+      "properties": {
+        "estimate": {
+          "description": "Always `true`.",
+          "type": "boolean"
+        },
+        "formula": {
+          "type": "string"
+        },
+        "rows": {
+          "description": "One row per file, by cost descending, then repository and path.",
+          "items": {
+            "$ref": "#/$defs/FileRow"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "estimate",
+        "formula",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "ByTool": {
+      "description": "Cost by tool: the results of every tool call of the scope, per tool name.",
+      "properties": {
+        "estimate": {
+          "description": "Always `true`.",
+          "type": "boolean"
+        },
+        "formula": {
+          "type": "string"
+        },
+        "rows": {
+          "description": "One row per tool name, by cost descending, then name.",
+          "items": {
+            "$ref": "#/$defs/ToolRow"
+          },
+          "type": "array"
+        },
+        "total": {
+          "$ref": "#/$defs/ResultCost",
+          "description": "Every call of the scope."
+        }
+      },
+      "required": [
+        "estimate",
+        "formula",
+        "total",
+        "rows"
+      ],
+      "type": "object"
+    },
     "CategoryRow": {
       "description": "One token category of [`Report::by_category`].",
       "properties": {
@@ -209,6 +264,36 @@
       ],
       "type": "object"
     },
+    "ContextCurve": {
+      "description": "The context curve per context window (#6): its prompt size at the start, its peak, and its\ncompactions.\n\nThe prompt size of a message is `input + cache read + cache write 5 min + cache write 1 h`\nof its usage. A compaction is a drop of the prompt size between consecutive messages of one\nwindow (#3): `prompt(next) < prompt(previous)`, messages ordered by time, then id. Over the\nmessages of the scope only: a window's messages before the range are not seen.",
+      "properties": {
+        "compactions": {
+          "description": "Compactions over every window.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rows": {
+          "description": "One row per window, sorted by session, then the main transcript before its sub-agents\nby agent id.",
+          "items": {
+            "$ref": "#/$defs/WindowCurve"
+          },
+          "type": "array"
+        },
+        "windows": {
+          "description": "Windows with a message in the scope.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "windows",
+        "compactions",
+        "rows"
+      ],
+      "type": "object"
+    },
     "DaemonStatus": {
       "description": "Result of `status.daemon`.",
       "properties": {
@@ -243,6 +328,86 @@
       ],
       "type": "object"
     },
+    "Estimates": {
+      "description": "Result of `report.estimates`. Its params are those of `report.exact`\n([`crate::ReportParams`]).",
+      "properties": {
+        "by_file": {
+          "$ref": "#/$defs/ByFile"
+        },
+        "by_tool": {
+          "$ref": "#/$defs/ByTool"
+        },
+        "bytes_per_token": {
+          "description": "The global ratio of bytes to tokens: a result of `b` bytes is `ceil(b / ratio)` tokens.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "estimate": {
+          "description": "Always `true`: every number of this result is an estimate.",
+          "type": "boolean"
+        },
+        "finding": {
+          "$ref": "#/$defs/Finding"
+        },
+        "formula": {
+          "description": "How a result is priced, as text.",
+          "type": "string"
+        },
+        "from_ms": {
+          "description": "The range asked for.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "known_gaps": {
+          "description": "What the estimates are known to get wrong, as text.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reference_model": {
+          "description": "The model every eqv is measured against.",
+          "type": "string"
+        },
+        "repeated_reads": {
+          "$ref": "#/$defs/RepeatedReads"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The repository asked for; `null` for every message of the range."
+        },
+        "to_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "identity",
+        "from_ms",
+        "to_ms",
+        "reference_model",
+        "estimate",
+        "bytes_per_token",
+        "formula",
+        "known_gaps",
+        "by_tool",
+        "by_file",
+        "repeated_reads",
+        "finding"
+      ],
+      "type": "object"
+    },
     "FailedFile": {
       "description": "A file a pass could not read.",
       "properties": {
@@ -256,6 +421,133 @@
       "required": [
         "path",
         "error"
+      ],
+      "type": "object"
+    },
+    "FileRow": {
+      "description": "One file of [`ByFile`]. A search touches the directory it searched.",
+      "properties": {
+        "path": {
+          "description": "Relative to the repository (`.` for its root); absolute outside one.",
+          "type": "string"
+        },
+        "reads": {
+          "description": "Calls that read, searched and wrote it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The repository of the calling message; `null` outside every repository."
+        },
+        "results": {
+          "$ref": "#/$defs/ResultCost",
+          "description": "The results of every call that touched it."
+        },
+        "searches": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessions": {
+          "description": "Root sessions with a call that touched it; a sub-agent counts with its session.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "writes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "reads",
+        "searches",
+        "writes",
+        "sessions",
+        "results"
+      ],
+      "type": "object"
+    },
+    "Finding": {
+      "description": "The cost of finding: the read and search calls of a root session before its first write.",
+      "properties": {
+        "before_write": {
+          "$ref": "#/$defs/ResultCost"
+        },
+        "estimate": {
+          "description": "Always `true`.",
+          "type": "boolean"
+        },
+        "formula": {
+          "type": "string"
+        },
+        "rows": {
+          "description": "One row per root session with a read or search, sorted by session.",
+          "items": {
+            "$ref": "#/$defs/FindingRow"
+          },
+          "type": "array"
+        },
+        "sessions_with_write": {
+          "description": "Sessions with a write: their reads and searches before it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessions_without_write": {
+          "description": "Sessions with reads or searches and no write: all of them.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "without_write": {
+          "$ref": "#/$defs/ResultCost"
+        }
+      },
+      "required": [
+        "estimate",
+        "formula",
+        "sessions_with_write",
+        "before_write",
+        "sessions_without_write",
+        "without_write",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "FindingRow": {
+      "description": "One root session of [`Finding`]; its sub-agents' calls count with it.",
+      "properties": {
+        "first_write_ms": {
+          "description": "The time of the message that made its first write call; `null` without one.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "results": {
+          "$ref": "#/$defs/ResultCost",
+          "description": "Its read and search calls before that write (all of them without one)."
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session",
+        "results"
       ],
       "type": "object"
     },
@@ -606,6 +898,87 @@
       ],
       "type": "object"
     },
+    "RepeatedRead": {
+      "description": "One file of [`RepeatedReads`].",
+      "properties": {
+        "across": {
+          "$ref": "#/$defs/ResultCost",
+          "description": "The first read of the file in each session after the first session that read it."
+        },
+        "path": {
+          "type": "string"
+        },
+        "reads": {
+          "description": "Read calls.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sessions": {
+          "description": "Root sessions that read it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "within": {
+          "$ref": "#/$defs/ResultCost",
+          "description": "Every read of a session after that session's first read of the file."
+        }
+      },
+      "required": [
+        "path",
+        "reads",
+        "sessions",
+        "within",
+        "across"
+      ],
+      "type": "object"
+    },
+    "RepeatedReads": {
+      "description": "Repeated reads: files read more than once, within a session and across sessions.",
+      "properties": {
+        "across": {
+          "$ref": "#/$defs/ResultCost",
+          "description": "Every row's `across`, summed."
+        },
+        "estimate": {
+          "description": "Always `true`.",
+          "type": "boolean"
+        },
+        "formula": {
+          "type": "string"
+        },
+        "rows": {
+          "description": "One row per file read more than once, by the cost of its repeats descending, then\nrepository and path.",
+          "items": {
+            "$ref": "#/$defs/RepeatedRead"
+          },
+          "type": "array"
+        },
+        "within": {
+          "$ref": "#/$defs/ResultCost",
+          "description": "Every row's `within`, summed."
+        }
+      },
+      "required": [
+        "estimate",
+        "formula",
+        "within",
+        "across",
+        "rows"
+      ],
+      "type": "object"
+    },
     "RepoRef": {
       "description": "A repository as configured.",
       "properties": {
@@ -673,6 +1046,10 @@
           },
           "type": "array"
         },
+        "context": {
+          "$ref": "#/$defs/ContextCurve",
+          "description": "The context curve of each context window."
+        },
         "from_ms": {
           "description": "The range asked for.",
           "format": "int64",
@@ -735,6 +1112,7 @@
         "by_model",
         "by_kind",
         "per_commit",
+        "context",
         "health",
         "unpriced"
       ],
@@ -768,6 +1146,65 @@
         "identity",
         "from_ms",
         "to_ms"
+      ],
+      "type": "object"
+    },
+    "ResultCost": {
+      "description": "The estimated cost of a set of tool results in the context.\n\nFor one call made by message `i` of a window, with `t = ceil(result_bytes /\nbytes_per_token)`: the messages after `i` up to the first compaction after `i` (a drop of\nthe prompt size, as in [`crate::ContextCurve`]) carry the result. The first of them writes\nit to the cache at its cache-write rate (the 1 h rate when that message wrote more 1 h than\n5 min tokens, else the 5 min rate); each later one reads it at its cache-read rate:\n\n`cost = t * write rate(i + 1) + sum over carrying messages j > i + 1 of t * cache read rate(j)`\n\nA result with no message after it before a compaction costs nothing here.",
+      "properties": {
+        "calls": {
+          "description": "Tool calls.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "carry_eqv": {
+          "description": "The cache reads after the first write, in eqv.",
+          "format": "double",
+          "type": "number"
+        },
+        "carry_turns": {
+          "description": "The messages that read the results from the cache, summed over calls: how long they\nstayed in context.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cost": {
+          "$ref": "#/$defs/Picodollars",
+          "description": "The cost of both."
+        },
+        "eqv": {
+          "description": "`cost` in eqv.",
+          "format": "double",
+          "type": "number"
+        },
+        "result_bytes": {
+          "description": "Their results' stored size.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tokens": {
+          "description": "Their results' estimated tokens, `ceil(bytes / bytes_per_token)` per call, summed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "write_eqv": {
+          "description": "The first writes, in eqv.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "calls",
+        "result_bytes",
+        "tokens",
+        "carry_turns",
+        "write_eqv",
+        "carry_eqv",
+        "cost",
+        "eqv"
       ],
       "type": "object"
     },
@@ -1071,6 +1508,29 @@
       ],
       "type": "object"
     },
+    "ToolRow": {
+      "description": "One tool of [`ByTool`].",
+      "properties": {
+        "errors": {
+          "description": "Calls whose result was an error.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "results": {
+          "$ref": "#/$defs/ResultCost"
+        }
+      },
+      "required": [
+        "name",
+        "errors",
+        "results"
+      ],
+      "type": "object"
+    },
     "Trend": {
       "description": "A period and the previous one.",
       "properties": {
@@ -1155,6 +1615,53 @@
       "description": "A 64-bit unsigned count that may exceed 2^53, as a decimal string.",
       "pattern": "^(0|[1-9][0-9]*)$",
       "type": "string"
+    },
+    "WindowCurve": {
+      "description": "One context window of [`ContextCurve`]: a session's main transcript or one sub-agent.",
+      "properties": {
+        "agent": {
+          "description": "The sub-agent id; `null` for the main transcript.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compactions": {
+          "description": "The drops of the prompt size between its consecutive messages.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "messages": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "peak": {
+          "description": "The largest prompt size of its messages in the scope.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session": {
+          "description": "The provider's session id.",
+          "type": "string"
+        },
+        "start": {
+          "description": "The prompt size of the window's first message in the scope.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session",
+        "messages",
+        "start",
+        "peak",
+        "compactions"
+      ],
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1189,8 +1696,17 @@
         "$ref": "#/$defs/IngestStatus"
       }
     },
+    "report.estimates": {
+      "description": "The estimate sections of the report over the range: the cost of tool results by tool and by file with cache carry, repeated reads of a file, and the cost of finding before a session's first write. Every number is an estimate and is never part of an exact total.",
+      "params": {
+        "$ref": "#/$defs/ReportParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Estimates"
+      }
+    },
     "report.exact": {
-      "description": "The exact sections of the report over the range: eqv by category, model and session      kind, eqv per commit against the previous period, the old method's number, and ingest      health with the agreement with the provider's own totals. No estimate.",
+      "description": "The exact sections of the report over the range: eqv by category, model and session kind, eqv per commit against the previous period, the old method's number, the context curve per context window, and ingest health with the agreement with the provider's own totals. No estimate.",
       "params": {
         "$ref": "#/$defs/ReportParams"
       },

@@ -16,7 +16,7 @@ use tempfile::TempDir;
 use super::*;
 
 /// Midnight UTC of 2000-01-`day`, the day of the fixture case numbered `day`.
-fn day(day: i64) -> i64 {
+pub(crate) fn day(day: i64) -> i64 {
     946_684_800_000 + (day - 1) * 86_400_000
 }
 
@@ -43,13 +43,13 @@ fn copy_dir(from: &Path, to: &Path) {
 
 /// A store holding the transcripts of `cases` (every case when empty), ingested from copies
 /// in one directory, with the repository roots those cases name.
-struct Corpus {
+pub(crate) struct Corpus {
     _dir: TempDir,
-    store: Store,
+    pub(crate) store: Store,
 }
 
 impl Corpus {
-    async fn new(cases: &[&str]) -> Self {
+    pub(crate) async fn new(cases: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let projects = dir.path().join("projects");
         let mut roots = Vec::new();
@@ -83,19 +83,25 @@ impl Corpus {
         Self { _dir: dir, store }
     }
 
-    async fn report(&self, scope: Scope<'_>, scans: Vec<CommitScan>) -> Report {
+    pub(crate) async fn estimates(&self, scope: Scope<'_>) -> bosun_api::Estimates {
+        crate::estimates(self.store.reader(), "personal", scope, name)
+            .await
+            .unwrap()
+    }
+
+    pub(crate) async fn report(&self, scope: Scope<'_>, scans: Vec<CommitScan>) -> Report {
         exact(self.store.reader(), "personal", scope, name, scans)
             .await
             .unwrap()
     }
 
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         self.store.close().await.unwrap();
     }
 }
 
 /// The configured name of each repository key of the corpus.
-fn name(key: &str) -> RepoRef {
+pub(crate) fn name(key: &str) -> RepoRef {
     let name = match key {
         "/fixture/repo-a" => "a",
         r"c:\fixture\repo-a" => "win-a",
@@ -352,4 +358,41 @@ async fn a_repository_scope_counts_its_messages_and_commits_only() {
     assert_eq!(rows, [Some(key)]);
     // Ingest health is the store's, whatever the scope.
     assert_eq!(report.health, all.health);
+}
+
+/// The context curve: the prompt sizes of the `report` case are measured counts, and the drop
+/// from 8065 to 706 after the edit is its one compaction.
+#[tokio::test]
+async fn the_context_curve_counts_a_drop_as_a_compaction() {
+    let corpus = Corpus::new(&["report"]).await;
+    let scope = Scope {
+        from_ms: day(8),
+        to_ms: day(9),
+        repo: None,
+    };
+    let report = corpus.report(scope, Vec::new()).await;
+    corpus.close().await;
+
+    let curve = &report.context;
+    let rows: Vec<(&str, u64, u64, u64, u64)> = curve
+        .rows
+        .iter()
+        .map(|r| {
+            (
+                r.session.as_str(),
+                r.messages,
+                r.start,
+                r.peak,
+                r.compactions,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("00000000-0000-4000-8000-008100000000", 6, 4321, 8065, 1),
+            ("00000000-0000-4000-8000-008200000000", 2, 9087, 10_098, 0),
+        ]
+    );
+    assert_eq!((curve.windows, curve.compactions), (2, 1));
 }

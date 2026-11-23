@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT f.tool_call_id, f.path, f.kind\n               FROM file_touch f\n               JOIN tool_call t ON t.id = f.tool_call_id\n               JOIN message m ON m.id = t.message_id\n               WHERE m.ts_ms >= ? AND m.ts_ms < ?\n               ORDER BY f.tool_call_id, f.path, f.kind",
+  "describe": {
+    "columns": [
+      {
+        "name": "tool_call_id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "file_touch",
+            "name": "tool_call_id"
+          }
+        }
+      },
+      {
+        "name": "path",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "file_touch",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "file_touch",
+            "name": "kind"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "626eebea2f794be7834d3a10eaf40aea83693e1feb70c57029b52e9724f50d52"
+}

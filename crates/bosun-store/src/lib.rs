@@ -34,7 +34,7 @@ mod writer;
 
 pub use error::Error;
 pub use link::{CommitLink, Link, LinkedSession};
-pub use read::{Bill, Reader};
+pub use read::{Bill, By, Group, Reader};
 pub use writer::{PriceChange, Repo, SourceFile, Write, Writer};
 
 use std::path::Path;

@@ -1,5 +1,6 @@
 //! Repository tasks for bosun (#12). Run as `cargo xtask <task>`.
 
+mod api;
 mod deps;
 mod fixtures;
 mod mutants;
@@ -12,6 +13,8 @@ usage: cargo xtask <task>
 
 tasks:
   check-deps          check the workspace dependency rules (#12)
+  gen-api [--check]   write schema/bosun-api.schema.json from bosun-api, or check that it
+                      is current (#12, #24)
   lint-fixtures [DIR] check that every id and path in fixtures/ (or DIR) is synthetic (#16)
   mutants [--shard K/N] [--platform-only] [NAME...]
                       run the registered mutants (or the named ones): each one's tests must
@@ -24,6 +27,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("check-deps") => deps::run(),
+        Some("gen-api") => api::run(&args[1..]),
         Some("lint-fixtures") => fixtures::run(&args[1..]),
         Some("mutants") => mutants::run(&args[1..]),
         Some("sqlx-prepare") => sqlx::run(&args[1..]),

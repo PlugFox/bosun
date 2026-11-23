@@ -151,6 +151,128 @@ impl Reader {
             unpriced,
         })
     }
+
+    /// The bills of the messages with `from_ms <= ts < to_ms`, one per group of `by`, each
+    /// message priced by the row valid at its time, with the price table they were priced by.
+    /// A group with no message has no entry.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn bills(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+        by: By,
+    ) -> Result<(PriceTable, BTreeMap<Group, Bill>), Error> {
+        let mut conn = self.pool.acquire().await?;
+        // One read transaction, so the prices and the messages are one snapshot.
+        let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+        let table = load_price_table(&mut tx).await?;
+        let rows = sqlx::query!(
+            r#"SELECT md.name AS model, m.ts_ms, s.session_key, s.agent_key,
+                      r.path AS "repo?: String",
+                      m.input_tokens, m.cache_write_5m_tokens, m.cache_write_1h_tokens,
+                      m.cache_read_tokens, m.output_tokens
+               FROM message m
+               JOIN model md ON md.id = m.model_id
+               JOIN session s ON s.id = m.session_id
+               LEFT JOIN repo r ON r.id = m.repo_id
+               WHERE m.ts_ms >= ? AND m.ts_ms < ?"#,
+            from_ms,
+            to_ms,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        let mut groups: BTreeMap<Group, Fold> = BTreeMap::new();
+        for row in rows {
+            let tokens = Tokens {
+                input: from_db(row.input_tokens, "input tokens")?,
+                cache_write_5m: from_db(row.cache_write_5m_tokens, "cache write tokens")?,
+                cache_write_1h: from_db(row.cache_write_1h_tokens, "cache write tokens")?,
+                cache_read: from_db(row.cache_read_tokens, "cache read tokens")?,
+                output: from_db(row.output_tokens, "output tokens")?,
+            };
+            let group = match by {
+                By::Session => Group::Session {
+                    session: row.session_key,
+                    agent: row.agent_key,
+                },
+                By::Repo => Group::Repo(row.repo),
+                By::Model => Group::Model(row.model.clone()),
+            };
+            groups
+                .entry(group)
+                .or_default()
+                .add(&table, &row.model, row.ts_ms, tokens);
+        }
+        let bills = groups
+            .into_iter()
+            .map(|(group, fold)| (group, fold.finish(&table)))
+            .collect();
+        Ok((table, bills))
+    }
+}
+
+/// How [`Reader::bills`] groups messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum By {
+    /// Per context window: the window that owns each message.
+    Session,
+    /// Per repository each message's working directory is attributed to.
+    Repo,
+    /// Per model.
+    Model,
+}
+
+/// The key of one group of [`Reader::bills`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    /// The provider's session id and the sub-agent id (`None` for the main transcript).
+    Session {
+        session: String,
+        agent: Option<String>,
+    },
+    /// The repository's canonical path key; `None` for messages in no repository.
+    Repo(Option<String>),
+    /// The model id as transcripts name it.
+    Model(String),
+}
+
+/// The sums of one bill as its messages are added.
+#[derive(Debug, Default)]
+struct Fold {
+    messages: u64,
+    tokens: Tokens,
+    cost: Cost,
+    unpriced: BTreeMap<String, u64>,
+}
+
+impl Fold {
+    fn add(&mut self, table: &PriceTable, model: &str, ts_ms: i64, t: Tokens) {
+        self.messages += 1;
+        self.tokens.input += t.input;
+        self.tokens.cache_write_5m += t.cache_write_5m;
+        self.tokens.cache_write_1h += t.cache_write_1h;
+        self.tokens.cache_read += t.cache_read;
+        self.tokens.output += t.output;
+        match table.cost(model, ts_ms, &t) {
+            Ok(c) => self.cost = self.cost + c,
+            Err(unknown) => *self.unpriced.entry(unknown.model).or_insert(0) += 1,
+        }
+    }
+
+    fn finish(self, table: &PriceTable) -> Bill {
+        Bill {
+            messages: self.messages,
+            tokens: self.tokens,
+            cost: self.cost,
+            eqv: table.eqv(self.cost),
+            unpriced: self.unpriced,
+        }
+    }
 }
 
 /// Reads back a stored message in the shape [`bosun_core::merge`] takes.
@@ -306,6 +428,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.reader().price_table().await.unwrap(), default_table());
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn grouped_bills_partition_the_bill() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("bosun.db"), Options::default())
+            .await
+            .unwrap();
+        let mut elsewhere = record("m3", "f2", 3_000, 30, &[]);
+        elsewhere.cwd = "/elsewhere".to_owned();
+        elsewhere.model = "claude-sonnet-5".to_owned();
+        store
+            .writer()
+            .write(vec![
+                Write::Repo(crate::Repo {
+                    path: "/work/repo".to_owned(),
+                    remote: None,
+                    default_branch: None,
+                }),
+                source_file("f1"),
+                source_file("f2"),
+                write(record("m1", "f1", 1_000, 10, &[])),
+                write(record("m2", "f1", 2_000, 20, &[])),
+                write(elsewhere),
+            ])
+            .await
+            .unwrap();
+        let reader = store.reader();
+        let whole = reader.bill(0, i64::MAX).await.unwrap();
+        for by in [By::Session, By::Repo, By::Model] {
+            let (_, bills) = reader.bills(0, i64::MAX, by).await.unwrap();
+            assert_eq!(bills.len(), 2, "{by:?}: {bills:?}");
+            let messages: u64 = bills.values().map(|b| b.messages).sum();
+            let output: u64 = bills.values().map(|b| b.tokens.output).sum();
+            let cost: Cost = bills.values().map(|b| b.cost).sum();
+            assert_eq!(
+                (messages, output, cost),
+                (whole.messages, whole.tokens.output, whole.cost),
+                "{by:?}"
+            );
+        }
+        let (_, by_session) = reader.bills(0, i64::MAX, By::Session).await.unwrap();
+        let f1 = &by_session[&Group::Session {
+            session: "session-f1".to_owned(),
+            agent: None,
+        }];
+        assert_eq!((f1.messages, f1.tokens.output), (2, 30));
+        let (_, by_repo) = reader.bills(0, i64::MAX, By::Repo).await.unwrap();
+        assert_eq!(by_repo[&Group::Repo(None)].tokens.output, 30);
+        let (_, in_range) = reader.bills(1_500, 3_000, By::Model).await.unwrap();
+        assert_eq!(
+            in_range.keys().collect::<Vec<_>>(),
+            [&Group::Model("claude-opus-5-5".to_owned())]
+        );
         store.close().await.unwrap();
     }
 

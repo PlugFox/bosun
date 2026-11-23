@@ -14,6 +14,15 @@ publish = false
 
 [workspace.dependencies]
 cargo_metadata = "0.23.1"
+# The arguments of the `bosun` CLI (#25), by derive; no colour and no suggestions, so the
+# dependency stays small.
+clap = { version = "4.6.9", default-features = false, features = [
+  "derive",
+  "error-context",
+  "help",
+  "std",
+  "usage",
+] }
 # The OS file id (inode, Windows file index) that keys a transcript file, so a rename is not a
 # new file (#3, #21). Maintained with `notify`, which watching (#22) uses.
 file-id = "0.2.3"
@@ -77,6 +86,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_ingest_backfill_first)",
   "cfg(mutant_ingest_backfill_from_zero)",
   "cfg(mutant_ingest_unbounded)",
+  "cfg(mutant_cli_sum_identities)",
 ] }
 
 [workspace.lints.clippy]

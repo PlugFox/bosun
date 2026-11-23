@@ -326,6 +326,14 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::backfill::the_backfill_holds_its_bounds"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_cli_sum_identities",
+        issue: 25,
+        breaks: "the CLI sums every identity into one section",
+        package: "bosun-cli",
+        check: Check::Test("identities_are_separate_sections"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

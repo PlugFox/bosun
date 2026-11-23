@@ -42,9 +42,9 @@ pub use link::{CommitLink, Link, LinkedSession};
 pub use read::{Bill, By, Group, Reader};
 pub use report::{CheckRow, ToolRow, UsageRow, VersionHealth, WindowSums};
 pub use work::{
-    AgentCall, AgentCallKind, AgentCallRow, AttemptRow, NewItem, OutboxOp, OutboxRow,
-    RecordedChild, RunEnd, RunRow, RunStart, Snapshot, StoredItem, TransitionRow, VerdictEnd,
-    VerdictRow, VerdictStart,
+    AgentCall, AgentCallKind, AgentCallRow, AttemptRow, ItemHistory, NewItem, OutboxOp, OutboxRow,
+    RecordedChild, RunCommitRow, RunCommits, RunEnd, RunRow, RunStart, Snapshot, StoredItem,
+    TransitionRow, VerdictEnd, VerdictRow, VerdictStart,
 };
 pub use writer::{PriceChange, Repo, SourceFile, Write, Writer};
 

@@ -113,6 +113,7 @@ pub async fn exact(
         context: crate::curve::context_curve(&in_scope),
         health,
         unpriced: sections.unpriced(),
+        items: crate::items::items(reader, scope, &repo_ref).await?,
     })
 }
 
@@ -270,7 +271,7 @@ struct Category {
 
 /// The sums of a set of messages as they are added.
 #[derive(Debug, Clone, Default)]
-struct Fold {
+pub(crate) struct Fold {
     messages: u64,
     tokens: Tokens,
     cost: Cost,
@@ -278,7 +279,7 @@ struct Fold {
 }
 
 impl Fold {
-    fn add(&mut self, tokens: &Tokens, rates: Option<Rates>) {
+    pub(crate) fn add(&mut self, tokens: &Tokens, rates: Option<Rates>) {
         self.messages += 1;
         self.tokens.input += tokens.input;
         self.tokens.cache_write_5m += tokens.cache_write_5m;
@@ -291,7 +292,7 @@ impl Fold {
         }
     }
 
-    fn merge(&mut self, other: &Self) {
+    pub(crate) fn merge(&mut self, other: &Self) {
         self.messages += other.messages;
         self.tokens.input += other.tokens.input;
         self.tokens.cache_write_5m += other.tokens.cache_write_5m;
@@ -302,7 +303,7 @@ impl Fold {
         self.unpriced += other.unpriced;
     }
 
-    fn sums(&self, table: &PriceTable) -> TokenSums {
+    pub(crate) fn sums(&self, table: &PriceTable) -> TokenSums {
         TokenSums {
             messages: self.messages,
             input: self.tokens.input,

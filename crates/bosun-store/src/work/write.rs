@@ -5,7 +5,8 @@ use sqlx::sqlite::SqliteConnection;
 
 use super::codec;
 use super::{
-    AgentCall, AgentCallKind, NewItem, RunEnd, RunStart, Snapshot, VerdictEnd, VerdictStart,
+    AgentCall, AgentCallKind, NewItem, RunCommits, RunEnd, RunStart, Snapshot, VerdictEnd,
+    VerdictStart,
 };
 use crate::error::{Error, to_db};
 use crate::writer::{Repo, upsert_repo};
@@ -506,6 +507,49 @@ pub(crate) async fn end_run(conn: &mut SqliteConnection, end: &RunEnd) -> Result
     )
     .execute(conn)
     .await?;
+    Ok(())
+}
+
+/// Records a session's commit range and links each commit of it to the session.
+pub(crate) async fn run_commits(
+    conn: &mut SqliteConnection,
+    range: &RunCommits,
+) -> Result<(), Error> {
+    let attempt = attempt_id(conn, &range.item, range.attempt).await?;
+    let run = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM run WHERE attempt_id = ? AND spawn = ?"#,
+        attempt,
+        range.spawn,
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| {
+        Error::UnknownRow(format!(
+            "session {} of attempt {} of {}",
+            range.spawn, range.attempt, range.item
+        ))
+    })?;
+    sqlx::query!(
+        "UPDATE run SET base_sha = ?, head_sha = ? WHERE id = ?",
+        range.base_sha,
+        range.head_sha,
+        run,
+    )
+    .execute(&mut *conn)
+    .await?;
+    for sha in &range.commits {
+        sqlx::query!(
+            "INSERT INTO run_commit (run_id, repo_id, sha)
+             SELECT r.id, i.repo_id, ?
+             FROM run r JOIN attempt a ON a.id = r.attempt_id JOIN item i ON i.id = a.item_id
+             WHERE r.id = ?
+             ON CONFLICT (repo_id, sha) DO NOTHING",
+            sha,
+            run,
+        )
+        .execute(&mut *conn)
+        .await?;
+    }
     Ok(())
 }
 

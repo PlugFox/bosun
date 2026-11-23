@@ -439,5 +439,15 @@
       ]
     }
   },
-  "unpriced": []
+  "unpriced": [],
+  "items": {
+    "rows": [],
+    "retried": [],
+    "flaky": [],
+    "refused_edits": [],
+    "parked": [],
+    "commits": [],
+    "trailer_missing": [],
+    "outside_runs": 4
+  }
 }

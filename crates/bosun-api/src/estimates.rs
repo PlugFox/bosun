@@ -45,6 +45,10 @@ pub struct Estimates {
     pub by_file: ByFile,
     pub repeated_reads: RepeatedReads,
     pub finding: Finding,
+    /// The interactive sessions inferred for items (#72): an estimate of attribution over
+    /// exact token counts, never added to an item's runs.
+    #[serde(default)]
+    pub items: crate::InferredItems,
 }
 
 /// The estimated cost of a set of tool results in the context.

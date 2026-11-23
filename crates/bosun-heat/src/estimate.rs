@@ -251,6 +251,7 @@ pub async fn estimates(
         by_file: by_file(&table, &priced, &repo_ref),
         repeated_reads: repeated_reads(&table, &priced, &repo_ref),
         finding: finding(&table, &priced),
+        items: crate::items::inferred(reader, scope, &repo_ref).await?,
     })
 }
 

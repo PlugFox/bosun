@@ -62,6 +62,10 @@ pub struct RunRow {
     pub started_ms: i64,
     pub ended_ms: Option<i64>,
     pub exit: Option<Exit>,
+    /// HEAD when the session started and when it ended, once its range is recorded
+    /// ([`crate::Write::RunCommits`]).
+    pub base_sha: Option<String>,
+    pub head_sha: Option<String>,
 }
 
 /// One verdict run.
@@ -351,7 +355,7 @@ impl Reader {
     pub async fn runs(&self, item: &ItemId) -> Result<Vec<RunRow>, Error> {
         let rows = sqlx::query!(
             "SELECT a.number, r.spawn, r.mode, r.provider, r.session_key, r.started_ms,
-                    r.ended_ms, r.exit, r.limit_reset_ms
+                    r.ended_ms, r.exit, r.limit_reset_ms, r.base_sha, r.head_sha
              FROM run r JOIN attempt a ON a.id = r.attempt_id JOIN item i ON i.id = a.item_id
              WHERE i.item_key = ? ORDER BY r.spawn",
             item.0,
@@ -373,6 +377,8 @@ impl Reader {
                         .as_deref()
                         .map(|e| codec::parse_exit(e, row.limit_reset_ms))
                         .transpose()?,
+                    base_sha: row.base_sha,
+                    head_sha: row.head_sha,
                 })
             })
             .collect()

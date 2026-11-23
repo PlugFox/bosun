@@ -164,6 +164,68 @@ impl Reader {
         Ok((table, rows))
     }
 
+    /// Every message of the sessions named by (provider, session id), over all time: each
+    /// session's main transcript and its sub-agents. Oldest first (then by key), with the price
+    /// table of the same snapshot.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn session_usage(
+        &self,
+        sessions: &[(String, String)],
+    ) -> Result<(PriceTable, Vec<UsageRow>), Error> {
+        let keys = serde_json::to_string(sessions)
+            .map_err(|e| Error::Corrupt(format!("session keys: {e}")))?;
+        let mut conn = self.pool.acquire().await?;
+        let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+        let table = load_price_table(&mut tx).await?;
+        let rows = sqlx::query!(
+            r#"SELECT m.provider, m.message_key, s.session_key, s.agent_key,
+                      coalesce(root.kind, s.kind) AS "kind!: String",
+                      md.name AS model, m.ts_ms, r.path AS "repo?: String",
+                      m.input_tokens, m.cache_write_5m_tokens, m.cache_write_1h_tokens,
+                      m.cache_read_tokens, m.output_tokens
+               FROM (SELECT DISTINCT json_extract(value, '$[0]') AS provider,
+                                     json_extract(value, '$[1]') AS session_key
+                     FROM json_each(?)) k
+               JOIN session s ON s.provider = k.provider AND s.session_key = k.session_key
+               JOIN message m ON m.session_id = s.id
+               JOIN model md ON md.id = m.model_id
+               LEFT JOIN session root ON root.provider = s.provider
+                    AND root.session_key = s.session_key AND root.agent_key IS NULL
+               LEFT JOIN repo r ON r.id = m.repo_id
+               ORDER BY m.ts_ms, m.provider, m.message_key"#,
+            keys,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let rows = rows
+            .into_iter()
+            .map(|row| {
+                Ok(UsageRow {
+                    provider: row.provider,
+                    message: row.message_key,
+                    session: row.session_key,
+                    agent: row.agent_key,
+                    kind: row.kind,
+                    model: row.model,
+                    ts_ms: row.ts_ms,
+                    repo: row.repo,
+                    tokens: tokens([
+                        row.input_tokens,
+                        row.cache_write_5m_tokens,
+                        row.cache_write_1h_tokens,
+                        row.cache_read_tokens,
+                        row.output_tokens,
+                    ])?,
+                })
+            })
+            .collect::<Result<_, Error>>()?;
+        Ok((table, rows))
+    }
+
     /// The provider's totals of every root session that has them, with the token sums over
     /// all time of every context window of those sessions (the main transcript and each
     /// sub-agent) per model and side of the provider's window, in one snapshot. Sorted by key.

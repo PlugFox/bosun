@@ -17,7 +17,9 @@
 //!   [`Report::by_category`], [`Report::by_model`], [`Report::by_kind`],
 //!   [`Report::old_method`], [`Report::per_commit`], [`Report::context`];
 //! - **range only**: the sessions the agreement compares ([`Agreement`]);
-//! - **the whole store**: the ingest counts of [`Health`].
+//! - **the whole store**: the ingest counts of [`Health`];
+//! - **the items of the range**: the loop's sections ([`Report::items`], [`crate::Items`]),
+//!   whose items are counted over their whole history.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,11 @@ pub struct Report {
     /// Models with no price at the time of some messages of the scope: their tokens are in
     /// every count, their cost and eqv in none.
     pub unpriced: Vec<UnpricedModel>,
+    /// The loop's sections (#72): items and attempts with their runs' exact cost, retries,
+    /// flaky verdicts, refused edits, time parked and the runs' commits. Their scope is said
+    /// in [`crate::Items`]; no other section includes them or is included in them.
+    #[serde(default)]
+    pub items: crate::Items,
 }
 
 /// The old method: per session, only the last usage block of its main transcript, as the

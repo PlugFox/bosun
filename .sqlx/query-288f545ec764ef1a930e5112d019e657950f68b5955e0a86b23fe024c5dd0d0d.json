@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE run SET base_sha = ?, head_sha = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "288f545ec764ef1a930e5112d019e657950f68b5955e0a86b23fe024c5dd0d0d"
+}

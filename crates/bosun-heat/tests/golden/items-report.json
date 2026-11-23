@@ -1,0 +1,663 @@
+{
+  "identity": "personal",
+  "from_ms": 947462400000,
+  "to_ms": 947548800000,
+  "repo": null,
+  "reference_model": "claude-opus-5-5",
+  "total": {
+    "messages": 14,
+    "input": 163,
+    "cache_write_5m": 1630,
+    "cache_write_1h": 0,
+    "cache_read": 16300,
+    "output": 489,
+    "cost": "18224000000",
+    "eqv": 4556.0,
+    "unpriced_messages": 0
+  },
+  "old_method": {
+    "sessions": 4,
+    "sums": {
+      "messages": 4,
+      "input": 60,
+      "cache_write_5m": 600,
+      "cache_write_1h": 0,
+      "cache_read": 6000,
+      "output": 180,
+      "cost": "7169000000",
+      "eqv": 1792.25,
+      "unpriced_messages": 0
+    }
+  },
+  "by_category": [
+    {
+      "category": "input",
+      "tokens": 163,
+      "cost": "544000000",
+      "eqv": 136.0
+    },
+    {
+      "category": "cache_write_5m",
+      "tokens": 1630,
+      "cost": "6800000000",
+      "eqv": 1700.0
+    },
+    {
+      "category": "cache_write_1h",
+      "tokens": 0,
+      "cost": "0",
+      "eqv": 0.0
+    },
+    {
+      "category": "cache_read",
+      "tokens": 16300,
+      "cost": "2720000000",
+      "eqv": 680.0
+    },
+    {
+      "category": "output",
+      "tokens": 489,
+      "cost": "8160000000",
+      "eqv": 2040.0
+    }
+  ],
+  "by_model": [
+    {
+      "model": "claude-opus-5-5",
+      "sums": {
+        "messages": 9,
+        "input": 109,
+        "cache_write_5m": 1090,
+        "cache_write_1h": 0,
+        "cache_read": 10900,
+        "output": 327,
+        "cost": "14606000000",
+        "eqv": 3651.5,
+        "unpriced_messages": 0
+      }
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "sums": {
+        "messages": 5,
+        "input": 54,
+        "cache_write_5m": 540,
+        "cache_write_1h": 0,
+        "cache_read": 5400,
+        "output": 162,
+        "cost": "3618000000",
+        "eqv": 904.5,
+        "unpriced_messages": 0
+      }
+    }
+  ],
+  "by_kind": [
+    {
+      "kind": "interactive",
+      "sessions": 1,
+      "sums": {
+        "messages": 2,
+        "input": 38,
+        "cache_write_5m": 380,
+        "cache_write_1h": 0,
+        "cache_read": 3800,
+        "output": 114,
+        "cost": "5092000000",
+        "eqv": 1273.0,
+        "unpriced_messages": 0
+      }
+    },
+    {
+      "kind": "run",
+      "sessions": 3,
+      "sums": {
+        "messages": 12,
+        "input": 125,
+        "cache_write_5m": 1250,
+        "cache_write_1h": 0,
+        "cache_read": 12500,
+        "output": 375,
+        "cost": "13132000000",
+        "eqv": 3283.0,
+        "unpriced_messages": 0
+      }
+    }
+  ],
+  "per_commit": {
+    "previous_from_ms": 947376000000,
+    "previous_to_ms": 947462400000,
+    "rows": [
+      {
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "trend": {
+          "current": {
+            "messages": 14,
+            "commits": 5,
+            "cost": "18224000000",
+            "eqv": 4556.0,
+            "eqv_per_commit": 911.2
+          },
+          "previous": {
+            "messages": 0,
+            "commits": 0,
+            "cost": "0",
+            "eqv": 0.0,
+            "eqv_per_commit": null
+          },
+          "change": null
+        }
+      }
+    ],
+    "attributed": {
+      "current": {
+        "messages": 14,
+        "commits": 5,
+        "cost": "18224000000",
+        "eqv": 4556.0,
+        "eqv_per_commit": 911.2
+      },
+      "previous": {
+        "messages": 0,
+        "commits": 0,
+        "cost": "0",
+        "eqv": 0.0,
+        "eqv_per_commit": null
+      },
+      "change": null
+    },
+    "scans": []
+  },
+  "context": {
+    "windows": 5,
+    "compactions": 0,
+    "rows": [
+      {
+        "session": "00000000-0000-4000-8000-072000000001",
+        "agent": null,
+        "messages": 5,
+        "start": 555,
+        "peak": 1221,
+        "compactions": 0
+      },
+      {
+        "session": "00000000-0000-4000-8000-072000000001",
+        "agent": "a0000000072000001",
+        "messages": 2,
+        "start": 777,
+        "peak": 888,
+        "compactions": 0
+      },
+      {
+        "session": "00000000-0000-4000-8000-072000000002",
+        "agent": null,
+        "messages": 3,
+        "start": 1443,
+        "peak": 1443,
+        "compactions": 0
+      },
+      {
+        "session": "00000000-0000-4000-8000-072000000003",
+        "agent": null,
+        "messages": 2,
+        "start": 1887,
+        "peak": 1887,
+        "compactions": 0
+      },
+      {
+        "session": "00000000-0000-4000-8000-072000000009",
+        "agent": null,
+        "messages": 2,
+        "start": 2109,
+        "peak": 2109,
+        "compactions": 0
+      }
+    ]
+  },
+  "health": {
+    "files": 5,
+    "files_counted": 5,
+    "lines": 14,
+    "gaps": 0,
+    "versions": [
+      {
+        "parser_version": 3,
+        "files": 5,
+        "files_counted": 5,
+        "lines": 14,
+        "gaps": 0
+      }
+    ],
+    "agreement": {
+      "tolerance_percent": 5,
+      "sessions": 0,
+      "within": 0,
+      "exceeding": 0,
+      "excluded": 0,
+      "total": {
+        "transcripts": {
+          "input": 0,
+          "cache_write": 0,
+          "cache_read": 0,
+          "output": 0,
+          "total": 0
+        },
+        "provider": {
+          "input": 0,
+          "cache_write": 0,
+          "cache_read": 0,
+          "output": 0,
+          "total": 0
+        },
+        "difference": 0,
+        "within": true,
+        "exceeds": false,
+        "undercount": {
+          "absent_models": 0,
+          "shared_models": 0
+        }
+      },
+      "absent_models": [],
+      "rows": []
+    }
+  },
+  "unpriced": [],
+  "items": {
+    "rows": [
+      {
+        "item": "local:demo#1",
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "state": "done",
+        "detail": "flaky",
+        "failed": 1,
+        "runs": {
+          "messages": 10,
+          "input": 91,
+          "cache_write_5m": 910,
+          "cache_write_1h": 0,
+          "cache_read": 9100,
+          "output": 273,
+          "cost": "8576000000",
+          "eqv": 2144.0,
+          "unpriced_messages": 0
+        },
+        "sessions": 2,
+        "wall_clock_ms": 2119000,
+        "parked": [
+          {
+            "reason": "limit",
+            "parks": 1,
+            "ms": 900000,
+            "ongoing": false
+          }
+        ],
+        "attempts": [
+          {
+            "number": 1,
+            "state": "verdict_running",
+            "started_ms": 947462401000,
+            "ended_ms": 947463520000,
+            "wall_clock_ms": 1119000,
+            "crash_retries": 0,
+            "refused_calls": 0,
+            "sums": {
+              "messages": 7,
+              "input": 52,
+              "cache_write_5m": 520,
+              "cache_write_1h": 0,
+              "cache_read": 5200,
+              "output": 156,
+              "cost": "5963000000",
+              "eqv": 1490.75,
+              "unpriced_messages": 0
+            },
+            "models": [
+              {
+                "model": "claude-opus-5-5",
+                "sums": {
+                  "messages": 5,
+                  "input": 37,
+                  "cache_write_5m": 370,
+                  "cache_write_1h": 0,
+                  "cache_read": 3700,
+                  "output": 111,
+                  "cost": "4958000000",
+                  "eqv": 1239.5,
+                  "unpriced_messages": 0
+                }
+              },
+              {
+                "model": "claude-sonnet-5-5",
+                "sums": {
+                  "messages": 2,
+                  "input": 15,
+                  "cache_write_5m": 150,
+                  "cache_write_1h": 0,
+                  "cache_read": 1500,
+                  "output": 45,
+                  "cost": "1005000000",
+                  "eqv": 251.25,
+                  "unpriced_messages": 0
+                }
+              }
+            ],
+            "sessions": [
+              {
+                "spawn": 1,
+                "mode": "fresh",
+                "provider": "claude",
+                "session": "00000000-0000-4000-8000-072000000001",
+                "started_ms": 947462401000,
+                "ended_ms": 947462500000,
+                "exit": "limit",
+                "base_sha": "0000000000000000000000000000000000000000",
+                "head_sha": "0101010101010101010101010101010101010101",
+                "sums": {
+                  "messages": 7,
+                  "input": 52,
+                  "cache_write_5m": 520,
+                  "cache_write_1h": 0,
+                  "cache_read": 5200,
+                  "output": 156,
+                  "cost": "5963000000",
+                  "eqv": 1490.75,
+                  "unpriced_messages": 0
+                }
+              },
+              {
+                "spawn": 2,
+                "mode": "resume",
+                "provider": "claude",
+                "session": "00000000-0000-4000-8000-072000000001",
+                "started_ms": 947463400000,
+                "ended_ms": 947463500000,
+                "exit": "ok",
+                "base_sha": "0101010101010101010101010101010101010101",
+                "head_sha": "0202020202020202020202020202020202020202",
+                "sums": {
+                  "messages": 0,
+                  "input": 0,
+                  "cache_write_5m": 0,
+                  "cache_write_1h": 0,
+                  "cache_read": 0,
+                  "output": 0,
+                  "cost": "0",
+                  "eqv": 0.0,
+                  "unpriced_messages": 0
+                }
+              }
+            ]
+          },
+          {
+            "number": 2,
+            "state": "flaky",
+            "started_ms": 947463520000,
+            "ended_ms": 947464520000,
+            "wall_clock_ms": 1000000,
+            "crash_retries": 0,
+            "refused_calls": 1,
+            "sums": {
+              "messages": 3,
+              "input": 39,
+              "cache_write_5m": 390,
+              "cache_write_1h": 0,
+              "cache_read": 3900,
+              "output": 117,
+              "cost": "2613000000",
+              "eqv": 653.25,
+              "unpriced_messages": 0
+            },
+            "models": [
+              {
+                "model": "claude-sonnet-5-5",
+                "sums": {
+                  "messages": 3,
+                  "input": 39,
+                  "cache_write_5m": 390,
+                  "cache_write_1h": 0,
+                  "cache_read": 3900,
+                  "output": 117,
+                  "cost": "2613000000",
+                  "eqv": 653.25,
+                  "unpriced_messages": 0
+                }
+              }
+            ],
+            "sessions": [
+              {
+                "spawn": 3,
+                "mode": "fresh",
+                "provider": "claude",
+                "session": "00000000-0000-4000-8000-072000000002",
+                "started_ms": 947464400000,
+                "ended_ms": 947464500000,
+                "exit": "ok",
+                "base_sha": "0202020202020202020202020202020202020202",
+                "head_sha": "0303030303030303030303030303030303030303",
+                "sums": {
+                  "messages": 3,
+                  "input": 39,
+                  "cache_write_5m": 390,
+                  "cache_write_1h": 0,
+                  "cache_read": 3900,
+                  "output": 117,
+                  "cost": "2613000000",
+                  "eqv": 653.25,
+                  "unpriced_messages": 0
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "item": "local:demo#2",
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "state": "needs_you",
+        "detail": "guard_protected_path",
+        "failed": 0,
+        "runs": {
+          "messages": 2,
+          "input": 34,
+          "cache_write_5m": 340,
+          "cache_write_1h": 0,
+          "cache_read": 3400,
+          "output": 102,
+          "cost": "4556000000",
+          "eqv": 1139.0,
+          "unpriced_messages": 0
+        },
+        "sessions": 1,
+        "wall_clock_ms": 0,
+        "parked": [],
+        "attempts": [
+          {
+            "number": 1,
+            "state": "verdict_pending",
+            "started_ms": 947465401000,
+            "ended_ms": null,
+            "wall_clock_ms": null,
+            "crash_retries": 0,
+            "refused_calls": 0,
+            "sums": {
+              "messages": 2,
+              "input": 34,
+              "cache_write_5m": 340,
+              "cache_write_1h": 0,
+              "cache_read": 3400,
+              "output": 102,
+              "cost": "4556000000",
+              "eqv": 1139.0,
+              "unpriced_messages": 0
+            },
+            "models": [
+              {
+                "model": "claude-opus-5-5",
+                "sums": {
+                  "messages": 2,
+                  "input": 34,
+                  "cache_write_5m": 340,
+                  "cache_write_1h": 0,
+                  "cache_read": 3400,
+                  "output": 102,
+                  "cost": "4556000000",
+                  "eqv": 1139.0,
+                  "unpriced_messages": 0
+                }
+              }
+            ],
+            "sessions": [
+              {
+                "spawn": 1,
+                "mode": "fresh",
+                "provider": "claude",
+                "session": "00000000-0000-4000-8000-072000000003",
+                "started_ms": 947465401000,
+                "ended_ms": 947465500000,
+                "exit": "ok",
+                "base_sha": "0303030303030303030303030303030303030303",
+                "head_sha": "0404040404040404040404040404040404040404",
+                "sums": {
+                  "messages": 2,
+                  "input": 34,
+                  "cache_write_5m": 340,
+                  "cache_write_1h": 0,
+                  "cache_read": 3400,
+                  "output": 102,
+                  "cost": "4556000000",
+                  "eqv": 1139.0,
+                  "unpriced_messages": 0
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "retried": [
+      {
+        "item": "local:demo#1",
+        "attempts": 2,
+        "failed": 1
+      }
+    ],
+    "flaky": [
+      {
+        "item": "local:demo#1",
+        "attempt": 2,
+        "tests": [
+          "tests::shared_a",
+          "tests::shared_b"
+        ]
+      }
+    ],
+    "refused_edits": [
+      {
+        "item": "local:demo#2",
+        "attempt": 1,
+        "ts_ms": 947465501000
+      }
+    ],
+    "parked": [
+      {
+        "reason": "limit",
+        "parks": 1,
+        "ms": 900000,
+        "ongoing": false
+      }
+    ],
+    "commits": [
+      {
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "sha": "0101010101010101010101010101010101010101",
+        "ts_ms": 947462450000,
+        "item": "local:demo#1",
+        "attempt": 1,
+        "spawn": 1,
+        "session": "00000000-0000-4000-8000-072000000001",
+        "trailers": {
+          "item": true,
+          "run": true,
+          "session": true
+        }
+      },
+      {
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "sha": "0202020202020202020202020202020202020202",
+        "ts_ms": 947463450000,
+        "item": "local:demo#1",
+        "attempt": 1,
+        "spawn": 2,
+        "session": "00000000-0000-4000-8000-072000000001",
+        "trailers": {
+          "item": true,
+          "run": true,
+          "session": true
+        }
+      },
+      {
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "sha": "0303030303030303030303030303030303030303",
+        "ts_ms": 947464450000,
+        "item": "local:demo#1",
+        "attempt": 2,
+        "spawn": 3,
+        "session": "00000000-0000-4000-8000-072000000002",
+        "trailers": {
+          "item": true,
+          "run": true,
+          "session": true
+        }
+      },
+      {
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "sha": "0404040404040404040404040404040404040404",
+        "ts_ms": 947465450000,
+        "item": "local:demo#2",
+        "attempt": 1,
+        "spawn": 1,
+        "session": "00000000-0000-4000-8000-072000000003",
+        "trailers": {
+          "item": true,
+          "run": false,
+          "session": false
+        }
+      }
+    ],
+    "trailer_missing": [
+      {
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "sha": "0404040404040404040404040404040404040404",
+        "item": "local:demo#2",
+        "missing": [
+          "Run",
+          "Session"
+        ]
+      }
+    ],
+    "outside_runs": 1
+  }
+}

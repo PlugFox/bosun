@@ -165,7 +165,11 @@ impl GitConfig {
         }
 
         let mut files = BTreeMap::new();
-        for path in paths.into_iter().map(|p| slashes(&p)) {
+        // Keyed by the canonical path: git may print a file under another spelling than the one
+        // built here (`/var` and `/private/var` on macOS, an 8.3 short name on Windows), and one
+        // file must be one entry.
+        let paths: BTreeSet<PathBuf> = paths.iter().map(|p| canonical(p)).collect();
+        for path in paths {
             let digest = digest(git, &path)?;
             files.insert(path, digest);
         }
@@ -188,7 +192,7 @@ pub fn config(git: &Git, before: &GitConfig) -> Result<Vec<Refusal>, Error> {
     // compared: the removal shows in the file that held the line, and the target's own state
     // is read again here.
     for path in before.files.keys() {
-        if !now.files.contains_key(path.as_path()) {
+        if !now.files.contains_key(path) {
             let digest = digest(git, path)?;
             now.files.insert(path.clone(), digest);
         }
@@ -245,13 +249,38 @@ fn config_entries(git: &Git) -> Result<Vec<Entry>, Error> {
     Ok(entries)
 }
 
-/// `path` with `/` separators on Windows, where git prints `C:/...` and `Path::join` adds `\`:
-/// one spelling per file, so the same file is not compared twice under two names.
-fn slashes(path: &Path) -> PathBuf {
+/// The canonical spelling of `path`, whether the file exists or not: the longest existing
+/// ancestor resolved (symbolic links, `.` and `..`, the true letter case and long names on
+/// Windows), the rest appended. On Windows the `\\?\` prefix is dropped and separators are `/`,
+/// as git prints them.
+pub(crate) fn canonical(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut existing = path;
+    let resolved = loop {
+        if let Ok(resolved) = std::fs::canonicalize(existing) {
+            break resolved;
+        }
+        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+            // Nothing of it exists (or it ends in `..`): keep it as given.
+            rest.clear();
+            break path.to_owned();
+        };
+        rest.push(name.to_owned());
+        existing = parent;
+    };
+    let mut out = resolved;
+    for name in rest.into_iter().rev() {
+        out.push(name);
+    }
     if cfg!(windows) {
-        PathBuf::from(path.to_string_lossy().replace('\\', "/"))
+        let text = out.to_string_lossy();
+        let text = match text.strip_prefix(r"\\?\") {
+            Some(local) if !local.starts_with(r"UNC\") => local,
+            _ => &text,
+        };
+        PathBuf::from(text.replace('\\', "/"))
     } else {
-        path.to_owned()
+        out
     }
 }
 

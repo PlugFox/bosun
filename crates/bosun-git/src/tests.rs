@@ -600,6 +600,39 @@ fn a_planted_hook_an_include_edit_and_an_exclude_edit_are_each_refused() {
 }
 
 #[test]
+fn each_configuration_file_is_one_entry_whatever_its_spelling() {
+    let repo = repository();
+    let dir = repo.path();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    // The same file under three spellings: built from git's directories, an origin git prints,
+    // and an include target written through `..`.
+    std::fs::write(dir.join(".git").join("extra.inc"), "").unwrap();
+    agent(dir, &["config", "include.path", "../.git/extra.inc"]);
+    let git = Git::new(dir.join("sub").join(".."));
+    let snapshot = GitConfig::capture(&git).unwrap();
+    for name in ["config", "extra.inc"] {
+        let count = snapshot
+            .files
+            .keys()
+            .filter(|p| p.file_name().is_some_and(|n| n == name))
+            .count();
+        assert_eq!(count, 1, "{name}: {:?}", snapshot.files.keys());
+    }
+
+    // Spellings of one path, existing or not, are one canonical path.
+    let a = crate::snapshot::canonical(&dir.join("sub").join("..").join("missing.inc"));
+    let b = crate::snapshot::canonical(&dir.join("missing.inc"));
+    assert_eq!(a, b);
+    let a = crate::snapshot::canonical(&dir.join(".").join(".git").join("config"));
+    let b = crate::snapshot::canonical(&dir.join(".git").join("config"));
+    assert_eq!(a, b);
+
+    // An edit of the file is reported once.
+    agent(dir, &["config", "core.fsmonitor", "false"]);
+    assert_eq!(changed(&config(&git, &snapshot).unwrap()), [".git/config"]);
+}
+
+#[test]
 fn a_commit_touching_the_verdicts_test_is_refused_with_the_diff_stat() {
     let repo = repository();
     let dir = repo.path();

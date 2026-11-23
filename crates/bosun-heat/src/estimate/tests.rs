@@ -216,6 +216,41 @@ async fn repeated_reads_count_within_and_across_sessions() {
     );
 }
 
+/// #76: the per-file table shows shell execs and unknown touches beside reads and writes, and
+/// a script run twelve times (the `shell-touches` case) is no repeated read.
+#[tokio::test]
+async fn the_file_table_counts_execs_and_unknowns() {
+    let corpus = Corpus::new(&["shell-touches"]).await;
+    let estimates = corpus
+        .estimates(Scope {
+            from_ms: day(12),
+            to_ms: day(13),
+            repo: None,
+        })
+        .await;
+    corpus.close().await;
+
+    let file = |path: &str| {
+        estimates
+            .by_file
+            .rows
+            .iter()
+            .find(|row| row.path == path)
+            .unwrap_or_else(|| panic!("no file {path}: {:?}", estimates.by_file))
+    };
+    let counts = |row: &FileRow| (row.reads, row.searches, row.writes, row.execs, row.unknowns);
+    assert_eq!(counts(file("tool/check.py")), (0, 0, 0, 12, 0));
+    assert_eq!(counts(file("src/lib.rs")), (12, 0, 0, 0, 1));
+    assert_eq!(estimates.by_file.rows.len(), 2, "{:?}", estimates.by_file);
+    let repeated: Vec<(&str, u64)> = estimates
+        .repeated_reads
+        .rows
+        .iter()
+        .map(|row| (row.path.as_str(), row.reads))
+        .collect();
+    assert_eq!(repeated, [("src/lib.rs", 12)]);
+}
+
 #[tokio::test]
 async fn the_cost_of_finding_stops_at_the_first_write() {
     let corpus = Corpus::new(&["report"]).await;

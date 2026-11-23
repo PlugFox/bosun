@@ -492,6 +492,12 @@
     "FileRow": {
       "description": "One file of [`ByFile`]. A search touches the directory it searched.",
       "properties": {
+        "execs": {
+          "description": "Calls that ran it as a script (`python x.py`): neither reads nor writes (#76).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "path": {
           "description": "Relative to the repository (`.` for its root); absolute outside one.",
           "type": "string"
@@ -528,6 +534,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "unknowns": {
+          "description": "Calls whose command named it with an effect not known: a gap, never a read (#76).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "writes": {
           "format": "uint64",
           "minimum": 0,
@@ -539,6 +551,8 @@
         "reads",
         "searches",
         "writes",
+        "execs",
+        "unknowns",
         "sessions",
         "results"
       ],

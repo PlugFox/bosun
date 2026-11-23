@@ -322,6 +322,8 @@ impl Reader {
                 "read" => TouchKind::Read,
                 "write" => TouchKind::Write,
                 "search" => TouchKind::Search,
+                "exec" => TouchKind::Exec,
+                "unknown" => TouchKind::Unknown,
                 other => return Err(Error::Corrupt(format!("file touch kind {other:?}"))),
             };
             by_call

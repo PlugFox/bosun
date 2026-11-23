@@ -625,6 +625,8 @@ fn by_file(estimates: &Estimates, out: &mut String) {
         ("reads", true),
         ("searches", true),
         ("writes", true),
+        ("execs", true),
+        ("unknown", true),
         ("sessions", true),
     ];
     columns.extend(RESULT_COLUMNS);
@@ -636,6 +638,8 @@ fn by_file(estimates: &Estimates, out: &mut String) {
             row.reads.to_string(),
             row.searches.to_string(),
             row.writes.to_string(),
+            row.execs.to_string(),
+            row.unknowns.to_string(),
             row.sessions.to_string(),
         ];
         cells.extend(result_cells(&row.results));

@@ -31,6 +31,27 @@ pub fn absolute(path: &str, cwd: &str) -> String {
     canonical_path(&joined, style_of(&joined))
 }
 
+/// The canonical absolute form of `path` as a shell command named it in `cwd`: as
+/// [`absolute`], and with a Git Bash drive path (`/c/fixture/x.rs`) read as the Windows path
+/// it names (`c:\fixture\x.rs`) when `cwd` is a Windows path.
+#[must_use]
+pub(crate) fn shell_absolute(path: &str, cwd: &str) -> String {
+    let bytes = path.as_bytes();
+    let drive = bytes.len() >= 2
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && (bytes.len() == 2 || bytes[2] == b'/');
+    if drive && style_of(cwd) == PathStyle::Windows {
+        let letter = char::from(bytes[1]);
+        absolute(
+            &format!("{letter}:/{}", path.get(3..).unwrap_or_default()),
+            cwd,
+        )
+    } else {
+        absolute(path, cwd)
+    }
+}
+
 /// The head of a shell command: its first word, without leading variable assignments, quotes
 /// or directories. The rest of the command is dropped, so that arguments, which may hold
 /// secrets, never reach the database.
@@ -86,6 +107,27 @@ mod tests {
         assert_eq!(
             absolute(r"\fixture\x.rs", r"C:\fixture"),
             r"c:\fixture\x.rs"
+        );
+    }
+
+    #[test]
+    fn a_git_bash_drive_path_is_a_windows_path() {
+        assert_eq!(
+            shell_absolute("/c/Fixture/repo-a/x.rs", r"C:\fixture"),
+            r"c:\fixture\repo-a\x.rs"
+        );
+        assert_eq!(
+            shell_absolute("src/x.rs", r"C:\fixture\repo-a"),
+            r"c:\fixture\repo-a\src\x.rs"
+        );
+        // On a Unix machine `/c/...` is a Unix path.
+        assert_eq!(
+            shell_absolute("/c/fixture/x.rs", "/fixture"),
+            "/c/fixture/x.rs"
+        );
+        assert_eq!(
+            shell_absolute("/cfixture/x.rs", r"C:\fixture"),
+            r"c:\cfixture\x.rs"
         );
     }
 

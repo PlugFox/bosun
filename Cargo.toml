@@ -121,6 +121,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_runner_limit_is_crash)",
   "cfg(mutant_runner_loose_mcp)",
   "cfg(mutant_runner_question_from_text)",
+  "cfg(mutant_ingest_exec_is_read)",
+  "cfg(mutant_ingest_unknown_is_read)",
 ] }
 
 [workspace.lints.clippy]

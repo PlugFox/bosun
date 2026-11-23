@@ -62,3 +62,22 @@ cases: `M1` = (input 1, 5 min 20, 1 h 300, read 4000, output 50000), `M2` = (6, 
 | `skipped-records` | an unknown record type carrying a usage block; an `assistant` record whose `input_tokens` is a string and that repeats `M1`'s id with a larger output; an `assistant` record whose `message` is a string; a torn non-JSON line; known non-usage types | only well-formed `assistant` records count |
 | `cache-and-models` | usage without `cache_creation` (all writes 5 min); a 1 h write; a `<synthetic>` message (zeros, uuid id); Haiku 5.5 with a 150 532-token prompt, over the 100k threshold; both kinds of writes | categories are taken field by field; the threshold matters to pricing, not to the sums |
 | `report` | for the report (#26, #27): searches and reads before the first write, the same file read twice in one session and again in a second session, a tool result with `is_error`, a compaction (`compact_boundary`, prompt size 8065 → 706) | plain sums; the case exists for the report's estimates |
+
+## `stub/`: a synthetic second provider
+
+Not a real provider: a format invented to prove that the event model needs no new field for a
+provider other than Claude (#6, #20). `bosun-ingest`'s `stub` module documents it.
+
+```
+stub/<case>/
+  sessions/<session>.jsonl   one event per line: `start`, `turn` (one API message), `result`
+  repos.json                 as for `claude/`
+  expected.json              as for `claude/`, written by hand
+```
+
+Ids, timestamps and paths follow the templates above; the case number of `basic` is 91, its
+day is 9.
+
+| Case | What it holds | Why the sums are what they are |
+| --- | --- | --- |
+| `basic` | a `start`; a turn in `repo-a` that opens a file; a turn in `repo-b`, under no root, that runs a failing command; their results; an unknown `telemetry` event | 2 messages, one per repository entry; the unknown event is skipped |

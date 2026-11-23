@@ -52,6 +52,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_store_commit_per_row)",
   "cfg(mutant_store_accept_newer)",
   "cfg(mutant_store_default_perms)",
+  "cfg(mutant_ingest_last_block)",
+  "cfg(mutant_ingest_gap_keeps_line)",
+  "cfg(mutant_ingest_abort_on_gap)",
 ] }
 
 [workspace.lints.clippy]

@@ -185,6 +185,30 @@ const MUTANTS: &[Mutant] = &[
         // The mode bits exist on Unix only; Windows has no such test.
         platform: Some(Platform::Linux),
     },
+    Mutant {
+        name: "mutant_ingest_last_block",
+        issue: 20,
+        breaks: "the parser keeps the last usage block per file instead of every message",
+        package: "bosun-ingest",
+        check: Check::Test("claude::tests::every_fixture_equals_its_expected"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_gap_keeps_line",
+        issue: 20,
+        breaks: "a gap's reason carries the line",
+        package: "bosun-ingest",
+        check: Check::Test("claude::tests::a_gap_holds_none_of_its_line"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_abort_on_gap",
+        issue: 20,
+        breaks: "a gap aborts the rest of the file",
+        package: "bosun-ingest",
+        check: Check::Test("claude::tests::the_rest_of_a_file_parses_after_a_gap"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

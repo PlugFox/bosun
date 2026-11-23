@@ -1,0 +1,17 @@
+[package]
+name = "bosun-ingest"
+description = "Provider transcript parsers of bosun: transcript lines to the event model."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Parsing only (#20): no async runtime, no database. Discovery and tailing are #21's.
+[dependencies]
+bosun-core = { path = "../bosun-core" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -11,6 +11,7 @@
 
 mod assemble;
 pub mod claude;
+pub mod git;
 mod line;
 mod normalise;
 mod record;

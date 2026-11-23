@@ -55,6 +55,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_ingest_last_block)",
   "cfg(mutant_ingest_gap_keeps_line)",
   "cfg(mutant_ingest_abort_on_gap)",
+  "cfg(mutant_commit_time_only)",
 ] }
 
 [workspace.lints.clippy]

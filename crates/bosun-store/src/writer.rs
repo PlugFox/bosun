@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use bosun_core::{Gap, Message, Rates, WindowKey, default_table, merge};
+use bosun_core::{Commit, Gap, Message, Rates, WindowKey, default_table, merge};
 use sqlx::sqlite::SqliteConnection;
 use sqlx::{Connection, Executor};
 use tokio::sync::{mpsc, oneshot};
@@ -41,6 +41,22 @@ pub enum Write {
     },
     /// A new price for a model from a time on. Closes the current row; never touches a message.
     ChangePrice(PriceChange),
+    /// Registers a repository or records its origin and default branch. Keyed by path.
+    Repo(Repo),
+    /// A commit of the repository with path key `repo`, which is registered if it is not yet.
+    /// Keyed by (repository, sha): a stored commit is never changed, so writing it again
+    /// changes nothing.
+    Commit { repo: String, commit: Commit },
+}
+
+/// A configured repository. Keyed by `path`: writing it again updates the row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repo {
+    /// The canonical path key (`bosun_core::canonical_path`), as the configuration holds it.
+    pub path: String,
+    /// The origin URL, without credentials.
+    pub remote: Option<String>,
+    pub default_branch: Option<String>,
 }
 
 /// A transcript file and how far it has been parsed. Keyed by (provider, file key): writing it
@@ -195,7 +211,59 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             parser_version,
         } => upsert_gap(conn, &provider, &file_key, &gap, parser_version).await,
         Write::ChangePrice(change) => change_price(conn, &change).await,
+        Write::Repo(repo) => upsert_repo(conn, &repo).await,
+        Write::Commit { repo, commit } => insert_commit(conn, &repo, &commit).await,
     }
+}
+
+async fn upsert_repo(conn: &mut SqliteConnection, repo: &Repo) -> Result<(), Error> {
+    sqlx::query!(
+        "INSERT INTO repo (path, remote, default_branch) VALUES (?, ?, ?)
+         ON CONFLICT (path) DO UPDATE SET
+             remote = excluded.remote,
+             default_branch = excluded.default_branch",
+        repo.path,
+        repo.remote,
+        repo.default_branch,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+async fn insert_commit(
+    conn: &mut SqliteConnection,
+    repo: &str,
+    commit: &Commit,
+) -> Result<(), Error> {
+    let repo_id = sqlx::query_scalar!(
+        r#"INSERT INTO repo (path) VALUES (?)
+           ON CONFLICT (path) DO UPDATE SET path = excluded.path
+           RETURNING id AS "id!: i64""#,
+        repo,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let added = to_db(commit.lines_added, "lines added")?;
+    let removed = to_db(commit.lines_removed, "lines removed")?;
+    let trailers = serde_json::to_string(&commit.trailers)
+        .map_err(|e| Error::Corrupt(format!("trailers of commit {}: {e}", commit.sha)))?;
+    sqlx::query!(
+        r#"INSERT INTO "commit"
+               (repo_id, sha, ts_ms, author, lines_added, lines_removed, trailers_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (repo_id, sha) DO NOTHING"#,
+        repo_id,
+        commit.sha,
+        commit.ts_ms,
+        commit.author,
+        added,
+        removed,
+        trailers,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 async fn upsert_source_file(conn: &mut SqliteConnection, file: &SourceFile) -> Result<(), Error> {

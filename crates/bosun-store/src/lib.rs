@@ -27,13 +27,15 @@
 //! wider ACL gets that ACL.
 
 mod error;
+mod link;
 mod open;
 mod read;
 mod writer;
 
 pub use error::Error;
+pub use link::{CommitLink, Link, LinkedSession};
 pub use read::{Bill, Reader};
-pub use writer::{PriceChange, SourceFile, Write, Writer};
+pub use writer::{PriceChange, Repo, SourceFile, Write, Writer};
 
 use std::path::Path;
 use std::time::Duration;

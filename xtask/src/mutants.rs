@@ -209,6 +209,16 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("claude::tests::the_rest_of_a_file_parses_after_a_gap"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_commit_time_only",
+        issue: 23,
+        breaks: "a commit is linked to sessions by time alone, whatever their repository",
+        // The cfg is in bosun-store's link query; the check reads real repositories through
+        // bosun-ingest's commit reader into the store, so it is bosun-ingest's test.
+        package: "bosun-ingest",
+        check: Check::Test("git::tests::each_commit_links_only_within_its_repository"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

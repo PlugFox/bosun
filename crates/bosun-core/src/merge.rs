@@ -4,11 +4,13 @@
 //! does not depend on the order in which files are scanned or lines arrive:
 //!
 //! - usage: the record with the largest output (the final record of a split message); ties are
-//!   broken by the remaining token counts, the model, the cwd and the raw usage JSON, which
-//!   makes the choice a maximum under a total order;
+//!   broken by the remaining token counts, the cwd, the model and the raw usage JSON, which
+//!   makes the choice a maximum under a total order (the cwd before the model, so that an
+//!   oracle that ignores models, `recount`, attributes the message to the same repository);
 //! - tool calls: the union over all records, keyed by `tool_use` id; a call seen twice keeps
 //!   the larger byte counts, the error flag if either has it, and the larger name and target;
-//! - origin (the owning file): the earliest by timestamp, ties broken by file key, then window.
+//! - origin (the owning file): the earliest by timestamp, ties broken by window (session id,
+//!   then agent id), then file key; see [`crate::event::Origin`].
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -87,8 +89,8 @@ fn usage_order(a: &Message, b: &Message) -> Ordering {
         .output
         .cmp(&b.usage.tokens.output)
         .then_with(|| a.usage.tokens.cmp(&b.usage.tokens))
-        .then_with(|| a.model.cmp(&b.model))
         .then_with(|| a.cwd.cmp(&b.cwd))
+        .then_with(|| a.model.cmp(&b.model))
         // serde_json orders object keys, so the text is canonical.
         .then_with(|| a.usage.raw.to_string().cmp(&b.usage.raw.to_string()))
 }
@@ -204,11 +206,44 @@ mod tests {
         assert_eq!(merged.origin.file, "b-original");
         assert_eq!(merge(original, fork).unwrap(), merged);
 
-        // Same timestamp: the smaller file key wins, whatever the order.
+        // Same timestamp, one window in two files: the smaller file key wins, whatever the order.
         let x = record("x", 2_000, 70, None);
-        let y = record("y", 2_000, 70, None);
+        let mut y = record("y", 2_000, 70, None);
+        y.origin.window = x.origin.window.clone();
         assert_eq!(merge(x.clone(), y.clone()).unwrap().origin.file, "x");
         assert_eq!(merge(y, x).unwrap().origin.file, "x");
+    }
+
+    /// A fork copies records with their timestamps. The tie goes to the smaller session id, not
+    /// to the smaller file key: a file id is arbitrary and changes when the tree is copied
+    /// (found on a real history, #6).
+    #[test]
+    fn a_timestamp_tie_goes_to_the_smaller_session_not_the_smaller_file() {
+        let mut original = record("z-file-of-the-original", 2_000, 70, None);
+        original.origin.window = window("s1");
+        let mut fork = record("a-file-of-the-fork", 2_000, 70, None);
+        fork.origin.window = window("s2");
+        for merged in [
+            merge(original.clone(), fork.clone()).unwrap(),
+            merge(fork, original).unwrap(),
+        ] {
+            assert_eq!(merged.origin.window, window("s1"));
+            assert_eq!(merged.origin.file, "z-file-of-the-original");
+        }
+    }
+
+    /// Equal output and tokens: the cwd decides before the model, as in `recount`, which knows
+    /// no models.
+    #[test]
+    fn a_usage_tie_is_broken_by_cwd_before_model() {
+        let mut a = record("a", 1_000, 70, None);
+        a.cwd = "/work/repo-b".to_owned();
+        a.model = "claude-haiku-5-5".to_owned();
+        let mut b = record("b", 1_000, 70, None);
+        b.cwd = "/work/repo-a".to_owned();
+        b.model = "claude-opus-5-5".to_owned();
+        assert_eq!(merge(a.clone(), b.clone()).unwrap().cwd, "/work/repo-b");
+        assert_eq!(merge(b, a).unwrap().cwd, "/work/repo-b");
     }
 
     #[test]

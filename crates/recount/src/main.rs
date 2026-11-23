@@ -27,9 +27,13 @@
 //!   `output_tokens`.
 //! - A last line without its newline is still being written and is not read.
 //! - One API message is several records with one `message.id`, across all files: it is
-//!   counted once, with the usage of the record with the largest `output_tokens`.
+//!   counted once, with the usage of the record with the largest `output_tokens` (ties: the
+//!   larger other counts, in the order input, 5 min write, 1 h write, read; then the larger
+//!   `cwd`).
 //! - It belongs to the context window (file) where its id appears earliest by `timestamp`
-//!   (ties: the file that sorts first by path, then the earlier line).
+//!   (ties: the smaller session id, then the main transcript before sub-agents and the smaller
+//!   agent id, then the path, then the earlier line). A fork copies records with their
+//!   timestamps, and the tie goes to the session id wherever its file lies.
 //! - It belongs to the repository whose root is the counted record's `cwd` or an ancestor of
 //!   it (the longest such root); separators are unified, drive-letter paths compare ignoring
 //!   case.
@@ -175,7 +179,7 @@ mod tests {
             .collect();
         cases.sort();
         // An empty corpus would pass for the wrong reason.
-        assert!(cases.len() >= 8, "found only {} fixture cases", cases.len());
+        assert!(cases.len() >= 9, "found only {} fixture cases", cases.len());
         let failures: Vec<String> = cases.iter().filter_map(|c| check_case(c).err()).collect();
         assert!(failures.is_empty(), "{failures:#?}");
     }
@@ -183,6 +187,13 @@ mod tests {
     #[test]
     fn a_split_message_counts_once() {
         check_case(&fixtures().join("split-message")).unwrap();
+    }
+
+    /// A fork's copy of a message ties with the original on timestamp; the original's session id
+    /// is smaller but its file sorts later by path (#6, found on a real history).
+    #[test]
+    fn a_timestamp_tie_goes_to_the_smaller_session() {
+        check_case(&fixtures().join("fork-tie")).unwrap();
     }
 
     #[test]

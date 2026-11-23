@@ -1,0 +1,6 @@
+{
+  "roots": [
+    "/fixture/repo-a",
+    "/fixture/repo-b"
+  ]
+}

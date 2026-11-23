@@ -67,9 +67,14 @@ pub struct Usage {
 
 /// Where a record of a message was seen. A message's origin is the earliest of its records'.
 ///
-/// Ordered by timestamp, then file, then window: the derived order is the ownership rule and
-/// its tiebreak (see [`crate::merge`]).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Ordered by timestamp, then window (session id, then agent id, the main transcript first),
+/// then file: the order is the ownership rule and its tiebreak (see [`crate::merge`], #3).
+///
+/// The window comes before the file because a fork copies records with their timestamps, and
+/// the file key (a file id) is arbitrary and changes when the tree is copied; the session id
+/// is the same wherever the file is. The file key stays last so that two files of one window
+/// (one session under two project directories) still compare unequal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Origin {
     /// The record's timestamp, milliseconds since the Unix epoch, UTC.
     pub ts_ms: i64,
@@ -77,6 +82,27 @@ pub struct Origin {
     pub file: String,
     /// The context window that file holds.
     pub window: WindowKey,
+}
+
+impl Ord for Origin {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let by_time = self.ts_ms.cmp(&other.ts_ms);
+        if cfg!(mutant_core_tie_by_file) {
+            // Mutant: the file key breaks ties before the window.
+            return by_time
+                .then_with(|| self.file.cmp(&other.file))
+                .then_with(|| self.window.cmp(&other.window));
+        }
+        by_time
+            .then_with(|| self.window.cmp(&other.window))
+            .then_with(|| self.file.cmp(&other.file))
+    }
+}
+
+impl PartialOrd for Origin {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// One tool call of a message. Its `tool_use` id is the key it is stored under in

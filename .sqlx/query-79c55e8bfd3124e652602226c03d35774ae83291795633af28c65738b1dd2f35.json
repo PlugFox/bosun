@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE outbox SET revision = revision + 1, retry_at_ms = NULL\n             WHERE coalesce_key = ? AND acked_ms IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "79c55e8bfd3124e652602226c03d35774ae83291795633af28c65738b1dd2f35"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO flaky_test (repo_id, test_name, item_id, attempt_id, ts_ms)\n             SELECT i.repo_id, ?, i.id, a.id, ?\n             FROM attempt a JOIN item i ON i.id = a.item_id WHERE a.id = ?\n             ON CONFLICT (attempt_id, test_name) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "89707c0bd8cab39ea77a1d44bfd75cb7417ea3cad07b3e3832f34c9dc58579e7"
+}

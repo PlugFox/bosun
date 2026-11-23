@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE verdict_run SET pid = NULL, pid_started_ms = NULL\n         WHERE pid = ? AND pid_started_ms = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2ae02fd1b2f346d9ddb081abd3a4a3f862fe4f5f535d3e5b3ffe3ee39c9c20ed"
+}

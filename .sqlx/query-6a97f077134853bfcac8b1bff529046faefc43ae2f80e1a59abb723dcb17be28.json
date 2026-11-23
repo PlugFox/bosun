@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.node_id FROM board_comment c JOIN item i ON i.id = c.item_id\n             WHERE i.item_key = ? ORDER BY c.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "node_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_comment",
+            "name": "node_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6a97f077134853bfcac8b1bff529046faefc43ae2f80e1a59abb723dcb17be28"
+}

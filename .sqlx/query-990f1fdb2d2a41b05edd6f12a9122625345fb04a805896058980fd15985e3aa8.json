@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT from_state, to_state, cause FROM transition WHERE transition_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "from_state",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "from_state"
+          }
+        }
+      },
+      {
+        "name": "to_state",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "to_state"
+          }
+        }
+      },
+      {
+        "name": "cause",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "cause"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "990f1fdb2d2a41b05edd6f12a9122625345fb04a805896058980fd15985e3aa8"
+}

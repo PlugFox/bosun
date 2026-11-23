@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE verdict_run SET\n             pid = NULL, pid_started_ms = NULL, ended_ms = ?, result = ?, exit_code = ?,\n             duration_ms = ?, verdict_line = ?, tail = ?\n         WHERE attempt_id = ? AND run = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "e3c0b2db20669091d0102f14f8b06c6d7064140e1dc83a99035b6fb87abcb93f"
+}

@@ -8,8 +8,9 @@
 use std::time::Duration;
 
 use bosun_core::{
-    Commit, FileTouch, Gap, Message, Rates, SessionCheck, ToolResult, WindowKey, WindowKind,
-    WindowMeta, canonical_path, default_table, merge, repo_root, strip_root, style_of,
+    Commit, Effect, FileTouch, Gap, ItemId, Message, Rates, SessionCheck, Stepped, ToolResult,
+    WindowKey, WindowKind, WindowMeta, canonical_path, default_table, merge, repo_root, strip_root,
+    style_of,
 };
 use sqlx::sqlite::SqliteConnection;
 use sqlx::{Connection, Executor};
@@ -19,6 +20,8 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::error::{Error, from_db, to_db};
 use crate::read;
+use crate::work::write as work;
+use crate::work::{AgentCall, NewItem, RunEnd, RunStart, Snapshot, VerdictEnd, VerdictStart};
 
 /// How many batches may wait for the writer before senders wait too.
 const QUEUE: usize = 64;
@@ -67,6 +70,71 @@ pub enum Write {
         check: SessionCheck,
         /// When bosun recorded it.
         recorded_ms: i64,
+    },
+    /// Registers an item of a repository (registered if it is not yet), or updates its card
+    /// key. Its state is changed by transitions only.
+    Item(NewItem),
+    /// The item's snapshot at claim; it becomes the item's current snapshot. Keyed by its key.
+    Snapshot(Snapshot),
+    /// One arrow of the item machine, recorded before its effects: the transition under its
+    /// idempotence key, the item and attempt as the step left them, and its board writes in the
+    /// outbox. A key already stored is a replay and changes nothing.
+    Transition { stepped: Stepped, at_ms: i64 },
+    /// A session about to be spawned, with its pre-assigned provider session id. A transcript of
+    /// that id is a run session whether it was ingested before or after this row.
+    Run(RunStart),
+    /// The child process of the attempt's current session (#50).
+    SessionChild {
+        item: ItemId,
+        attempt: u32,
+        pid: u32,
+        pid_started_ms: i64,
+    },
+    /// A session ended; clears the attempt's child process.
+    RunEnded(RunEnd),
+    /// A verdict run started, with its child process. Keyed by (attempt, run).
+    VerdictStarted(VerdictStart),
+    /// A verdict run finished; clears its child process.
+    VerdictEnded(VerdictEnd),
+    /// A call of the agent. Every call is a row; it is not a transition.
+    AgentCall(AgentCall),
+    /// A board write in the outbox, outside a transition. Keyed by the effect's key; a pending
+    /// write with the same coalesce key absorbs it. Effects that are not board writes are
+    /// skipped.
+    Enqueue { effect: Effect, at_ms: i64 },
+    /// The board acknowledged `revision` of outbox row `id`. A row that absorbed a newer write
+    /// since stays pending.
+    Acknowledge { id: i64, revision: u32, at_ms: i64 },
+    /// Sending outbox row `id` failed; it waits until `retry_at_ms`.
+    SendFailed {
+        id: i64,
+        error: String,
+        retry_at_ms: i64,
+    },
+    /// A comment the daemon created on the board, by its key. Writing it again records the new
+    /// node id (a deleted comment recreated).
+    BoardComment {
+        item: ItemId,
+        key: String,
+        node_id: String,
+        at_ms: i64,
+    },
+    /// Tests that failed on a verdict's first run and passed on its re-run (#44 D).
+    FlakyTests {
+        item: ItemId,
+        attempt: u32,
+        names: Vec<String>,
+        at_ms: i64,
+    },
+    /// A child process is gone (reaped, or found dead): the session or verdict run that named
+    /// it by pid and start time no longer does.
+    ChildGone { pid: u32, started_ms: i64 },
+    /// A start of the daemon, numbered after the last one ([`crate::Reader::last_boot`]). A
+    /// number already recorded fails the batch: two starts never share one.
+    Boot {
+        number: u32,
+        started_ms: i64,
+        pid: u32,
     },
     /// Mutant `mutant_ingest_reingest_truncates` (#21): deletes every ingested row, as a
     /// reingest that truncates before it rebuilds would.
@@ -250,6 +318,51 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
         Write::SessionCheck { check, recorded_ms } => {
             replace_session_check(conn, &check, recorded_ms).await
         }
+        Write::Item(item) => work::upsert_item(conn, &item).await,
+        Write::Snapshot(snapshot) => work::insert_snapshot(conn, &snapshot).await,
+        Write::Transition { stepped, at_ms } => {
+            work::record_transition(conn, &stepped, at_ms).await
+        }
+        Write::Run(run) => work::insert_run(conn, &run).await,
+        Write::SessionChild {
+            item,
+            attempt,
+            pid,
+            pid_started_ms,
+        } => work::session_child(conn, &item, attempt, pid, pid_started_ms).await,
+        Write::RunEnded(end) => work::end_run(conn, &end).await,
+        Write::VerdictStarted(start) => work::start_verdict(conn, &start).await,
+        Write::VerdictEnded(end) => work::end_verdict(conn, &end).await,
+        Write::AgentCall(call) => work::insert_agent_call(conn, &call).await,
+        Write::Enqueue { effect, at_ms } => work::enqueue_effect(conn, &effect, at_ms).await,
+        Write::Acknowledge {
+            id,
+            revision,
+            at_ms,
+        } => work::acknowledge(conn, id, revision, at_ms).await,
+        Write::SendFailed {
+            id,
+            error,
+            retry_at_ms,
+        } => work::send_failed(conn, id, &error, retry_at_ms).await,
+        Write::BoardComment {
+            item,
+            key,
+            node_id,
+            at_ms,
+        } => work::upsert_board_comment(conn, &item, &key, &node_id, at_ms).await,
+        Write::FlakyTests {
+            item,
+            attempt,
+            names,
+            at_ms,
+        } => work::insert_flaky_tests(conn, &item, attempt, &names, at_ms).await,
+        Write::ChildGone { pid, started_ms } => work::child_gone(conn, pid, started_ms).await,
+        Write::Boot {
+            number,
+            started_ms,
+            pid,
+        } => work::insert_boot(conn, number, started_ms, pid).await,
         #[cfg(mutant_ingest_reingest_truncates)]
         Write::Truncate => {
             conn.execute(
@@ -282,7 +395,7 @@ fn repo_of(cwd: &str, repos: &[(i64, String)]) -> Option<i64> {
         .map(|(id, _)| *id)
 }
 
-async fn upsert_repo(conn: &mut SqliteConnection, repo: &Repo) -> Result<(), Error> {
+pub(crate) async fn upsert_repo(conn: &mut SqliteConnection, repo: &Repo) -> Result<(), Error> {
     let key = canonical_path(&repo.path, style_of(&repo.path));
     let known = sqlx::query_scalar!(r#"SELECT id AS "id!: i64" FROM repo WHERE path = ?"#, key)
         .fetch_optional(&mut *conn)
@@ -382,9 +495,13 @@ async fn upsert_session(
         WindowKind::Run => "run",
         WindowKind::Interactive => "interactive",
     };
+    // A session bosun spawned stays a run session whatever the transcript says.
     sqlx::query!(
         "UPDATE session SET
-             kind = ?,
+             kind = CASE WHEN ? = 'run' OR kind = 'run' OR EXISTS (
+                     SELECT 1 FROM run r
+                     WHERE r.provider = session.provider AND r.session_key = session.session_key)
+                 THEN 'run' ELSE 'interactive' END,
              root_id = ?,
              parent_id = coalesce(?, parent_id),
              agent_type = coalesce(?, agent_type),
@@ -599,15 +716,18 @@ async fn session_id(
     if let Some(id) = found {
         return Ok(id);
     }
-    Ok(sqlx::query_scalar!(
+    let id = sqlx::query_scalar!(
         r#"INSERT INTO session (provider, session_key, agent_key) VALUES (?, ?, ?)
            RETURNING id AS "id!: i64""#,
         provider,
         window.session_id,
         window.agent_id,
     )
-    .fetch_one(conn)
-    .await?)
+    .fetch_one(&mut *conn)
+    .await?;
+    // The run row came first: the transcript of a spawned session is a run session.
+    work::mark_run_session(conn, provider, &window.session_id).await?;
+    Ok(id)
 }
 
 async fn model_id(conn: &mut SqliteConnection, provider: &str, name: &str) -> Result<i64, Error> {

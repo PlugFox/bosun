@@ -1,0 +1,314 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.item_key, r.path AS repo, i.card_key, i.state, i.park_reason,\n                      i.park_until_ms, i.park_next, i.outcome, i.reason, i.seq, i.attempts,\n                      i.spawns, i.runs, i.failed, i.uncounted, i.boot, i.created_ms,\n                      i.updated_ms, s.hash AS \"snapshot_hash?: String\",\n                      a.number AS \"a_number?: i64\", a.spawn AS \"a_spawn?: i64\",\n                      a.run AS \"a_run?: i64\", a.state AS \"a_state?: String\",\n                      a.first_run AS \"a_first_run?: String\",\n                      a.crash_retries AS \"a_crash_retries?: i64\"\n               FROM item i\n               JOIN repo r ON r.id = i.repo_id\n               LEFT JOIN snapshot s ON s.id = i.snapshot_id\n               LEFT JOIN attempt a ON a.item_id = i.id AND a.number = i.attempt_number\n               WHERE (?1 IS NULL OR i.item_key = ?1)\n               ORDER BY i.item_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "item_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "item_key"
+          }
+        }
+      },
+      {
+        "name": "repo",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "card_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "card_key"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "park_reason",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "park_reason"
+          }
+        }
+      },
+      {
+        "name": "park_until_ms",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "park_until_ms"
+          }
+        }
+      },
+      {
+        "name": "park_next",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "park_next"
+          }
+        }
+      },
+      {
+        "name": "outcome",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "outcome"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "seq",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "name": "attempts",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "name": "spawns",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "spawns"
+          }
+        }
+      },
+      {
+        "name": "runs",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "runs"
+          }
+        }
+      },
+      {
+        "name": "failed",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "failed"
+          }
+        }
+      },
+      {
+        "name": "uncounted",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "uncounted"
+          }
+        }
+      },
+      {
+        "name": "boot",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "boot"
+          }
+        }
+      },
+      {
+        "name": "created_ms",
+        "ordinal": 16,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "created_ms"
+          }
+        }
+      },
+      {
+        "name": "updated_ms",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "updated_ms"
+          }
+        }
+      },
+      {
+        "name": "snapshot_hash?: String",
+        "ordinal": 18,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "hash"
+          }
+        }
+      },
+      {
+        "name": "a_number?: i64",
+        "ordinal": 19,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "name": "a_spawn?: i64",
+        "ordinal": 20,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "spawn"
+          }
+        }
+      },
+      {
+        "name": "a_run?: i64",
+        "ordinal": 21,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "run"
+          }
+        }
+      },
+      {
+        "name": "a_state?: String",
+        "ordinal": 22,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "a_first_run?: String",
+        "ordinal": 23,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "first_run"
+          }
+        }
+      },
+      {
+        "name": "a_crash_retries?: i64",
+        "ordinal": 24,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "crash_retries"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "f437e01a439889a3bc4e1f7bccde0eb9c2778f7ab18821ac9614b3f5499218cf"
+}

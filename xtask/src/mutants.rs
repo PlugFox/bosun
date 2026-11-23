@@ -655,6 +655,30 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::a_repository_asking_for_gh_token_does_not_get_it"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_store_transition_no_key",
+        issue: 57,
+        breaks: "a replayed transition is not recognised by its idempotence key",
+        package: "bosun-store",
+        check: Check::Test("work::tests::a_transition_written_twice_is_one_row"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_outbox_no_coalesce",
+        issue: 57,
+        breaks: "pending upsert_comment rows of one key do not coalesce",
+        package: "bosun-store",
+        check: Check::Test("work::tests::report_writes_of_one_key_coalesce_into_one_pending_row"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_run_kind_order",
+        issue: 57,
+        breaks: "a session is marked run only when its run row is written first",
+        package: "bosun-store",
+        check: Check::Test("work::tests::a_transcript_is_a_run_session_in_either_order"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

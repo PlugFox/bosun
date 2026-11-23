@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO transition (transition_key, item_id, seq, attempt, from_state, to_state,\n                                       to_detail, attempt_from, attempt_to, cause, effects_json,\n                                       ts_ms)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n               RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "14addbb1b7f5025d839bbe7461f53b5d5c0da9708b1e16e58925d177b878afe4"
+}

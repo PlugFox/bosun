@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE session SET\n             kind = CASE WHEN ? = 'run' OR kind = 'run' OR EXISTS (\n                     SELECT 1 FROM run r\n                     WHERE r.provider = session.provider AND r.session_key = session.session_key)\n                 THEN 'run' ELSE 'interactive' END,\n             root_id = ?,\n             parent_id = coalesce(?, parent_id),\n             agent_type = coalesce(?, agent_type),\n             spawn_depth = coalesce(?, spawn_depth),\n             spawn_tool_use_id = coalesce(?, spawn_tool_use_id)\n         WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "c65e71616a7b3b3fc24173b834617471a9d274e4cdfe1209033fbea5a9a82d32"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE outbox SET acked_ms = ?, last_error = NULL, retry_at_ms = NULL\n         WHERE id = ? AND revision = ? AND acked_ms IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "b4549fcc1904a43ea2b7fa2c8c739ce8faae791fe4ab122eb992ccd5f276bfda"
+}

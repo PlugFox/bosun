@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id AS \"id!: i64\" FROM attempt a JOIN item i ON i.id = a.item_id\n           WHERE i.item_key = ? AND a.number = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d947005adb2bb36de2d96e9926ec6f487ad4c6734d37c0ae9c825816f7323d9f"
+}

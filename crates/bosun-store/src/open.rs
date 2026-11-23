@@ -222,6 +222,23 @@ mod tests {
         Migrator::with_migrations(migrations)
     }
 
+    /// The highest migration version of this binary.
+    fn latest() -> i64 {
+        MIGRATOR.iter().map(|m| m.version).max().unwrap()
+    }
+
+    /// This binary's migrations up to `version`, as an earlier bosun shipped them.
+    fn up_to(version: i64) -> Migrator {
+        Migrator::with_migrations(
+            MIGRATOR
+                .migrations
+                .iter()
+                .filter(|m| m.version <= version)
+                .cloned()
+                .collect(),
+        )
+    }
+
     fn backups(dir: &Path) -> Vec<PathBuf> {
         let mut found: Vec<PathBuf> = fs::read_dir(dir)
             .unwrap()
@@ -238,19 +255,7 @@ mod tests {
     async fn a_check_of_version_2_survives_migration_3() {
         let dir = tempfile::tempdir().unwrap();
         let path = store_path(&dir);
-        let earlier = MIGRATOR
-            .migrations
-            .iter()
-            .filter(|m| m.version <= 2)
-            .cloned()
-            .collect();
-        let store = open(
-            &path,
-            &Options::default(),
-            &Migrator::with_migrations(earlier),
-        )
-        .await
-        .unwrap();
+        let store = open(&path, &Options::default(), &up_to(2)).await.unwrap();
         store.close().await.unwrap();
         let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
             .await
@@ -371,9 +376,9 @@ mod tests {
                 err,
                 Error::NewerDatabase {
                     found: 9_000,
-                    supported: 4,
+                    supported,
                     ..
-                }
+                } if supported == latest()
             ),
             "{err}"
         );
@@ -409,8 +414,11 @@ mod tests {
         let copies = backups(path.parent().unwrap());
         assert_eq!(copies.len(), 1, "{copies:?}");
         let name = copies[0].file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("bosun.db.v4-"), "{name}");
-        // The copy is the file as it was: version 4, the data, no table of the later version.
+        assert!(
+            name.starts_with(&format!("bosun.db.v{}-", latest())),
+            "{name}"
+        );
+        // The copy is the file as it was: this version, the data, no table of the later one.
         let mut conn = SqliteConnection::connect_with(
             &SqliteConnectOptions::new()
                 .filename(&copies[0])
@@ -423,7 +431,10 @@ mod tests {
                 .fetch_all(&mut conn)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1, 2, 3, 4]);
+        assert_eq!(
+            versions,
+            MIGRATOR.iter().map(|m| m.version).collect::<Vec<_>>()
+        );
         let files = sqlx::query_scalar!(r#"SELECT count(*) AS "n!: i64" FROM source_file"#)
             .fetch_one(&mut conn)
             .await
@@ -436,6 +447,83 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(later_tables, 0);
+    }
+
+    /// #57: a stage-0 database (migrations 1 to 3) migrates to this binary's schema, leaving a
+    /// copy of itself, and its bill is unchanged.
+    #[tokio::test]
+    async fn a_stage_0_database_migrates_with_a_copy_and_the_same_bill() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        // The rows a stage-0 bosun wrote: this binary's writer needs the later schema.
+        let store = open(&path, &Options::default(), &up_to(3)).await.unwrap();
+        let before = store.reader().bill(0, i64::MAX).await.unwrap();
+        assert_eq!(before.messages, 0);
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO source_file (id, provider, file_key, path) VALUES (1, 'claude', 'f1', 'p');
+             INSERT INTO session (id, provider, session_key) VALUES (1, 'claude', 's1');
+             INSERT INTO session (id, provider, session_key, agent_key, parent_id, root_id)
+                 VALUES (2, 'claude', 's1', 'agent-1', 1, 1);
+             INSERT INTO model (id, provider, name) VALUES
+                 (1, 'claude', 'claude-opus-5-5'), (2, 'claude', 'claude-haiku-5-5');
+             INSERT INTO message (provider, message_key, session_id, source_file_id, ts_ms,
+                                  model_id, cwd, input_tokens, cache_write_5m_tokens,
+                                  cache_write_1h_tokens, cache_read_tokens, output_tokens,
+                                  usage_json, parser_version)
+             VALUES ('claude', 'm1', 1, 1, 100, 1, '/w', 10, 1000, 2000, 50000, 80, '{}', 1),
+                    ('claude', 'm2', 1, 1, 200, 1, '/w', 3, 0, 500, 9000, 70, '{}', 1),
+                    ('claude', 'm3', 2, 1, 300, 2, '/w', 7, 100, 0, 4000, 9, '{}', 1);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+        let store = open(&path, &Options::default(), &up_to(3)).await.unwrap();
+        let before = store.reader().bill(0, i64::MAX).await.unwrap();
+        store.close().await.unwrap();
+        assert_eq!(before.messages, 3);
+        assert!(before.unpriced.is_empty(), "{before:?}");
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let after = store.reader().bill(0, i64::MAX).await.unwrap();
+        assert_eq!(after, before);
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table'
+             AND name IN ('item', 'transition', 'outbox') ORDER BY name",
+        )
+        .fetch_all(store.reader().pool())
+        .await
+        .unwrap();
+        assert_eq!(tables, ["item", "outbox", "transition"]);
+        store.close().await.unwrap();
+
+        let copies = backups(path.parent().unwrap());
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        let name = copies[0].file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("bosun.db.v3-"), "{name}");
+        let mut conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&copies[0])
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+        let messages: i64 = sqlx::query_scalar("SELECT count(*) FROM message")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(messages, 3);
+        let loop_tables: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name = 'item'")
+                .fetch_one(&mut conn)
+                .await
+                .unwrap();
+        assert_eq!(loop_tables, 0, "the copy is the stage-0 file");
+        conn.close().await.unwrap();
     }
 
     #[cfg(unix)]

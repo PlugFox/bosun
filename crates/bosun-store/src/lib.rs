@@ -8,6 +8,9 @@
 //!   a [`Writer`]; each batch is one transaction, so a crash loses at most the uncommitted batch
 //!   and never half of one. Messages are folded with [`bosun_core::merge`] read-modify-write:
 //!   SQL holds no merge logic.
+//! - The loop's tables (#7, #57): items, snapshots, attempts, run sessions, verdict runs, the
+//!   transition log and the outbox. A transition is written under its idempotence key in one
+//!   transaction with the item it produced and its board writes, so a replay is a no-op.
 //! - Readers use a read-only pool ([`Reader`]). Every derived number (cost, eqv) is computed at
 //!   query time from raw token counts and the price rows.
 //!
@@ -31,12 +34,18 @@ mod link;
 mod open;
 mod read;
 mod report;
+mod work;
 mod writer;
 
 pub use error::Error;
 pub use link::{CommitLink, Link, LinkedSession};
 pub use read::{Bill, By, Group, Reader};
 pub use report::{CheckRow, ToolRow, UsageRow, VersionHealth, WindowSums};
+pub use work::{
+    AgentCall, AgentCallKind, AgentCallRow, AttemptRow, NewItem, OutboxOp, OutboxRow,
+    RecordedChild, RunEnd, RunRow, RunStart, Snapshot, StoredItem, TransitionRow, VerdictEnd,
+    VerdictRow, VerdictStart,
+};
 pub use writer::{PriceChange, Repo, SourceFile, Write, Writer};
 
 use std::path::Path;

@@ -1,0 +1,134 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.snapshot_key, s.taken_ms, s.hash, s.body, s.contract_json, s.comments_json,\n                    s.config_hash, s.policy_hash, s.base_sha, s.branch\n             FROM item i JOIN snapshot s ON s.id = i.snapshot_id\n             WHERE i.item_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "snapshot_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "snapshot_key"
+          }
+        }
+      },
+      {
+        "name": "taken_ms",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "taken_ms"
+          }
+        }
+      },
+      {
+        "name": "hash",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "hash"
+          }
+        }
+      },
+      {
+        "name": "body",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "body"
+          }
+        }
+      },
+      {
+        "name": "contract_json",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "contract_json"
+          }
+        }
+      },
+      {
+        "name": "comments_json",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "comments_json"
+          }
+        }
+      },
+      {
+        "name": "config_hash",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "config_hash"
+          }
+        }
+      },
+      {
+        "name": "policy_hash",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "policy_hash"
+          }
+        }
+      },
+      {
+        "name": "base_sha",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "base_sha"
+          }
+        }
+      },
+      {
+        "name": "branch",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "branch"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "25d11262815c84bd928cd369405d8c30fdad796a63ca7853d2db6ad091113d68"
+}

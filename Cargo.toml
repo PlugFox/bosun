@@ -134,6 +134,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_identity_skip_allowlist)",
   "cfg(mutant_identity_skip_author)",
   "cfg(mutant_identity_declared_credentials)",
+  "cfg(mutant_store_transition_no_key)",
+  "cfg(mutant_store_outbox_no_coalesce)",
+  "cfg(mutant_store_run_kind_order)",
 ] }
 
 [workspace.lints.clippy]

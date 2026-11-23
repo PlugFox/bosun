@@ -30,6 +30,17 @@ pub enum Error {
         provider: String,
         file_key: String,
     },
+    /// A write names an item that no earlier write registered.
+    UnknownItem(String),
+    /// A write names an attempt that no recorded transition started.
+    UnknownAttempt {
+        item: String,
+        attempt: u32,
+    },
+    /// A write ends a session or a verdict run that was not started.
+    UnknownRow(String),
+    /// A transition that does not follow the recorded item: computed from a stale state.
+    Stale(String),
     /// Two records with different keys reached the merge.
     Merge(bosun_core::KeyMismatch),
     /// The price rows do not form a valid table.
@@ -61,6 +72,12 @@ impl fmt::Display for Error {
             Self::UnknownSourceFile { provider, file_key } => {
                 write!(f, "unknown source file {provider}/{file_key}")
             }
+            Self::UnknownItem(item) => write!(f, "unknown item {item}"),
+            Self::UnknownAttempt { item, attempt } => {
+                write!(f, "unknown attempt {attempt} of item {item}")
+            }
+            Self::UnknownRow(what) => write!(f, "unknown {what}"),
+            Self::Stale(what) => write!(f, "stale transition: {what}"),
             Self::Merge(e) => e.fmt(f),
             Self::Prices(e) => write!(f, "price table: {e}"),
             Self::PriceChange(why) => write!(f, "price change refused: {why}"),

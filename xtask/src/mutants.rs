@@ -531,6 +531,40 @@ const MUTANTS: &[Mutant] = &[
         // Job Objects exist on Windows only.
         platform: Some(Platform::Windows),
     },
+    Mutant {
+        name: "mutant_runner_inline_daemon_comments",
+        issue: 52,
+        breaks: "the prompt builder inlines the daemon's own comments",
+        package: "bosun-runner",
+        check: Check::Test(
+            "prompt::tests::daemon_comments_are_excluded_by_node_id_and_by_hidden_key",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_limit_is_crash",
+        issue: 52,
+        breaks: "a usage-limit exit classifies as a crash",
+        package: "bosun-runner",
+        check: Check::Test("claude::tests::a_limit_yields_its_reset_or_none"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_loose_mcp",
+        issue: 52,
+        breaks: "the Claude command drops --strict-mcp-config",
+        package: "bosun-runner",
+        check: Check::Test("claude::tests::the_command_loads_only_the_session_mcp_servers"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_question_from_text",
+        issue: 52,
+        breaks: "a question in the agent's final text classifies the exit as a question",
+        package: "bosun-runner",
+        check: Check::Test("claude::tests::a_question_in_the_text_is_not_a_question"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

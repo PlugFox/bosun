@@ -22,9 +22,10 @@ const IO_CRATES: &[&str] = &[
     "ureq",
 ];
 
-/// Clients of the local API (#4) and the only workspace crates they may depend on directly.
+/// Clients of the local API (#4) and the only workspace crates they may depend on directly:
+/// `bosun-config` so that `bosun doctor` works with the daemon down.
 const CLIENTS: &[&str] = &["bosun-cli", "bosun-tui", "bosun-mcp"];
-const CLIENT_ALLOWED: &[&str] = &["bosun-client", "bosun-api"];
+const CLIENT_ALLOWED: &[&str] = &["bosun-client", "bosun-api", "bosun-config"];
 
 /// Crates a client may not reach even transitively: a client that can open the database is not
 /// a client.
@@ -107,7 +108,7 @@ pub(crate) fn violations(graph: &Graph) -> Vec<String> {
             if !CLIENT_ALLOWED.contains(&dep) {
                 out.push(format!(
                     "{client} depends on workspace crate {dep}; a client may depend on {} only",
-                    CLIENT_ALLOWED.join(" and ")
+                    CLIENT_ALLOWED.join(", ")
                 ));
             }
         }
@@ -128,6 +129,17 @@ pub(crate) fn violations(graph: &Graph) -> Vec<String> {
                 out.push(format!(
                     "{standalone} reaches workspace crate {dep}; it may share no code with the \
                      workspace"
+                ));
+            }
+        }
+    }
+
+    // Clients link `bosun-config`, so it may not reach what a client may not.
+    if graph.members.contains("bosun-config") {
+        for dep in graph.reachable("bosun-config") {
+            if CLIENT_FORBIDDEN.contains(&dep) {
+                out.push(format!(
+                    "bosun-config reaches {dep}; clients link bosun-config, so it never links {dep}"
                 ));
             }
         }
@@ -314,6 +326,37 @@ mod tests {
         let found = violations(&g);
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found[0].contains("recount reaches workspace crate bosun-core"));
+    }
+
+    #[test]
+    fn a_client_may_depend_on_the_configuration() {
+        let g = graph(
+            &["bosun-core", "bosun-config", "bosun-cli", "bosun-tui"],
+            &[
+                ("bosun-config", "bosun-core"),
+                ("bosun-config", "toml_edit"),
+                ("bosun-cli", "bosun-config"),
+                ("bosun-tui", "bosun-config"),
+            ],
+        );
+        assert_eq!(violations(&g), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_configuration_may_not_reach_what_a_client_may_not() {
+        for forbidden in ["bosun-store", "bosun-queue", "bosun-runner", "bosund"] {
+            let g = graph(
+                &["bosun-config", "bosun-heat", forbidden],
+                &[("bosun-config", "bosun-heat"), ("bosun-heat", forbidden)],
+            );
+            let found = violations(&g);
+            assert!(
+                found
+                    .iter()
+                    .any(|v| v.starts_with(&format!("bosun-config reaches {forbidden}"))),
+                "{forbidden}: {found:?}"
+            );
+        }
     }
 
     #[test]

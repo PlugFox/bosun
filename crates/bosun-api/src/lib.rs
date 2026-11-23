@@ -31,8 +31,10 @@
 //! | `tokens.by_model` | [`TokensParams`] | [`TokensByModel`] |
 //! | `report.exact` | [`ReportParams`] | [`Report`] |
 //! | `report.estimates` | [`ReportParams`] | [`Estimates`] |
+//! | `events.subscribe` | [`SubscribeParams`] | [`SubscribeResult`], then the notifications of [`event`] |
 
 mod estimates;
+pub mod event;
 mod report;
 pub mod rpc;
 mod wire;
@@ -46,6 +48,10 @@ use serde_json::{Map, Value, json};
 pub use estimates::{
     ByFile, ByTool, Estimates, FileRow, Finding, FindingRow, RepeatedRead, RepeatedReads,
     ResultCost, ToolRow,
+};
+pub use event::{
+    Event, EventBody, EventFilter, OutputStream, Resync, ResyncReason, SubscribeParams,
+    SubscribeResult, Tail,
 };
 pub use report::{
     AbsentModel, Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan,
@@ -160,6 +166,15 @@ pub mod method {
      and by file with cache carry, repeated reads of a file, and the cost of finding before a \
      session's first write. Every number is an estimate and is never part of an exact total."
     );
+    method!(
+        EventsSubscribe,
+        "events.subscribe",
+        crate::SubscribeParams,
+        crate::SubscribeResult,
+        "Subscribes to the identity's events from `from_seq` of `epoch`, or from now. The \
+     connection then carries the `events.event` and `events.resync` notifications in \
+     `x-notifications` and takes no more requests."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -173,6 +188,7 @@ pub const METHODS: &[&str] = &[
     method::TokensByModel::NAME,
     method::ReportExact::NAME,
     method::ReportEstimates::NAME,
+    method::EventsSubscribe::NAME,
 ];
 
 /// Params of `hello`: none yet.
@@ -398,8 +414,9 @@ fn add_method<M: Method>(generator: &mut SchemaGenerator, methods: &mut Map<Stri
 }
 
 /// The JSON Schema (draft 2020-12) of the API: `x-api-version` is [`API_VERSION`],
-/// `x-methods` maps each method name to the schemas of its params and result, and `$defs`
-/// holds every type they reference.
+/// `x-methods` maps each method name to the schemas of its params and result,
+/// `x-notifications` maps each notification the daemon sends to the schema of its params, and
+/// `$defs` holds every type they reference.
 #[must_use]
 pub fn schema() -> Value {
     let mut generator = SchemaSettings::draft2020_12().into_generator();
@@ -413,6 +430,18 @@ pub fn schema() -> Value {
     add_method::<method::TokensByModel>(&mut generator, &mut methods);
     add_method::<method::ReportExact>(&mut generator, &mut methods);
     add_method::<method::ReportEstimates>(&mut generator, &mut methods);
+    add_method::<method::EventsSubscribe>(&mut generator, &mut methods);
+    let notifications = json!({
+        event::EVENT: {
+            "description": "One event of the subscribed identity, in sequence order.",
+            "params": generator.subschema_for::<Event>(),
+        },
+        event::RESYNC: {
+            "description": "The subscriber missed events: it refetches its state; the daemon \
+                            closes the connection.",
+            "params": generator.subschema_for::<Resync>(),
+        },
+    });
     let defs = generator.take_definitions(true);
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -422,6 +451,7 @@ pub fn schema() -> Value {
                         or a Windows named pipe.",
         "x-api-version": API_VERSION,
         "x-methods": methods,
+        "x-notifications": notifications,
         "$defs": defs,
     })
 }

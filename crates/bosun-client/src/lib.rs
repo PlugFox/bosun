@@ -4,9 +4,13 @@
 //! [`Client::connect`] opens the [`Endpoint`], calls `hello` and refuses a daemon whose API
 //! version is not in [`SUPPORTED_API_VERSIONS`], saying which side to upgrade. Then
 //! [`Client::call`] sends one request at a time and waits for its response.
+//!
+//! [`Subscription`] follows an identity's event stream and reconnects by itself from the last
+//! sequence it delivered.
 
 pub mod endpoint;
 pub mod framing;
+mod subscribe;
 
 use std::fmt;
 use std::io;
@@ -17,6 +21,7 @@ use bosun_api::{API_VERSION, HelloParams, HelloResult, Method, method};
 use tokio::io::{AsyncRead, AsyncWrite, BufReader, ReadHalf, WriteHalf};
 
 pub use endpoint::Endpoint;
+pub use subscribe::{Cursor, Delivery, Subscription};
 
 /// The API versions this client speaks.
 pub const SUPPORTED_API_VERSIONS: &[u32] = &[API_VERSION];
@@ -163,10 +168,15 @@ async fn open_stream(endpoint: &Endpoint) -> io::Result<Box<dyn Stream>> {
     }
 }
 
+/// The read side of a connection, buffered.
+pub(crate) type Reader = BufReader<ReadHalf<Box<dyn Stream>>>;
+/// The write side of a connection.
+pub(crate) type Writer = WriteHalf<Box<dyn Stream>>;
+
 /// A connection to the daemon that has passed `hello`.
 pub struct Client {
-    reader: BufReader<ReadHalf<Box<dyn Stream>>>,
-    writer: WriteHalf<Box<dyn Stream>>,
+    reader: Reader,
+    writer: Writer,
     next_id: u64,
     hello: HelloResult,
 }
@@ -223,6 +233,11 @@ impl Client {
     #[must_use]
     pub fn daemon(&self) -> &HelloResult {
         &self.hello
+    }
+
+    /// The open stream, buffered as it was read so far.
+    pub(crate) fn into_parts(self) -> (Reader, Writer) {
+        (self.reader, self.writer)
     }
 
     /// Calls method `M` and waits for its result.

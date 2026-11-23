@@ -137,6 +137,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_store_transition_no_key)",
   "cfg(mutant_store_outbox_no_coalesce)",
   "cfg(mutant_store_run_kind_order)",
+  "cfg(mutant_api_no_event_seq)",
+  "cfg(mutant_api_slow_subscriber_blocks)",
+  "cfg(mutant_api_tail_always_on)",
 ] }
 
 [workspace.lints.clippy]

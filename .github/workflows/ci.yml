@@ -79,8 +79,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: shard 1/2, os: ubuntu-latest, args: --shard 1/2 }
-          - { name: shard 2/2, os: ubuntu-latest, args: --shard 2/2 }
+          - { name: shard 1/4, os: ubuntu-latest, args: --shard 1/4 }
+          - { name: shard 2/4, os: ubuntu-latest, args: --shard 2/4 }
+          - { name: shard 3/4, os: ubuntu-latest, args: --shard 3/4 }
+          - { name: shard 4/4, os: ubuntu-latest, args: --shard 4/4 }
           - { name: windows, os: windows-latest, args: --platform-only }
           - { name: macos, os: macos-latest, args: --platform-only }
     runs-on: ${{ matrix.os }}

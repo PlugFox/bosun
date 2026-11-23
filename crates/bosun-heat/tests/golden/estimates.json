@@ -115,7 +115,7 @@
   },
   "by_file": {
     "estimate": true,
-    "formula": "per file, the results of every call that read, searched or wrote it, priced by the result formula; a search touches the directory it searched",
+    "formula": "per file, the results of every call that read, searched, wrote, ran (exec) or named it with an unknown effect, priced by the result formula; a search touches the directory it searched",
     "rows": [
       {
         "repo": {
@@ -126,6 +126,8 @@
         "reads": 3,
         "searches": 0,
         "writes": 1,
+        "execs": 0,
+        "unknowns": 0,
         "sessions": 2,
         "results": {
           "calls": 4,
@@ -147,6 +149,8 @@
         "reads": 0,
         "searches": 1,
         "writes": 0,
+        "execs": 0,
+        "unknowns": 0,
         "sessions": 1,
         "results": {
           "calls": 1,
@@ -168,6 +172,8 @@
         "reads": 0,
         "searches": 0,
         "writes": 1,
+        "execs": 0,
+        "unknowns": 0,
         "sessions": 1,
         "results": {
           "calls": 1,

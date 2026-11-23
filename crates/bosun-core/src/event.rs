@@ -176,6 +176,11 @@ pub enum TouchKind {
     Read,
     Write,
     Search,
+    /// A script run by an interpreter (`python x.py`): neither a read nor a write, but the
+    /// file is used (#44 A).
+    Exec,
+    /// A file named by a command whose effect on it is not known: a gap, never a read.
+    Unknown,
 }
 
 impl TouchKind {
@@ -186,6 +191,8 @@ impl TouchKind {
             Self::Read => "read",
             Self::Write => "write",
             Self::Search => "search",
+            Self::Exec => "exec",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -201,6 +208,10 @@ pub struct FileTouch {
     /// The canonical absolute path ([`crate::canonical_path`]).
     pub path: String,
     pub kind: TouchKind,
+    /// The path was taken out of free text (a shell command) rather than a tool's path
+    /// field: it is stored only when it lies inside the message's repository, and dropped
+    /// otherwise, so that nothing else of the text reaches the database (#2, #76).
+    pub confined: bool,
 }
 
 /// A provider's totals for one model in a session.

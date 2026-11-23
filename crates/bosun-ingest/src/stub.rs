@@ -126,6 +126,7 @@ fn turn(source: &Source, object: &Map<String, Value>) -> Option<Vec<Record>> {
                 tool_use_id: call_id.to_owned(),
                 path: path.clone(),
                 kind,
+                confined: false,
             }));
             Some(path)
         };

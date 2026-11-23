@@ -57,8 +57,9 @@ pub(crate) fn spawn(
     every: Duration,
     reported: Reported,
 ) -> JoinHandle<()> {
+    // Read now, not in the task: an edit made right after this call is a change.
+    let mut last = std::fs::read(&path).ok();
     tokio::spawn(async move {
-        let mut last = tokio::fs::read(&path).await.ok();
         loop {
             tokio::time::sleep(every).await;
             let Ok(now) = tokio::fs::read(&path).await else {

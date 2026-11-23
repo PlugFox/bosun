@@ -4,6 +4,7 @@
 //! every path is in a temporary directory and the login probe is a fake.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -234,7 +235,7 @@ impl Scene {
         let replay = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/claude-stream/normal-end.jsonl");
         let mut text = lines.join("\n");
-        text.push_str(&format!("\nreplay {}\n", replay.display()));
+        let _ = writeln!(text, "\nreplay {}", replay.display());
         std::fs::write(self.scripts.join(format!("demo_{card}.script")), text).unwrap();
     }
 
@@ -516,7 +517,7 @@ async fn seven_items_end_done_or_needs_you_and_board_edits_take_effect() {
     );
 
     // Item 3 was bounced by its verdict on the base commit and never spawned.
-    assert!(reader.runs(&id(3)).await.unwrap().is_empty());
+    assert_eq!(reader.runs(&id(3)).await.unwrap().len(), 0);
     assert!(!flag("spawned3").exists());
 
     // Item 2: two attempts; the dropped one is stored as failed; the second prompt carries the
@@ -574,23 +575,27 @@ async fn seven_items_end_done_or_needs_you_and_board_edits_take_effect() {
 }
 
 /// Every transition is written before its effects: when the store refuses the transition that
-/// carries a spawn, nothing is spawned (`mutant_loop_effect_before_transition` spawns first).
+/// carries the claim, the board is not written and nothing is spawned
+/// (`mutant_loop_effect_before_transition` performs the claim first: the card moves to In
+/// progress and gets its claim marker with no row behind them). The claim is the effect
+/// observed because the store itself refuses a session's run row without its attempt, which
+/// only the transition creates.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_transition_leaves_no_spawn_without_its_row() {
+async fn a_refused_transition_leaves_no_effect_without_its_row() {
     let scene = Scene::new().await;
     scene.write_board(&[card(1, "One", "test -f one.txt", "Item one.")]);
     scene.script(1, &["commit one.txt one".to_owned()]);
     let refused = Arc::new(AtomicUsize::new(0));
     let seen = refused.clone();
     let failpoint: Failpoint = Arc::new(move |t: &bosun_core::Transition| {
-        let spawns = t
+        let claims = t
             .effects
             .iter()
-            .any(|e| matches!(e.kind, EffectKind::Spawn { .. }));
-        if spawns {
+            .any(|e| matches!(e.kind, EffectKind::Claim));
+        if claims {
             seen.fetch_add(1, Ordering::SeqCst);
         }
-        spawns
+        claims
     });
     let (task, watcher) = scene.start(Some(failpoint));
     // The loop halts once the store refuses a transition.
@@ -600,14 +605,16 @@ async fn a_refused_transition_leaves_no_spawn_without_its_row() {
         .unwrap();
     watcher.abort();
     assert_eq!(refused.load(Ordering::SeqCst), 1);
-    // A spawn performed before its row would show up here.
+    // An effect performed before its row would show up here.
     tokio::time::sleep(Duration::from_secs(2)).await;
+    let cards = scene.cards();
     assert_eq!(
-        scene.spawner.spawns.load(Ordering::SeqCst),
-        0,
-        "a session was spawned without its transition"
+        (cards[0].column, cards[0].comments.len()),
+        (Column::Ready, 0),
+        "the board was written without the claim's transition"
     );
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
     let id = ItemId::new("demo#1");
-    assert!(scene.store.reader().runs(&id).await.unwrap().is_empty());
-    assert_eq!(scene.state(1).await, Some(State::Claimed));
+    assert_eq!(scene.store.reader().runs(&id).await.unwrap().len(), 0);
+    assert_eq!(scene.state(1).await, Some(State::Ready));
 }

@@ -29,7 +29,7 @@ pub(crate) async fn killed(kill: &mut watch::Receiver<bool>) {
 pub(crate) struct Run {
     pub(crate) item: ItemId,
     pub(crate) attempt: u32,
-    pub(crate) run: u32,
+    pub(crate) number: u32,
     /// For a re-run after a non-passing first run: that run's failing tests. A pass now makes
     /// the attempt flaky, and they are its flaky tests (#44 D).
     pub(crate) first_failing: Option<Vec<String>>,
@@ -97,7 +97,7 @@ pub(crate) async fn verdict(
 ) -> (Event, Vec<String>) {
     let fail = |result| Event::Verdict {
         attempt: run.attempt,
-        run: run.run,
+        run: run.number,
         result,
     };
     let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
@@ -143,7 +143,7 @@ pub(crate) async fn verdict(
             let write = Write::VerdictStarted(VerdictStart {
                 item: run.item.clone(),
                 attempt: run.attempt,
-                run: run.run,
+                run: run.number,
                 command: command.clone(),
                 pid: key.pid,
                 pid_started_ms: key.start.raw().cast_signed(),
@@ -155,7 +155,7 @@ pub(crate) async fn verdict(
             shared.publish(EventBody::VerdictStarted {
                 item: run.item.to_string(),
                 attempt: run.attempt,
-                run: run.run,
+                run: run.number,
             });
         }
     };
@@ -199,7 +199,7 @@ async fn record_end(shared: &Shared, run: &Run, verdict: &VerdictRun, result: Ru
     let mut writes = vec![Write::VerdictEnded(VerdictEnd {
         item: run.item.clone(),
         attempt: run.attempt,
-        run: run.run,
+        run: run.number,
         result,
         exit_code: verdict.exit.code,
         duration_ms: u64::try_from(verdict.duration.as_millis()).unwrap_or(u64::MAX),
@@ -224,7 +224,7 @@ async fn record_end(shared: &Shared, run: &Run, verdict: &VerdictRun, result: Ru
     shared.publish(EventBody::VerdictFinished {
         item: run.item.to_string(),
         attempt: run.attempt,
-        run: run.run,
+        run: run.number,
         result: events::run_result_name(result).to_owned(),
         duration_ms: u64::try_from(verdict.duration.as_millis()).unwrap_or(u64::MAX),
     });

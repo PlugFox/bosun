@@ -558,7 +558,7 @@ impl Loop {
             let spec = verdict::Run {
                 item: item.clone(),
                 attempt,
-                run,
+                number: run,
                 first_failing,
             };
             let (event, failing) =

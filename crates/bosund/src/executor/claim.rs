@@ -19,7 +19,7 @@ use super::{ClaimOutcome, Claimed, Shared, blocking, git, identity, lookup, now_
 
 /// What lint says when a card's verdict already passes on the base commit.
 pub(crate) const PASSES_ON_BASE: &str =
-    "error: the verdict already passes on the base commit; the card is mis-specified";
+    "error: the verdict already passes on the base commit; the card is wrongly specified";
 
 /// Lowercase hex SHA-256 of `text`, shortened.
 pub(crate) fn text_hash(text: &str) -> String {
@@ -114,7 +114,7 @@ pub(crate) async fn claim(
         Err(e) => return ClaimOutcome::Failed(format!("the base cannot be captured: {e}")),
     };
 
-    // D7: a verdict that already passes on the base commit is mis-specified.
+    // D7: a verdict that already passes on the base commit is wrongly specified.
     if !cfg!(mutant_loop_skip_base_verdict) {
         let passes = base_verdict(shared, config, repo, &snapshot, &mut kill).await;
         let (path, at) = (repo.path.clone(), base.clone());

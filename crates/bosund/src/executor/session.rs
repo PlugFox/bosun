@@ -71,8 +71,8 @@ fn new_session_id(run: &Run) -> SessionId {
     SessionId::from_random_bytes(bytes)
 }
 
-fn exit_of(exit: bosun_runner::Exit) -> Exit {
-    match exit {
+fn exit_of(exit: &bosun_runner::Exit) -> Exit {
+    match *exit {
         bosun_runner::Exit::Ok => Exit::Ok,
         bosun_runner::Exit::Limit { reset } => Exit::Limit {
             reset_ms: reset.and_then(|t| {
@@ -462,7 +462,7 @@ pub(crate) async fn session(
     let (exit, published) = match status {
         Some(status) => {
             let code = status.ok().and_then(|s| s.code());
-            let exit = exit_of(runner.classify_exit(ProcessExit { code }, &tail));
+            let exit = exit_of(&runner.classify_exit(ProcessExit { code }, &tail));
             (exit, Some(exit))
         }
         // Killed by the daemon: recorded as a crash; the machine has moved on already.

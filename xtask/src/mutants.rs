@@ -956,7 +956,9 @@ const MUTANTS: &[Mutant] = &[
         issue: 62,
         breaks: "the loop performs an arrow's effects before its row is written",
         package: "bosund",
-        check: Check::Test("executor::tests::a_refused_transition_leaves_no_spawn_without_its_row"),
+        check: Check::Test(
+            "executor::tests::a_refused_transition_leaves_no_effect_without_its_row",
+        ),
         platform: None,
     },
     Mutant {

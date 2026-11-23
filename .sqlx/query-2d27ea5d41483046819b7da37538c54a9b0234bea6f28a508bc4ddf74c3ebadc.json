@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO message (\n               provider, message_key, session_id, source_file_id, ts_ms, model_id, cwd,\n               input_tokens, cache_write_5m_tokens, cache_write_1h_tokens, cache_read_tokens,\n               output_tokens, usage_json, parser_version)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n           ON CONFLICT (provider, message_key) DO UPDATE SET\n               session_id = excluded.session_id,\n               source_file_id = excluded.source_file_id,\n               ts_ms = excluded.ts_ms,\n               model_id = excluded.model_id,\n               cwd = excluded.cwd,\n               input_tokens = excluded.input_tokens,\n               cache_write_5m_tokens = excluded.cache_write_5m_tokens,\n               cache_write_1h_tokens = excluded.cache_write_1h_tokens,\n               cache_read_tokens = excluded.cache_read_tokens,\n               output_tokens = excluded.output_tokens,\n               usage_json = excluded.usage_json,\n               parser_version = excluded.parser_version\n           RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 14
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2d27ea5d41483046819b7da37538c54a9b0234bea6f28a508bc4ddf74c3ebadc"
+}

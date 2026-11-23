@@ -160,6 +160,31 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("validate::tests::a_database_on_a_network_or_synced_disk_is_refused"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_store_commit_per_row",
+        issue: 19,
+        breaks: "the writer commits each row of a batch on its own",
+        package: "bosun-store",
+        check: Check::Test("writer::tests::an_abort_mid_batch_leaves_the_whole_batch_or_none"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_accept_newer",
+        issue: 19,
+        breaks: "a database newer than the binary is not refused",
+        package: "bosun-store",
+        check: Check::Test("open::tests::a_newer_database_is_refused_untouched"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_default_perms",
+        issue: 19,
+        breaks: "database files get the default mode instead of 0600",
+        package: "bosun-store",
+        check: Check::Test("open::tests::database_files_are_private"),
+        // The mode bits exist on Unix only; Windows has no such test.
+        platform: Some(Platform::Linux),
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

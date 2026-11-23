@@ -1,0 +1,170 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT m.id AS \"row_id!: i64\", m.ts_ms, f.file_key, s.session_key, s.agent_key,\n                  md.name AS model, m.cwd,\n                  m.input_tokens, m.cache_write_5m_tokens, m.cache_write_1h_tokens,\n                  m.cache_read_tokens, m.output_tokens, m.usage_json\n           FROM message m\n           JOIN source_file f ON f.id = m.source_file_id\n           JOIN session s ON s.id = m.session_id\n           JOIN model md ON md.id = m.model_id\n           WHERE m.provider = ? AND m.message_key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "row_id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "ts_ms",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "ts_ms"
+          }
+        }
+      },
+      {
+        "name": "file_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "file_key"
+          }
+        }
+      },
+      {
+        "name": "session_key",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "session_key"
+          }
+        }
+      },
+      {
+        "name": "agent_key",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "agent_key"
+          }
+        }
+      },
+      {
+        "name": "model",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "cwd",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cwd"
+          }
+        }
+      },
+      {
+        "name": "input_tokens",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "input_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_write_5m_tokens",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_write_5m_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_write_1h_tokens",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_write_1h_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_read_tokens",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_read_tokens"
+          }
+        }
+      },
+      {
+        "name": "output_tokens",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "output_tokens"
+          }
+        }
+      },
+      {
+        "name": "usage_json",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "usage_json"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a6fd126113f788ed438894b35d4eee93c322542ca98da47f3e7da9db8bda5124"
+}

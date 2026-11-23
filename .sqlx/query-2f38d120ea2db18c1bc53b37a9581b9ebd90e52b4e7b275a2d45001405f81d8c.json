@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", valid_from_ms, is_reference FROM price\n           WHERE model = ? AND prompt_threshold IS ? AND valid_to_ms IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "price",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "valid_from_ms",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "price",
+            "name": "valid_from_ms"
+          }
+        }
+      },
+      {
+        "name": "is_reference",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "price",
+            "name": "is_reference"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2f38d120ea2db18c1bc53b37a9581b9ebd90e52b4e7b275a2d45001405f81d8c"
+}

@@ -3,6 +3,7 @@
 mod deps;
 mod fixtures;
 mod mutants;
+mod sqlx;
 
 use std::process::ExitCode;
 
@@ -14,7 +15,10 @@ tasks:
   lint-fixtures [DIR] check that every id and path in fixtures/ (or DIR) is synthetic (#16)
   mutants [--shard K/N] [--platform-only] [NAME...]
                       run the registered mutants (or the named ones): each one's tests must
-                      build, and its check must be green without it and red with it";
+                      build, and its check must be green without it and red with it
+  sqlx-prepare [--check]
+                      regenerate the sqlx offline cache `.sqlx/` against a database built by
+                      the store's migrations, or check that it is current (#19)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -22,6 +26,7 @@ fn main() -> ExitCode {
         Some("check-deps") => deps::run(),
         Some("lint-fixtures") => fixtures::run(&args[1..]),
         Some("mutants") => mutants::run(&args[1..]),
+        Some("sqlx-prepare") => sqlx::run(&args[1..]),
         Some("help" | "-h" | "--help") => {
             println!("{USAGE}");
             Ok(())

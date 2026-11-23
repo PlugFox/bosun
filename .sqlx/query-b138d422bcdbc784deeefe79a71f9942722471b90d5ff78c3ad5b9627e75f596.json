@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO ingest_gap (source_file_id, byte_offset, length, record_type,\n                                 top_level_keys_json, reason, parser_version)\n         VALUES (?, ?, ?, ?, ?, ?, ?)\n         ON CONFLICT (source_file_id, byte_offset) DO UPDATE SET\n             length = excluded.length,\n             record_type = excluded.record_type,\n             top_level_keys_json = excluded.top_level_keys_json,\n             reason = excluded.reason,\n             parser_version = excluded.parser_version",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "b138d422bcdbc784deeefe79a71f9942722471b90d5ff78c3ad5b9627e75f596"
+}

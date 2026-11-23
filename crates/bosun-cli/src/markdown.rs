@@ -15,6 +15,8 @@ use bosun_api::{
 use serde::Serialize;
 
 use crate::render::usd;
+
+mod items;
 use crate::time;
 
 /// The rows a long list prints.
@@ -164,6 +166,7 @@ pub(crate) fn report(report: &Report, out: &mut String) {
     context(report, out);
     health(report, out);
     unpriced(report, out);
+    items::items(&report.items, out);
 }
 
 fn total(report: &Report, out: &mut String) {
@@ -574,6 +577,7 @@ pub(crate) fn estimates(estimates: &Estimates, out: &mut String) {
     by_file(estimates, out);
     repeated_reads(estimates, out);
     finding(estimates, out);
+    items::inferred(&estimates.items, out);
 }
 
 const RESULT_COLUMNS: [(&str, bool); 5] = [
@@ -739,16 +743,31 @@ mod tests {
     /// `BOSUN_BLESS=1` to rewrite it.
     #[test]
     fn the_golden_report_renders_as_the_snapshot() {
+        snapshot("report.json", "estimates.json", "tests/golden/report.md");
+    }
+
+    /// The same for the golden report of the seeded loop store of `bosun-heat` (#72): items,
+    /// attempts, commits of the runs and the inferred sessions.
+    #[test]
+    fn the_golden_items_report_renders_as_the_snapshot() {
+        snapshot(
+            "items-report.json",
+            "items-estimates.json",
+            "tests/golden/report-items.md",
+        );
+    }
+
+    fn snapshot(exact: &str, estimates: &str, markdown: &str) {
         let read = |name: &str| {
             std::fs::read_to_string(golden(&format!("../bosun-heat/tests/golden/{name}"))).unwrap()
         };
         let data = Document {
-            exact: serde_json::from_str(&read("report.json")).unwrap(),
-            estimates: serde_json::from_str(&read("estimates.json")).unwrap(),
+            exact: serde_json::from_str(&read(exact)).unwrap(),
+            estimates: serde_json::from_str(&read(estimates)).unwrap(),
         };
         let mut text = String::new();
         document(&data, &mut text);
-        let snapshot = golden("tests/golden/report.md");
+        let snapshot = golden(markdown);
         if std::env::var_os("BOSUN_BLESS").is_some() {
             std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
             std::fs::write(&snapshot, &text).unwrap();

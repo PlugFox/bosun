@@ -98,6 +98,30 @@ Signed difference, transcripts less provider: +0 tokens. The provider's excess i
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 00000000-0000-4000-8000-003100000000 | 2 | 4 | 76942 | 76942 | +0 | +0.0% | 0 | +0 | yes |
 
+## Items
+
+No item has a transition in the range.
+
+### Retried items
+
+None.
+
+### Flaky verdicts
+
+None.
+
+### Refused protected-path edits
+
+None.
+
+### Time parked
+
+None.
+
+### Commits of the runs
+
+Each commit is linked to its session and item by the session's commit range: exact. Commits of the range made outside the runs: 4.
+
 ---
 
 ## Estimates
@@ -147,4 +171,10 @@ Reads and searches before a session's first write: 2 sessions, 4 calls, 25 est. 
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | 00000000-0000-4000-8000-008100000000 | 2000-01-08T00:00:12Z | 3 | 13 | 6 | 17 | 1 |
 | 00000000-0000-4000-8000-008200000000 | 2000-01-08T01:00:04Z | 1 | 6 | 0 | 8 | 0 |
+
+### Items: inferred sessions (estimate)
+
+Interactive sessions attributed to an item by inference: an interactive session is inferred for an item when its messages of the range in a repository span the time of a commit there that no run's commit range holds and whose Item: trailer names the item (the time-and-repository link of #3); the whole session counts, main transcript and sub-agents, so the figure is an upper bound. Their tokens are exact; the attribution is not, and these numbers are never added to an item's runs.
+
+None.
 

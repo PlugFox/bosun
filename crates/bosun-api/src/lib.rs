@@ -35,6 +35,7 @@
 
 mod estimates;
 pub mod event;
+mod items;
 mod report;
 pub mod rpc;
 mod wire;
@@ -52,6 +53,10 @@ pub use estimates::{
 pub use event::{
     Event, EventBody, EventFilter, OutputStream, Resync, ResyncReason, SubscribeParams,
     SubscribeResult, Tail,
+};
+pub use items::{
+    AttemptReport, Evidence, FlakyVerdict, InferredItem, InferredItems, InferredSession, ItemRow,
+    Items, ParkedTime, RefusedEdit, RetriedItem, RunCommit, RunSession, TrailerMissing, Trailers,
 };
 pub use report::{
     AbsentModel, Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan,

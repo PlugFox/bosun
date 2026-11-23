@@ -911,3 +911,99 @@ async fn a_late_session_end_keeps_the_current_child_and_a_reaped_child_is_gone()
     store.writer().write(vec![boot(2)]).await.unwrap_err();
     store.close().await.unwrap();
 }
+
+fn range(spawn: u32, base: &str, head: &str, commits: &[&str]) -> Write {
+    Write::RunCommits(RunCommits {
+        item: id(),
+        attempt: 1,
+        spawn,
+        base_sha: base.to_owned(),
+        head_sha: head.to_owned(),
+        commits: commits.iter().map(|&c| c.to_owned()).collect(),
+    })
+}
+
+fn commit(sha: &str, ts_ms: i64) -> Write {
+    Write::Commit {
+        repo: REPO.to_owned(),
+        commit: bosun_core::Commit {
+            sha: sha.to_owned(),
+            ts_ms,
+            author: "A U Thor <author@example.invalid>".to_owned(),
+            lines_added: 1,
+            lines_removed: 0,
+            trailers: std::collections::BTreeMap::new(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn a_commit_belongs_to_the_first_session_range_that_lists_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    let claim = go(&Item::new(id()), &Event::Claim);
+    let running = go(&claim.item, &Event::ClaimConfirmed);
+    store
+        .writer()
+        .write(vec![
+            register(),
+            transition(&claim),
+            transition(&running),
+            run_start(1, 1, "session-a"),
+            run_start(1, 2, "session-b"),
+        ])
+        .await
+        .unwrap();
+    // A range of a session that was never spawned fails the batch.
+    let err = store
+        .writer()
+        .write(vec![range(9, "b", "h", &["c1"])])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::Error::UnknownRow(_)), "{err}");
+    store
+        .writer()
+        .write(vec![
+            range(1, "base", "h1", &["c1", "c2"]),
+            // Written again, and a second session that lists c2 again: c2 stays session 1's.
+            range(1, "base", "h1", &["c1", "c2"]),
+            range(2, "h1", "h2", &["c2", "c3"]),
+            commit("c1", T0 + 1_000),
+            commit("c2", T0 + 2_000),
+            commit("c3", T0 + 3_000),
+            commit("outside", T0 + 4_000),
+        ])
+        .await
+        .unwrap();
+    let rows = store.reader().run_commits(0, i64::MAX).await.unwrap();
+    let links: Vec<(&str, u32, &str)> = rows
+        .iter()
+        .map(|r| (r.commit.sha.as_str(), r.spawn, r.session_key.as_str()))
+        .collect();
+    assert_eq!(
+        links,
+        [
+            ("c1", 1, "session-a"),
+            ("c2", 1, "session-a"),
+            ("c3", 2, "session-b")
+        ]
+    );
+    assert!(rows.iter().all(|r| r.item == id() && r.attempt == 1));
+    assert_eq!(count(&store, "run_commit").await, 3);
+    let runs = store.reader().runs(&id()).await.unwrap();
+    assert_eq!(runs[1].base_sha.as_deref(), Some("h1"));
+    assert_eq!(runs[1].head_sha.as_deref(), Some("h2"));
+    // The range selects by commit time.
+    let ranged = store
+        .reader()
+        .run_commits(T0 + 2_000, T0 + 3_000)
+        .await
+        .unwrap();
+    assert_eq!(ranged.len(), 1);
+    assert_eq!(ranged[0].commit.sha, "c2");
+    let histories = store.reader().item_histories(T0, T0 + 10).await.unwrap();
+    assert_eq!(histories.len(), 1);
+    assert_eq!(histories[0].runs.len(), 2);
+    assert_eq!(store.reader().item_histories(0, T0).await.unwrap(), []);
+    store.close().await.unwrap();
+}

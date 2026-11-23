@@ -1,0 +1,135 @@
+{
+  "identity": "personal",
+  "from_ms": 947462400000,
+  "to_ms": 947548800000,
+  "repo": null,
+  "reference_model": "claude-opus-5-5",
+  "estimate": true,
+  "bytes_per_token": 4,
+  "formula": "tokens = ceil(result bytes / bytes_per_token); a result is carried by the messages after its call up to the first compaction after it; cost = tokens * cache-write rate of the first carrying message (1 h if it wrote more 1 h than 5 min tokens, else 5 min) + sum over the later carrying messages of tokens * their cache-read rate",
+  "known_gaps": [
+    "Tokens are bytes divided by one global ratio, the same for every tool, language and model.",
+    "Images are estimated from their base64 bytes, which says little about their real token count.",
+    "A call's input is part of the calling message's output and is not counted here; only results are.",
+    "A result is carried only within the range: messages of the window before or after it are not seen, nor what a compaction keeps of it in its summary."
+  ],
+  "by_tool": {
+    "estimate": true,
+    "formula": "per tool name, the results of its calls, priced by the result formula",
+    "total": {
+      "calls": 0,
+      "result_bytes": 0,
+      "tokens": 0,
+      "carry_turns": 0,
+      "write_eqv": 0.0,
+      "carry_eqv": 0.0,
+      "cost": "0",
+      "eqv": 0.0
+    },
+    "rows": []
+  },
+  "by_file": {
+    "estimate": true,
+    "formula": "per file, the results of every call that read, searched, wrote, ran (exec) or named it with an unknown effect, priced by the result formula; a search touches the directory it searched",
+    "rows": []
+  },
+  "repeated_reads": {
+    "estimate": true,
+    "formula": "per file read more than once: within = every read of a session after that session's first read of the file; across = the first read in each session after the first session that read it; both priced by the result formula",
+    "within": {
+      "calls": 0,
+      "result_bytes": 0,
+      "tokens": 0,
+      "carry_turns": 0,
+      "write_eqv": 0.0,
+      "carry_eqv": 0.0,
+      "cost": "0",
+      "eqv": 0.0
+    },
+    "across": {
+      "calls": 0,
+      "result_bytes": 0,
+      "tokens": 0,
+      "carry_turns": 0,
+      "write_eqv": 0.0,
+      "carry_eqv": 0.0,
+      "cost": "0",
+      "eqv": 0.0
+    },
+    "rows": []
+  },
+  "finding": {
+    "estimate": true,
+    "formula": "per root session (sub-agents included), its read and search calls before the call of its first write (all of them without a write), ordered by message time, priced by the result formula",
+    "sessions_with_write": 0,
+    "before_write": {
+      "calls": 0,
+      "result_bytes": 0,
+      "tokens": 0,
+      "carry_turns": 0,
+      "write_eqv": 0.0,
+      "carry_eqv": 0.0,
+      "cost": "0",
+      "eqv": 0.0
+    },
+    "sessions_without_write": 0,
+    "without_write": {
+      "calls": 0,
+      "result_bytes": 0,
+      "tokens": 0,
+      "carry_turns": 0,
+      "write_eqv": 0.0,
+      "carry_eqv": 0.0,
+      "cost": "0",
+      "eqv": 0.0
+    },
+    "rows": []
+  },
+  "items": {
+    "estimate": true,
+    "rule": "an interactive session is inferred for an item when its messages of the range in a repository span the time of a commit there that no run's commit range holds and whose Item: trailer names the item (the time-and-repository link of #3); the whole session counts, main transcript and sub-agents, so the figure is an upper bound",
+    "rows": [
+      {
+        "item": "local:demo#1",
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "sessions": [
+          {
+            "provider": "claude",
+            "session": "00000000-0000-4000-8000-072000000009",
+            "evidence": [
+              {
+                "type": "commit_trailer",
+                "sha": "0505050505050505050505050505050505050505"
+              }
+            ],
+            "sums": {
+              "messages": 2,
+              "input": 38,
+              "cache_write_5m": 380,
+              "cache_write_1h": 0,
+              "cache_read": 3800,
+              "output": 114,
+              "cost": "5092000000",
+              "eqv": 1273.0,
+              "unpriced_messages": 0
+            }
+          }
+        ],
+        "sums": {
+          "messages": 2,
+          "input": 38,
+          "cache_write_5m": 380,
+          "cache_write_1h": 0,
+          "cache_read": 3800,
+          "output": 114,
+          "cost": "5092000000",
+          "eqv": 1273.0,
+          "unpriced_messages": 0
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.item_key,\n                      coalesce(i.park_reason, i.outcome, i.reason) AS \"detail?: String\"\n               FROM item i\n               WHERE EXISTS (SELECT 1 FROM transition t\n                             WHERE t.item_id = i.id AND t.ts_ms >= ? AND t.ts_ms < ?)\n               ORDER BY i.item_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "item_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "item_key"
+          }
+        }
+      },
+      {
+        "name": "detail?: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "62ac7a1573acedc3521999cdddf32035c09b894535d04c89d02fecf0ae78a640"
+}

@@ -91,6 +91,82 @@
       ],
       "type": "object"
     },
+    "AttemptReport": {
+      "description": "One attempt of an item.",
+      "properties": {
+        "crash_retries": {
+          "description": "Fresh sessions after a crash within the attempt.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ended_ms": {
+          "description": "When it reached pass, fail, flaky or timeout; `null` before.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "models": {
+          "description": "`sums` by model, sorted by model.",
+          "items": {
+            "$ref": "#/$defs/ModelRow"
+          },
+          "type": "array"
+        },
+        "number": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refused_calls": {
+          "description": "Calls of the agent refused over their rate cap.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessions": {
+          "description": "Its sessions, in order.",
+          "items": {
+            "$ref": "#/$defs/RunSession"
+          },
+          "type": "array"
+        },
+        "started_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "description": "`bosun_core::AttemptState::as_str`.",
+          "type": "string"
+        },
+        "sums": {
+          "$ref": "#/$defs/TokenSums",
+          "description": "The messages of its sessions, exact."
+        },
+        "wall_clock_ms": {
+          "description": "`ended_ms - started_ms`; `null` while it has not ended.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "number",
+        "state",
+        "started_ms",
+        "crash_retries",
+        "refused_calls",
+        "sums",
+        "models",
+        "sessions"
+      ],
+      "type": "object"
+    },
     "ByFile": {
       "description": "Cost by file: the results of the calls that touched each file.",
       "properties": {
@@ -426,6 +502,15 @@
         },
         "identity": {
           "type": "string"
+        },
+        "items": {
+          "$ref": "#/$defs/InferredItems",
+          "default": {
+            "estimate": true,
+            "rows": [],
+            "rule": ""
+          },
+          "description": "The interactive sessions inferred for items (#72): an estimate of attribution over\nexact token counts, never added to an item's runs."
         },
         "known_gaps": {
           "description": "What the estimates are known to get wrong, as text.",
@@ -1015,6 +1100,28 @@
       },
       "type": "object"
     },
+    "Evidence": {
+      "description": "Why a session is inferred to belong to an item.",
+      "oneOf": [
+        {
+          "description": "The session is linked by time and repository (the inferred commit link of #3: its\nmessages of the range in the commit's repository span the commit's time) to a commit\noutside every run's range whose `Item:` trailer names the item.",
+          "properties": {
+            "sha": {
+              "type": "string"
+            },
+            "type": {
+              "const": "commit_trailer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "sha"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "FailedFile": {
       "description": "A file a pass could not read.",
       "properties": {
@@ -1172,6 +1279,32 @@
       ],
       "type": "object"
     },
+    "FlakyVerdict": {
+      "description": "A flaky verdict.",
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "item": {
+          "type": "string"
+        },
+        "tests": {
+          "description": "The tests that failed on the first run, sorted; empty when the parser found none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "item",
+        "attempt",
+        "tests"
+      ],
+      "type": "object"
+    },
     "Health": {
       "description": "Ingest health. The counts are over the whole store; the agreement over the sessions of\nthe range.",
       "properties": {
@@ -1264,6 +1397,89 @@
       ],
       "type": "object"
     },
+    "InferredItem": {
+      "description": "The interactive sessions inferred to have worked on one item.",
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "sessions": {
+          "description": "Sorted by session.",
+          "items": {
+            "$ref": "#/$defs/InferredSession"
+          },
+          "type": "array"
+        },
+        "sums": {
+          "$ref": "#/$defs/TokenSums",
+          "description": "The sums over `sessions`. A session inferred for several items counts in each."
+        }
+      },
+      "required": [
+        "item",
+        "repo",
+        "sessions",
+        "sums"
+      ],
+      "type": "object"
+    },
+    "InferredItems": {
+      "description": "The inferred sessions of items, in `report.estimates`: **an estimate**, never added to an\nitem's runs.",
+      "properties": {
+        "estimate": {
+          "description": "Always `true`.",
+          "type": "boolean"
+        },
+        "rows": {
+          "description": "One row per item with an inferred session, sorted by item id.",
+          "items": {
+            "$ref": "#/$defs/InferredItem"
+          },
+          "type": "array"
+        },
+        "rule": {
+          "description": "The rule that links a session to an item, as text.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "estimate",
+        "rule",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "InferredSession": {
+      "description": "One interactive session inferred for an item, with the evidence.",
+      "properties": {
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "sums": {
+          "$ref": "#/$defs/TokenSums",
+          "description": "Every message of the session, main transcript and sub-agents, over all time."
+        }
+      },
+      "required": [
+        "provider",
+        "session",
+        "evidence",
+        "sums"
+      ],
+      "type": "object"
+    },
     "IngestStatus": {
       "description": "Result of `ingest.status`.",
       "properties": {
@@ -1310,6 +1526,148 @@
         "parsed",
         "parsed_since_start",
         "last_pass"
+      ],
+      "type": "object"
+    },
+    "ItemRow": {
+      "description": "One item.",
+      "properties": {
+        "attempts": {
+          "description": "By number.",
+          "items": {
+            "$ref": "#/$defs/AttemptReport"
+          },
+          "type": "array"
+        },
+        "detail": {
+          "description": "The state's park reason, outcome or needs-you reason.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed": {
+          "description": "Attempts that failed and counted.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "item": {
+          "description": "The item's id.",
+          "type": "string"
+        },
+        "parked": {
+          "description": "Its time parked by reason, sorted by reason.",
+          "items": {
+            "$ref": "#/$defs/ParkedTime"
+          },
+          "type": "array"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "runs": {
+          "$ref": "#/$defs/TokenSums",
+          "description": "Runs, exact: the messages of every session bosun spawned for the item, main transcripts\nand sub-agents. Equal to the sum of its attempts' `sums`."
+        },
+        "sessions": {
+          "description": "Distinct run sessions (a resume keeps its session).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "description": "Its state (`bosun_core::State::as_str`) now.",
+          "type": "string"
+        },
+        "wall_clock_ms": {
+          "description": "The wall-clock time of its attempts that ended, summed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "item",
+        "repo",
+        "state",
+        "failed",
+        "runs",
+        "sessions",
+        "wall_clock_ms",
+        "parked",
+        "attempts"
+      ],
+      "type": "object"
+    },
+    "Items": {
+      "description": "The exact loop sections of `report.exact`.\n\nAn item is in them when one of its transitions is in the range (and, with a repository\ngiven, it is that repository's). Its numbers cover its whole history, not only the range:\nan item's cost is not cut at the range's edges. The commits are those of the range.",
+      "properties": {
+        "commits": {
+          "description": "The commits of the range that a run's commit range holds, oldest first: each maps to\none session and one item.",
+          "items": {
+            "$ref": "#/$defs/RunCommit"
+          },
+          "type": "array"
+        },
+        "flaky": {
+          "description": "The flaky verdicts (fail, then pass on the re-run) with their failing tests (#44 D), by\nitem, then attempt.",
+          "items": {
+            "$ref": "#/$defs/FlakyVerdict"
+          },
+          "type": "array"
+        },
+        "outside_runs": {
+          "description": "The commits of the range, in the report's repositories, that no run's range holds:\nmade outside the runs.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parked": {
+          "description": "The time parked over every row, by reason (sorted by reason).",
+          "items": {
+            "$ref": "#/$defs/ParkedTime"
+          },
+          "type": "array"
+        },
+        "refused_edits": {
+          "description": "The attempts a guard refused because their commits touched a protected path, by time.",
+          "items": {
+            "$ref": "#/$defs/RefusedEdit"
+          },
+          "type": "array"
+        },
+        "retried": {
+          "description": "The items with more than one attempt, sorted by item id.",
+          "items": {
+            "$ref": "#/$defs/RetriedItem"
+          },
+          "type": "array"
+        },
+        "rows": {
+          "description": "One row per item, sorted by item id.",
+          "items": {
+            "$ref": "#/$defs/ItemRow"
+          },
+          "type": "array"
+        },
+        "trailer_missing": {
+          "description": "The commits of `commits` that lack one of the trailers `Item:`, `Run:`, `Session:`, in\nthe same order. The link above stays exact without them.",
+          "items": {
+            "$ref": "#/$defs/TrailerMissing"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rows",
+        "retried",
+        "flaky",
+        "refused_edits",
+        "parked",
+        "commits",
+        "trailer_missing",
+        "outside_runs"
       ],
       "type": "object"
     },
@@ -1452,6 +1810,38 @@
         }
       ]
     },
+    "ParkedTime": {
+      "description": "Time parked for one reason.",
+      "properties": {
+        "ms": {
+          "description": "From each park to the next transition; a park still open counts up to the report's\n`to_ms`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ongoing": {
+          "description": "Whether a park is still open.",
+          "type": "boolean"
+        },
+        "parks": {
+          "description": "Times parked.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "`limit`, `paused`, `killed` or `daily_cap`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "parks",
+        "ms",
+        "ongoing"
+      ],
+      "type": "object"
+    },
     "PassReport": {
       "description": "What one pass over an identity's files did.",
       "properties": {
@@ -1531,6 +1921,29 @@
       "description": "An exact amount of money in picodollars (10^-12 USD), as a decimal string.",
       "pattern": "^(0|[1-9][0-9]*)$",
       "type": "string"
+    },
+    "RefusedEdit": {
+      "description": "An attempt refused because its commits touched a protected path.",
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "item": {
+          "type": "string"
+        },
+        "ts_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "item",
+        "attempt",
+        "ts_ms"
+      ],
+      "type": "object"
     },
     "ReingestResult": {
       "description": "Result of `ingest.reingest`.",
@@ -1711,6 +2124,20 @@
         },
         "identity": {
           "type": "string"
+        },
+        "items": {
+          "$ref": "#/$defs/Items",
+          "default": {
+            "commits": [],
+            "flaky": [],
+            "outside_runs": 0,
+            "parked": [],
+            "refused_edits": [],
+            "retried": [],
+            "rows": [],
+            "trailer_missing": []
+          },
+          "description": "The loop's sections (#72): items and attempts with their runs' exact cost, retries,\nflaky verdicts, refused edits, time parked and the runs' commits. Their scope is said\nin [`crate::Items`]; no other section includes them or is included in them."
         },
         "old_method": {
           "$ref": "#/$defs/OldMethod",
@@ -1924,6 +2351,145 @@
           "type": "object"
         }
       ]
+    },
+    "RetriedItem": {
+      "description": "An item that took more than one attempt.",
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "item": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "attempts",
+        "failed"
+      ],
+      "type": "object"
+    },
+    "RunCommit": {
+      "description": "A commit of a run, exactly linked.",
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "item": {
+          "type": "string"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "session": {
+          "description": "The provider session id of the session that made it.",
+          "type": "string"
+        },
+        "sha": {
+          "type": "string"
+        },
+        "spawn": {
+          "description": "The session's number within the item.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trailers": {
+          "$ref": "#/$defs/Trailers",
+          "description": "Which of the daemon's trailers it carries."
+        },
+        "ts_ms": {
+          "description": "Committer time.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repo",
+        "sha",
+        "ts_ms",
+        "item",
+        "attempt",
+        "spawn",
+        "session",
+        "trailers"
+      ],
+      "type": "object"
+    },
+    "RunSession": {
+      "description": "One session bosun spawned.",
+      "properties": {
+        "base_sha": {
+          "description": "HEAD when it started and ended, once its range is recorded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ended_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exit": {
+          "description": "`ok`, `limit`, `auth` or `crash`; `null` while it runs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "`fresh`, `resume` or `reset`.",
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "session": {
+          "description": "The provider session id bosun assigned.",
+          "type": "string"
+        },
+        "spawn": {
+          "description": "The session's number within the item.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "sums": {
+          "$ref": "#/$defs/TokenSums",
+          "description": "The messages of this spawn's session id. A resume shares the id of the session it\nresumes, so its messages are counted once, under the first spawn of the id."
+        }
+      },
+      "required": [
+        "spawn",
+        "mode",
+        "provider",
+        "session",
+        "started_ms",
+        "sums"
+      ],
+      "type": "object"
     },
     "ScanState": {
       "description": "The outcome of a repository's last commit scan.",
@@ -2326,6 +2892,54 @@
         "name",
         "errors",
         "results"
+      ],
+      "type": "object"
+    },
+    "TrailerMissing": {
+      "description": "A run's commit without some of the daemon's trailers.",
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "missing": {
+          "description": "The missing trailer names: `Item`, `Run`, `Session`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "sha": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "sha",
+        "item",
+        "missing"
+      ],
+      "type": "object"
+    },
+    "Trailers": {
+      "description": "The daemon's trailers on a commit: present or not.",
+      "properties": {
+        "item": {
+          "type": "boolean"
+        },
+        "run": {
+          "type": "boolean"
+        },
+        "session": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "item",
+        "run",
+        "session"
       ],
       "type": "object"
     },

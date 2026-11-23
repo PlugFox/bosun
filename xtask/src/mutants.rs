@@ -805,6 +805,30 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("doctor_fails_naming_a_missing_tool"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_report_item_last_attempt",
+        issue: 72,
+        breaks: "an item's runs bill only its last attempt",
+        package: "bosun-heat",
+        check: Check::Test("items::tests::an_items_sums_are_its_run_sessions_messages"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_report_merge_inferred",
+        issue: 72,
+        breaks: "the inferred sessions of an item are added to its exact runs",
+        package: "bosun-heat",
+        check: Check::Test("items::tests::an_inferred_session_is_an_estimate_only"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_report_commit_by_time",
+        issue: 72,
+        breaks: "a commit is linked to the run whose time span contains it, not by its range",
+        package: "bosun-heat",
+        check: Check::Test("items::tests::every_commit_of_the_runs_maps_to_one_session_and_item"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

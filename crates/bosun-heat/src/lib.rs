@@ -9,6 +9,10 @@
 //!   of finding, which guess a result's tokens from its bytes ([`BYTES_PER_TOKEN`]) and price
 //!   its stay in the cache. Nothing estimated is added to an exact figure.
 //!
+//! The loop's sections (#72) follow the same split: an item's runs, with the commits linked to
+//! them by the sessions' commit ranges, are exact; interactive sessions inferred for an item are
+//! an estimate and never part of the item's runs (#3).
+//!
 //! The definitions are those of the `bosun_api::Report` and `bosun_api::Estimates` types; this
 //! crate computes them from the rows `bosun-store` reads and holds no SQL of its own. The
 //! detectors of stage 5 come later.
@@ -16,6 +20,7 @@
 mod curve;
 mod estimate;
 mod exact;
+mod items;
 
 pub use estimate::{BYTES_PER_TOKEN, estimates};
 pub use exact::{Scope, exact};

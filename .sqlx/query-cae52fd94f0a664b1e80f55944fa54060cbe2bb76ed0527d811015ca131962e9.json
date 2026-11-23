@@ -1,0 +1,158 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.path AS repo, c.sha, c.ts_ms, c.author, c.lines_added, c.lines_removed,\n                      c.trailers_json, i.item_key, a.number, run.spawn, run.provider,\n                      run.session_key\n               FROM \"commit\" c\n               JOIN repo r ON r.id = c.repo_id\n               JOIN run_commit rc ON rc.repo_id = c.repo_id AND rc.sha = c.sha\n               JOIN run ON run.id = rc.run_id\n               JOIN attempt a ON a.id = run.attempt_id\n               JOIN item i ON i.id = a.item_id\n               WHERE c.ts_ms >= ? AND c.ts_ms < ?\n               ORDER BY c.ts_ms, r.path, c.sha",
+  "describe": {
+    "columns": [
+      {
+        "name": "repo",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "sha",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "sha"
+          }
+        }
+      },
+      {
+        "name": "ts_ms",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "ts_ms"
+          }
+        }
+      },
+      {
+        "name": "author",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "author"
+          }
+        }
+      },
+      {
+        "name": "lines_added",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "lines_added"
+          }
+        }
+      },
+      {
+        "name": "lines_removed",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "lines_removed"
+          }
+        }
+      },
+      {
+        "name": "trailers_json",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "trailers_json"
+          }
+        }
+      },
+      {
+        "name": "item_key",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "item_key"
+          }
+        }
+      },
+      {
+        "name": "number",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "name": "spawn",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "spawn"
+          }
+        }
+      },
+      {
+        "name": "provider",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "session_key",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "session_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cae52fd94f0a664b1e80f55944fa54060cbe2bb76ed0527d811015ca131962e9"
+}

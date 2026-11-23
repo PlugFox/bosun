@@ -1,0 +1,165 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT m.provider, m.message_key, s.session_key, s.agent_key,\n                      coalesce(root.kind, s.kind) AS \"kind!: String\",\n                      md.name AS model, m.ts_ms, r.path AS \"repo?: String\",\n                      m.input_tokens, m.cache_write_5m_tokens, m.cache_write_1h_tokens,\n                      m.cache_read_tokens, m.output_tokens\n               FROM (SELECT DISTINCT json_extract(value, '$[0]') AS provider,\n                                     json_extract(value, '$[1]') AS session_key\n                     FROM json_each(?)) k\n               JOIN session s ON s.provider = k.provider AND s.session_key = k.session_key\n               JOIN message m ON m.session_id = s.id\n               JOIN model md ON md.id = m.model_id\n               LEFT JOIN session root ON root.provider = s.provider\n                    AND root.session_key = s.session_key AND root.agent_key IS NULL\n               LEFT JOIN repo r ON r.id = m.repo_id\n               ORDER BY m.ts_ms, m.provider, m.message_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "provider",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "message_key",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "message_key"
+          }
+        }
+      },
+      {
+        "name": "session_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "session_key"
+          }
+        }
+      },
+      {
+        "name": "agent_key",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "agent_key"
+          }
+        }
+      },
+      {
+        "name": "kind!: String",
+        "ordinal": 4,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "model",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "ts_ms",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "ts_ms"
+          }
+        }
+      },
+      {
+        "name": "repo?: String",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "input_tokens",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "input_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_write_5m_tokens",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_write_5m_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_write_1h_tokens",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_write_1h_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_read_tokens",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_read_tokens"
+          }
+        }
+      },
+      {
+        "name": "output_tokens",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "output_tokens"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "783b1775daa9dfa8f69e5f2e26cdb8007da5ae1deef7c4785ecc984756a89746"
+}

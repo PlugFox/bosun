@@ -21,7 +21,9 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::error::{Error, from_db, to_db};
 use crate::read;
 use crate::work::write as work;
-use crate::work::{AgentCall, NewItem, RunEnd, RunStart, Snapshot, VerdictEnd, VerdictStart};
+use crate::work::{
+    AgentCall, NewItem, RunCommits, RunEnd, RunStart, Snapshot, VerdictEnd, VerdictStart,
+};
 
 /// How many batches may wait for the writer before senders wait too.
 const QUEUE: usize = 64;
@@ -92,6 +94,9 @@ pub enum Write {
     },
     /// A session ended; clears the attempt's child process.
     RunEnded(RunEnd),
+    /// The commit range of a session that ended: each commit of it is linked to the session
+    /// exactly (#72). Keyed by (attempt, spawn).
+    RunCommits(RunCommits),
     /// A verdict run started, with its child process. Keyed by (attempt, run).
     VerdictStarted(VerdictStart),
     /// A verdict run finished; clears its child process.
@@ -331,6 +336,7 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             pid_started_ms,
         } => work::session_child(conn, &item, attempt, pid, pid_started_ms).await,
         Write::RunEnded(end) => work::end_run(conn, &end).await,
+        Write::RunCommits(range) => work::run_commits(conn, &range).await,
         Write::VerdictStarted(start) => work::start_verdict(conn, &start).await,
         Write::VerdictEnded(end) => work::end_verdict(conn, &end).await,
         Write::AgentCall(call) => work::insert_agent_call(conn, &call).await,

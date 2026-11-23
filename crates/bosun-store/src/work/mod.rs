@@ -13,6 +13,7 @@
 
 mod codec;
 mod read;
+mod report;
 #[cfg(test)]
 mod tests;
 pub(crate) mod write;
@@ -21,6 +22,7 @@ pub use read::{
     AgentCallRow, AttemptRow, OutboxOp, OutboxRow, RecordedChild, RunRow, StoredItem,
     TransitionRow, VerdictRow,
 };
+pub use report::{ItemHistory, RunCommitRow};
 
 use bosun_core::{Exit, ItemId, RunResult, SpawnMode};
 
@@ -145,4 +147,23 @@ pub struct RunEnd {
     /// HEAD when the session ended: the end of the attempt's commit range so far.
     pub head_sha: Option<String>,
     pub ended_ms: i64,
+}
+
+/// The commit range of a session that ended (#72): HEAD when it started and when it ended, and
+/// the commits of `base..head` as git lists them. Each listed commit is linked to this session,
+/// and through it to its attempt and item, exactly. Keyed by (attempt, spawn): writing it again
+/// records the new range and adds the commits not yet linked; a commit another session's range
+/// already lists stays with that session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunCommits {
+    pub item: ItemId,
+    pub attempt: u32,
+    /// The session's number, as in its [`RunStart`].
+    pub spawn: u32,
+    /// HEAD when the session started.
+    pub base_sha: String,
+    /// HEAD when the session ended.
+    pub head_sha: String,
+    /// The shas of `base..head`, in any order.
+    pub commits: Vec<String>,
 }

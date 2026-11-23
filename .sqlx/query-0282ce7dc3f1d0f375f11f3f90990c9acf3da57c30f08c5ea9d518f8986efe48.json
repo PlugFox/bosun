@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO run_commit (run_id, repo_id, sha)\n             SELECT r.id, i.repo_id, ?\n             FROM run r JOIN attempt a ON a.id = r.attempt_id JOIN item i ON i.id = a.item_id\n             WHERE r.id = ?\n             ON CONFLICT (repo_id, sha) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "0282ce7dc3f1d0f375f11f3f90990c9acf3da57c30f08c5ea9d518f8986efe48"
+}

@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT r.path, count(*) AS \"commits!: i64\"\n               FROM \"commit\" c JOIN repo r ON r.id = c.repo_id\n               WHERE c.ts_ms >= ? AND c.ts_ms < ?\n               GROUP BY r.path",
+  "describe": {
+    "columns": [
+      {
+        "name": "path",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "commits!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "cba087fe2834cf48f0c94dd6cb1982545e1facf89bff6f849e866c34b9c103f4"
+}

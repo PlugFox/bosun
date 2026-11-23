@@ -13,9 +13,10 @@ use bosun_config::{Config, Repo};
 use bosun_ingest::{Handle, Ingest, Options as IngestOptions, claude};
 use bosun_store::{Options as StoreOptions, Store};
 use tokio::io::BufReader;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::api;
+use crate::commits::Commits;
 use crate::listen::{self, ClaimError, Listener};
 
 /// One identity: its own store and its own ingest.
@@ -28,6 +29,10 @@ pub(crate) struct Served {
     pub(crate) repos: Vec<(String, Repo)>,
     pub(crate) store: Store,
     pub(crate) ingest: Handle,
+    /// The commit reader of the repositories.
+    pub(crate) commits: Commits,
+    /// Its timer task; aborted at shutdown.
+    pub(crate) commit_task: JoinHandle<()>,
 }
 
 /// Everything a request can reach.
@@ -157,7 +162,13 @@ async fn open(
             .iter()
             .filter(|(_, repo)| repo.identity == plan.identity)
             .map(|(name, repo)| (name.clone(), repo.clone()))
-            .collect();
+            .collect::<Vec<_>>();
+        let commits = Commits::new(
+            store.reader().clone(),
+            store.writer().clone(),
+            repos.clone(),
+        );
+        let commit_task = commits.spawn();
         identities.insert(
             plan.identity.clone(),
             Served {
@@ -167,6 +178,8 @@ async fn open(
                 repos,
                 store,
                 ingest: bosun_ingest::spawn(ingest),
+                commits,
+                commit_task,
             },
         );
     }
@@ -175,6 +188,8 @@ async fn open(
 
 async fn shut_down(identities: BTreeMap<String, Served>) {
     for (name, served) in identities {
+        served.commit_task.abort();
+        let _ = served.commit_task.await;
         if let Err(e) = served.ingest.shutdown().await {
             eprintln!("bosund: identity {name}: ingest: {e}");
         }

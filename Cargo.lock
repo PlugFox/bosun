@@ -114,6 +114,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bosun-heat"
+version = "0.0.0"
+dependencies = [
+ "bosun-api",
+ "bosun-core",
+ "bosun-ingest",
+ "bosun-store",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "bosun-ingest"
 version = "0.0.0"
 dependencies = [
@@ -147,6 +160,7 @@ dependencies = [
  "bosun-client",
  "bosun-config",
  "bosun-core",
+ "bosun-heat",
  "bosun-ingest",
  "bosun-store",
  "serde",

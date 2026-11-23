@@ -29,7 +29,9 @@
 //! | `tokens.by_session` | [`TokensParams`] | [`TokensBySession`] |
 //! | `tokens.by_repo` | [`TokensParams`] | [`TokensByRepo`] |
 //! | `tokens.by_model` | [`TokensParams`] | [`TokensByModel`] |
+//! | `report.exact` | [`ReportParams`] | [`Report`] |
 
+mod report;
 pub mod rpc;
 mod wire;
 
@@ -39,6 +41,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+pub use report::{
+    Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan, Comparison, Health,
+    KindRow, OldMethod, PerCommit, Report, ReportParams, ScanState, SessionAgreement, Trend,
+    VersionRow,
+};
 pub use wire::{Picodollars, Wide};
 
 /// The version of this API. A client refuses a daemon that answers [`method::Hello`] with a version it
@@ -101,8 +108,9 @@ pub mod method {
         "ingest.reingest",
         crate::IdentityParams,
         crate::ReingestResult,
-        "Re-reads every transcript file of the identity from zero with the current parser and \
-     answers when the pass is done. Nothing is deleted."
+        "Re-reads every transcript file of the identity from zero with the current parser, then \
+     reads the new commits of its repositories, and answers when both are done. Nothing is \
+     deleted."
     );
     method!(
         TokensBySession,
@@ -127,6 +135,13 @@ pub mod method {
         crate::TokensByModel,
         "Token sums of the identity's messages in the range, per model."
     );
+    method!(
+        ReportExact,
+        "report.exact",
+        crate::ReportParams,
+        crate::Report,
+        "The exact sections of the report over the range: eqv by category, model and session      kind, eqv per commit against the previous period, the old method's number, and ingest      health with the agreement with the provider's own totals. No estimate."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -138,6 +153,7 @@ pub const METHODS: &[&str] = &[
     method::TokensBySession::NAME,
     method::TokensByRepo::NAME,
     method::TokensByModel::NAME,
+    method::ReportExact::NAME,
 ];
 
 /// Params of `hello`: none yet.
@@ -376,6 +392,7 @@ pub fn schema() -> Value {
     add_method::<method::TokensBySession>(&mut generator, &mut methods);
     add_method::<method::TokensByRepo>(&mut generator, &mut methods);
     add_method::<method::TokensByModel>(&mut generator, &mut methods);
+    add_method::<method::ReportExact>(&mut generator, &mut methods);
     let defs = generator.take_definitions(true);
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",

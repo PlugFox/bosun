@@ -151,8 +151,9 @@ struct StoreHandles {
 /// Where a read of a file starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Start {
-    /// The file grew: from the stored offset.
-    Resume(u64),
+    /// The file grew: from the stored offset, with the lines counted up to it (`None` when
+    /// they were not counted).
+    Resume { offset: u64, lines: Option<u64> },
     /// New, shrunk or rewritten: from zero.
     Restart,
 }
@@ -385,6 +386,7 @@ impl<P: Provider> Ingest<P> {
             let (path, open) = (file.path.clone(), self.meters.open.clone());
             blocking(move || Open::file(&path, &open)).await??
         };
+        let stored_lines = known.as_ref().and_then(|known| known.parsed_lines);
         let start = match known
             .as_ref()
             .and_then(|known| known.last_line_hash.clone())
@@ -397,7 +399,10 @@ impl<P: Provider> Ingest<P> {
                 .await?;
                 handle = back;
                 if same? {
-                    Start::Resume(stored)
+                    Start::Resume {
+                        offset: stored,
+                        lines: stored_lines,
+                    }
                 } else {
                     Start::Restart
                 }
@@ -420,9 +425,9 @@ impl<P: Provider> Ingest<P> {
         renamed: bool,
         session: Vec<Write>,
     ) -> Result<u64, FileError> {
-        let mut offset = match start {
-            Start::Resume(offset) => offset,
-            Start::Restart => 0,
+        let (mut offset, mut lines) = match start {
+            Start::Resume { offset, lines } => (offset, lines),
+            Start::Restart => (0, Some(0)),
         };
         let mut session = Some(session);
         let mut parsed = 0;
@@ -466,14 +471,15 @@ impl<P: Provider> Ingest<P> {
                 // Nothing complete past the offset. A restart still records that the file
                 // starts over, so the next pass does not restart again.
                 if first && (start == Start::Restart || renamed) {
-                    let row = self.source_file(file, offset, None);
+                    let row = self.source_file(file, offset, None, lines);
                     self.commit(Some(row.clone()), vec![Write::SourceFile(row)])
                         .await?;
                 }
                 return Ok(parsed);
             }
             let end = chunk.batch.end;
-            let row = self.source_file(file, end, chunk.last_hash.clone());
+            lines = lines.map(|n| n + chunk.batch.lines.len() as u64);
+            let row = self.source_file(file, end, chunk.last_hash.clone(), lines);
             let batch = self.batch(file, offset, row.clone(), &chunk, session.take());
             self.commit(Some(row), batch).await?;
             parsed += end - offset;
@@ -531,7 +537,13 @@ impl<P: Provider> Ingest<P> {
         batch
     }
 
-    fn source_file(&self, file: &Found, offset: u64, hash: Option<String>) -> SourceFile {
+    fn source_file(
+        &self,
+        file: &Found,
+        offset: u64,
+        hash: Option<String>,
+        lines: Option<u64>,
+    ) -> SourceFile {
         SourceFile {
             provider: self.provider.provider().to_owned(),
             file_key: file.key.clone(),
@@ -540,6 +552,7 @@ impl<P: Provider> Ingest<P> {
             parsed_offset: offset,
             parser_version: self.provider.version(),
             last_line_hash: hash,
+            parsed_lines: lines,
         }
     }
 
@@ -597,6 +610,8 @@ impl<P: Provider> Ingest<P> {
                         parsed_offset: size,
                         parser_version: self.provider.version(),
                         last_line_hash: None,
+                        // A meta file is one record, not lines: the gap is its one line.
+                        parsed_lines: Some(1),
                     }),
                     Write::Gap {
                         provider: provider.clone(),

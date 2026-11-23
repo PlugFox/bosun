@@ -30,11 +30,13 @@ mod error;
 mod link;
 mod open;
 mod read;
+mod report;
 mod writer;
 
 pub use error::Error;
 pub use link::{CommitLink, Link, LinkedSession};
 pub use read::{Bill, By, Group, Reader};
+pub use report::{CheckRow, UsageRow, VersionHealth, WindowSums};
 pub use writer::{PriceChange, Repo, SourceFile, Write, Writer};
 
 use std::path::Path;

@@ -1,0 +1,358 @@
+{
+  "identity": "personal",
+  "from_ms": 946857600000,
+  "to_ms": 947376000000,
+  "repo": null,
+  "reference_model": "claude-opus-5-5",
+  "total": {
+    "messages": 26,
+    "input": 92,
+    "cache_write_5m": 1630,
+    "cache_write_1h": 6130,
+    "cache_read": 288100,
+    "output": 217080,
+    "cost": "4404354750000",
+    "eqv": 1101088.6875,
+    "unpriced_messages": 0
+  },
+  "old_method": {
+    "sessions": 7,
+    "sums": {
+      "messages": 7,
+      "input": 41,
+      "cache_write_5m": 1090,
+      "cache_write_1h": 2460,
+      "cache_read": 51000,
+      "output": 410,
+      "cost": "43694000000",
+      "eqv": 10923.5,
+      "unpriced_messages": 0
+    }
+  },
+  "by_category": [
+    {
+      "category": "input",
+      "tokens": 92,
+      "cost": "351000000",
+      "eqv": 87.75
+    },
+    {
+      "category": "cache_write_5m",
+      "tokens": 1630,
+      "cost": "7943750000",
+      "eqv": 1985.9375
+    },
+    {
+      "category": "cache_write_1h",
+      "tokens": 6130,
+      "cost": "43940000000",
+      "eqv": 10985.0
+    },
+    {
+      "category": "cache_read",
+      "tokens": 288100,
+      "cost": "34020000000",
+      "eqv": 8505.0
+    },
+    {
+      "category": "output",
+      "tokens": 217080,
+      "cost": "4318100000000",
+      "eqv": 1079525.0
+    }
+  ],
+  "by_model": [
+    {
+      "model": "<synthetic>",
+      "sums": {
+        "messages": 1,
+        "input": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0,
+        "cache_read": 0,
+        "output": 0,
+        "cost": "0",
+        "eqv": 0.0,
+        "unpriced_messages": 0
+      }
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "sums": {
+        "messages": 1,
+        "input": 2,
+        "cache_write_5m": 30,
+        "cache_write_1h": 500,
+        "cache_read": 150000,
+        "output": 600,
+        "cost": "9519750000",
+        "eqv": 2379.9375,
+        "unpriced_messages": 0
+      }
+    },
+    {
+      "model": "claude-opus-5-5",
+      "sums": {
+        "messages": 22,
+        "input": 85,
+        "cache_write_5m": 1570,
+        "cache_write_1h": 5230,
+        "cache_read": 127100,
+        "output": 215180,
+        "cost": "4379050000000",
+        "eqv": 1094762.5,
+        "unpriced_messages": 0
+      }
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "sums": {
+        "messages": 2,
+        "input": 5,
+        "cache_write_5m": 30,
+        "cache_write_1h": 400,
+        "cache_read": 11000,
+        "output": 1300,
+        "cost": "15785000000",
+        "eqv": 3946.25,
+        "unpriced_messages": 0
+      }
+    }
+  ],
+  "by_kind": [
+    {
+      "kind": "interactive",
+      "sessions": 7,
+      "sums": {
+        "messages": 26,
+        "input": 92,
+        "cache_write_5m": 1630,
+        "cache_write_1h": 6130,
+        "cache_read": 288100,
+        "output": 217080,
+        "cost": "4404354750000",
+        "eqv": 1101088.6875,
+        "unpriced_messages": 0
+      }
+    },
+    {
+      "kind": "run",
+      "sessions": 0,
+      "sums": {
+        "messages": 0,
+        "input": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0,
+        "cache_read": 0,
+        "output": 0,
+        "cost": "0",
+        "eqv": 0.0,
+        "unpriced_messages": 0
+      }
+    }
+  ],
+  "per_commit": {
+    "previous_from_ms": 946339200000,
+    "previous_to_ms": 946857600000,
+    "rows": [
+      {
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "trend": {
+          "current": {
+            "messages": 21,
+            "commits": 3,
+            "cost": "3357440750000",
+            "eqv": 839360.1875,
+            "eqv_per_commit": 279786.7291666667
+          },
+          "previous": {
+            "messages": 6,
+            "commits": 2,
+            "cost": "2055726000000",
+            "eqv": 513931.5,
+            "eqv_per_commit": 256965.75
+          },
+          "change": 0.08880941980270407
+        }
+      },
+      {
+        "repo": {
+          "name": "win-a",
+          "path": "c:\\fixture\\repo-a"
+        },
+        "trend": {
+          "current": {
+            "messages": 2,
+            "commits": 1,
+            "cost": "1012078000000",
+            "eqv": 253019.5,
+            "eqv_per_commit": 253019.5
+          },
+          "previous": {
+            "messages": 0,
+            "commits": 0,
+            "cost": "0",
+            "eqv": 0.0,
+            "eqv_per_commit": null
+          },
+          "change": null
+        }
+      },
+      {
+        "repo": {
+          "name": "win-b",
+          "path": "c:\\fixture\\repo-b"
+        },
+        "trend": {
+          "current": {
+            "messages": 2,
+            "commits": 0,
+            "cost": "16424000000",
+            "eqv": 4106.0,
+            "eqv_per_commit": null
+          },
+          "previous": {
+            "messages": 0,
+            "commits": 0,
+            "cost": "0",
+            "eqv": 0.0,
+            "eqv_per_commit": null
+          },
+          "change": null
+        }
+      },
+      {
+        "repo": null,
+        "trend": {
+          "current": {
+            "messages": 1,
+            "commits": 0,
+            "cost": "18412000000",
+            "eqv": 4603.0,
+            "eqv_per_commit": null
+          },
+          "previous": {
+            "messages": 0,
+            "commits": 0,
+            "cost": "0",
+            "eqv": 0.0,
+            "eqv_per_commit": null
+          },
+          "change": null
+        }
+      }
+    ],
+    "attributed": {
+      "current": {
+        "messages": 25,
+        "commits": 4,
+        "cost": "4385942750000",
+        "eqv": 1096485.6875,
+        "eqv_per_commit": 274121.421875
+      },
+      "previous": {
+        "messages": 6,
+        "commits": 2,
+        "cost": "2055726000000",
+        "eqv": 513931.5,
+        "eqv_per_commit": 256965.75
+      },
+      "change": 0.06676248439723964
+    },
+    "scans": [
+      {
+        "repo": {
+          "name": "a",
+          "path": "/fixture/repo-a"
+        },
+        "state": {
+          "type": "done"
+        }
+      },
+      {
+        "repo": {
+          "name": "win-a",
+          "path": "c:\\fixture\\repo-a"
+        },
+        "state": {
+          "type": "pending"
+        }
+      },
+      {
+        "repo": {
+          "name": "win-b",
+          "path": "c:\\fixture\\repo-b"
+        },
+        "state": {
+          "type": "failed",
+          "error": "not a git repository"
+        }
+      }
+    ]
+  },
+  "health": {
+    "files": 12,
+    "files_counted": 12,
+    "lines": 79,
+    "gaps": 3,
+    "versions": [
+      {
+        "parser_version": 1,
+        "files": 12,
+        "files_counted": 12,
+        "lines": 79,
+        "gaps": 3
+      }
+    ],
+    "agreement": {
+      "tolerance_percent": 5,
+      "sessions": 1,
+      "within": 1,
+      "total": {
+        "transcripts": {
+          "input": 12,
+          "cache_write": 1620,
+          "cache_read": 24000,
+          "output": 51310,
+          "total": 76942
+        },
+        "provider": {
+          "input": 12,
+          "cache_write": 1620,
+          "cache_read": 24000,
+          "output": 51310,
+          "total": 76942
+        },
+        "within": true
+      },
+      "rows": [
+        {
+          "session": "00000000-0000-4000-8000-003100000000",
+          "windows": 2,
+          "messages": 4,
+          "comparison": {
+            "transcripts": {
+              "input": 12,
+              "cache_write": 1620,
+              "cache_read": 24000,
+              "output": 51310,
+              "total": 76942
+            },
+            "provider": {
+              "input": 12,
+              "cache_write": 1620,
+              "cache_read": 24000,
+              "output": 51310,
+              "total": 76942
+            },
+            "within": true
+          }
+        }
+      ]
+    }
+  },
+  "unpriced": []
+}

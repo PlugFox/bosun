@@ -95,6 +95,9 @@ pub struct SourceFile {
     pub parsed_offset: u64,
     pub parser_version: u32,
     pub last_line_hash: Option<String>,
+    /// The complete lines up to `parsed_offset`; `None` when they were not counted (a file
+    /// parsed before the count existed keeps `None` until it is re-read from zero).
+    pub parsed_lines: Option<u64>,
 }
 
 /// New rates for `model` (and `prompt_threshold`) valid from `from_ms` on.
@@ -504,16 +507,22 @@ async fn replace_session_check(
 async fn upsert_source_file(conn: &mut SqliteConnection, file: &SourceFile) -> Result<(), Error> {
     let size = to_db(file.size, "file size")?;
     let offset = to_db(file.parsed_offset, "parsed offset")?;
+    let lines = file
+        .parsed_lines
+        .map(|n| to_db(n, "parsed lines"))
+        .transpose()?;
     sqlx::query!(
         "INSERT INTO source_file
-             (provider, file_key, path, size, parsed_offset, parser_version, last_line_hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+             (provider, file_key, path, size, parsed_offset, parser_version, last_line_hash,
+              parsed_lines)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (provider, file_key) DO UPDATE SET
              path = excluded.path,
              size = excluded.size,
              parsed_offset = excluded.parsed_offset,
              parser_version = excluded.parser_version,
-             last_line_hash = excluded.last_line_hash",
+             last_line_hash = excluded.last_line_hash,
+             parsed_lines = excluded.parsed_lines",
         file.provider,
         file.file_key,
         file.path,
@@ -521,6 +530,7 @@ async fn upsert_source_file(conn: &mut SqliteConnection, file: &SourceFile) -> R
         offset,
         file.parser_version,
         file.last_line_hash,
+        lines,
     )
     .execute(conn)
     .await?;
@@ -850,6 +860,7 @@ pub(crate) mod tests {
             parsed_offset: 100,
             parser_version: 1,
             last_line_hash: None,
+            parsed_lines: Some(4),
         })
     }
 

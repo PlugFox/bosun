@@ -1,0 +1,47 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT parser_version, count(*) AS \"files!: i64\",\n                      count(parsed_lines) AS \"counted!: i64\",\n                      ifnull(sum(parsed_lines), 0) AS \"lines!: i64\"\n               FROM source_file GROUP BY parser_version",
+  "describe": {
+    "columns": [
+      {
+        "name": "parser_version",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "parser_version"
+          }
+        }
+      },
+      {
+        "name": "files!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "counted!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "lines!: i64",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5e287616dd8a41bd40c6033b8876980e0acfe0b30b3ce4810b0ecbb4b0f77bd1"
+}

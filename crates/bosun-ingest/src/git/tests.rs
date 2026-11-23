@@ -366,3 +366,74 @@ async fn each_commit_links_only_within_its_repository() {
     assert_eq!(found[&in_two], ["session-two"]);
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn refresh_stores_new_commits_once() {
+    let db = tempfile::tempdir().unwrap();
+    let store = open_store(&db).await;
+    let repo = repository();
+    let dir = repo.path();
+    let a = commit(
+        dir,
+        1_700_000_000,
+        &[(
+            "a.txt", b"a
+",
+        )],
+        "A",
+    );
+    let b = commit(
+        dir,
+        1_700_000_100,
+        &[(
+            "a.txt", b"b
+",
+        )],
+        "B",
+    );
+
+    assert_eq!(
+        refresh(store.reader(), store.writer(), dir).await.unwrap(),
+        2
+    );
+    let mut stored = vec![a, b];
+    stored.sort();
+    assert_eq!(store.reader().commit_shas(&key(dir)).await.unwrap(), stored);
+    // The stored commits are the cursor: nothing is read twice.
+    assert_eq!(
+        refresh(store.reader(), store.writer(), dir).await.unwrap(),
+        0
+    );
+    let c = commit(
+        dir,
+        1_700_000_200,
+        &[(
+            "a.txt", b"c
+",
+        )],
+        "C",
+    );
+    assert_eq!(
+        refresh(store.reader(), store.writer(), dir).await.unwrap(),
+        1
+    );
+    stored.push(c);
+    stored.sort();
+    assert_eq!(store.reader().commit_shas(&key(dir)).await.unwrap(), stored);
+
+    // A directory that is not a repository is an error and stores nothing.
+    let plain = tempfile::tempdir().unwrap();
+    let err = refresh(store.reader(), store.writer(), plain.path())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RefreshError::Git(_)), "{err}");
+    assert_eq!(
+        store
+            .reader()
+            .commit_shas(&key(plain.path()))
+            .await
+            .unwrap(),
+        Vec::<String>::new()
+    );
+    store.close().await.unwrap();
+}

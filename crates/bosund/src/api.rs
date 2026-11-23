@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 
 use bosun_api::rpc::{self, ErrorObject, Request, Response, code};
 use bosun_api::{
-    API_VERSION, DaemonStatus, FailedFile, HelloResult, IngestStatus, LastPass, Method, ModelRow,
-    PassReport, Picodollars, ReingestResult, RepoRef, RepoRow, SessionRow, TokenSums,
-    TokensByModel, TokensByRepo, TokensBySession, TokensParams, TokensSummary, UnpricedModel, Wide,
-    method,
+    API_VERSION, CommitScan, DaemonStatus, FailedFile, HelloResult, IngestStatus, LastPass, Method,
+    ModelRow, PassReport, Picodollars, ReingestResult, RepoRef, RepoRow, Report, ReportParams,
+    SessionRow, TokenSums, TokensByModel, TokensByRepo, TokensBySession, TokensParams,
+    TokensSummary, UnpricedModel, Wide, method,
 };
 use bosun_core::{Cost, PriceTable};
 use bosun_store::{Bill, By, Group};
@@ -113,12 +113,7 @@ async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObj
         }
         method::IngestReingest::NAME => {
             call::<method::IngestReingest, _, _>(p, |p| async move {
-                let served = state.identity(&p.identity)?;
-                let report = served.ingest.reingest().await.map_err(failed)?;
-                Ok(ReingestResult {
-                    identity: served.name.clone(),
-                    pass: pass_report(&report),
-                })
+                reingest(state.identity(&p.identity)?).await
             })
             .await
         }
@@ -180,6 +175,12 @@ async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObj
             })
             .await
         }
+        method::ReportExact::NAME => {
+            call::<method::ReportExact, _, _>(p, |p| async move {
+                report(state.identity(&p.identity)?, &p).await
+            })
+            .await
+        }
         _ => Err(ErrorObject::new(
             code::METHOD_NOT_FOUND,
             format!("no method {name}"),
@@ -232,6 +233,65 @@ fn pass_report(report: &bosun_ingest::Report) -> PassReport {
             })
             .collect(),
     }
+}
+
+/// Re-reads every transcript, then the new commits, so that a report after a reingest sees
+/// both.
+async fn reingest(served: &Served) -> Result<ReingestResult, ErrorObject> {
+    let report = served.ingest.reingest().await.map_err(failed)?;
+    served.commits.refresh().await;
+    Ok(ReingestResult {
+        identity: served.name.clone(),
+        pass: pass_report(&report),
+    })
+}
+
+/// The exact sections of the report of one identity. Reads only: the commits are those the
+/// commit reader has stored.
+async fn report(served: &Served, p: &ReportParams) -> Result<Report, ErrorObject> {
+    if p.from_ms >= p.to_ms {
+        return Err(ErrorObject::new(
+            code::INVALID_PARAMS,
+            "from_ms must be before to_ms: the range is empty",
+        ));
+    }
+    let repos: Vec<&(String, bosun_config::Repo)> = match &p.repo {
+        None => served.repos.iter().collect(),
+        Some(name) => {
+            let found = served
+                .repos
+                .iter()
+                .find(|(n, _)| n == name)
+                .ok_or_else(|| {
+                    ErrorObject::new(
+                        code::INVALID_PARAMS,
+                        format!("identity {} has no repository named {name:?}", served.name),
+                    )
+                })?;
+            vec![found]
+        }
+    };
+    let scans = repos
+        .iter()
+        .map(|(name, repo)| CommitScan {
+            repo: served.repo(&repo.key),
+            state: served.commits.state(name),
+        })
+        .collect();
+    let scope = bosun_heat::Scope {
+        from_ms: p.from_ms,
+        to_ms: p.to_ms,
+        repo: p.repo.as_ref().map(|_| repos[0].1.key.as_str()),
+    };
+    bosun_heat::exact(
+        served.store.reader(),
+        &served.name,
+        scope,
+        |key| served.repo(key),
+        scans,
+    )
+    .await
+    .map_err(failed)
 }
 
 /// The bills of one identity in the range, and their summary.

@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.provider, s.session_key, s.agent_key,\n                      count(*) AS \"messages!: i64\",\n                      sum(m.input_tokens) AS \"input!: i64\",\n                      sum(m.cache_write_5m_tokens) AS \"cache_write_5m!: i64\",\n                      sum(m.cache_write_1h_tokens) AS \"cache_write_1h!: i64\",\n                      sum(m.cache_read_tokens) AS \"cache_read!: i64\",\n                      sum(m.output_tokens) AS \"output!: i64\"\n               FROM message m JOIN session s ON s.id = m.session_id\n               WHERE EXISTS (\n                   SELECT 1 FROM session_check c JOIN session root ON root.id = c.root_session_id\n                   WHERE root.provider = s.provider AND root.session_key = s.session_key)\n               GROUP BY s.id\n               ORDER BY s.provider, s.session_key, ifnull(s.agent_key, '')",
+  "describe": {
+    "columns": [
+      {
+        "name": "provider",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "session_key",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "session_key"
+          }
+        }
+      },
+      {
+        "name": "agent_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "agent_key"
+          }
+        }
+      },
+      {
+        "name": "messages!: i64",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "input!: i64",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "cache_write_5m!: i64",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "cache_write_1h!: i64",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "cache_read!: i64",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "output!: i64",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "98bc229d69bde11451b20a6c92f23369266f3ca3dad2fe017278848fa4f81ac3"
+}

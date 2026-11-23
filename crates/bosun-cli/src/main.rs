@@ -7,9 +7,11 @@
 //! bosun install [--daemon <path>] [--name <name>]
 //! bosun uninstall [--name <name>]
 //! bosun doctor [--identity <name>] [--name <name>]
+//! bosun report [--since <t>] [--until <t>] [--repo <name>] [--identity <name>]
 //! ```
 //!
-//! Every command also takes `--format text|json` (default `text`), `--config <file>` (default
+//! Every command also takes `--format text|json` (default `text`; `report` also takes `md`,
+//! and its text is Markdown either way), `--config <file>` (default
 //! `bosun_config::default_path`: `BOSUN_CONFIG`, else the platform's location) and
 //! `--endpoint <socket or pipe>` (default `bosun_client::Endpoint::resolve`: `BOSUN_ENDPOINT`,
 //! else per user).
@@ -33,6 +35,12 @@
 //! - `reingest`: re-reads every transcript file of the identity from zero with the current
 //!   parser and answers when the pass is done (`ingest.reingest`). Nothing is deleted. Files
 //!   that could not be read are listed; they do not change the exit code.
+//! - `report`: the exact sections of the report (`report.exact`, #6, #26): eqv by category,
+//!   model and session kind, eqv per commit against the previous period of the same length,
+//!   the old method's number next to the real total, and ingest health with the agreement
+//!   with the provider's own totals. `--until` defaults to now and `--since` to seven days
+//!   before `--until`. `--repo` limits the range sections to one configured repository; without
+//!   `--identity`, only the identity that owns it is asked.
 //! - `install`: registers the logon process that starts `bosund` for the current user, and
 //!   starts it now (`install.rs`). `bosund` is the one next to `bosun` unless `--daemon` names
 //!   another; `--config` and `--endpoint` (or `BOSUN_CONFIG` and `BOSUN_ENDPOINT`), when set,
@@ -57,6 +65,7 @@
 //! | `tokens --by session` | `recount`'s compare shape version 1 (`shape.rs`), so that `recount --compare <file>` reads it |
 //! | `tokens --by repo` | the result of `tokens.by_repo` |
 //! | `tokens --by model` | the result of `tokens.by_model` |
+//! | `report` | the result of `report.exact` |
 //!
 //! The results are those of `schema/bosun-api.schema.json`. Without `--identity`, the output
 //! is an object keyed by identity name whose values are those documents:
@@ -85,6 +94,7 @@ mod admin;
 mod artefact;
 mod doctor;
 mod install;
+mod markdown;
 mod render;
 mod shape;
 mod time;
@@ -95,8 +105,8 @@ use std::process::ExitCode;
 
 use bosun_api::rpc::code;
 use bosun_api::{
-    IdentityParams, IngestStatus, ModelRow, ReingestResult, RepoRow, SessionRow, TokensParams,
-    TokensSummary, method,
+    IdentityParams, IngestStatus, ModelRow, ReingestResult, RepoRow, Report, ReportParams,
+    SessionRow, TokensParams, TokensSummary, method,
 };
 use bosun_client::{Client, Endpoint, Error};
 use bosun_config::SystemProbe;
@@ -128,7 +138,8 @@ Exit codes:
   6  the daemon speaks an API version this bosun does not know
   7  doctor: a check did not pass";
 
-/// The command line of bosun: token sums, ingest status and reingest, asked of the daemon.
+/// The command line of bosun: token sums, the report, ingest status and reingest, asked of
+/// the daemon.
 #[derive(Debug, Parser)]
 #[command(name = "bosun", version, after_help = EXIT_CODES)]
 struct Cli {
@@ -141,7 +152,7 @@ struct Cli {
 #[derive(Debug, Args)]
 struct Global {
     /// Output format. JSON with --identity is one document; without it, an object keyed by
-    /// identity name.
+    /// identity name. md is for report only, whose text is Markdown either way.
     #[arg(long, global = true, value_enum, default_value_t = Format::Text)]
     format: Format,
     /// The identity to ask about. Without it, every identity of the configuration, each in a
@@ -160,6 +171,8 @@ struct Global {
 enum Format {
     Text,
     Json,
+    /// Markdown: `report` only, whose text is Markdown too.
+    Md,
 }
 
 #[derive(Debug, Subcommand)]
@@ -173,6 +186,10 @@ enum Command {
     /// Re-reads every transcript file from zero with the current parser; deletes nothing.
     #[command(after_help = EXIT_CODES)]
     Reingest,
+    /// The exact sections of the report: eqv by category, model, session kind and commit,
+    /// the old method's number, and ingest health.
+    #[command(after_help = EXIT_CODES)]
+    Report(ReportArgs),
     /// Registers the logon process that starts bosund for you, and starts it now.
     #[command(after_help = EXIT_CODES)]
     Install(InstallArgs),
@@ -222,6 +239,35 @@ struct TokensArgs {
     until: Option<Bound>,
 }
 
+#[derive(Debug, Args)]
+struct ReportArgs {
+    /// Messages at or after this time [default: seven days before --until]. The previous
+    /// period of the per-commit trend has the same length and ends here. The same forms as
+    /// tokens --since.
+    #[arg(long, value_name = "TIME", value_parser = time::parse_bound)]
+    since: Option<Bound>,
+    /// Messages before this time [default: now].
+    #[arg(long, value_name = "TIME", value_parser = time::parse_bound)]
+    until: Option<Bound>,
+    /// Only this repository's messages and commits (its name in the configuration).
+    #[arg(long, value_name = "NAME")]
+    repo: Option<String>,
+}
+
+/// The default length of a report's range.
+const WEEK_MS: i64 = 7 * 24 * 3_600_000;
+
+impl ReportArgs {
+    /// The range `[since, until)`: `until` defaults to now, `since` to a week before `until`.
+    fn range(&self, now_ms: i64) -> (i64, i64) {
+        let until = self.until.map_or(now_ms, |b| b.resolve(now_ms));
+        let since = self
+            .since
+            .map_or_else(|| until.saturating_sub(WEEK_MS), |b| b.resolve(now_ms));
+        (since, until)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum By {
     Session,
@@ -257,8 +303,9 @@ impl From<Error> for Failure {
     }
 }
 
-/// The identities to ask about: `--identity`, else every identity of the configuration.
-fn identities(global: &Global) -> Result<Vec<String>, Failure> {
+/// The identities to ask about: `--identity`, else every identity of the configuration, or
+/// with `repo` the one that owns that repository.
+fn identities(global: &Global, repo: Option<&str>) -> Result<Vec<String>, Failure> {
     if let Some(name) = &global.identity {
         return Ok(vec![name.clone()]);
     }
@@ -274,6 +321,15 @@ fn identities(global: &Global) -> Result<Vec<String>, Failure> {
         })?;
     let config = bosun_config::load(&path, &SystemProbe::new())
         .map_err(|e| Failure::new(exit::CONFIG, format!("{}: {e}", path.display())))?;
+    if let Some(repo) = repo {
+        let owner = config.repos.get(repo).ok_or_else(|| {
+            Failure::new(
+                exit::USAGE,
+                format!("{}: no repository named {repo:?}", path.display()),
+            )
+        })?;
+        return Ok(vec![owner.identity.clone()]);
+    }
     Ok(config.identities.into_keys().collect())
 }
 
@@ -433,6 +489,43 @@ impl Section {
     }
 }
 
+/// The usage errors of `report` and of `--format md`, which only `report` takes.
+fn check_report_args(cli: &Cli, now_ms: i64) -> Result<(), Failure> {
+    if let Command::Report(args) = &cli.command {
+        let (since, until) = args.range(now_ms);
+        if since >= until {
+            return Err(Failure::new(
+                exit::USAGE,
+                "--since must be before --until: the range is empty",
+            ));
+        }
+    } else if cli.global.format == Format::Md {
+        return Err(Failure::new(
+            exit::USAGE,
+            "--format md applies to report only; use text or json",
+        ));
+    }
+    Ok(())
+}
+
+/// One identity's `report` section.
+async fn report(
+    client: &mut Client,
+    identity: &str,
+    args: &ReportArgs,
+    now_ms: i64,
+) -> Result<Section, Failure> {
+    let (from_ms, to_ms) = args.range(now_ms);
+    let ask = ReportParams {
+        identity: identity.to_owned(),
+        from_ms,
+        to_ms,
+        repo: args.repo.clone(),
+    };
+    let result = client.call::<method::ReportExact>(&ask).await?;
+    Section::of::<Report>(&result.identity, &result, markdown::report)
+}
+
 /// Runs the command; the text to print on stdout.
 async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
     let global = &cli.global;
@@ -448,17 +541,23 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
             "--since must be before --until: the range is empty",
         ));
     }
+    // Refuses `--format md` outside `report` before any command runs.
+    check_report_args(&cli, now_ms)?;
     match &cli.command {
         Command::Install(args) => return admin::install(global, args).await,
         Command::Uninstall(args) => return admin::uninstall(global, args).await,
         Command::Doctor(args) => return admin::doctor(global, args).await,
         _ => {}
     }
-    let names = identities(global)?;
+    let repo = match &cli.command {
+        Command::Report(args) => args.repo.as_deref(),
+        _ => None,
+    };
+    let names = identities(global, repo)?;
     if names.is_empty() {
         eprintln!("bosun: the configuration names no identity");
         return Ok(match global.format {
-            Format::Text => String::new(),
+            Format::Text | Format::Md => String::new(),
             Format::Json => "{}\n".to_owned(),
         });
     }
@@ -489,6 +588,11 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
                     &result,
                     render::reingest,
                 )?);
+            }
+        }
+        Command::Report(args) => {
+            for name in &names {
+                sections.push(report(&mut client, name, args, now_ms).await?);
             }
         }
         Command::Tokens(args) => {
@@ -525,7 +629,7 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
 /// as an object keyed by identity without it.
 fn output(global: &Global, sections: Vec<Section>) -> String {
     match global.format {
-        Format::Text => sections
+        Format::Text | Format::Md => sections
             .iter()
             .map(|s| s.text.as_str())
             .collect::<Vec<_>>()

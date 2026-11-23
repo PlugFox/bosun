@@ -304,6 +304,10 @@ async fn a_partial_last_line_waits_for_its_newline() {
         "the offset stops before the torn line"
     );
     assert!(offset < size);
+    // Lines are counted up to the offset: the torn line is not one yet (#26).
+    let complete = i64::try_from(bytes.split(|&b| b == b'\n').count() - 1).unwrap();
+    let lines = "SELECT parsed_lines FROM source_file";
+    assert_eq!(scalar(&bench.db(), lines).await, complete);
 
     // The newline arrives: the third message is stored.
     let mut appended = std::fs::OpenOptions::new()
@@ -319,6 +323,10 @@ async fn a_partial_last_line_waits_for_its_newline() {
         scalar(&bench.db(), "SELECT count(*) FROM ingest_gap").await,
         0
     );
+    // A resumed read adds its lines; a read from zero counts them again, not twice.
+    assert_eq!(scalar(&bench.db(), lines).await, complete + 1);
+    ingest.reingest().await.unwrap();
+    assert_eq!(scalar(&bench.db(), lines).await, complete + 1);
     bench.close().await;
 }
 

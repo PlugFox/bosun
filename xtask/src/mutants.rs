@@ -350,6 +350,14 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("doctor_warns_when_cleanup_period_is_below_the_reingest_window"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_report_main_only",
+        issue: 26,
+        breaks: "the cost-state agreement sums the main transcript only, not its sub-agents",
+        package: "bosun-heat",
+        check: Check::Test("exact::tests::the_agreement_counts_subagents"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

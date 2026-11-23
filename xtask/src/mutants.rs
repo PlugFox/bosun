@@ -464,6 +464,48 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("schedule::tests::order_is_board_order_skipping_open_blockers"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_git_skip_clean_tree",
+        issue: 53,
+        breaks: "the clean-tree precondition passes every working tree",
+        package: "bosun-git",
+        check: Check::Test("tests::an_untracked_file_fails_clean_tree"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_skip_ancestry",
+        issue: 53,
+        breaks: "the ancestry precondition passes a rewritten base and zero commits",
+        package: "bosun-git",
+        check: Check::Test("tests::a_reset_below_base_and_a_recommit_fails_ancestry"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_skip_ref_check",
+        issue: 53,
+        breaks: "the refs precondition passes new, moved and deleted refs and a changed stash",
+        package: "bosun-git",
+        check: Check::Test("tests::a_new_tag_a_moved_branch_and_a_stash_entry_each_fail_refs"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_skip_message_check",
+        issue: 53,
+        breaks: "the commit-message precondition passes closing keywords, skip-ci and forged trailers",
+        package: "bosun-git",
+        check: Check::Test(
+            "tests::closing_keywords_skip_ci_and_forged_trailers_each_fail_messages",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_repo_hooks",
+        issue: 53,
+        breaks: "the invoker leaves the repository's hooks and fsmonitor live",
+        package: "bosun-git",
+        check: Check::Test("tests::planted_hooks_never_run_under_the_invoker"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

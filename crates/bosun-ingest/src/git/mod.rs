@@ -18,11 +18,11 @@
 //!
 //! # Safety
 //!
-//! Every command is read-only, and read commands run no hooks. As defence in depth each one is
-//! also run with `core.hooksPath` pointed at the null device, `core.fsmonitor` off,
-//! `--no-ext-diff` and `--no-textconv` where a diff is computed (configuration could otherwise
-//! name a program for both), no terminal prompt, and no optional locks (so `git` does not
-//! refresh the index of a repository it only reads).
+//! Every command is read-only, and read commands run no hooks. As defence in depth each one goes
+//! through the daemon's one invoker, [`bosun_git::Git`] (hooks and fsmonitor off, no terminal
+//! prompt, no optional locks, so `git` does not refresh the index of a repository it only
+//! reads), and the log is read with `--no-ext-diff` and `--no-textconv` (configuration could
+//! otherwise name a program for both).
 //!
 //! # Incremental reads
 //!
@@ -40,18 +40,14 @@ mod refresh;
 #[cfg(test)]
 mod tests;
 
+pub use bosun_git::Error;
 pub use refresh::{RefreshError, refresh};
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 
 use bosun_core::Commit;
-
-/// The hooks directory every command is given: the null device, which holds no hook.
-const NO_HOOKS: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+use bosun_git::Git;
 
 /// The refs whose commits are read: local and remote-tracking branches.
 const REFS: [&str; 2] = ["refs/heads", "refs/remotes"];
@@ -108,52 +104,6 @@ pub struct Scan {
     pub commits: Vec<Commit>,
     /// The cursor to scan from next time, once `commits` are stored.
     pub cursor: Cursor,
-}
-
-/// What can go wrong reading a repository.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Error {
-    /// `git` could not be started (it is not on `PATH`, for example).
-    Spawn { source: std::io::Error },
-    /// A `git` command failed.
-    Git {
-        repo: PathBuf,
-        command: String,
-        stderr: String,
-    },
-    /// A `git` command printed something the reader does not understand.
-    Output { repo: PathBuf, what: String },
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Spawn { source } => write!(f, "cannot run git: {source}"),
-            Self::Git {
-                repo,
-                command,
-                stderr,
-            } => write!(
-                f,
-                "{}: git {command} failed: {}",
-                repo.display(),
-                stderr.trim()
-            ),
-            Self::Output { repo, what } => {
-                write!(f, "{}: unexpected git output: {what}", repo.display())
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Spawn { source } => Some(source),
-            _ => None,
-        }
-    }
 }
 
 /// Reads the commits of the repository at `repo` that `cursor` has not reached, with its origin
@@ -286,94 +236,19 @@ fn scrub(url: &str) -> String {
 }
 
 fn output(repo: &Path, what: String) -> Error {
-    Error::Output {
-        repo: repo.to_owned(),
-        what,
-    }
+    Git::new(repo).unexpected(what)
 }
 
-/// The `git` command every read goes through: the repository, the defensive configuration and
-/// environment of the module documentation.
-fn git(repo: &Path) -> Command {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(repo)
-        .args(["-c", &format!("core.hooksPath={NO_HOOKS}")])
-        .args(["-c", "core.fsmonitor=false"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command
-}
-
-/// Runs `git args` in `repo`, feeding it `stdin`; returns its standard output.
+/// Runs `git args` in `repo` through the invoker, feeding it `stdin`; returns its standard
+/// output.
 fn run(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<String, Error> {
-    match exec(repo, args, stdin)? {
-        (true, out, _) => Ok(out),
-        (false, _, stderr) => Err(Error::Git {
-            repo: repo.to_owned(),
-            command: args.first().copied().unwrap_or_default().to_owned(),
-            stderr,
-        }),
-    }
+    Git::new(repo).run(args, stdin)
 }
 
-/// Runs a query that exits 1 with no output when there is nothing to report (`config --get`,
-/// `symbolic-ref --quiet`, `rev-parse --verify --quiet`): its trimmed output, or `None`.
+/// Runs a query that exits 1 with no output when there is nothing to report: its trimmed
+/// output, or `None`.
 fn optional(repo: &Path, args: &[&str]) -> Result<Option<String>, Error> {
-    let mut command = git(repo);
-    let out = command
-        .args(args)
-        .output()
-        .map_err(|source| Error::Spawn { source })?;
-    match out.status.code() {
-        Some(0) => {
-            let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-            Ok((!text.is_empty()).then_some(text))
-        }
-        Some(1) => Ok(None),
-        _ => Err(Error::Git {
-            repo: repo.to_owned(),
-            command: args.first().copied().unwrap_or_default().to_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        }),
-    }
-}
-
-fn exec(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<(bool, String, String), Error> {
-    let mut command = git(repo);
-    command.args(args);
-    if stdin.is_some() {
-        command.stdin(Stdio::piped());
-    }
-    let mut child = command.spawn().map_err(|source| Error::Spawn { source })?;
-    // Written from another thread: a large input and a large output would otherwise block each
-    // other on the pipes.
-    let writer = match (stdin, child.stdin.take()) {
-        (Some(text), Some(mut pipe)) => {
-            let text = text.to_owned();
-            Some(std::thread::spawn(move || pipe.write_all(text.as_bytes())))
-        }
-        _ => None,
-    };
-    let out = child
-        .wait_with_output()
-        .map_err(|source| Error::Spawn { source })?;
-    if let Some(writer) = writer {
-        // A failed write shows up as a failed command; its own error adds nothing.
-        let _ = writer.join();
-    }
-    Ok((
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    ))
+    Git::new(repo).optional(args)
 }
 
 /// Parses the log printed with the format of [`scan`]: per commit, a record separator, the

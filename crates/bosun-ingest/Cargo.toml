@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 bosun-config = { path = "../bosun-config" }
 bosun-core = { path = "../bosun-core" }
+bosun-git = { path = "../bosun-git" }
 bosun-store = { path = "../bosun-store" }
 file-id.workspace = true
 notify.workspace = true

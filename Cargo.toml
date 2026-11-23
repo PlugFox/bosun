@@ -103,6 +103,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_core_no_park_cap)",
   "cfg(mutant_core_flaky_is_fail)",
   "cfg(mutant_core_ignore_blockers)",
+  "cfg(mutant_git_skip_clean_tree)",
+  "cfg(mutant_git_skip_ancestry)",
+  "cfg(mutant_git_skip_ref_check)",
+  "cfg(mutant_git_skip_message_check)",
+  "cfg(mutant_git_repo_hooks)",
 ] }
 
 [workspace.lints.clippy]

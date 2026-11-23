@@ -137,6 +137,9 @@ dependencies = [
 [[package]]
 name = "bosun-identity"
 version = "0.0.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "bosun-ingest"

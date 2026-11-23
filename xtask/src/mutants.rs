@@ -605,6 +605,56 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("local::tests::suite_a_reorder_alone_appears_in_the_next_poll"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_identity_inherit_env",
+        issue: 54,
+        breaks: "the constructed environment is the daemon's inherited one",
+        package: "bosun-identity",
+        check: Check::Test(
+            "tests::a_sentinel_credential_in_the_daemon_environment_is_absent_in_the_child",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_identity_skip_login",
+        issue: 54,
+        breaks: "the token's login is not compared with the expected login",
+        package: "bosun-identity",
+        check: Check::Test("tests::wrong_login_is_refused"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_identity_agent_gets_bundle",
+        issue: 54,
+        breaks: "the agent environment is the daemon's tool environment, the full bundle",
+        package: "bosun-identity",
+        check: Check::Test("tests::the_agent_environment_has_no_github_credential_of_the_identity"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_identity_skip_allowlist",
+        issue: 54,
+        breaks: "the remote's owner is not compared with the identity's allowlist",
+        package: "bosun-identity",
+        check: Check::Test("tests::remote_owner_off_the_allowlist_is_refused"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_identity_skip_author",
+        issue: 54,
+        breaks: "the resolved git author is not compared with the configured one",
+        package: "bosun-identity",
+        check: Check::Test("tests::wrong_author_is_refused"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_identity_declared_credentials",
+        issue: 54,
+        breaks: "a repository may declare a credential variable",
+        package: "bosun-identity",
+        check: Check::Test("tests::a_repository_asking_for_gh_token_does_not_get_it"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

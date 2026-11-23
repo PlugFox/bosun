@@ -128,6 +128,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_queue_lint_off)",
   "cfg(mutant_queue_local_no_key)",
   "cfg(mutant_queue_stale_poll)",
+  "cfg(mutant_identity_inherit_env)",
+  "cfg(mutant_identity_skip_login)",
+  "cfg(mutant_identity_agent_gets_bundle)",
+  "cfg(mutant_identity_skip_allowlist)",
+  "cfg(mutant_identity_skip_author)",
+  "cfg(mutant_identity_declared_credentials)",
 ] }
 
 [workspace.lints.clippy]

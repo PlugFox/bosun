@@ -97,6 +97,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_report_merge_estimates)",
   "cfg(mutant_report_no_window)",
   "cfg(mutant_ingest_subagent_cost_state)",
+  "cfg(mutant_xtask_mcp_not_client)",
 ] }
 
 [workspace.lints.clippy]

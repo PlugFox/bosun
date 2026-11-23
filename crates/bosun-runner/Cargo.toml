@@ -1,0 +1,12 @@
+[package]
+name = "bosun-runner"
+description = "Coding-agent runners of bosun: the runner trait, the verdict executor and the provider runners."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

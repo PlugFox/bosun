@@ -5,6 +5,7 @@ mod deps;
 mod fixtures;
 mod mutants;
 mod sqlx;
+mod unsafe_code;
 
 use std::process::ExitCode;
 
@@ -12,7 +13,8 @@ const USAGE: &str = "\
 usage: cargo xtask <task>
 
 tasks:
-  check-deps          check the workspace dependency rules (#12)
+  check-deps          check the workspace dependency rules and that unsafe is denied outside
+                      bosun-proc (#12)
   gen-api [--check]   write schema/bosun-api.schema.json from bosun-api, or check that it
                       is current (#12, #24)
   lint-fixtures [DIR] check that every id and path in fixtures/ (or DIR) is synthetic (#16)

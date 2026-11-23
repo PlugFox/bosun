@@ -114,6 +114,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bosun-git"
+version = "0.0.0"
+
+[[package]]
 name = "bosun-heat"
 version = "0.0.0"
 dependencies = [
@@ -125,6 +129,10 @@ dependencies = [
  "tempfile",
  "tokio",
 ]
+
+[[package]]
+name = "bosun-identity"
+version = "0.0.0"
 
 [[package]]
 name = "bosun-ingest"
@@ -142,6 +150,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bosun-mcp"
+version = "0.0.0"
+
+[[package]]
+name = "bosun-proc"
+version = "0.0.0"
+
+[[package]]
+name = "bosun-queue"
+version = "0.0.0"
+
+[[package]]
+name = "bosun-runner"
+version = "0.0.0"
+
+[[package]]
 name = "bosun-store"
 version = "0.0.0"
 dependencies = [
@@ -151,6 +175,10 @@ dependencies = [
  "tempfile",
  "tokio",
 ]
+
+[[package]]
+name = "bosun-tui"
+version = "0.0.0"
 
 [[package]]
 name = "bosund"
@@ -432,6 +460,10 @@ dependencies = [
  "parking",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "fake-agent"
+version = "0.0.0"
 
 [[package]]
 name = "fastrand"

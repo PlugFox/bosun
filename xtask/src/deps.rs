@@ -24,12 +24,28 @@ const IO_CRATES: &[&str] = &[
 
 /// Clients of the local API (#4) and the only workspace crates they may depend on directly:
 /// `bosun-config` so that `bosun doctor` works with the daemon down.
+#[cfg(not(mutant_xtask_mcp_not_client))]
 const CLIENTS: &[&str] = &["bosun-cli", "bosun-tui", "bosun-mcp"];
+#[cfg(mutant_xtask_mcp_not_client)]
+const CLIENTS: &[&str] = &["bosun-cli", "bosun-tui"];
 const CLIENT_ALLOWED: &[&str] = &["bosun-client", "bosun-api", "bosun-config"];
 
 /// Crates a client may not reach even transitively: a client that can open the database is not
 /// a client.
 const CLIENT_FORBIDDEN: &[&str] = &["bosun-store", "bosun-queue", "bosun-runner", "bosund"];
+
+/// The side-effect crates of stage 1 (#7, #12): none of them reaches `bosun-store` or another of
+/// them, except [`SIDE_EFFECT_ALLOWED`]. `bosund` composes them.
+const SIDE_EFFECT: &[&str] = &[
+    "bosun-queue",
+    "bosun-runner",
+    "bosun-git",
+    "bosun-proc",
+    "bosun-identity",
+];
+
+/// The one edge between side-effect crates: the runner spawns through `bosun-proc`.
+const SIDE_EFFECT_ALLOWED: &[(&str, &str)] = &[("bosun-runner", "bosun-proc")];
 
 /// Crates that may reach no workspace crate at all: the independent recount (#16) shares no
 /// code with the parser it checks.
@@ -134,6 +150,24 @@ pub(crate) fn violations(graph: &Graph) -> Vec<String> {
         }
     }
 
+    for krate in SIDE_EFFECT
+        .iter()
+        .copied()
+        .filter(|c| graph.members.contains(*c))
+    {
+        for dep in graph.reachable(krate) {
+            if dep == "bosun-store" {
+                out.push(format!(
+                    "{krate} reaches bosun-store; only bosund composes the store with it"
+                ));
+            } else if SIDE_EFFECT.contains(&dep) && !SIDE_EFFECT_ALLOWED.contains(&(krate, dep)) {
+                out.push(format!(
+                    "{krate} reaches {dep}; side-effect crates do not reach each other"
+                ));
+            }
+        }
+    }
+
     // Clients link `bosun-config`, so it may not reach what a client may not.
     if graph.members.contains("bosun-config") {
         for dep in graph.reachable("bosun-config") {
@@ -208,6 +242,7 @@ fn load() -> Result<Graph, String> {
 }
 
 pub(crate) fn run() -> Result<(), String> {
+    crate::unsafe_code::run()?;
     let graph = load()?;
     let found = violations(&graph);
     if found.is_empty() {
@@ -363,5 +398,93 @@ mod tests {
     fn nothing_depends_on_the_daemon() {
         let g = graph(&["bosund", "bosun-heat"], &[("bosun-heat", "bosund")]);
         assert_eq!(violations(&g).len(), 1);
+    }
+
+    #[test]
+    fn mcp_is_a_client() {
+        let clean = graph(
+            &["bosun-mcp", "bosun-client", "bosun-api", "bosun-config"],
+            &[
+                ("bosun-mcp", "bosun-client"),
+                ("bosun-mcp", "bosun-api"),
+                ("bosun-mcp", "bosun-config"),
+            ],
+        );
+        assert_eq!(violations(&clean), Vec::<String>::new());
+
+        let g = graph(
+            &["bosun-mcp", "bosun-store"],
+            &[("bosun-mcp", "bosun-store")],
+        );
+        let found = violations(&g);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].starts_with("bosun-mcp depends on workspace crate bosun-store"));
+        assert!(found[1].starts_with("bosun-mcp reaches bosun-store"));
+    }
+
+    const SIDE_EFFECT: [&str; 5] = [
+        "bosun-queue",
+        "bosun-runner",
+        "bosun-git",
+        "bosun-proc",
+        "bosun-identity",
+    ];
+
+    #[test]
+    fn side_effect_crates_never_reach_the_store() {
+        for krate in SIDE_EFFECT {
+            let g = graph(
+                &[krate, "bosun-core", "bosun-heat", "bosun-store"],
+                &[
+                    (krate, "bosun-core"),
+                    (krate, "bosun-heat"),
+                    ("bosun-heat", "bosun-store"),
+                ],
+            );
+            let found = violations(&g);
+            assert_eq!(found.len(), 1, "{krate}: {found:?}");
+            assert!(
+                found[0].starts_with(&format!("{krate} reaches bosun-store")),
+                "{found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn side_effect_crates_reach_each_other_only_runner_to_proc() {
+        let mut members = SIDE_EFFECT.to_vec();
+        members.push("bosund");
+        let clean = graph(
+            &members,
+            &[
+                ("bosun-runner", "bosun-proc"),
+                ("bosund", "bosun-runner"),
+                ("bosund", "bosun-queue"),
+                ("bosund", "bosun-git"),
+                ("bosund", "bosun-identity"),
+            ],
+        );
+        assert_eq!(violations(&clean), Vec::<String>::new());
+
+        for from in SIDE_EFFECT {
+            for to in SIDE_EFFECT {
+                if from == to || (from, to) == ("bosun-runner", "bosun-proc") {
+                    continue;
+                }
+                let found = violations(&graph(&SIDE_EFFECT, &[(from, to)]));
+                assert_eq!(found.len(), 1, "{from} -> {to}: {found:?}");
+                assert!(found[0].starts_with(&format!("{from} reaches {to}")));
+            }
+        }
+
+        // Transitively too: the runner reaches the queue through bosun-proc.
+        let found = violations(&graph(
+            &SIDE_EFFECT,
+            &[
+                ("bosun-runner", "bosun-proc"),
+                ("bosun-proc", "bosun-queue"),
+            ],
+        ));
+        assert_eq!(found.len(), 2, "{found:?}");
     }
 }

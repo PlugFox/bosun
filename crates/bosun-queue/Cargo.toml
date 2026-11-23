@@ -1,0 +1,12 @@
+[package]
+name = "bosun-queue"
+description = "The work queue of bosun: the queue trait, the item contract and its backends."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

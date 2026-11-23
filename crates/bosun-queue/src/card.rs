@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::contract::Contract;
+
 /// An item on the board: the number of the issue behind the card (`#N`), or the card's own
 /// number in a backend without issues (the local file).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -154,9 +156,27 @@ pub struct Card {
     pub draft: bool,
     /// The item's comments, oldest first.
     pub comments: Vec<Comment>,
+    /// Blockers the backend knows besides the contract's `blocked-by`: GitHub's own issue
+    /// dependencies (#5). Sorted, without duplicates; always empty in the local file.
+    pub blocked_by: Vec<ItemId>,
 }
 
 impl Card {
+    /// Every blocker of the item: the contract's `blocked-by` and [`Card::blocked_by`], sorted,
+    /// without duplicates.
+    #[must_use]
+    pub fn blockers(&self, contract: &Contract) -> Vec<ItemId> {
+        let mut all: Vec<ItemId> = contract
+            .blocked_by
+            .iter()
+            .chain(&self.blocked_by)
+            .copied()
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+
     /// The comment written with `key`, if any.
     #[must_use]
     pub fn comment_by_key(&self, key: &str) -> Option<&Comment> {

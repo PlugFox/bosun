@@ -729,6 +729,32 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::a_policy_that_omits_gitignore_still_protects_it"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_queue_no_author_filter",
+        issue: 60,
+        breaks: "comments and bodies from logins off the author allowlist reach the card",
+        package: "bosun-queue",
+        check: Check::Test(
+            "projects_v2::tests::a_comment_from_a_login_off_the_allowlist_is_absent_and_counted",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_ambiguous_ok",
+        issue: 60,
+        breaks: "a Status option matched by two columns' names is accepted at start",
+        package: "bosun-queue",
+        check: Check::Test("projects_v2::tests::a_duplicated_status_option_refuses_at_start"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_no_cursor",
+        issue: 60,
+        breaks: "every poll fetches every issue again instead of those whose updatedAt moved",
+        package: "bosun-queue",
+        check: Check::Test("projects_v2::tests::an_unchanged_board_costs_one_request_per_poll"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

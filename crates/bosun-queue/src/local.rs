@@ -451,6 +451,7 @@ fn read_card(table: &Table) -> Result<Card, String> {
         labels,
         draft,
         comments,
+        blocked_by: Vec::new(),
     })
 }
 
@@ -793,6 +794,7 @@ mod tests {
                 key: Some("k".into()),
                 body: "line\r\nwith cr".into(),
             }],
+            blocked_by: Vec::new(),
         };
         let (_dir, queue) = board(&LocalFile::render(std::slice::from_ref(&card)));
         assert_eq!(queue.lint_target(ItemId(9)).unwrap(), card);

@@ -12,12 +12,16 @@ publish.workspace = true
 # The local-file backend is on by default: it costs nothing beyond the TOML writer, and it is
 # the backend of tests and of repositories with no board (#5). `bosund` may still disable
 # default features and name it explicitly.
-default = ["local_file"]
+default = ["local_file", "projects_v2"]
 local_file = ["toml_edit/display"]
+# The GitHub Projects v2 backend (#60): GraphQL through `gh api graphql`, so only a JSON codec
+# is added. On by default because `bosund` binds boards with it.
+projects_v2 = ["dep:serde_json"]
 # The backend-agnostic trait test suite, for other backends' tests (#60, #61).
 testsuite = []
 
 [dependencies]
+serde_json = { workspace = true, optional = true }
 sha2.workspace = true
 toml_edit.workspace = true
 

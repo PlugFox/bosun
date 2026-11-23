@@ -144,6 +144,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_config_reload_adopts_invalid)",
   "cfg(mutant_config_hash_ignores_policy)",
   "cfg(mutant_config_gitignore_unprotected)",
+  "cfg(mutant_queue_no_author_filter)",
+  "cfg(mutant_queue_ambiguous_ok)",
+  "cfg(mutant_queue_no_cursor)",
 ] }
 
 [workspace.lints.clippy]

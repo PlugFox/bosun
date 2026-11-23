@@ -398,6 +398,7 @@ mod tests {
             labels: Vec::new(),
             draft: false,
             comments: Vec::new(),
+            blocked_by: Vec::new(),
         }
     }
 

@@ -364,16 +364,16 @@
     ]
   },
   "health": {
-    "files": 12,
-    "files_counted": 12,
-    "lines": 79,
+    "files": 14,
+    "files_counted": 14,
+    "lines": 88,
     "gaps": 3,
     "versions": [
       {
         "parser_version": 1,
-        "files": 12,
-        "files_counted": 12,
-        "lines": 79,
+        "files": 14,
+        "files_counted": 14,
+        "lines": 88,
         "gaps": 3
       }
     ],

@@ -79,8 +79,8 @@ Over the whole store, whatever the range.
 
 | parser version | files | files with a line count | lines | gaps | gaps per line |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | 12 | 12 | 79 | 3 | 3.8% |
-| total | 12 | 12 | 79 | 3 | 3.8% |
+| 1 | 14 | 14 | 88 | 3 | 3.4% |
+| total | 14 | 14 | 88 | 3 | 3.4% |
 
 ### Agreement with the provider's own totals
 

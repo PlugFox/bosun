@@ -100,7 +100,13 @@ impl<P: Provider> Core<P> {
         failed: Vec<(PathBuf, String)>,
         reingest: bool,
     ) -> Result<(), Error> {
-        self.report.files += found.len() as u64;
+        // A rescan may join a pass still reading: the files found are those of the latest walk,
+        // not the sum over walks.
+        if cfg!(mutant_ingest_pass_files_summed) {
+            self.report.files += found.len() as u64;
+        } else {
+            self.report.files = found.len() as u64;
+        }
         self.report.failed.extend(failed);
         let planned = self.ingest.changed(found, reingest).await?;
         let now = SystemTime::now();

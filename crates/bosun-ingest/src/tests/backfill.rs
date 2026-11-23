@@ -312,6 +312,39 @@ async fn the_backfill_holds_its_bounds() {
     store.close().await.unwrap();
 }
 
+/// A rescan that lands while the backfill is still queued joins the running pass; the pass's
+/// report counts the files found once, not once per discovery (found on a real history, #6:
+/// 6660 files reported for 666).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pass_joined_by_a_rescan_counts_each_file_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let projects = dir.path().join("projects");
+    let db = dir.path().join("bosun.db");
+    let corpus = generate(&projects, 0, BOUND_FILES);
+    let store = open(&db).await;
+    let options = Options {
+        rescan_interval: Duration::from_secs(3600),
+        ..bounded()
+    };
+    let ingest = Ingest::new(claude::Parser, projects, &store, options);
+    ingest.register_repos(&[ROOT.to_owned()]).await.unwrap();
+    let handle = spawn(ingest);
+    // The first pass has planned its files and is reading them.
+    let start = Instant::now();
+    while handle.stats().queued_backfill == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no backfill queued"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let report = handle.rescan().await.unwrap();
+    assert_eq!(report.files, BOUND_FILES);
+    assert_eq!(report.parsed_bytes, corpus.bytes, "every byte once");
+    handle.shutdown().await.unwrap();
+    store.close().await.unwrap();
+}
+
 const KILL_TEST: &str = "tests::backfill::a_killed_backfill_resumes_without_parsing_a_byte_twice";
 const KILL_CHILD: &str = "BOSUN_INGEST_KILL_CHILD";
 

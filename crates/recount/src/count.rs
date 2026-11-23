@@ -127,6 +127,9 @@ fn stem(path: &Path, prefix: &str, suffix: &str) -> Option<String> {
 #[derive(Debug)]
 struct Observation {
     window: usize,
+    /// The window's rank in the tiebreak order: by session id, then agent id (main first),
+    /// then path.
+    rank: usize,
     line: usize,
     id: String,
     timestamp: String,
@@ -135,9 +138,17 @@ struct Observation {
 }
 
 impl Observation {
-    /// Order of appearance: by timestamp, then file, then line.
+    /// Order of appearance: by timestamp, then window (session id, then agent id), then path,
+    /// then line. A fork copies records with their timestamps; the tie goes to the smaller
+    /// session id wherever its file lies (#3).
     fn place(&self) -> (&str, usize, usize) {
-        (&self.timestamp, self.window, self.line)
+        (&self.timestamp, self.rank, self.line)
+    }
+
+    /// The order that picks the record whose usage a message keeps: the largest output, then
+    /// the larger remaining counts, then the larger cwd. Ties beyond that change no sum.
+    fn usage_key(&self) -> (u64, [u64; 5], Option<&str>) {
+        (self.tokens[OUTPUT], self.tokens, self.cwd.as_deref())
     }
 }
 
@@ -219,6 +230,16 @@ fn observe(files: &[(Window, PathBuf)]) -> Result<(Vec<Observation>, Lines), Str
         files: files.len(),
         ..Lines::default()
     };
+    // `files` is sorted by path; the rank orders it by window first.
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    if !cfg!(mutant_recount_tie_by_path) {
+        // The mutant skips this sort: ties then go to the file that sorts first by path.
+        order.sort_by(|&a, &b| files[a].0.cmp(&files[b].0).then(a.cmp(&b)));
+    }
+    let mut rank = vec![0; files.len()];
+    for (r, &i) in order.iter().enumerate() {
+        rank[i] = r;
+    }
     let mut out = Vec::new();
     for (window, (_, path)) in files.iter().enumerate() {
         let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -242,6 +263,7 @@ fn observe(files: &[(Window, PathBuf)]) -> Result<(Vec<Observation>, Lines), Str
                     lines.usage_records += 1;
                     out.push(Observation {
                         window,
+                        rank: rank[window],
                         line,
                         id,
                         timestamp,
@@ -285,8 +307,8 @@ fn messages(observations: &[Observation]) -> Vec<Message> {
     for (i, o) in observations.iter().enumerate() {
         let entry = by_id.entry(&o.id).or_insert(Message { usage: i, home: i });
         let usage = &observations[entry.usage];
-        if o.tokens[OUTPUT] > usage.tokens[OUTPUT]
-            || (o.tokens[OUTPUT] == usage.tokens[OUTPUT] && o.place() < usage.place())
+        if o.usage_key() > usage.usage_key()
+            || (o.usage_key() == usage.usage_key() && o.place() < usage.place())
         {
             entry.usage = i;
         }

@@ -103,6 +103,16 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_core_tie_by_file",
+        issue: 6,
+        breaks: "a timestamp tie goes to the smaller file key, not the smaller session id",
+        package: "bosun-core",
+        check: Check::Test(
+            "merge::tests::a_timestamp_tie_goes_to_the_smaller_session_not_the_smaller_file",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_core_no_threshold",
         issue: 17,
         breaks: "the prompt-size price row is ignored",
@@ -132,6 +142,14 @@ const MUTANTS: &[Mutant] = &[
         breaks: "recount sums every record instead of every message",
         package: "recount",
         check: Check::Test("tests::a_split_message_counts_once"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_recount_tie_by_path",
+        issue: 6,
+        breaks: "recount breaks a timestamp tie by path instead of by session id",
+        package: "recount",
+        check: Check::Test("tests::a_timestamp_tie_goes_to_the_smaller_session"),
         platform: None,
     },
     Mutant {
@@ -217,6 +235,14 @@ const MUTANTS: &[Mutant] = &[
         // bosun-ingest's commit reader into the store, so it is bosun-ingest's test.
         package: "bosun-ingest",
         check: Check::Test("git::tests::each_commit_links_only_within_its_repository"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_pass_files_summed",
+        issue: 6,
+        breaks: "a pass joined by a rescan counts each file once per walk",
+        package: "bosun-ingest",
+        check: Check::Test("tests::backfill::a_pass_joined_by_a_rescan_counts_each_file_once"),
         platform: None,
     },
     Mutant {

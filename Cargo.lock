@@ -188,7 +188,9 @@ dependencies = [
 name = "bosun-runner"
 version = "0.0.0"
 dependencies = [
+ "bosun-proc",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

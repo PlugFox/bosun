@@ -1,11 +1,12 @@
 //! The runners (#7, #52, #58): the runner trait, the provider runners as modules behind
-//! features (Claude first), the prompt builder and, later, the verdict executor.
+//! features (Claude first), the prompt builder and the verdict executor ([`verdict`]).
 //!
-//! Nothing in this crate spawns yet. A [`Runner`] turns a [`SessionContext`] into a [`Spawn`]
+//! A [`Runner`] turns a [`SessionContext`] into a [`Spawn`]
 //! (argv, environment additions, working directory, standard input), reads the session id and
 //! the live tail from the child's standard output line by line, and classifies the exit from
 //! the process status and the last lines of that output ([`Tail`]). `bosund` does the spawning
-//! through `bosun-proc` (#50) and owns the bookkeeping.
+//! through `bosun-proc` (#50) and owns the bookkeeping. The verdict executor is the one part
+//! that spawns, through a `bosun-proc` [`bosun_proc::Spawner`] the caller passes in.
 //!
 //! Of the workspace crates this one may reach `bosun-proc` only, never `bosun-store` (#12).
 //!
@@ -21,6 +22,7 @@
 #[cfg(feature = "claude")]
 pub mod claude;
 pub mod prompt;
+pub mod verdict;
 
 use std::collections::VecDeque;
 use std::ffi::OsString;

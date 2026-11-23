@@ -159,6 +159,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_report_item_last_attempt)",
   "cfg(mutant_report_merge_inferred)",
   "cfg(mutant_report_commit_by_time)",
+  "cfg(mutant_runner_merge_streams)",
+  "cfg(mutant_runner_no_flaky_names)",
+  "cfg(mutant_runner_no_verdict_timeout)",
 ] }
 
 [workspace.lints.clippy]

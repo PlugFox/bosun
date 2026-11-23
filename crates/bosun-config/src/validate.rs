@@ -1,11 +1,27 @@
-//! Cross-checks of a draft: identity isolation (#2) and the local-disk rule for databases.
+//! Cross-checks of a draft: identity isolation (#2), the local-disk rule for databases and the
+//! budget's reserve.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::disk::{Disk, DiskProbe};
 use crate::error::Problem;
-use crate::read::{Draft, PathValue};
+use crate::read::{Draft, DraftIdentity, PathValue};
+
+/// A path of an identity bundle, read from a draft identity.
+type BundlePath = fn(&DraftIdentity) -> Option<&PathValue>;
+
+/// The paths of an identity bundle that no two identities share (#2), each with its name.
+const BUNDLE_PATHS: [(&str, BundlePath); 6] = [
+    ("Claude configuration directory", |i| {
+        i.claude_config_dir.as_ref()
+    }),
+    ("database file", |i| i.database.as_ref()),
+    ("gh configuration directory", |i| i.gh_config_dir.as_ref()),
+    ("git configuration file", |i| i.git_config.as_ref()),
+    ("SSH key", |i| i.ssh_key.as_ref()),
+    ("Codex home", |i| i.codex_home.as_ref()),
+];
 
 /// Appends every problem of `draft` to `problems`.
 pub(crate) fn validate(draft: &Draft, probe: &dyn DiskProbe, problems: &mut Vec<Problem>) {
@@ -34,24 +50,28 @@ pub(crate) fn validate(draft: &Draft, probe: &dyn DiskProbe, problems: &mut Vec<
     );
 
     if !cfg!(mutant_config_shared_dir) {
-        distinct(
-            draft.identities.iter().filter_map(|i| {
-                Some((
-                    format!("identity.{}", i.name),
-                    i.claude_config_dir.as_ref()?,
-                ))
-            }),
-            "Claude configuration directory",
-            problems,
-        );
-        distinct(
-            draft
-                .identities
-                .iter()
-                .filter_map(|i| Some((format!("identity.{}", i.name), i.database.as_ref()?))),
-            "database file",
-            problems,
-        );
+        for (what, field) in BUNDLE_PATHS {
+            distinct(
+                draft
+                    .identities
+                    .iter()
+                    .filter_map(|i| Some((format!("identity.{}", i.name), field(i)?))),
+                what,
+                problems,
+            );
+        }
+    }
+
+    if let (Some(daily), reserve) = (draft.budget.daily_eqv, draft.budget.reserve_eqv)
+        && reserve >= daily
+    {
+        problems.push(Problem {
+            location: draft.reserve_at,
+            message: format!(
+                "`budget.reserve_eqv` is {reserve}, not less than `budget.daily_eqv` \
+                 ({daily}); the reserve would leave nothing for the queue"
+            ),
+        });
     }
 
     for identity in &draft.identities {

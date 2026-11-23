@@ -705,6 +705,30 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("stream_tests::output_lines_reach_only_subscriptions_that_opted_in"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_config_reload_adopts_invalid",
+        issue: 55,
+        breaks: "a refused configuration edit replaces the configuration in force",
+        package: "bosun-config",
+        check: Check::Test("tests::a_broken_edit_keeps_the_previous_configuration"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_hash_ignores_policy",
+        issue: 55,
+        breaks: "the policy and configuration hashes leave the protected paths out",
+        package: "bosun-config",
+        check: Check::Test("tests::the_policy_hash_follows_protected_paths_only"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_gitignore_unprotected",
+        issue: 55,
+        breaks: "`.gitignore` is protected only when the policy lists it",
+        package: "bosun-config",
+        check: Check::Test("tests::a_policy_that_omits_gitignore_still_protects_it"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT max(number) AS \"n?: i64\" FROM boot",
+  "describe": {
+    "columns": [
+      {
+        "name": "n?: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5c59634e465af28fe8777727e82d332c48c8b7beb81302bf2a9476b5269e2003"
+}

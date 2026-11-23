@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO transition (transition_key, item_id, seq, attempt, from_state, to_state,\n                                       to_detail, attempt_from, attempt_to, cause, effects_json,\n                                       ts_ms)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n               ON CONFLICT (transition_key) DO NOTHING\n               RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "73c771a86fa146cdebfefdd484cecc3b34688a5b9934f2f0c09705bf60572176"
+}

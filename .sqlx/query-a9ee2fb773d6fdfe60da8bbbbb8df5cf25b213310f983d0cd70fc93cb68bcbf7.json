@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO outbox (item_id, effect_key, op, column_name, reason, coalesce_key,\n                             created_ms)\n         VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "a9ee2fb773d6fdfe60da8bbbbb8df5cf25b213310f983d0cd70fc93cb68bcbf7"
+}

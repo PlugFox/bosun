@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.number, r.spawn, r.mode, r.provider, r.session_key, r.started_ms,\n                    r.ended_ms, r.exit, r.limit_reset_ms\n             FROM run r JOIN attempt a ON a.id = r.attempt_id JOIN item i ON i.id = a.item_id\n             WHERE i.item_key = ? ORDER BY r.spawn",
+  "describe": {
+    "columns": [
+      {
+        "name": "number",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "name": "spawn",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "spawn"
+          }
+        }
+      },
+      {
+        "name": "mode",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "mode"
+          }
+        }
+      },
+      {
+        "name": "provider",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "session_key",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "session_key"
+          }
+        }
+      },
+      {
+        "name": "started_ms",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "started_ms"
+          }
+        }
+      },
+      {
+        "name": "ended_ms",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "ended_ms"
+          }
+        }
+      },
+      {
+        "name": "exit",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "exit"
+          }
+        }
+      },
+      {
+        "name": "limit_reset_ms",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "limit_reset_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "002ea6af344b0e38154d6e745eab37213e974b4b81f64ae8d39ba2b06a8e4662"
+}

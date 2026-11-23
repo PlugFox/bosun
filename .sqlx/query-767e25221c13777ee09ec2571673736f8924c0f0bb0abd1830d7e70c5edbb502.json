@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT o.id, o.revision, i.item_key, o.effect_key, o.op, o.column_name, o.reason,\n                    o.coalesce_key, o.tries, o.last_error, o.created_ms\n             FROM outbox o JOIN item i ON i.id = o.item_id\n             WHERE o.acked_ms IS NULL AND (o.retry_at_ms IS NULL OR o.retry_at_ms <= ?)\n             ORDER BY o.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "revision",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "revision"
+          }
+        }
+      },
+      {
+        "name": "item_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "item_key"
+          }
+        }
+      },
+      {
+        "name": "effect_key",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "effect_key"
+          }
+        }
+      },
+      {
+        "name": "op",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "op"
+          }
+        }
+      },
+      {
+        "name": "column_name",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "column_name"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "coalesce_key",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "coalesce_key"
+          }
+        }
+      },
+      {
+        "name": "tries",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "tries"
+          }
+        }
+      },
+      {
+        "name": "last_error",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "last_error"
+          }
+        }
+      },
+      {
+        "name": "created_ms",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "created_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "767e25221c13777ee09ec2571673736f8924c0f0bb0abd1830d7e70c5edbb502"
+}

@@ -1,0 +1,134 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.transition_key, t.seq, t.attempt, t.from_state, t.to_state, t.to_detail,\n                    t.attempt_from, t.attempt_to, t.cause, t.ts_ms\n             FROM transition t JOIN item i ON i.id = t.item_id\n             WHERE i.item_key = ? ORDER BY t.seq, t.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "transition_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "transition_key"
+          }
+        }
+      },
+      {
+        "name": "seq",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "name": "attempt",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "attempt"
+          }
+        }
+      },
+      {
+        "name": "from_state",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "from_state"
+          }
+        }
+      },
+      {
+        "name": "to_state",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "to_state"
+          }
+        }
+      },
+      {
+        "name": "to_detail",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "to_detail"
+          }
+        }
+      },
+      {
+        "name": "attempt_from",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "attempt_from"
+          }
+        }
+      },
+      {
+        "name": "attempt_to",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "attempt_to"
+          }
+        }
+      },
+      {
+        "name": "cause",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "cause"
+          }
+        }
+      },
+      {
+        "name": "ts_ms",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "ts_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "aba5dd883f79c89afe0aecee06e6697dfab4565bf2125a15b083fd5db38bdd3b"
+}

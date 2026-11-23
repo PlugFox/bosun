@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO board_comment (item_id, comment_key, node_id, created_ms)\n         VALUES (?, ?, ?, ?)\n         ON CONFLICT (item_id, comment_key) DO UPDATE SET\n             node_id = excluded.node_id,\n             created_ms = excluded.created_ms",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "34150de5539a4e3546154a193d6a0bc179b8bc1c8197814168e066775ea145a0"
+}

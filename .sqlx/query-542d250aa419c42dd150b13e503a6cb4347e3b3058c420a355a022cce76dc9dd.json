@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.number, c.kind, c.body, c.decisions_json, c.followups_json,\n                      c.blocking AS \"blocking?: bool\", c.head_sha, c.refused AS \"refused!: bool\",\n                      c.ts_ms\n               FROM agent_call c\n               JOIN attempt a ON a.id = c.attempt_id\n               JOIN item i ON i.id = a.item_id\n               WHERE i.item_key = ? ORDER BY c.ts_ms, c.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "number",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "agent_call",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "body",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "agent_call",
+            "name": "body"
+          }
+        }
+      },
+      {
+        "name": "decisions_json",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "agent_call",
+            "name": "decisions_json"
+          }
+        }
+      },
+      {
+        "name": "followups_json",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "agent_call",
+            "name": "followups_json"
+          }
+        }
+      },
+      {
+        "name": "blocking?: bool",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "agent_call",
+            "name": "blocking"
+          }
+        }
+      },
+      {
+        "name": "head_sha",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "agent_call",
+            "name": "head_sha"
+          }
+        }
+      },
+      {
+        "name": "refused!: bool",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "agent_call",
+            "name": "refused"
+          }
+        }
+      },
+      {
+        "name": "ts_ms",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "agent_call",
+            "name": "ts_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "542d250aa419c42dd150b13e503a6cb4347e3b3058c420a355a022cce76dc9dd"
+}

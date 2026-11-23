@@ -1,0 +1,134 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.number, a.spawn, a.run, a.state, a.first_run, a.crash_retries,\n                      a.head_sha, a.started_ms, a.ended_ms, s.hash AS \"snapshot_hash?: String\"\n               FROM attempt a\n               JOIN item i ON i.id = a.item_id\n               LEFT JOIN snapshot s ON s.id = a.snapshot_id\n               WHERE i.item_key = ? ORDER BY a.number",
+  "describe": {
+    "columns": [
+      {
+        "name": "number",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "name": "spawn",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "spawn"
+          }
+        }
+      },
+      {
+        "name": "run",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "run"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "first_run",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "first_run"
+          }
+        }
+      },
+      {
+        "name": "crash_retries",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "crash_retries"
+          }
+        }
+      },
+      {
+        "name": "head_sha",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "head_sha"
+          }
+        }
+      },
+      {
+        "name": "started_ms",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "started_ms"
+          }
+        }
+      },
+      {
+        "name": "ended_ms",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "ended_ms"
+          }
+        }
+      },
+      {
+        "name": "snapshot_hash?: String",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "hash"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "99a92d7d269820aaa00b19026d64d1daeab36395a9c00aaecc170c1331621de1"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE session SET kind = 'run'\n         WHERE provider = ? AND session_key = ? AND kind <> 'run'\n           AND EXISTS (SELECT 1 FROM run r WHERE r.provider = ? AND r.session_key = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "42d47c447aecc8d09707802ec8477c1644376e17df32cc8195ba5e7187393652"
+}

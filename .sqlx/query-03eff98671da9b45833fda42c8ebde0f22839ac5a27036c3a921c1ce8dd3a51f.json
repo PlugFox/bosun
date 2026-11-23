@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE run SET ended_ms = ?, exit = ?, limit_reset_ms = ?\n         WHERE attempt_id = ? AND spawn = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "03eff98671da9b45833fda42c8ebde0f22839ac5a27036c3a921c1ce8dd3a51f"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO agent_call (attempt_id, kind, body, decisions_json, followups_json, blocking,\n                                 head_sha, refused, ts_ms)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "bfe6c5a2eef67a3e9702eb5ff85a4ef271c184db17af0d67fc5f5fb7364127d5"
+}

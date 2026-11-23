@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO attempt (item_id, number, snapshot_id, state, spawn, run, first_run,\n                              crash_retries, started_ms, ended_ms)\n         VALUES (?, ?, (SELECT snapshot_id FROM item WHERE id = ?), ?, ?, ?, ?, ?, ?, ?)\n         ON CONFLICT (item_id, number) DO UPDATE SET\n             state = excluded.state,\n             spawn = excluded.spawn,\n             run = excluded.run,\n             first_run = excluded.first_run,\n             crash_retries = excluded.crash_retries,\n             ended_ms = coalesce(ended_ms, excluded.ended_ms)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "f59cdef3413ff594124bd42166c711731a1eb7ea9c89f3882c9b1d0a79e40219"
+}

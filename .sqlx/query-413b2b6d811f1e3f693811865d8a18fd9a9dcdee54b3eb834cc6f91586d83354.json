@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.number, f.test_name\n             FROM flaky_test f JOIN attempt a ON a.id = f.attempt_id JOIN item i ON i.id = f.item_id\n             WHERE i.item_key = ? ORDER BY a.number, f.test_name",
+  "describe": {
+    "columns": [
+      {
+        "name": "number",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "name": "test_name",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "flaky_test",
+            "name": "test_name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "413b2b6d811f1e3f693811865d8a18fd9a9dcdee54b3eb834cc6f91586d83354"
+}

@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT state, count(*) AS \"n!: i64\" FROM item GROUP BY state ORDER BY state",
+  "describe": {
+    "columns": [
+      {
+        "name": "state",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "n!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "2a48aa2c1bf5f791e06546208adfc48bbc5a0ff30909496b3d9460dd3af16747"
+}

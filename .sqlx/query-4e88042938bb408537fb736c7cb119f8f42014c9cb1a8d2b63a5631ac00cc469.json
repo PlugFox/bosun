@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO verdict_run (attempt_id, run, command, pid, pid_started_ms, started_ms)\n         VALUES (?, ?, ?, ?, ?, ?)\n         ON CONFLICT (attempt_id, run) DO UPDATE SET\n             pid = excluded.pid,\n             pid_started_ms = excluded.pid_started_ms\n         WHERE ended_ms IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "4e88042938bb408537fb736c7cb119f8f42014c9cb1a8d2b63a5631ac00cc469"
+}

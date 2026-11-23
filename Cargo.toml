@@ -117,6 +117,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_proc_kill_parent_only)",
   "cfg(mutant_proc_skip_start_time)",
   "cfg(mutant_proc_no_kill_on_close)",
+  "cfg(mutant_runner_inline_daemon_comments)",
+  "cfg(mutant_runner_limit_is_crash)",
+  "cfg(mutant_runner_loose_mcp)",
+  "cfg(mutant_runner_question_from_text)",
 ] }
 
 [workspace.lints.clippy]

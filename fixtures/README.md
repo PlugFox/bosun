@@ -83,3 +83,25 @@ day is 9.
 | Case | What it holds | Why the sums are what they are |
 | --- | --- | --- |
 | `basic` | a `start`; a turn in `repo-a` that opens a file; a turn in `repo-b`, under no root, that runs a failing command; their results; an unknown `telemetry` event | 2 messages, one per repository entry; the unknown event is skipped |
+
+## `claude-stream/`: Claude Code headless output
+
+The standard output of `claude -p --output-format stream-json --verbose`, one file per case, for
+the runner's exit classification and live tail (#52, `crates/bosun-runner/src/claude.rs`, whose
+docs say which shapes were observed and which are inferred). The case number is 52; the
+session number (the digit after `052` in a session id, after `52` in a message or tool-use id)
+is the file's number below; timestamps are on day 5. The fields are a subset of the real events:
+the ones the runner reads, and enough around them to look like the real thing. The expected
+class of each file, with its exit code, is the table in `each_fixture_classifies_as_expected`.
+
+| # | File | What it holds | Class |
+| --- | --- | --- | --- |
+| 1 | `normal-end.jsonl` | init, a Bash call and its result, an allowed rate-limit event, a text, a successful result | ok with exit code 0 |
+| 2 | `limit-reset.jsonl` | a rejected rate-limit event with `resetsAt`, a `rate_limit` API error (429), an error result | limit, reset 2000-01-01T06:00:00Z |
+| 3 | `limit-legacy-reset.jsonl` | a `rate_limit` API error whose text is `Claude AI usage limit reached\|<epoch s>` | limit, the same reset |
+| 4 | `limit-no-reset.jsonl` | a rejected rate-limit event without `resetsAt`, a limit text without a time | limit, no reset |
+| 5 | `auth-expired.jsonl` | an `authentication_failed` API error (401), an error result | auth |
+| 6 | `crash-torn.jsonl` | a Bash call, then the stream stops in a torn line | crash |
+| 7 | `crash-error-result.jsonl` | only an `error_during_execution` result (resuming an unknown session) | crash |
+| 8 | `permission-denied.jsonl` | a `git push` refused by the deny list (`permission_denied`, an error tool result), then a normal end | ok |
+| 9 | `question-text.jsonl` | a normal end whose final text asks a question and says "I am done" | ok: text is never a question |

@@ -1,10 +1,11 @@
 //! `bosund`, the bosun daemon (#6, #24).
 //!
 //! Loads the configuration, claims the local endpoint, opens one store and starts one ingest
-//! per identity, and answers the local API until Ctrl-C, SIGTERM (Unix) or a console close,
-//! logoff or shutdown event (Windows). Then it stops listening (a Unix socket file is removed),
-//! stops every ingest after its pass in progress, and closes every store, which checkpoints
-//! and truncates its WAL.
+//! per identity, reads the commits of each identity's repositories (at start, on a timer and
+//! on every reingest), and answers the local API until Ctrl-C, SIGTERM (Unix) or a console
+//! close, logoff or shutdown event (Windows). Then it stops listening (a Unix socket file is
+//! removed), stops every ingest after its pass in progress, and closes every store, which
+//! checkpoints and truncates its WAL.
 //!
 //! ```text
 //! bosund [--config <file>] [--endpoint <socket or pipe>]
@@ -29,6 +30,7 @@
 //! when the other instance did not answer `hello` in time.
 
 mod api;
+mod commits;
 mod listen;
 mod state;
 

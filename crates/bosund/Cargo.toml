@@ -13,6 +13,7 @@ bosun-api = { path = "../bosun-api" }
 bosun-client = { path = "../bosun-client" }
 bosun-config = { path = "../bosun-config" }
 bosun-core = { path = "../bosun-core" }
+bosun-heat = { path = "../bosun-heat" }
 bosun-ingest = { path = "../bosun-ingest" }
 bosun-store = { path = "../bosun-store" }
 serde.workspace = true

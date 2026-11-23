@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT parser_version, count(*) AS \"gaps!: i64\"\n               FROM ingest_gap GROUP BY parser_version",
+  "describe": {
+    "columns": [
+      {
+        "name": "parser_version",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ingest_gap",
+            "name": "parser_version"
+          }
+        }
+      },
+      {
+        "name": "gaps!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "3bf18a042f0519306a0ec300ae5860014c0abd0c04878516916a45c5712e8d53"
+}

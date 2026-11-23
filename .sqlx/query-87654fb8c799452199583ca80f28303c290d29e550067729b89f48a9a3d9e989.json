@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT file_key, path, size, parsed_offset, parser_version, last_line_hash\n             FROM source_file WHERE provider = ? ORDER BY file_key",
+  "query": "SELECT file_key, path, size, parsed_offset, parser_version, last_line_hash,\n                    parsed_lines\n             FROM source_file WHERE provider = ? ORDER BY file_key",
   "describe": {
     "columns": [
       {
@@ -68,6 +68,17 @@
             "name": "last_line_hash"
           }
         }
+      },
+      {
+        "name": "parsed_lines",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "parsed_lines"
+          }
+        }
       }
     ],
     "parameters": {
@@ -79,8 +90,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "8ac84535892ecbc930da43451a7ce19447ae69d8af2a7c36c824f34e7d6cd9a2"
+  "hash": "87654fb8c799452199583ca80f28303c290d29e550067729b89f48a9a3d9e989"
 }

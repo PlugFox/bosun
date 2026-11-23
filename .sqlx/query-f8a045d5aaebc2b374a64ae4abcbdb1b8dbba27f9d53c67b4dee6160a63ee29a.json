@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.provider, s.session_key, c.model, c.input_tokens, c.cache_write_tokens,\n                      c.cache_read_tokens, c.output_tokens, c.cost_usd\n               FROM session_check c JOIN session s ON s.id = c.root_session_id\n               ORDER BY s.provider, s.session_key, c.model",
+  "describe": {
+    "columns": [
+      {
+        "name": "provider",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "session_key",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "session_key"
+          }
+        }
+      },
+      {
+        "name": "model",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session_check",
+            "name": "model"
+          }
+        }
+      },
+      {
+        "name": "input_tokens",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "session_check",
+            "name": "input_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_write_tokens",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "session_check",
+            "name": "cache_write_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_read_tokens",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "session_check",
+            "name": "cache_read_tokens"
+          }
+        }
+      },
+      {
+        "name": "output_tokens",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "session_check",
+            "name": "output_tokens"
+          }
+        }
+      },
+      {
+        "name": "cost_usd",
+        "ordinal": 7,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "session_check",
+            "name": "cost_usd"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f8a045d5aaebc2b374a64ae4abcbdb1b8dbba27f9d53c67b4dee6160a63ee29a"
+}

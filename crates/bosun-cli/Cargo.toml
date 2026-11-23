@@ -1,6 +1,6 @@
 [package]
 name = "bosun-cli"
-description = "The `bosun` command line: a client of the local API for token sums, ingest status and reingest."
+description = "The `bosun` command line: a client of the local API for token sums, the report, ingest status and reingest."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

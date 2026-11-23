@@ -504,3 +504,113 @@ async fn exit_codes_match_the_help() {
         assert_eq!(code(&output), Some(documented("success")), "{output:?}");
     }
 }
+
+/// Runs `git args` in `dir` with no user or system configuration, no hooks and no signing,
+/// the commit dates set to `at` (Unix seconds) when given.
+fn git(dir: &Path, at: Option<i64>, args: &[&str]) {
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", &format!("core.hooksPath={null}")])
+        .args(["-c", "commit.gpgSign=false"])
+        .args(["-c", "user.name=Test"])
+        .args(["-c", "user.email=test@example.invalid"])
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", null)
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    if let Some(at) = at {
+        let date = format!("@{at} +0000");
+        command
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+}
+
+/// The titles of the Markdown documents of a report, one per identity.
+fn titles(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter_map(|l| l.strip_prefix("# bosun report: "))
+        .collect()
+}
+
+/// `bosun report` through a real daemon: the agreement over the sub-agent fixture, commits
+/// read from a configured repository by the daemon's commit reader, `--repo`, Markdown, and
+/// the usage errors of the command.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_report_through_the_daemon() {
+    let cases = [("personal", "subagent-cost-state"), ("work", "cwd-change")];
+    let home = Home::new(&cases);
+    // A repository of `personal` with one commit in the range (2000-01-03, the case's day)
+    // and one on the day before.
+    let repo = home.path("code");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, None, &["init", "--quiet", "--initial-branch=main"]);
+    for (at, message) in [(946_771_200 + 3_600, "before"), (946_857_600 + 3_600, "in")] {
+        git(
+            &repo,
+            Some(at),
+            &["commit", "--quiet", "--allow-empty", "-m", message],
+        );
+    }
+    let mut config = std::fs::read_to_string(home.path("config.toml")).unwrap();
+    let _ = write!(
+        config,
+        "[repo.code]\npath = '{}'\nidentity = 'personal'\n",
+        repo.display()
+    );
+    std::fs::write(home.path("config.toml"), config).unwrap();
+    let _daemon = home.start().await;
+    // A reingest answers when its pass and a commit scan are done.
+    home.ok(&["reingest"]);
+
+    let range = ["--since", "2000-01-03", "--until", "2000-01-04"];
+    let json = home.ok(&[
+        &["report", "--format", "json", "--identity", "personal"][..],
+        &range,
+    ]
+    .concat());
+    let report: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["total"]["messages"], 4, "{json}");
+    let agreement = &report["health"]["agreement"];
+    assert_eq!(agreement["sessions"], 1, "{json}");
+    assert_eq!(agreement["within"], 1, "{json}");
+    let named = |list: &Value| -> Value {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["repo"]["name"] == "code")
+            .cloned()
+            .unwrap()
+    };
+    let scan = named(&report["per_commit"]["scans"]);
+    assert_eq!(scan["state"]["type"], "done", "{json}");
+    let row = named(&report["per_commit"]["rows"]);
+    assert_eq!(row["trend"]["current"]["commits"], 1, "{json}");
+    assert_eq!(row["trend"]["previous"]["commits"], 1, "{json}");
+
+    // Markdown, one document per identity; with --repo, only its owner is asked.
+    let text = home.ok(&[&["report"][..], &range].concat());
+    assert_eq!(titles(&text), ["personal", "work"], "{text}");
+    let md = home.ok(&[&["report", "--format", "md"][..], &range].concat());
+    assert_eq!(md, text);
+    let scoped = home.ok(&[&["report", "--repo", "code"][..], &range].concat());
+    assert_eq!(titles(&scoped), ["personal"], "{scoped}");
+    assert!(scoped.contains("Scope: code."), "{scoped}");
+
+    for bad in [
+        &["report", "--repo", "nowhere"][..],
+        &["report", "--since", "2000-01-04", "--until", "2000-01-03"],
+        &["tokens", "--format", "md"],
+    ] {
+        let output = home.bosun(bad);
+        assert_eq!(
+            output.status.code(),
+            Some(documented("bad arguments")),
+            "{bad:?}: {output:?}"
+        );
+    }
+}

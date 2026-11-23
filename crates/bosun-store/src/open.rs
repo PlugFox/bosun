@@ -247,7 +247,7 @@ mod tests {
                 err,
                 Error::NewerDatabase {
                     found: 9_000,
-                    supported: 1,
+                    supported: 2,
                     ..
                 }
             ),
@@ -285,8 +285,8 @@ mod tests {
         let copies = backups(path.parent().unwrap());
         assert_eq!(copies.len(), 1, "{copies:?}");
         let name = copies[0].file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("bosun.db.v1-"), "{name}");
-        // The copy is the file as it was: version 1, the data, no table of the later version.
+        assert!(name.starts_with("bosun.db.v2-"), "{name}");
+        // The copy is the file as it was: version 2, the data, no table of the later version.
         let mut conn = SqliteConnection::connect_with(
             &SqliteConnectOptions::new()
                 .filename(&copies[0])
@@ -299,7 +299,7 @@ mod tests {
                 .fetch_all(&mut conn)
                 .await
                 .unwrap();
-        assert_eq!(versions, [1]);
+        assert_eq!(versions, [1, 2]);
         let files = sqlx::query_scalar!(r#"SELECT count(*) AS "n!: i64" FROM source_file"#)
             .fetch_one(&mut conn)
             .await

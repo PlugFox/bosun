@@ -5,6 +5,8 @@
 //! remote-tracking) that the previous scan had not reached, and the repository's origin URL and
 //! default branch. It writes nothing, to the repository or anywhere else: the caller stores the
 //! commits ([`bosun_core::Commit`]) and then keeps the returned [`Cursor`] for the next scan.
+//! [`refresh`] does both for the daemon: it scans from the commits already stored and stores
+//! what it found.
 //!
 //! # Why the command line
 //!
@@ -34,8 +36,11 @@
 //! storing a commit again changes nothing, so the cost is one re-read. A cursor seeded from
 //! every stored commit loses nothing that way.
 
+mod refresh;
 #[cfg(test)]
 mod tests;
+
+pub use refresh::{RefreshError, refresh};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

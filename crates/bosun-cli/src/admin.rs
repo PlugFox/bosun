@@ -87,7 +87,8 @@ async fn stop_daemon(platform: Platform, name: &str, endpoint: &Endpoint) -> (Ve
 
 fn render(global: &Global, name: &str, done: &[String], extra: Value) -> String {
     match global.format {
-        Format::Text => {
+        // `run` refuses `md` outside `report`; treat it as text all the same.
+        Format::Text | Format::Md => {
             let mut out = String::new();
             for line in done {
                 let _ = writeln!(out, "{line}");
@@ -196,7 +197,7 @@ pub(crate) async fn doctor(global: &Global, args: &NameArgs) -> Result<String, F
     };
     let checks = doctor::run(&inputs).await;
     let text = match global.format {
-        Format::Text => doctor::text(&checks),
+        Format::Text | Format::Md => doctor::text(&checks),
         Format::Json => doctor::json(&checks),
     };
     if doctor::overall(&checks) != doctor::Status::Fail {

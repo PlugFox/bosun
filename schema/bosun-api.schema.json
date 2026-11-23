@@ -1,5 +1,214 @@
 {
   "$defs": {
+    "Agreement": {
+      "description": "The agreement with the provider's own totals (Claude Code's `cost-state`, the last record\nof each session): for each root session that has them and a message in the range, the\ntoken sums of all its messages, main transcript and sub-agents, over all time (the\nprovider's totals are cumulative), against the provider's.\n\nA session is within the tolerance when `|transcripts - provider| * 100 <= tolerance *\nprovider` on the total of the four categories; the categories are shown for reading.",
+      "properties": {
+        "rows": {
+          "description": "One row per compared session, sorted by session.",
+          "items": {
+            "$ref": "#/$defs/SessionAgreement"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "description": "Sessions compared.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tolerance_percent": {
+          "description": "The tolerance, in percent.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "$ref": "#/$defs/Comparison",
+          "description": "The sums over every compared session."
+        },
+        "within": {
+          "description": "Sessions within the tolerance.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tolerance_percent",
+        "sessions",
+        "within",
+        "total",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "CategoryRow": {
+      "description": "One token category of [`Report::by_category`].",
+      "properties": {
+        "category": {
+          "description": "`input`, `cache_write_5m`, `cache_write_1h`, `cache_read` or `output`.",
+          "type": "string"
+        },
+        "cost": {
+          "$ref": "#/$defs/Picodollars",
+          "description": "The category's tokens at the rates of the row that prices each message (the row is\nchosen by the message's whole prompt size)."
+        },
+        "eqv": {
+          "description": "`cost` in input-equivalent tokens of the reference model, rounded for display.",
+          "format": "double",
+          "type": "number"
+        },
+        "tokens": {
+          "description": "The category's tokens.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "category",
+        "tokens",
+        "cost",
+        "eqv"
+      ],
+      "type": "object"
+    },
+    "CheckTokens": {
+      "description": "Token sums in the provider's categories: cache writes are not split by duration.",
+      "properties": {
+        "cache_read": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_write": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "input": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "description": "The four categories summed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "input",
+        "cache_write",
+        "cache_read",
+        "output",
+        "total"
+      ],
+      "type": "object"
+    },
+    "CommitPeriod": {
+      "description": "The operands of eqv per commit in one period.",
+      "properties": {
+        "commits": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cost": {
+          "$ref": "#/$defs/Picodollars"
+        },
+        "eqv": {
+          "format": "double",
+          "type": "number"
+        },
+        "eqv_per_commit": {
+          "description": "`eqv / commits`; `null` without commits.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "messages": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "messages",
+        "commits",
+        "cost",
+        "eqv"
+      ],
+      "type": "object"
+    },
+    "CommitRow": {
+      "description": "One repository of [`PerCommit`].",
+      "properties": {
+        "repo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`null` for the messages in no repository."
+        },
+        "trend": {
+          "$ref": "#/$defs/Trend"
+        }
+      },
+      "required": [
+        "trend"
+      ],
+      "type": "object"
+    },
+    "CommitScan": {
+      "description": "The commit reader's last scan of one repository.",
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "state": {
+          "$ref": "#/$defs/ScanState"
+        }
+      },
+      "required": [
+        "repo",
+        "state"
+      ],
+      "type": "object"
+    },
+    "Comparison": {
+      "description": "The transcripts' sums against the provider's.",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/CheckTokens"
+        },
+        "transcripts": {
+          "$ref": "#/$defs/CheckTokens"
+        },
+        "within": {
+          "description": "Whether the totals agree within the tolerance.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "transcripts",
+        "provider",
+        "within"
+      ],
+      "type": "object"
+    },
     "DaemonStatus": {
       "description": "Result of `status.daemon`.",
       "properties": {
@@ -47,6 +256,54 @@
       "required": [
         "path",
         "error"
+      ],
+      "type": "object"
+    },
+    "Health": {
+      "description": "Ingest health. The counts are over the whole store; the agreement over the sessions of\nthe range.",
+      "properties": {
+        "agreement": {
+          "$ref": "#/$defs/Agreement"
+        },
+        "files": {
+          "description": "Source files: transcripts, and meta files that could not be read.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files_counted": {
+          "description": "Of them, files whose lines were counted. A file parsed before lines were counted\nhas no count until it is re-read from zero (`bosun reingest`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gaps": {
+          "description": "Lines that could not be read as expected (`ingest_gap`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lines": {
+          "description": "The complete lines of the counted files.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "versions": {
+          "description": "The same counts per parser version, ascending. A file counts under the version of its\nlast parse, a gap under the version that wrote it.",
+          "items": {
+            "$ref": "#/$defs/VersionRow"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "files",
+        "files_counted",
+        "lines",
+        "gaps",
+        "versions",
+        "agreement"
       ],
       "type": "object"
     },
@@ -143,6 +400,30 @@
       ],
       "type": "object"
     },
+    "KindRow": {
+      "description": "One session kind of [`Report::by_kind`].",
+      "properties": {
+        "kind": {
+          "description": "`interactive` or `run`: the kind of the root session; a sub-agent counts with its\nsession.",
+          "type": "string"
+        },
+        "sessions": {
+          "description": "Root sessions of this kind with a message in the scope.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sums": {
+          "$ref": "#/$defs/TokenSums"
+        }
+      },
+      "required": [
+        "kind",
+        "sessions",
+        "sums"
+      ],
+      "type": "object"
+    },
     "LastPass": {
       "description": "The outcome of the last timed ingest pass.",
       "oneOf": [
@@ -209,6 +490,26 @@
       ],
       "type": "object"
     },
+    "OldMethod": {
+      "description": "The old method: per session, only the last usage block of its main transcript, as the\nscripts bosun replaces summed it. It ignores every earlier message and every sub-agent.\n\nOver the messages of the scope: for each root session with a main-transcript message in\nit, the last such message (by time, then message id); their sums.",
+      "properties": {
+        "sessions": {
+          "description": "Sessions that contributed a last block.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sums": {
+          "$ref": "#/$defs/TokenSums",
+          "description": "The sums of those last blocks; `messages` equals `sessions`."
+        }
+      },
+      "required": [
+        "sessions",
+        "sums"
+      ],
+      "type": "object"
+    },
     "PassReport": {
       "description": "What one pass over an identity's files did.",
       "properties": {
@@ -241,6 +542,46 @@
         "parsed_bytes",
         "restarted",
         "failed"
+      ],
+      "type": "object"
+    },
+    "PerCommit": {
+      "description": "Eqv per commit: the eqv of the messages attributed to a repository divided by the number\nof its commits, both in one period. Both operands are exact; no message is linked to a\ncommit (that link is an estimate).\n\nCommits are those the commit reader stored: reachable from the repository's local and\nremote-tracking branches, counted by committer time.",
+      "properties": {
+        "attributed": {
+          "$ref": "#/$defs/Trend",
+          "description": "The sums over the rows of repositories, without the messages in no repository."
+        },
+        "previous_from_ms": {
+          "description": "The previous period: the range of the same length that ends at the report's `from_ms`.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "previous_to_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "rows": {
+          "description": "One row per repository with messages or commits in either period, sorted by path, then\nthe messages in no repository (`repo` null, never any commit).",
+          "items": {
+            "$ref": "#/$defs/CommitRow"
+          },
+          "type": "array"
+        },
+        "scans": {
+          "description": "The commit reader's state for each configured repository of the scope.",
+          "items": {
+            "$ref": "#/$defs/CommitScan"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "previous_from_ms",
+        "previous_to_ms",
+        "rows",
+        "attributed",
+        "scans"
       ],
       "type": "object"
     },
@@ -305,6 +646,207 @@
       },
       "required": [
         "sums"
+      ],
+      "type": "object"
+    },
+    "Report": {
+      "description": "Result of `report.exact`.",
+      "properties": {
+        "by_category": {
+          "description": "`total` by token category, in the order input, cache write 5 min, cache write 1 h,\ncache read, output. The categories sum to `total` exactly.",
+          "items": {
+            "$ref": "#/$defs/CategoryRow"
+          },
+          "type": "array"
+        },
+        "by_kind": {
+          "description": "`total` by the kind of the root session, `interactive` then `run`; both are always\npresent.",
+          "items": {
+            "$ref": "#/$defs/KindRow"
+          },
+          "type": "array"
+        },
+        "by_model": {
+          "description": "`total` by model, sorted by model.",
+          "items": {
+            "$ref": "#/$defs/ModelRow"
+          },
+          "type": "array"
+        },
+        "from_ms": {
+          "description": "The range asked for.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "health": {
+          "$ref": "#/$defs/Health",
+          "description": "The ingest's counts and the agreement with the provider's own totals."
+        },
+        "identity": {
+          "type": "string"
+        },
+        "old_method": {
+          "$ref": "#/$defs/OldMethod",
+          "description": "What the old method would have reported for the same messages, shown once next to\n`total`."
+        },
+        "per_commit": {
+          "$ref": "#/$defs/PerCommit",
+          "description": "Eqv per commit, per repository, against the previous period."
+        },
+        "reference_model": {
+          "description": "The model every eqv is measured against.",
+          "type": "string"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The repository asked for; `null` for every message of the range."
+        },
+        "to_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "total": {
+          "$ref": "#/$defs/TokenSums",
+          "description": "The real total: every message of the scope, each counted once."
+        },
+        "unpriced": {
+          "description": "Models with no price at the time of some messages of the scope: their tokens are in\nevery count, their cost and eqv in none.",
+          "items": {
+            "$ref": "#/$defs/UnpricedModel"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "from_ms",
+        "to_ms",
+        "reference_model",
+        "total",
+        "old_method",
+        "by_category",
+        "by_model",
+        "by_kind",
+        "per_commit",
+        "health",
+        "unpriced"
+      ],
+      "type": "object"
+    },
+    "ReportParams": {
+      "description": "Params of `report.exact`: an identity, a half-open time range and an optional repository.",
+      "properties": {
+        "from_ms": {
+          "description": "Messages at or after this time. The previous period of the per-commit trend is the\nrange of the same length that ends here.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "repo": {
+          "description": "A repository's name in the configuration: the sections of the range and repository\nscope count its messages and commits only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to_ms": {
+          "description": "Messages before this time. Must be after `from_ms`.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "identity",
+        "from_ms",
+        "to_ms"
+      ],
+      "type": "object"
+    },
+    "ScanState": {
+      "description": "The outcome of a repository's last commit scan.",
+      "oneOf": [
+        {
+          "description": "Not scanned since the daemon started.",
+          "properties": {
+            "type": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Scanned; its commits are stored.",
+          "properties": {
+            "type": {
+              "const": "done",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The scan failed; the commits stored before stay.",
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "type": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SessionAgreement": {
+      "description": "One session of [`Agreement`].",
+      "properties": {
+        "comparison": {
+          "$ref": "#/$defs/Comparison"
+        },
+        "messages": {
+          "description": "Messages over those windows.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session": {
+          "description": "The provider's session id.",
+          "type": "string"
+        },
+        "windows": {
+          "description": "Context windows with messages: the main transcript and each sub-agent.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session",
+        "windows",
+        "messages",
+        "comparison"
       ],
       "type": "object"
     },
@@ -529,6 +1071,30 @@
       ],
       "type": "object"
     },
+    "Trend": {
+      "description": "A period and the previous one.",
+      "properties": {
+        "change": {
+          "description": "`current.eqv_per_commit / previous.eqv_per_commit - 1`; `null` when either is null.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "current": {
+          "$ref": "#/$defs/CommitPeriod"
+        },
+        "previous": {
+          "$ref": "#/$defs/CommitPeriod"
+        }
+      },
+      "required": [
+        "current",
+        "previous"
+      ],
+      "type": "object"
+    },
     "UnpricedModel": {
       "description": "A model with no price at the time of some messages.",
       "properties": {
@@ -544,6 +1110,44 @@
       "required": [
         "model",
         "messages"
+      ],
+      "type": "object"
+    },
+    "VersionRow": {
+      "description": "The counts of one parser version.",
+      "properties": {
+        "files": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files_counted": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gaps": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lines": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parser_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "parser_version",
+        "files",
+        "files_counted",
+        "lines",
+        "gaps"
       ],
       "type": "object"
     },
@@ -568,7 +1172,7 @@
       }
     },
     "ingest.reingest": {
-      "description": "Re-reads every transcript file of the identity from zero with the current parser and answers when the pass is done. Nothing is deleted.",
+      "description": "Re-reads every transcript file of the identity from zero with the current parser, then reads the new commits of its repositories, and answers when both are done. Nothing is deleted.",
       "params": {
         "$ref": "#/$defs/IdentityParams"
       },
@@ -583,6 +1187,15 @@
       },
       "result": {
         "$ref": "#/$defs/IngestStatus"
+      }
+    },
+    "report.exact": {
+      "description": "The exact sections of the report over the range: eqv by category, model and session      kind, eqv per commit against the previous period, the old method's number, and ingest      health with the agreement with the provider's own totals. No estimate.",
+      "params": {
+        "$ref": "#/$defs/ReportParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Report"
       }
     },
     "status.daemon": {

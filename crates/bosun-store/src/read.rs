@@ -65,7 +65,8 @@ impl Reader {
     /// A database error, or a stored value that does not read back.
     pub async fn source_files(&self, provider: &str) -> Result<Vec<SourceFile>, Error> {
         let rows = sqlx::query!(
-            "SELECT file_key, path, size, parsed_offset, parser_version, last_line_hash
+            "SELECT file_key, path, size, parsed_offset, parser_version, last_line_hash,
+                    parsed_lines
              FROM source_file WHERE provider = ? ORDER BY file_key",
             provider,
         )
@@ -83,6 +84,10 @@ impl Reader {
                         Error::Corrupt(format!("parser version {}", row.parser_version))
                     })?,
                     last_line_hash: row.last_line_hash,
+                    parsed_lines: row
+                        .parsed_lines
+                        .map(|n| from_db(n, "parsed lines"))
+                        .transpose()?,
                 })
             })
             .collect()

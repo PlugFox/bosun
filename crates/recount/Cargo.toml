@@ -1,0 +1,17 @@
+[package]
+name = "recount"
+description = "Independent recount of Claude Code transcript token sums; shares no code with bosun."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# No workspace crate, ever (#12, #16): it must share no code with the parser it checks.
+# `cargo xtask check-deps` enforces it.
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

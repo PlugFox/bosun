@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "sessions": [
+    { "session": "00000000-0000-4000-8000-004100000000", "agent": null, "messages": 5, "input": 16, "cache_write_5m": 170, "cache_write_1h": 1500, "cache_read": 31000, "output": 51390 }
+  ],
+  "repos": [
+    { "repo": "C:\\fixture\\repo-a", "messages": 2, "input": 7, "cache_write_5m": 90, "cache_write_1h": 1100, "cache_read": 13000, "output": 50010 },
+    { "repo": "C:\\fixture\\repo-b", "messages": 2, "input": 6, "cache_write_5m": 80, "cache_write_1h": 0, "cache_read": 12000, "output": 680 },
+    { "repo": null, "messages": 1, "input": 3, "cache_write_5m": 0, "cache_write_1h": 400, "cache_read": 6000, "output": 700 }
+  ],
+  "total": { "messages": 5, "input": 16, "cache_write_5m": 170, "cache_write_1h": 1500, "cache_read": 31000, "output": 51390 }
+}

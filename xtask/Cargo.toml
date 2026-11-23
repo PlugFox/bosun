@@ -10,6 +10,8 @@ publish.workspace = true
 
 [dependencies]
 cargo_metadata.workspace = true
+regex.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

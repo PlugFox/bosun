@@ -1,5 +1,9 @@
 # Spell checking (#12): `typos` in CI.
 
+[files]
+# Synthetic transcripts (#16): ids and token-shaped strings, not prose.
+extend-exclude = ["fixtures/"]
+
 [default.extend-words]
 # The TUI library.
 ratatui = "ratatui"

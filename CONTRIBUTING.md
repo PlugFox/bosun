@@ -8,8 +8,9 @@ changes, the issue changes with it.
 
 - Only the pinned Rust toolchain (`rust-toolchain.toml`) is needed to build and test.
 - `mise install` adds the pinned checkers (`mise.toml`): cargo-deny, typos, cargo-machete.
-- Repository tasks are `cargo xtask <task>`: `check-deps` for the dependency rules, `mutants`
-  for the mutant job.
+- Repository tasks are `cargo xtask <task>`: `check-deps` for the dependency rules,
+  `lint-fixtures` for the synthetic-fixture templates (`fixtures/README.md`), `mutants` for the
+  mutant job.
 - A check is not trusted until it has been seen failing: every acceptance item names a mutant
   (`--cfg mutant_<name>`), registered in `xtask/src/mutants.rs`.
 - The repository is public. Fixtures are synthetic or scrubbed: no real transcripts, paths,

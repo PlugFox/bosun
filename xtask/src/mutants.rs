@@ -118,6 +118,30 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("path::tests::windows_paths_differing_by_case_or_separator_share_a_key"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_recount_last_block",
+        issue: 16,
+        breaks: "recount takes the last usage block per session instead of the sum",
+        package: "recount",
+        check: Check::Test("tests::every_fixture_equals_its_expected"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_recount_no_dedup",
+        issue: 16,
+        breaks: "recount sums every record instead of every message",
+        package: "recount",
+        check: Check::Test("tests::a_split_message_counts_once"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_fixture_lint_off",
+        issue: 16,
+        breaks: "lint-fixtures accepts everything",
+        package: "xtask",
+        check: Check::Test("fixtures::tests::a_bad_fixture_is_rejected"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.
@@ -223,7 +247,7 @@ fn step(mutant: &Mutant, mutated: bool) -> Result<Step, String> {
     })
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf)

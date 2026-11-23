@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO \"commit\"\n               (repo_id, sha, ts_ms, author, lines_added, lines_removed, trailers_json)\n           VALUES (?, ?, ?, ?, ?, ?, ?)\n           ON CONFLICT (repo_id, sha) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "c25e16c17d15507b4537177378d609ae9ca64284ca284e4a406aad9c27915213"
+}

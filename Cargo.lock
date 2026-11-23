@@ -79,7 +79,11 @@ name = "bosun-ingest"
 version = "0.0.0"
 dependencies = [
  "bosun-core",
+ "bosun-store",
  "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

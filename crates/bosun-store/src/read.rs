@@ -14,7 +14,7 @@ use crate::error::{Error, from_db};
 /// Queries over the read-only pool. Cloning it is cheap; every clone shares the pool.
 #[derive(Debug, Clone)]
 pub struct Reader {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 /// The bill of the messages in a time range, priced by the stored table at each message's time.

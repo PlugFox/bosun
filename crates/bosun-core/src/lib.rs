@@ -4,11 +4,13 @@
 //! This crate performs no I/O: no async runtime, no database, no HTTP client. The rule is
 //! enforced by `cargo xtask check-deps` (#12), not by convention.
 
+mod commit;
 mod event;
 mod merge;
 mod path;
 mod price;
 
+pub use commit::Commit;
 pub use event::{
     ContextWindow, Gap, Message, Origin, Tokens, ToolCall, Usage, WindowKey, WindowKind,
 };

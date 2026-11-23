@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.sha FROM \"commit\" c JOIN repo r ON r.id = c.repo_id\n               WHERE r.path = ? ORDER BY c.sha",
+  "describe": {
+    "columns": [
+      {
+        "name": "sha",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "sha"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a5ee870ce9fae9a0564f85193c952964076d1f59fdbe7cd7adbbcd35ccce7c75"
+}

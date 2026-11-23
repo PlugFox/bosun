@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT m.session_id, m.repo_id AS \"repo_id!: i64\"\n               FROM message m JOIN session s ON s.id = m.session_id\n               WHERE m.repo_id IS NOT NULL\n                 AND s.started_ms < ? AND s.ended_ms >= ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "session_id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "session_id"
+          }
+        }
+      },
+      {
+        "name": "repo_id!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "repo_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "caf70f9a35f83b611950aea78123daf1c46ef8e5d495e6b240d18b0b1d51eb79"
+}

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT path, remote, default_branch FROM repo ORDER BY path",
+  "describe": {
+    "columns": [
+      {
+        "name": "path",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "remote",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "remote"
+          }
+        }
+      },
+      {
+        "name": "default_branch",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "default_branch"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "3161b8b25015de1842477bf1fe47a363e5a8d40d8ecde8b90c6fb6078165cee5"
+}

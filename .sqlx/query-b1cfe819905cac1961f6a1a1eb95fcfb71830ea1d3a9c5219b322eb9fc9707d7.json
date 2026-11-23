@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.repo_id, r.path AS repo, c.sha, c.ts_ms, c.author,\n                      c.lines_added, c.lines_removed, c.trailers_json\n               FROM \"commit\" c JOIN repo r ON r.id = c.repo_id\n               WHERE c.ts_ms >= ? AND c.ts_ms < ?\n               ORDER BY c.ts_ms, r.path, c.sha",
+  "describe": {
+    "columns": [
+      {
+        "name": "repo_id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "repo_id"
+          }
+        }
+      },
+      {
+        "name": "repo",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "sha",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "sha"
+          }
+        }
+      },
+      {
+        "name": "ts_ms",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "ts_ms"
+          }
+        }
+      },
+      {
+        "name": "author",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "author"
+          }
+        }
+      },
+      {
+        "name": "lines_added",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "lines_added"
+          }
+        }
+      },
+      {
+        "name": "lines_removed",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "lines_removed"
+          }
+        }
+      },
+      {
+        "name": "trailers_json",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "commit",
+            "name": "trailers_json"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b1cfe819905cac1961f6a1a1eb95fcfb71830ea1d3a9c5219b322eb9fc9707d7"
+}

@@ -335,6 +335,13 @@ fn documented(meaning: &str) -> i32 {
 /// A fake daemon on `endpoint` that answers `hello` with `api_version` and every other
 /// request with the error `code`. It serves connections until the test ends; call it on the
 /// runtime.
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::needless_pass_by_value,
+        reason = "the Windows branch consumes the endpoint; the Unix one only borrows it"
+    )
+)]
 fn fake_daemon(endpoint: Endpoint, api_version: u32, code: i32) {
     use bosun_api::Method as _;
     use bosun_api::rpc::{ErrorObject, Request, Response};

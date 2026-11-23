@@ -4,3 +4,10 @@
 "aqua:EmbarkStudios/cargo-deny" = "0.22.0"
 "aqua:crate-ci/typos" = "1.52.2"
 "github:bnjbvr/cargo-machete" = "0.10.1"
+# The sqlx CLI regenerates and checks `.sqlx/` (#19). It publishes no binaries of its own; with
+# cargo-binstall present (under its short name, which mise's cargo backend looks for), mise
+# fetches the signed QuickInstall build where one exists (Linux x86_64, so CI) and compiles
+# from source elsewhere. Keep the version equal to the sqlx library in Cargo.toml; default
+# features, since a feature list forces a source build.
+cargo-binstall = "1.28.0"
+"cargo:sqlx-cli" = "0.9.1"

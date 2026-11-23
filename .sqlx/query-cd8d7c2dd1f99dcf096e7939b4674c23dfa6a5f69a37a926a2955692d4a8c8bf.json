@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO model (provider, name) VALUES (?, ?)\n           ON CONFLICT (provider, name) DO UPDATE SET name = excluded.name\n           RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "model",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cd8d7c2dd1f99dcf096e7939b4674c23dfa6a5f69a37a926a2955692d4a8c8bf"
+}

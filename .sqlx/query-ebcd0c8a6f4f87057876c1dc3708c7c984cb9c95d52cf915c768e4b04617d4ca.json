@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT tool_use_key, name, target, input_bytes, result_bytes, is_error\n         FROM tool_call WHERE message_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "tool_use_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "tool_use_key"
+          }
+        }
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "target",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "target"
+          }
+        }
+      },
+      {
+        "name": "input_bytes",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "input_bytes"
+          }
+        }
+      },
+      {
+        "name": "result_bytes",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_bytes"
+          }
+        }
+      },
+      {
+        "name": "is_error",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "is_error"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ebcd0c8a6f4f87057876c1dc3708c7c984cb9c95d52cf915c768e4b04617d4ca"
+}

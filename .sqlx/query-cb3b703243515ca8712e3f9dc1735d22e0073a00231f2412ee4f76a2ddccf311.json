@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reason, top_level_keys_json FROM ingest_gap",
+  "describe": {
+    "columns": [
+      {
+        "name": "reason",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ingest_gap",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "top_level_keys_json",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ingest_gap",
+            "name": "top_level_keys_json"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "cb3b703243515ca8712e3f9dc1735d22e0073a00231f2412ee4f76a2ddccf311"
+}

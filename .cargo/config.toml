@@ -1,2 +1,9 @@
 [alias]
 xtask = "run --package xtask --quiet --"
+
+[env]
+# sqlx query macros read the committed `.sqlx/` cache instead of a database, so a clean clone
+# builds with none (#12, #19). `cargo xtask sqlx-prepare` regenerates the cache against a
+# scratch database; it sets SQLX_OFFLINE=false itself, and a variable set in the environment
+# wins over this one.
+SQLX_OFFLINE = "true"

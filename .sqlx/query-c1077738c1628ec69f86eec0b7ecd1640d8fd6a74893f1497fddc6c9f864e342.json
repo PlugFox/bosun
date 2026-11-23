@@ -1,0 +1,206 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", provider, message_key, session_id, source_file_id, ts_ms,\n                      model_id, cwd, repo_id, input_tokens, cache_write_5m_tokens,\n                      cache_write_1h_tokens, cache_read_tokens, output_tokens, usage_json,\n                      parser_version\n               FROM message ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "provider",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "message_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "message_key"
+          }
+        }
+      },
+      {
+        "name": "session_id",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "session_id"
+          }
+        }
+      },
+      {
+        "name": "source_file_id",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "source_file_id"
+          }
+        }
+      },
+      {
+        "name": "ts_ms",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "ts_ms"
+          }
+        }
+      },
+      {
+        "name": "model_id",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "model_id"
+          }
+        }
+      },
+      {
+        "name": "cwd",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cwd"
+          }
+        }
+      },
+      {
+        "name": "repo_id",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "repo_id"
+          }
+        }
+      },
+      {
+        "name": "input_tokens",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "input_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_write_5m_tokens",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_write_5m_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_write_1h_tokens",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_write_1h_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_read_tokens",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_read_tokens"
+          }
+        }
+      },
+      {
+        "name": "output_tokens",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "output_tokens"
+          }
+        }
+      },
+      {
+        "name": "usage_json",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "usage_json"
+          }
+        }
+      },
+      {
+        "name": "parser_version",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "parser_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c1077738c1628ec69f86eec0b7ecd1640d8fd6a74893f1497fddc6c9f864e342"
+}

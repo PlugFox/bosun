@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE price SET valid_to_ms = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "6cd30c50645c1dd42279ec9a45fae88876575327066f7ec9e4d01d0394b20aec"
+}

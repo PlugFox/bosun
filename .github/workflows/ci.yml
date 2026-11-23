@@ -66,6 +66,10 @@ jobs:
         run: cargo-machete
       - name: Typos
         run: typos
+      # Every other job builds with SQLX_OFFLINE=true from `.sqlx/` (#19); this one fails when a
+      # query or a migration changed without `cargo xtask sqlx-prepare`.
+      - name: The sqlx offline cache is current
+        run: cargo xtask sqlx-prepare --check
 
   # Mutants (#12, #15): platform-independent ones are sharded on Linux; a mutant bound to a
   # platform runs only there. `mutants` is the required check that gathers them.

@@ -7,10 +7,13 @@ changes, the issue changes with it.
 ## Working on the code
 
 - Only the pinned Rust toolchain (`rust-toolchain.toml`) is needed to build and test.
-- `mise install` adds the pinned checkers (`mise.toml`): cargo-deny, typos, cargo-machete.
+- `mise install` adds the pinned checkers (`mise.toml`): cargo-deny, typos, cargo-machete,
+  and the sqlx CLI.
 - Repository tasks are `cargo xtask <task>`: `check-deps` for the dependency rules,
   `lint-fixtures` for the synthetic-fixture templates (`fixtures/README.md`), `mutants` for the
-  mutant job.
+  mutant job, `sqlx-prepare` after changing a query or a migration of `bosun-store`. The build
+  reads the committed query cache `.sqlx/` (`SQLX_OFFLINE=true` in `.cargo/config.toml`) and
+  needs no database.
 - A check is not trusted until it has been seen failing: every acceptance item names a mutant
   (`--cfg mutant_<name>`), registered in `xtask/src/mutants.rs`.
 - The repository is public. Fixtures are synthetic or scrubbed: no real transcripts, paths,

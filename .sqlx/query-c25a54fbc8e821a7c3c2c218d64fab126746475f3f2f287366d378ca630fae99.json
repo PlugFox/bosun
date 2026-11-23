@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO price (version, model, valid_from_ms, valid_to_ms, prompt_threshold,\n                            input, cache_write_5m, cache_write_1h, cache_read, output,\n                            is_reference)\n         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "c25a54fbc8e821a7c3c2c218d64fab126746475f3f2f287366d378ca630fae99"
+}

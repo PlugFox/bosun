@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT md.name AS model, m.ts_ms,\n                      m.input_tokens, m.cache_write_5m_tokens, m.cache_write_1h_tokens,\n                      m.cache_read_tokens, m.output_tokens\n               FROM message m JOIN model md ON md.id = m.model_id\n               WHERE m.ts_ms >= ? AND m.ts_ms < ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "model",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "ts_ms",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "ts_ms"
+          }
+        }
+      },
+      {
+        "name": "input_tokens",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "input_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_write_5m_tokens",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_write_5m_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_write_1h_tokens",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_write_1h_tokens"
+          }
+        }
+      },
+      {
+        "name": "cache_read_tokens",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "cache_read_tokens"
+          }
+        }
+      },
+      {
+        "name": "output_tokens",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "output_tokens"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4ff5257fd59bdef911ffdf02c8db4b8bfd7ee4bd810dd918b228ec2ed5fb6609"
+}

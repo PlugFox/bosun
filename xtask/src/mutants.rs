@@ -859,6 +859,34 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_queue_skip_claim_reread",
+        issue: 61,
+        breaks: "the claim is taken for granted after the Status write, with no re-read (#5)",
+        package: "bosun-queue",
+        check: Check::Test(
+            "projects_v2::tests::a_user_move_between_the_claim_write_and_the_re_read_releases_the_claim",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_no_comment_key",
+        issue: 61,
+        breaks: "the Projects v2 backend does not look comments up by key before posting (#5)",
+        package: "bosun-queue",
+        check: Check::Test(
+            "projects_v2::tests::a_comment_whose_response_was_lost_is_found_by_key_on_replay",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_recreate_always",
+        issue: 61,
+        breaks: "a sticky comment the user deleted again is recreated again, without end",
+        package: "bosun-queue",
+        check: Check::Test("projects_v2::tests::suite_a_sticky_deleted_twice_is_recreated_once"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

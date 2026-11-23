@@ -162,6 +162,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_runner_merge_streams)",
   "cfg(mutant_runner_no_flaky_names)",
   "cfg(mutant_runner_no_verdict_timeout)",
+  "cfg(mutant_queue_skip_claim_reread)",
+  "cfg(mutant_queue_no_comment_key)",
+  "cfg(mutant_queue_recreate_always)",
 ] }
 
 [workspace.lints.clippy]

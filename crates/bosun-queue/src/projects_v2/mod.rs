@@ -1,4 +1,4 @@
-//! The GitHub Projects v2 backend (#5, #60), read side: the board is one or more Projects v2
+//! The GitHub Projects v2 backend (#5, #60, #61): the board is one or more Projects v2
 //! projects, and the cards are the issues of one repository on them.
 //!
 //! - **Transport.** GraphQL only, through the [`GraphQl`] trait; [`GhCli`] runs `gh api graphql`
@@ -32,8 +32,29 @@
 //!   [`Card::blockers`]). A blocker in another repository cannot be named by an [`ItemId`] and
 //!   is left out.
 //!
-//! The write half of [`Queue`] (`project`, `comment`, `upsert_comment`) is #61; until then it
-//! fails with [`QueueError::Unsupported`].
+//! # Writes (#61)
+//!
+//! Every write first reads the issue (one request: its project items with their Status, and
+//! its comments), then sends at most one mutation, so the outbox may replay any write.
+//!
+//! - **Status.** [`Queue::project`] sets the Status of the card on the first bound project that
+//!   has it (`updateProjectV2ItemFieldValue`), and sends nothing when the card is already in
+//!   that column. Projects v2 has no place for the one-line note; it is not written.
+//! - **Comments.** The daemon's comments carry the hidden key of [`marker`] on their first
+//!   line. Before creating, the backend looks the key up among the comments the identity wrote
+//!   (`viewerDidAuthor`; a comment by anyone else never counts, whatever marker it imitates),
+//!   so a crash between the create and the record of it never yields a second comment. A keyed
+//!   comment the user deleted is never reposted by [`Queue::comment`] and is recreated once by
+//!   [`Queue::upsert_comment`]; deleted again, it stays deleted. The backend remembers which
+//!   comments it posted or found, and which it recreated, for its lifetime.
+//! - **Claim.** [`crate::claim()`] runs on these writes and on [`Queue::lint_target`] as the
+//!   re-read.
+//! - **Typed errors.** A secondary rate limit (a 403 or 429 with `Retry-After`, or a message
+//!   naming it) and an exhausted quota are [`QueueError::RateLimited`], transient, with the
+//!   wait; a token that lost a scope (`INSUFFICIENT_SCOPES`, `FORBIDDEN`, a 401, `gh` no longer
+//!   logged in) is [`QueueError::Scope`], which pauses the repository. An issue transferred to
+//!   another repository or converted to a discussion is [`QueueError::Gone`], and a deleted one
+//!   [`QueueError::NotFound`]: both [`QueueError::is_cancel`].
 
 mod pace;
 mod transport;
@@ -52,8 +73,8 @@ use std::sync::{Mutex, PoisonError};
 use serde_json::{Value, json};
 
 use crate::card::{Card, Column, Comment, ItemId, Owned};
-use crate::marker;
-use crate::queue::{Changes, Cursor, Queue, QueueError};
+use crate::marker::{self, valid_key};
+use crate::queue::{Changes, Cursor, Gone, Keyed, Queue, QueueError, RateLimited};
 
 /// The name of the Status field unless [`Binding::status_field`] says otherwise.
 pub const STATUS_FIELD: &str = "Status";
@@ -134,6 +155,8 @@ struct Resolved {
     label: String,
     /// The project's node id.
     id: String,
+    /// The Status field's node id.
+    field: String,
     /// The option id of every column.
     columns: BTreeMap<Column, String>,
 }
@@ -162,6 +185,10 @@ struct Issue {
 
 #[derive(Debug, Clone)]
 struct RawComment {
+    /// The comment's node id.
+    id: String,
+    /// Whether the identity wrote it (`viewerDidAuthor`).
+    mine: bool,
     author: Option<String>,
     editor: Option<String>,
     body: String,
@@ -174,6 +201,28 @@ struct Entry {
     node: String,
     updated_at: String,
     column: Column,
+}
+
+/// An issue of the repository, read for a write or the lint.
+#[derive(Debug)]
+struct Located {
+    /// The issue's node id.
+    id: String,
+    /// The issue, all comment pages read.
+    issue: Issue,
+    /// Its card on the first bound project that has one.
+    placement: Option<Placement>,
+}
+
+/// Where an issue's card is.
+#[derive(Debug)]
+struct Placement {
+    /// The index of the project in [`ProjectsV2::projects`].
+    project: usize,
+    /// The project item's node id.
+    item: String,
+    /// The Status option id; `None` when it has no Status.
+    option: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -209,6 +258,8 @@ pub struct ProjectsV2<T> {
     /// Issue node id to the `updatedAt` it was read at and what it held then.
     cache: Mutex<HashMap<String, (String, Issue)>>,
     stats: Mutex<PollStats>,
+    /// The keyed comments this backend posted or found, for the deletion rules of #5.
+    keyed: Keyed,
 }
 
 const RESOLVE: &str = "query Resolve($owner: String!, $number: Int!, $field: String!) {
@@ -264,7 +315,7 @@ const ISSUE_FIELDS: &str = "fragment Fields on Issue {
   blockedBy(first: 100) { nodes { number repository { nameWithOwner } } }
   comments(first: $first) {
     pageInfo { hasNextPage endCursor }
-    nodes { author { login } editor { login } body }
+    nodes { id viewerDidAuthor author { login } editor { login } body }
   }
 }";
 
@@ -277,7 +328,7 @@ const COMMENTS: &str = "query Comments($issue: ID!, $first: Int!, $after: String
     ... on Issue {
       comments(first: $first, after: $after) {
         pageInfo { hasNextPage endCursor }
-        nodes { author { login } editor { login } body }
+        nodes { id viewerDidAuthor author { login } editor { login } body }
       }
     }
   }
@@ -288,8 +339,10 @@ $first: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       ...Fields
+      repository { nameWithOwner }
       projectItems(first: 50) {
         nodes {
+          id
           isArchived
           project { id }
           status: fieldValueByName(name: $field) {
@@ -299,6 +352,33 @@ $first: Int!) {
         }
       }
     }
+  }
+}";
+
+/// Asked only when an issue does not resolve: a conversion leaves a discussion with its number.
+const DISCUSSION: &str = "query Discussion($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    discussion(number: $number) { id }
+  }
+}";
+
+const UPDATE_STATUS: &str = "mutation UpdateStatus($project: ID!, $item: ID!, $field: ID!, \
+$option: String!) {
+  updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field, \
+value: {singleSelectOptionId: $option}}) {
+    projectV2Item { id }
+  }
+}";
+
+const ADD_COMMENT: &str = "mutation AddComment($subject: ID!, $body: String!) {
+  addComment(input: {subjectId: $subject, body: $body}) {
+    commentEdge { node { id } }
+  }
+}";
+
+const UPDATE_COMMENT: &str = "mutation UpdateComment($id: ID!, $body: String!) {
+  updateIssueComment(input: {id: $id, body: $body}) {
+    issueComment { id }
   }
 }";
 
@@ -341,6 +421,7 @@ impl<T: GraphQl> ProjectsV2<T> {
             meter: Mutex::new(Meter::default()),
             cache: Mutex::new(HashMap::new()),
             stats: Mutex::new(PollStats::default()),
+            keyed: Keyed::default(),
             binding,
         };
         let mut projects = Vec::new();
@@ -395,7 +476,8 @@ impl<T: GraphQl> ProjectsV2<T> {
         self
     }
 
-    /// One request. GraphQL errors fail it unless `allow` names their type.
+    /// One request. GraphQL errors fail it unless `allow` names their type; a rate limit or a
+    /// lost scope fails it with its own typed error.
     fn request(&self, query: &str, variables: &Value, allow: &[&str]) -> Result<Value, QueueError> {
         let result = self.transport.execute(query, variables);
         let mut meter = self.meter.lock().unwrap_or_else(PoisonError::into_inner);
@@ -410,24 +492,50 @@ impl<T: GraphQl> ProjectsV2<T> {
                 {
                     meter.rate_limit = Some(limit.clone());
                 }
-                return Err(QueueError::Remote(e.to_string()));
+                return Err(transport_error(e));
             }
         };
-        if let Some(limit) = reply.rate_limit {
-            meter.rate_limit = Some(limit);
+        if let Some(limit) = &reply.rate_limit {
+            meter.rate_limit = Some(limit.clone());
         }
         drop(meter);
-        let unexpected: Vec<String> = reply
+        let unexpected: Vec<&ReplyError> = reply
             .errors
             .iter()
             .filter(|e| !e.kind.as_deref().is_some_and(|k| allow.contains(&k)))
-            .map(ToString::to_string)
             .collect();
         if unexpected.is_empty() {
-            Ok(reply.data)
-        } else {
-            Err(QueueError::Remote(unexpected.join("; ")))
+            return Ok(reply.data);
         }
+        let joined = || {
+            unexpected
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        let kind = |names: &[&str]| {
+            unexpected
+                .iter()
+                .any(|e| e.kind.as_deref().is_some_and(|k| names.contains(&k)))
+        };
+        if kind(&["RATE_LIMITED", "RATE_LIMIT"]) {
+            let secondary = unexpected.iter().any(|e| names_secondary(&e.message));
+            return Err(QueueError::RateLimited(RateLimited {
+                secondary,
+                retry_after: None,
+                reset: reply.rate_limit.map(|l| l.reset),
+            }));
+        }
+        if kind(&["INSUFFICIENT_SCOPES", "FORBIDDEN"]) {
+            return Err(QueueError::Scope(joined()));
+        }
+        Err(QueueError::Remote(joined()))
+    }
+
+    /// A mutation: `NOT_FOUND` is an answer (the node is gone), anything else unexpected fails.
+    fn mutate(&self, query: &str, variables: &Value) -> Result<Value, QueueError> {
+        self.request(query, variables, &["NOT_FOUND"])
     }
 
     fn resolve(&self, project: &ProjectRef) -> Result<Resolved, QueueError> {
@@ -459,7 +567,13 @@ impl<T: GraphQl> ProjectsV2<T> {
         }
         let id = text(node, "/id")?.to_owned();
         let columns = self.columns(&label, &node["field"])?;
-        Ok(Resolved { label, id, columns })
+        let field = text(node, "/field/id")?.to_owned();
+        Ok(Resolved {
+            label,
+            id,
+            field,
+            columns,
+        })
     }
 
     /// The option id of every column in a Status field's JSON.
@@ -686,7 +800,7 @@ impl<T: GraphQl> ProjectsV2<T> {
                 continue;
             }
             let (key, body) = match marker::extract(&comment.body) {
-                Some((key, body)) => (Some(key.to_owned()), body.to_owned()),
+                Some((key, body)) => (Some(key), body.to_owned()),
                 None => (None, comment.body.clone()),
             };
             comments.push(Comment {
@@ -713,6 +827,139 @@ impl<T: GraphQl> ProjectsV2<T> {
             comments,
             blocked_by,
         }
+    }
+
+    /// The issue of `item` with its card, fresh from GitHub.
+    ///
+    /// # Errors
+    ///
+    /// [`QueueError::NotFound`] when no issue has the number (never had, or deleted),
+    /// [`QueueError::Gone`] when it was transferred or converted, [`QueueError::Setup`] when the
+    /// repository is not visible.
+    fn locate(&self, item: ItemId) -> Result<Located, QueueError> {
+        let query = format!("{ISSUE}\n{ISSUE_FIELDS}");
+        let data = self.request(
+            &query,
+            &json!({
+                "owner": self.owner,
+                "name": self.name,
+                "number": item.0,
+                "field": self.binding.status_field,
+                "first": self.sizes.comments,
+            }),
+            &["NOT_FOUND"],
+        )?;
+        let repository = &data["repository"];
+        if repository.is_null() {
+            return Err(QueueError::Setup(format!(
+                "the repository {} does not exist or is not visible to this identity",
+                self.binding.repository
+            )));
+        }
+        let node = &repository["issue"];
+        if node.is_null() {
+            return Err(if self.converted(item)? {
+                QueueError::Gone(item, Gone::Converted)
+            } else {
+                QueueError::NotFound(item)
+            });
+        }
+        // GitHub answers for a transferred issue by its old number with the issue in its new
+        // repository.
+        if let Some(now) = node["repository"]["nameWithOwner"].as_str()
+            && !now.eq_ignore_ascii_case(&self.binding.repository)
+        {
+            return Err(QueueError::Gone(item, Gone::Transferred(now.to_owned())));
+        }
+        let items: Vec<&Value> = node["projectItems"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|i| i["isArchived"].as_bool() != Some(true))
+            .collect();
+        let placement = self
+            .projects
+            .iter()
+            .enumerate()
+            .find_map(|(index, project)| {
+                let found = items
+                    .iter()
+                    .find(|i| i["project"]["id"].as_str() == Some(project.id.as_str()))?;
+                Some(Placement {
+                    project: index,
+                    item: found["id"].as_str()?.to_owned(),
+                    option: found["status"]["optionId"].as_str().map(str::to_owned),
+                })
+            });
+        let id = text(node, "/id")?.to_owned();
+        let issue = self.issue(&id, node)?;
+        Ok(Located {
+            id,
+            issue,
+            placement,
+        })
+    }
+
+    /// Whether a discussion has the number of `item`: what a conversion leaves.
+    fn converted(&self, item: ItemId) -> Result<bool, QueueError> {
+        let data = self.request(
+            DISCUSSION,
+            &json!({ "owner": self.owner, "name": self.name, "number": item.0 }),
+            &["NOT_FOUND"],
+        )?;
+        Ok(!data["repository"]["discussion"].is_null())
+    }
+
+    /// The issue of `item`, which must have a card on a bound project.
+    fn located_card(&self, item: ItemId) -> Result<(Located, Placement), QueueError> {
+        let mut located = self.locate(item)?;
+        let placement = located.placement.take().ok_or(QueueError::NotFound(item))?;
+        Ok((located, placement))
+    }
+
+    /// The identity's comment with `key` on the issue, if there is one: (node id, body).
+    fn own_by_key<'i>(issue: &'i Issue, key: &str) -> Option<(&'i str, &'i str)> {
+        if cfg!(mutant_queue_no_comment_key) {
+            // Mutant: no lookup by key, so every replay posts again.
+            return None;
+        }
+        issue
+            .comments
+            .iter()
+            .filter(|c| c.mine)
+            .find(|c| marker::extract(&c.body).is_some_and(|(found, _)| found == key))
+            .map(|c| (c.id.as_str(), c.body.as_str()))
+    }
+
+    /// Posts `body` (its marker included) on the issue with node id `subject`.
+    fn add_comment(&self, item: ItemId, subject: &str, body: &str) -> Result<(), QueueError> {
+        let data = self.mutate(ADD_COMMENT, &json!({ "subject": subject, "body": body }))?;
+        if data["addComment"].is_null() {
+            return Err(QueueError::NotFound(item));
+        }
+        Ok(())
+    }
+
+    /// Creates the comment with `key` that is missing from the issue, by the deletion rules.
+    fn create_missing(
+        &self,
+        item: ItemId,
+        subject: &str,
+        key: &str,
+        body: &str,
+        upsert: bool,
+    ) -> Result<(), QueueError> {
+        let create = if cfg!(mutant_queue_no_comment_key) {
+            Some(false)
+        } else {
+            self.keyed.create_missing(item, key, upsert)
+        };
+        // `None`: the user deleted it, and it is left deleted.
+        if let Some(recreated) = create {
+            self.add_comment(item, subject, body)?;
+            self.keyed.created(item, key, recreated);
+        }
+        Ok(())
     }
 }
 
@@ -770,69 +1017,113 @@ impl<T: GraphQl> Queue for ProjectsV2<T> {
         Ok(Changes::since(cursor, cards))
     }
 
-    fn project(&self, _item: ItemId, _state: Owned, _note: Option<&str>) -> Result<(), QueueError> {
-        Err(QueueError::Unsupported(WRITES))
+    fn project(&self, item: ItemId, state: Owned, _note: Option<&str>) -> Result<(), QueueError> {
+        let (_, placement) = self.located_card(item)?;
+        let project = &self.projects[placement.project];
+        let target = &project.columns[&state.column()];
+        if placement.option.as_deref() == Some(target.as_str()) {
+            return Ok(());
+        }
+        let data = self.mutate(
+            UPDATE_STATUS,
+            &json!({
+                "project": project.id,
+                "item": placement.item,
+                "field": project.field,
+                "option": target,
+            }),
+        )?;
+        if data["updateProjectV2ItemFieldValue"].is_null() {
+            // The card was removed between the read and the write.
+            return Err(QueueError::NotFound(item));
+        }
+        Ok(())
     }
 
-    fn comment(&self, _item: ItemId, _body: &str, _key: &str) -> Result<(), QueueError> {
-        Err(QueueError::Unsupported(WRITES))
+    fn comment(&self, item: ItemId, body: &str, key: &str) -> Result<(), QueueError> {
+        if !valid_key(key) {
+            return Err(QueueError::InvalidKey(key.to_owned()));
+        }
+        if !cfg!(mutant_queue_no_comment_key)
+            && self.keyed.create_missing(item, key, false).is_none()
+        {
+            // Posted or found before: a replay leaves the one comment as it is.
+            return Ok(());
+        }
+        let (located, _) = self.located_card(item)?;
+        if Self::own_by_key(&located.issue, key).is_some() {
+            self.keyed.seen(item, key);
+            return Ok(());
+        }
+        self.create_missing(item, &located.id, key, &marker::embed(key, body), false)
     }
 
-    fn upsert_comment(&self, _item: ItemId, _key: &str, _body: &str) -> Result<(), QueueError> {
-        Err(QueueError::Unsupported(WRITES))
+    fn upsert_comment(&self, item: ItemId, key: &str, body: &str) -> Result<(), QueueError> {
+        if !valid_key(key) {
+            return Err(QueueError::InvalidKey(key.to_owned()));
+        }
+        let wanted = marker::embed(key, body);
+        let (located, _) = self.located_card(item)?;
+        if let Some((id, current)) = Self::own_by_key(&located.issue, key) {
+            self.keyed.seen(item, key);
+            if current.replace("\r\n", "\n") == wanted.replace("\r\n", "\n") {
+                return Ok(());
+            }
+            let data = self.mutate(UPDATE_COMMENT, &json!({ "id": id, "body": wanted }))?;
+            if !data["updateIssueComment"].is_null() {
+                return Ok(());
+            }
+            // Deleted between the read and the edit: the deletion rules apply.
+        }
+        self.create_missing(item, &located.id, key, &wanted, true)
     }
 
     fn lint_target(&self, item: ItemId) -> Result<Card, QueueError> {
-        let query = format!("{ISSUE}\n{ISSUE_FIELDS}");
-        let data = self.request(
-            &query,
-            &json!({
-                "owner": self.owner,
-                "name": self.name,
-                "number": item.0,
-                "field": self.binding.status_field,
-                "first": self.sizes.comments,
-            }),
-            &["NOT_FOUND"],
-        )?;
-        let repository = &data["repository"];
-        if repository.is_null() {
-            return Err(QueueError::Setup(format!(
-                "the repository {} does not exist or is not visible to this identity",
-                self.binding.repository
-            )));
-        }
-        let node = &repository["issue"];
-        if node.is_null() {
-            return Err(QueueError::NotFound(item));
-        }
-        let items: Vec<&Value> = node["projectItems"]["nodes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|i| i["isArchived"].as_bool() != Some(true))
-            .collect();
-        let column = self
-            .projects
-            .iter()
-            .find_map(|project| {
-                let item = items
-                    .iter()
-                    .find(|i| i["project"]["id"].as_str() == Some(project.id.as_str()))?;
-                match item["status"]["optionId"].as_str() {
-                    None => Some(Some(Column::Backlog)),
-                    Some(option) => Some(project.column_of(option)),
-                }
-            })
-            .flatten()
-            .ok_or(QueueError::NotFound(item))?;
-        let id = text(node, "/id")?.to_owned();
-        let issue = self.issue(&id, node)?;
-        Ok(self.card(column, &issue, &mut PollStats::default()))
+        let (located, placement) = self.located_card(item)?;
+        let column = match &placement.option {
+            None => Column::Backlog,
+            Some(option) => self.projects[placement.project]
+                .column_of(option)
+                .ok_or(QueueError::NotFound(item))?,
+        };
+        Ok(self.card(column, &located.issue, &mut PollStats::default()))
     }
 }
 
-const WRITES: &str = "the Projects v2 backend does not write yet (#61)";
+/// Whether a message names GitHub's secondary rate limit.
+fn names_secondary(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("secondary rate limit")
+}
+
+/// The typed error of a request that produced no reply.
+fn transport_error(e: TransportError) -> QueueError {
+    match e {
+        TransportError::Status {
+            status: 403 | 429,
+            ref message,
+            ref rate_limit,
+            retry_after,
+        } if retry_after.is_some()
+            || names_secondary(message)
+            || rate_limit.as_ref().is_some_and(|l| l.remaining == 0) =>
+        {
+            QueueError::RateLimited(RateLimited {
+                secondary: retry_after.is_some() || names_secondary(message),
+                retry_after: retry_after.map(std::time::Duration::from_secs),
+                reset: rate_limit.as_ref().map(|l| l.reset),
+            })
+        }
+        TransportError::Status {
+            status: 401 | 403, ..
+        } => QueueError::Scope(e.to_string()),
+        TransportError::Gh { ref stderr, .. } if stderr.contains("gh auth login") => {
+            QueueError::Scope(e.to_string())
+        }
+        e => QueueError::Remote(e.to_string()),
+    }
+}
 
 fn text<'v>(value: &'v Value, pointer: &str) -> Result<&'v str, QueueError> {
     value
@@ -854,6 +1145,8 @@ fn login(actor: &Value) -> Option<String> {
 
 fn raw_comment(node: &Value) -> RawComment {
     RawComment {
+        id: node["id"].as_str().unwrap_or_default().to_owned(),
+        mine: node["viewerDidAuthor"].as_bool() == Some(true),
         author: login(&node["author"]),
         editor: login(&node["editor"]),
         body: node["body"].as_str().unwrap_or_default().to_owned(),

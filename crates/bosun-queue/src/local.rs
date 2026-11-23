@@ -77,8 +77,8 @@ use std::time::Duration;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, Value};
 
 use crate::card::{Card, Column, Comment, ItemId, Owned};
-use crate::marker::valid_key;
-use crate::queue::{Changes, Cursor, Queue, QueueError};
+use crate::marker::{self, valid_key};
+use crate::queue::{Changes, Cursor, Keyed, Queue, QueueError};
 
 /// How many times a write starts over when the user saved the file under it.
 pub const WRITE_ATTEMPTS: usize = 5;
@@ -100,6 +100,8 @@ pub struct LocalFile {
     path: PathBuf,
     /// Serialises this process's writes; the user's are handled by the re-read.
     write: Mutex<()>,
+    /// The keyed comments this backend posted or found, for the deletion rules of #5.
+    keyed: Keyed,
     /// Mutant (#51): the file's length at the last poll and the cards read then.
     #[cfg(mutant_queue_stale_poll)]
     cache: Mutex<Option<(u64, Vec<Card>)>>,
@@ -112,6 +114,7 @@ impl LocalFile {
         Self {
             path: path.into(),
             write: Mutex::new(()),
+            keyed: Keyed::default(),
             #[cfg(mutant_queue_stale_poll)]
             cache: Mutex::new(None),
         }
@@ -260,8 +263,13 @@ author = {}",
         if !valid_key(key) {
             return Err(QueueError::InvalidKey(key.to_owned()));
         }
+        // The key lives in its own field: a body rendered with its marker is stored without.
+        let body = marker::without(key, body);
+        // What the last attempt of the edit did: found the comment, or created it.
+        let mut outcome = None;
         self.edit(item, |card| {
             if let Some(existing) = comment_by_key(card, key) {
+                outcome = Some(None);
                 let same = existing
                     .get("body")
                     .and_then(Item::as_str)
@@ -272,6 +280,17 @@ author = {}",
                 set_str(existing, "body", body);
                 return true;
             }
+            let create = if cfg!(mutant_queue_local_no_key) {
+                Some(false)
+            } else {
+                self.keyed.create_missing(item, key, replace_existing)
+            };
+            let Some(recreated) = create else {
+                // Deleted by the user, and not to be posted again.
+                outcome = None;
+                return false;
+            };
+            outcome = Some(Some(recreated));
             let mut comment = Table::new();
             comment.decor_mut().set_prefix("\n");
             comment.insert("author", string_item(DAEMON_AUTHOR));
@@ -284,7 +303,13 @@ author = {}",
                 array.push(comment);
             }
             true
-        })
+        })?;
+        match outcome {
+            Some(None) => self.keyed.seen(item, key),
+            Some(Some(recreated)) => self.keyed.created(item, key, recreated),
+            None => {}
+        }
+        Ok(())
     }
 }
 
@@ -607,6 +632,21 @@ mod tests {
     #[test]
     fn suite_upsert_recreates_a_deleted_comment() {
         testsuite::upsert_recreates_a_deleted_comment(&mut LocalHarness::new());
+    }
+
+    #[test]
+    fn suite_a_sticky_deleted_twice_is_recreated_once() {
+        testsuite::a_sticky_deleted_twice_is_recreated_once(&mut LocalHarness::new());
+    }
+
+    #[test]
+    fn suite_a_deleted_comment_is_not_posted_again() {
+        testsuite::a_deleted_comment_is_not_posted_again(&mut LocalHarness::new());
+    }
+
+    #[test]
+    fn suite_a_body_with_its_marker_keeps_one_marker() {
+        testsuite::a_body_with_its_marker_keeps_one_marker(&mut LocalHarness::new());
     }
 
     #[test]

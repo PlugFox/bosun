@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::io;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -31,7 +32,9 @@ pub trait Queue {
     fn project(&self, item: ItemId, state: Owned, note: Option<&str>) -> Result<(), QueueError>;
 
     /// Posts `body` as a new comment on `item`, unless a comment with `key` already exists:
-    /// replayed with the same key, it leaves one comment (and does not edit it).
+    /// replayed with the same key, it leaves one comment (and does not edit it). A keyed
+    /// comment the user deleted is not posted again. `body` may already start with the marker
+    /// of `key` ([`crate::marker`]); it is not doubled.
     ///
     /// # Errors
     ///
@@ -40,7 +43,8 @@ pub trait Queue {
 
     /// Creates the comment with `key` on `item`, or replaces its body. The lookup by key runs
     /// before every create, so a crash between creating a comment and recording that it exists
-    /// never yields a second one; a comment the user deleted is recreated.
+    /// never yields a second one; a comment the user deleted is recreated once, and left
+    /// deleted when the user deletes it again.
     ///
     /// # Errors
     ///
@@ -240,11 +244,60 @@ impl Mark {
     }
 }
 
+/// What a backend remembers of the keyed comments it posted or found, for the deletion rules
+/// of #5: a keyed comment the user deleted is never reposted by [`Queue::comment`], and is
+/// recreated by [`Queue::upsert_comment`] once, not in a loop.
+///
+/// The record lives as long as the backend: after a restart a comment deleted before it may be
+/// recreated once more, never more.
+#[cfg(any(feature = "local_file", feature = "projects_v2"))]
+#[derive(Debug, Default)]
+pub(crate) struct Keyed(std::sync::Mutex<BTreeMap<(ItemId, String), bool>>);
+
+#[cfg(any(feature = "local_file", feature = "projects_v2"))]
+impl Keyed {
+    /// Notes that the comment with `key` exists on `item` (found by key, or created).
+    pub(crate) fn seen(&self, item: ItemId, key: &str) {
+        self.lock().entry((item, key.to_owned())).or_insert(false);
+    }
+
+    /// Whether a comment with `key` that is missing from `item` now is to be created, and if
+    /// so whether that is a recreation: `Some(false)` for a first creation (or one after a
+    /// crash lost the record), `Some(true)` to recreate a comment the user deleted, `None` to
+    /// leave it deleted. `upsert` tells `upsert_comment` from `comment`.
+    pub(crate) fn create_missing(&self, item: ItemId, key: &str, upsert: bool) -> Option<bool> {
+        match self.lock().get(&(item, key.to_owned())) {
+            None => Some(false),
+            Some(false) if upsert => Some(true),
+            // Mutant: a sticky comment deleted again is recreated again, without end.
+            Some(true) if upsert && cfg!(mutant_queue_recreate_always) => Some(true),
+            Some(_) => None,
+        }
+    }
+
+    /// Notes that the comment with `key` was created on `item`, `recreated` as
+    /// [`Keyed::create_missing`] said.
+    pub(crate) fn created(&self, item: ItemId, key: &str, recreated: bool) {
+        let mut map = self.lock();
+        let entry = map.entry((item, key.to_owned())).or_insert(false);
+        *entry |= recreated;
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<(ItemId, String), bool>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// Why a backend could not do what it was asked.
 #[derive(Debug)]
 pub enum QueueError {
-    /// The item has no card on the board.
+    /// The item has no card on the board: its issue does not exist (or was deleted), or its
+    /// card was removed. For an item in flight this is a cancel (#5).
     NotFound(ItemId),
+    /// The item's issue left the repository mid-item (#5): a cancel, never retried.
+    Gone(ItemId, Gone),
     /// A comment key the backend cannot carry; see [`crate::marker::valid_key`].
     InvalidKey(String),
     /// The board's content is not valid: a local file that does not parse, two cards with one
@@ -258,12 +311,63 @@ pub enum QueueError {
     /// A remote board could not be asked, or answered with an error (a GraphQL backend).
     /// Retrying later may succeed.
     Remote(String),
+    /// The remote board refused the request for its rate limit: retry after
+    /// [`RateLimited::wait`], in order, without a burst.
+    RateLimited(RateLimited),
+    /// The identity's credentials no longer allow the request: a token that lost a scope, was
+    /// revoked, or cannot see the project. Not transient: the repository pauses with this
+    /// error until the user fixes the token.
+    Scope(String),
     /// The board does not match the configuration: a project, its Status field or a column's
     /// option is missing, ambiguous, or was renamed since start. Not transient: the repository
     /// pauses with this error until the user fixes the board or the configuration.
     Setup(String),
-    /// The backend does not implement this call.
-    Unsupported(&'static str),
+    /// Another daemon claims items on this board (#5): its claim marker is on an item this
+    /// daemon claimed. Not transient: the repository is refused until the user stops one of
+    /// them (and deletes the marker comment, when the other daemon is gone for good).
+    Contested {
+        /// The item where the other daemon's marker was found.
+        item: ItemId,
+        /// The other daemons' ids, as their markers name them.
+        others: Vec<String>,
+    },
+}
+
+/// How an item's issue left the repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gone {
+    /// Transferred to the repository named here (`owner/name`).
+    Transferred(String),
+    /// Converted to a discussion.
+    Converted,
+}
+
+/// A rate-limit refusal of a remote board (#5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimited {
+    /// A secondary limit (too many requests or mutations in a short time) rather than the
+    /// hourly quota.
+    pub secondary: bool,
+    /// The wait the server named (`Retry-After`), if it named one.
+    pub retry_after: Option<Duration>,
+    /// When the hourly quota resets, in Unix seconds, if the server said.
+    pub reset: Option<u64>,
+}
+
+impl RateLimited {
+    /// The least wait before a retry: `Retry-After` when the server named it; for an exhausted
+    /// quota, the time from `now` (Unix seconds) to the reset; otherwise a minute, which is
+    /// what GitHub asks for after a secondary limit that names no wait.
+    #[must_use]
+    pub fn wait(&self, now: u64) -> Duration {
+        if let Some(after) = self.retry_after {
+            return after;
+        }
+        match self.reset {
+            Some(reset) if !self.secondary => Duration::from_secs(reset.saturating_sub(now)),
+            _ => Duration::from_secs(60),
+        }
+    }
 }
 
 impl QueueError {
@@ -273,7 +377,28 @@ impl QueueError {
     pub fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::Conflict(_) | Self::Io(_) | Self::Invalid(_) | Self::Remote(_)
+            Self::Conflict(_)
+                | Self::Io(_)
+                | Self::Invalid(_)
+                | Self::Remote(_)
+                | Self::RateLimited(_)
+        )
+    }
+
+    /// Whether the item is no longer on the board (its issue deleted, transferred or
+    /// converted, its card removed): the loop cancels an item in flight (#5), and the outbox
+    /// drops its rows.
+    #[must_use]
+    pub fn is_cancel(&self) -> bool {
+        matches!(self, Self::NotFound(_) | Self::Gone(..))
+    }
+
+    /// Whether the whole repository pauses with this error until the user acts.
+    #[must_use]
+    pub fn pauses_repository(&self) -> bool {
+        matches!(
+            self,
+            Self::Setup(_) | Self::Scope(_) | Self::Contested { .. }
         )
     }
 }
@@ -282,13 +407,36 @@ impl fmt::Display for QueueError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound(item) => write!(f, "item {item} has no card on the board"),
+            Self::Gone(item, Gone::Transferred(to)) => {
+                write!(f, "the issue of item {item} was transferred to {to}")
+            }
+            Self::Gone(item, Gone::Converted) => {
+                write!(f, "the issue of item {item} was converted to a discussion")
+            }
             Self::InvalidKey(key) => write!(f, "comment key `{key}` is not valid"),
             Self::Invalid(why) => write!(f, "the board is not valid: {why}"),
             Self::Conflict(why) => write!(f, "the board changed during a write: {why}"),
             Self::Io(e) => write!(f, "board I/O failed: {e}"),
             Self::Remote(why) => write!(f, "the board cannot be read: {why}"),
+            Self::RateLimited(limit) => {
+                let kind = if limit.secondary {
+                    "a secondary rate limit"
+                } else {
+                    "the rate limit"
+                };
+                match limit.retry_after {
+                    Some(after) => write!(f, "the board refused for {kind}; retry after {after:?}"),
+                    None => write!(f, "the board refused for {kind}"),
+                }
+            }
+            Self::Scope(why) => write!(f, "the identity's token cannot do this: {why}"),
             Self::Setup(why) => write!(f, "the board does not match the configuration: {why}"),
-            Self::Unsupported(what) => f.write_str(what),
+            Self::Contested { item, others } => write!(
+                f,
+                "another daemon claims items on this board ({}; its marker is on item {item}); \
+                 the repository is refused",
+                others.join(", ")
+            ),
         }
     }
 }

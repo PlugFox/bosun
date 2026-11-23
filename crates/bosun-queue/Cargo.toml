@@ -21,6 +21,9 @@ projects_v2 = ["dep:serde_json"]
 testsuite = []
 
 [dependencies]
+# The hidden key marker of the daemon's comments (`bosun_core::publish`, #56): one format for
+# every backend and for the prompt builder.
+bosun-core = { path = "../bosun-core" }
 serde_json = { workspace = true, optional = true }
 sha2.workspace = true
 toml_edit.workspace = true

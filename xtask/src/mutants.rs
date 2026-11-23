@@ -334,6 +334,22 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("identities_are_separate_sections"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_install_boot_trigger",
+        issue: 28,
+        breaks: "the Windows task starts at boot instead of at the user's logon",
+        package: "bosun-cli",
+        check: Check::Test("artefact::tests::each_artefact_names_a_logon_trigger"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_doctor_skip_retention",
+        issue: 28,
+        breaks: "doctor skips the cleanupPeriodDays check against the reingest window",
+        package: "bosun-cli",
+        check: Check::Test("doctor_warns_when_cleanup_period_is_below_the_reingest_window"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

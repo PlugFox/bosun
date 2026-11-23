@@ -87,6 +87,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_ingest_backfill_from_zero)",
   "cfg(mutant_ingest_unbounded)",
   "cfg(mutant_cli_sum_identities)",
+  "cfg(mutant_install_boot_trigger)",
+  "cfg(mutant_doctor_skip_retention)",
 ] }
 
 [workspace.lints.clippy]

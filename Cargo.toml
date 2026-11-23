@@ -31,6 +31,9 @@ file-id = "0.2.3"
 libc = "0.2.191"
 # File watching (#22): latency only; the rescan stays the source of truth.
 notify = "9.0.0"
+# The CommonMark parser of the publication sanitiser (#8, #56): parse only, no HTML writer, no
+# I/O; the allowlist re-emitter is ours.
+pulldown-cmark = { version = "0.13.6", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 regex = "1.13.1"
 # The JSON Schema of the local API (#12, #24), generated from `bosun-api` by `cargo xtask gen-api`.
@@ -147,6 +150,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_queue_no_author_filter)",
   "cfg(mutant_queue_ambiguous_ok)",
   "cfg(mutant_queue_no_cursor)",
+  "cfg(mutant_publish_passthrough)",
+  "cfg(mutant_publish_no_redact)",
+  "cfg(mutant_publish_truncate_back)",
+  "cfg(mutant_publish_short_fence)",
 ] }
 
 [workspace.lints.clippy]

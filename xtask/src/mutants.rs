@@ -755,6 +755,40 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("projects_v2::tests::an_unchanged_board_costs_one_request_per_poll"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_publish_passthrough",
+        issue: 56,
+        breaks: "the sanitiser passes agent-influenced Markdown through unchanged (#8)",
+        package: "bosun-core",
+        check: Check::Test("publish::sanitise::tests::the_hostile_corpus_comes_out_inert"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_publish_no_redact",
+        issue: 56,
+        breaks: "the secret redactor returns its input unchanged",
+        package: "bosun-core",
+        check: Check::Test("publish::report::tests::a_token_in_a_verdict_tail_is_redacted"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_publish_truncate_back",
+        issue: 56,
+        breaks: "an over-long verdict tail keeps its first lines instead of its last",
+        package: "bosun-core",
+        check: Check::Test(
+            "publish::report::tests::a_200_kb_tail_renders_under_the_cap_and_keeps_its_last_lines",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_publish_short_fence",
+        issue: 56,
+        breaks: "code fences have a fixed length instead of outrunning the content's backticks",
+        package: "bosun-core",
+        check: Check::Test("publish::report::tests::ten_backticks_cannot_close_the_fence"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

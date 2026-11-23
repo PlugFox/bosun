@@ -28,6 +28,10 @@ tokio = { workspace = true, features = [
   "time",
 ] }
 
+# The owner-only security descriptor of the named pipe (#71).
+[target.'cfg(windows)'.dependencies]
+bosun-proc = { path = "../bosun-proc" }
+
 [dev-dependencies]
 tempfile.workspace = true
 

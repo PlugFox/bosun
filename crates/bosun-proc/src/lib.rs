@@ -1,6 +1,6 @@
 //! Child processes (#7, #50): spawning into a container, tree kill, reaping by pid and start
-//! time, and the power request. Containment back ends and the session shim come in stage 2 (#8);
-//! the security descriptor of the local endpoint (D2) comes with the endpoint's hardening.
+//! time, the power request, and on Windows the security descriptor of the local endpoint (D2,
+//! #71). Containment back ends and the session shim come in stage 2 (#8).
 //!
 //! - [`Spawner`] starts a child from a [`ChildSpec`] (argv, a constructed environment, a working
 //!   directory) inside a container, with separate stdout and stderr pipes, and hands back a
@@ -11,6 +11,8 @@
 //!   still match, so a reused pid is never killed.
 //! - [`Power`] holds the machine awake while work runs: [`PowerGuard`] issues one request on
 //!   acquire and one release on drop. [`SystemPower`] is the platform's, [`FakePower`] counts.
+//! - `pipe` (Windows): `pipe::OwnerOnly` creates the daemon's named pipe with a DACL that admits
+//!   only the user it runs as, and `pipe::dacl` reads a handle's DACL back.
 //!
 //! # Containers
 //!
@@ -35,6 +37,8 @@
 #![allow(unsafe_code)]
 
 mod key;
+#[cfg(windows)]
+pub mod pipe;
 mod power;
 mod spawn;
 mod sys;

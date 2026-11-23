@@ -789,6 +789,22 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("publish::report::tests::ten_backticks_cannot_close_the_fence"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_api_default_pipe_acl",
+        issue: 71,
+        breaks: "the named pipe keeps the default DACL, which admits more than its owner",
+        package: "bosund",
+        check: Check::Test("listen::windows::tests::every_instance_admits_only_the_owner"),
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_doctor_skip_tool_paths",
+        issue: 71,
+        breaks: "doctor does not look for sh, the agent CLI and gh on the daemon's PATH",
+        package: "bosun-cli",
+        check: Check::Test("doctor_fails_naming_a_missing_tool"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

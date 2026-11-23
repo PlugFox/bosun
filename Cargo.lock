@@ -102,6 +102,7 @@ dependencies = [
  "bosun-core",
  "serde_json",
  "sha2",
+ "tempfile",
  "toml_edit",
 ]
 
@@ -215,6 +216,7 @@ dependencies = [
  "bosun-core",
  "bosun-heat",
  "bosun-ingest",
+ "bosun-proc",
  "bosun-store",
  "serde",
  "serde_json",

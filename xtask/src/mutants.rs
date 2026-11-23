@@ -581,6 +581,30 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("shell::tests::an_unknown_verb_names_an_unknown_touch"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_queue_lint_off",
+        issue: 51,
+        breaks: "card lint finds nothing, so a card with no verdict is claimable",
+        package: "bosun-queue",
+        check: Check::Test("lint::tests::a_card_with_no_verdict_is_not_claimable"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_local_no_key",
+        issue: 51,
+        breaks: "the local-file backend does not look comments up by key before posting",
+        package: "bosun-queue",
+        check: Check::Test("local::tests::suite_comment_replayed_with_one_key_leaves_one_comment"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_stale_poll",
+        issue: 51,
+        breaks: "the local-file poll trusts an unchanged file length, so a reorder is not seen",
+        package: "bosun-queue",
+        check: Check::Test("local::tests::suite_a_reorder_alone_appears_in_the_next_poll"),
+        platform: None,
+    },
 ];
 
 /// What one side (without or with the cfg) of a mutant run produced.

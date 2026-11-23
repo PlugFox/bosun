@@ -41,6 +41,8 @@ serde_json = "1.0.154"
 toml_edit = { version = "0.25.19", default-features = false, features = ["parse"] }
 # The store (#19): SQLite only, the bundled library, compile-time checked queries, embedded
 # migrations. Offline: `.sqlx/` is committed and `SQLX_OFFLINE` is set in .cargo/config.toml.
+# The snapshot hash of a queue item (#5, #51).
+sha2 = "0.11.1"
 sqlx = { version = "0.9.1", default-features = false, features = [
   "runtime-tokio",
   "sqlite-bundled",
@@ -123,6 +125,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_runner_question_from_text)",
   "cfg(mutant_ingest_exec_is_read)",
   "cfg(mutant_ingest_unknown_is_read)",
+  "cfg(mutant_queue_lint_off)",
+  "cfg(mutant_queue_local_no_key)",
+  "cfg(mutant_queue_stale_poll)",
 ] }
 
 [workspace.lints.clippy]

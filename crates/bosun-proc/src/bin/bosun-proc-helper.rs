@@ -4,6 +4,7 @@
 //! - `parent-stay`: starts a sleeping grandchild, reports its pid on stdout as
 //!   `bosun-proc-helper grandchild <pid>`, then sleeps.
 //! - `speak`: reports a line on stdout and one on stderr, then exits with 3.
+//! - `slow-speak`: reports a line, waits three seconds, reports another, then exits with 3.
 //!
 //! The helper has no other use: it exists so the tests run a real child without relying on
 //! any program of the machine.
@@ -40,6 +41,13 @@ fn main() {
         "speak" => {
             report("greeting", "hello");
             eprintln!("bosun-proc-helper alarm bell");
+            std::process::exit(3);
+        }
+        "slow-speak" => {
+            // Long enough for a holder to read the first line and drop before the rest comes.
+            report("first", "one");
+            std::thread::sleep(Duration::from_secs(3));
+            report("second", "two");
             std::process::exit(3);
         }
         other => {

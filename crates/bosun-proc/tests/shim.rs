@@ -2,17 +2,52 @@
 //! tests read the record and the output files the shim writes. Each test works in its own
 //! temporary directory and kills only the pids it started.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use bosun_proc::shim::{Record, Spec};
-use bosun_proc::{ProcessKey, is_running, reap, start_time};
+use bosun_proc::shim::{Offsets, Record, ShimSpawner, Spec, attach};
+use bosun_proc::{ChildSpec, ProcessKey, Spawner, StartTime, is_running, reap, start_time};
 use tempfile::TempDir;
+use tokio::io::AsyncReadExt;
 
 const SHIM: &str = env!("CARGO_BIN_EXE_bosun-shim");
 const HELPER: &str = env!("CARGO_BIN_EXE_bosun-proc-helper");
+
+/// The environment a helper child gets through a session: only what Windows programs need.
+fn helper_env() -> Vec<(OsString, OsString)> {
+    std::env::var_os("SystemRoot")
+        .map_or_else(Vec::new, |root| vec![(OsString::from("SystemRoot"), root)])
+}
+
+/// Whether `needle` occurs in `haystack`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Reads from `stream` until `marker` has come in, and returns every byte read so far.
+async fn read_through(stream: &mut (impl AsyncReadExt + Unpin), marker: &[u8]) -> Vec<u8> {
+    let mut got = Vec::new();
+    let mut chunk = [0_u8; 256];
+    while !contains(&got, marker) {
+        let n = stream.read(&mut chunk).await.expect("read the output");
+        assert_ne!(n, 0, "the output ended before {marker:?}");
+        got.extend_from_slice(&chunk[..n]);
+    }
+    got
+}
+
+/// The one session directory under `sessions`, and the record of its spec.
+fn only_record(sessions: &Path) -> PathBuf {
+    let mut dirs = fs::read_dir(sessions)
+        .expect("the sessions directory")
+        .map(|e| e.expect("an entry").path());
+    let session = dirs.next().expect("one session");
+    assert!(dirs.next().is_none(), "one session, not two");
+    session.join("spec.record")
+}
 
 /// Writes a spec that runs the helper with `role` into `dir`, and returns the spec's path.
 fn write_spec(dir: &Path, role: &str, cap: Duration) -> PathBuf {
@@ -192,4 +227,152 @@ fn the_wall_clock_cap_kills_the_child_and_records_it() {
         record.exit,
         "the shim exits with the recorded code"
     );
+}
+
+/// A session outlives the holder that spawned it: the holder drops its streams and its tree
+/// without killing, and a new attach from the record reads the rest of the output and the exit.
+/// The session has one exit: both readers see the same one, and the output is never doubled.
+#[tokio::test]
+async fn a_session_survives_its_holder_and_is_reattached() {
+    let dir = TempDir::new().expect("tempdir");
+    let sessions = dir.path().join("sessions");
+    let shims = ShimSpawner::new(SHIM, &sessions, Duration::from_secs(60));
+    let spec = ChildSpec {
+        program: HELPER.into(),
+        args: vec!["slow-speak".into()],
+        env: helper_env(),
+        cwd: dir.path().to_owned(),
+        stdin: false,
+    };
+
+    // The holder: reads the first line, then drops everything while the child still runs.
+    let (record_path, consumed) = {
+        let mut session = shims.spawn(&spec).expect("spawn through the shim");
+        let first = read_through(&mut session.stdout, b"bosun-proc-helper first one\n").await;
+        let record_path = only_record(&sessions);
+        let record = Record::read_from(&record_path).expect("the record");
+        assert!(record.exit.is_none(), "the child still runs");
+        assert!(is_running(record.shim), "the shim outlives the spawn");
+        assert!(is_running(record.child), "the child runs");
+        (record_path, first.len() as u64)
+        // The holder drops here, without a kill.
+    };
+
+    let mut again = attach(
+        &record_path,
+        Offsets {
+            stdout: consumed,
+            stderr: 0,
+        },
+    )
+    .expect("attach from the record");
+    let mut rest = Vec::new();
+    again
+        .stdout
+        .read_to_end(&mut rest)
+        .await
+        .expect("the rest of stdout");
+    assert_eq!(
+        String::from_utf8_lossy(&rest),
+        "bosun-proc-helper second two\n",
+        "the rest of the output"
+    );
+    let status = again.tree.wait().await.expect("the exit");
+    assert_eq!(status.code(), Some(3), "the child's exit");
+
+    let mut from_start = attach(&record_path, Offsets::default()).expect("attach again");
+    let mut all = Vec::new();
+    from_start
+        .stdout
+        .read_to_end(&mut all)
+        .await
+        .expect("all of stdout");
+    assert_eq!(
+        String::from_utf8_lossy(&all),
+        "bosun-proc-helper first one\nbosun-proc-helper second two\n",
+        "the whole output, once"
+    );
+    let again_status = from_start.tree.wait().await.expect("the same exit");
+    assert_eq!(again_status.code(), Some(3), "one session, one exit");
+    let record = Record::read_from(&record_path).expect("the record");
+    assert_eq!(record.exit, Some(3), "the record holds the exit");
+}
+
+/// A record whose shim pid is live but started at another time names another process, so attach
+/// refuses it. The same record with the shim's real start time attaches, so the refusal is the
+/// start time's doing and not the pid's.
+#[test]
+fn attach_refuses_a_record_whose_pid_changed_hands() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut other = Command::new(HELPER)
+        .arg("sleep")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn a live process");
+    let pid = other.id();
+    let start = start_time(pid).expect("start time").expect("live");
+    let output = dir.path().join("out");
+    fs::create_dir_all(&output).expect("output directory");
+    let (stdout, stderr) = (output.join("stdout.log"), output.join("stderr.log"));
+    fs::write(&stdout, b"").expect("stdout file");
+    fs::write(&stderr, b"").expect("stderr file");
+    let record_of = |shim: ProcessKey| Record {
+        shim,
+        child: ProcessKey { pid, start },
+        stdout: stdout.clone(),
+        stderr: stderr.clone(),
+        exit: None,
+        capped: false,
+    };
+    let changed = dir.path().join("changed.record");
+    record_of(ProcessKey {
+        pid,
+        start: StartTime::from_raw(start.raw() ^ 1),
+    })
+    .write_to(&changed)
+    .expect("write the record");
+    let genuine = dir.path().join("genuine.record");
+    record_of(ProcessKey { pid, start })
+        .write_to(&genuine)
+        .expect("write the record");
+
+    let refused = attach(&changed, Offsets::default()).is_err();
+    let attached = attach(&genuine, Offsets::default()).is_ok();
+    other.kill().ok();
+    other.wait().ok();
+    assert!(refused, "a record whose shim pid changed hands is refused");
+    assert!(
+        attached,
+        "the same record with the shim's start time attaches"
+    );
+}
+
+/// Killing a session through its tree ends the child and the shim, and the child's exit is in the
+/// record, so a reader that waits sees it end.
+#[tokio::test]
+async fn kill_through_the_tree_ends_the_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let sessions = dir.path().join("sessions");
+    let shims = ShimSpawner::new(SHIM, &sessions, Duration::from_secs(60));
+    let spec = ChildSpec {
+        program: HELPER.into(),
+        args: vec!["sleep".into()],
+        env: helper_env(),
+        cwd: dir.path().to_owned(),
+        stdin: false,
+    };
+    let mut session = shims.spawn(&spec).expect("spawn through the shim");
+    let record_path = only_record(&sessions);
+    let record = Record::read_from(&record_path).expect("the record");
+    assert!(record.exit.is_none(), "the child runs");
+
+    session.tree.kill_tree().expect("kill through the tree");
+    let status = session.tree.wait().await.expect("the exit after the kill");
+    let keys = [record.child, record.shim];
+    let left = survivors(&keys, Duration::from_secs(5));
+    clean_up(&keys);
+    assert!(left.is_empty(), "still running after the kill: {left:?}");
+    assert!(status.code().is_some(), "the session has an exit code");
 }

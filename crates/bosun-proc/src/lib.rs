@@ -20,6 +20,8 @@
 //! - [`shim`] (#8): the session shim's spec and record, and [`shim::run`], which the
 //!   `bosun-shim` binary calls: a child run in a container that outlives the daemon's death,
 //!   with its output drained to files, its exit recorded and its wall-clock cap enforced.
+//!   [`shim::ShimSpawner`] is the [`Spawner`] that starts children through the shim, and
+//!   [`shim::attach`] re-attaches to a session from its record: output, exit and kill.
 //!
 //! # Containers
 //!

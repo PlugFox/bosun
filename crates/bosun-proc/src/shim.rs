@@ -20,19 +20,33 @@
 //! hex-encoded UTF-8, so no value needs escaping. The record is replaced by a rename, so a
 //! reader sees the old record or the new one, never a part of either.
 
+use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::pin::Pin;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
+use std::task::{Context, Poll, ready};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::key::{ProcessKey, StartTime};
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio::time::Sleep;
+
+use crate::key::{ProcessKey, StartTime, is_running, reap};
+use crate::spawn::{ChildSpec, Spawned, Spawner, Tree, WaitFuture};
 use crate::{start_time, sys};
 
 /// The format version of the spec and the record. A reader refuses any other.
 pub const FORMAT_VERSION: u32 = 1;
+
+/// How often a reader of a session polls its record and its output file.
+const POLL: Duration = Duration::from_millis(20);
+
+/// How long the shim may take to record its child before the spawn is given up.
+const STARTUP: Duration = Duration::from_secs(10);
 
 /// How long the drains may outlive the child. A grandchild that keeps a pipe open must not
 /// hold the record: after this, the shim records the exit and leaves the rest to the container.
@@ -375,4 +389,315 @@ fn unhex(text: &str) -> io::Result<String> {
         bytes.push(u8::from_str_radix(pair, 16).map_err(|_| invalid("a hex digit"))?);
     }
     String::from_utf8(bytes).map_err(|_| invalid("hex text that is not UTF-8"))
+}
+
+/// How many bytes of each output stream a reader has consumed, so that [`attach`] resumes after
+/// them. The daemon keeps these counts; [`Offsets::default`] reads from the start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Offsets {
+    /// Bytes of the child's stdout already consumed.
+    pub stdout: u64,
+    /// Bytes of the child's stderr already consumed.
+    pub stderr: u64,
+}
+
+/// Starts children through the session shim (#8): [`Spawner::spawn`] writes a [`Spec`] into a
+/// new session directory and starts the `bosun-shim` binary on it, then reads the child's output
+/// and exit back from the shim's files and record through [`attach`].
+///
+/// The shim binary's path is given, not found: the daemon copies it to a versioned path under
+/// its state directory before it launches. Each session gets its own directory under `sessions`,
+/// which is created when missing.
+#[derive(Debug, Clone)]
+pub struct ShimSpawner {
+    shim: PathBuf,
+    sessions: PathBuf,
+    cap: Duration,
+}
+
+impl ShimSpawner {
+    /// A spawner that runs `shim` for each child, keeps sessions under `sessions`, and kills a
+    /// child that runs longer than `cap`.
+    #[must_use]
+    pub fn new(shim: impl Into<PathBuf>, sessions: impl Into<PathBuf>, cap: Duration) -> Self {
+        Self {
+            shim: shim.into(),
+            sessions: sessions.into(),
+            cap,
+        }
+    }
+}
+
+impl Spawner for ShimSpawner {
+    /// # Errors
+    ///
+    /// When the spec cannot be written, the shim cannot be started or does not record its child
+    /// within [`STARTUP`], or `spec.stdin` asks for a pipe, which a session does not carry yet.
+    /// A child the shim had started is ended then.
+    fn spawn(&self, spec: &ChildSpec) -> io::Result<Spawned> {
+        if spec.stdin {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "a session has no standard input pipe",
+            ));
+        }
+        fs::create_dir_all(&self.sessions)?;
+        let dir = self.sessions.join(session_name());
+        fs::create_dir(&dir)?;
+        let spec_path = dir.join("spec.json");
+        let session = Spec {
+            program: utf8(spec.program.as_os_str())?,
+            args: spec
+                .args
+                .iter()
+                .map(|a| utf8(a))
+                .collect::<io::Result<_>>()?,
+            env: spec
+                .env
+                .iter()
+                .map(|(k, v)| Ok((utf8(k)?, utf8(v)?)))
+                .collect::<io::Result<_>>()?,
+            cwd: spec.cwd.clone(),
+            output: dir.join("out"),
+            cap: self.cap,
+        };
+        session.write_to(&spec_path)?;
+
+        let mut command = Command::new(&self.shim);
+        command
+            .arg(&spec_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // Its own process group, so that killing the shim by its pid cannot reach the daemon.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut shim = command.spawn()?;
+        let record_path = spec_path.with_extension("record");
+        let record = match await_record(&record_path, &mut shim) {
+            Ok(record) => record,
+            Err(e) => {
+                shim.kill().ok();
+                if let Ok(record) = Record::read_from(&record_path) {
+                    reap(record.child).ok();
+                }
+                return Err(e);
+            }
+        };
+        debug_assert_eq!(record.shim.pid, shim.id());
+        // Dropping the std child neither kills the shim nor waits for it: the session outlives
+        // this spawn and its holder.
+        drop(shim);
+        attach(&record_path, Offsets::default())
+    }
+}
+
+/// Waits until the shim has written the record that names the child, and returns it. A shim
+/// that exits first failed to start the child.
+fn await_record(record_path: &Path, shim: &mut Child) -> io::Result<Record> {
+    let deadline = Instant::now() + STARTUP;
+    loop {
+        if let Ok(record) = Record::read_from(record_path) {
+            return Ok(record);
+        }
+        if let Some(status) = shim.try_wait()? {
+            return Err(io::Error::other(format!(
+                "the shim exited ({status}) before it recorded the child"
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the shim did not record its child in time",
+            ));
+        }
+        thread::sleep(POLL);
+    }
+}
+
+/// Re-attaches to the session of the record at `record_path`, running or finished, from the
+/// record alone: the stdout and stderr from `from` on, the exit once it is written, and kill
+/// through the shim. A session whose shim is gone and whose exit is recorded is still attached,
+/// so that its output and exit can be read.
+///
+/// # Errors
+///
+/// When the record cannot be read or is not of this version, or its shim's pid now belongs to a
+/// process that started at another time: that is another process, and nothing of the session is
+/// attached. Also when an output file cannot be opened.
+pub fn attach(record_path: &Path, from: Offsets) -> io::Result<Spawned> {
+    let record = Record::read_from(record_path)?;
+    if let Some(now) = start_time(record.shim.pid)? {
+        // Mutant (`mutant_shim_attach_by_pid`): the pid alone names the shim, so a pid that has
+        // changed hands is attached, and its output and kill go to another process.
+        if now != record.shim.start && !cfg!(mutant_shim_attach_by_pid) {
+            return Err(io::Error::other(
+                "the shim's pid belongs to another process; the record is refused",
+            ));
+        }
+    }
+    let stdout = Tail::open(record_path, record.shim, &record.stdout, from.stdout)?;
+    let stderr = Tail::open(record_path, record.shim, &record.stderr, from.stderr)?;
+    Ok(Spawned {
+        tree: Box::new(ShimTree {
+            record: record_path.to_owned(),
+            shim: record.shim,
+            child: record.child,
+        }),
+        stdout: Box::new(stdout),
+        stderr: Box::new(stderr),
+        stdin: None,
+    })
+}
+
+/// The container of a session, as the record names it: the child, and the shim that holds the
+/// container. Holds no handle, so dropping it kills nothing.
+#[derive(Debug)]
+struct ShimTree {
+    record: PathBuf,
+    shim: ProcessKey,
+    child: ProcessKey,
+}
+
+impl Tree for ShimTree {
+    fn key(&self) -> ProcessKey {
+        self.child
+    }
+
+    /// Kills the child, and leaves the rest to the shim: it sees its child end, records the exit
+    /// and ends, and on Windows the job goes with it, which kills the descendants. The shim is not
+    /// killed here, so that its exit is recorded rather than lost. On Unix the child's group is
+    /// the container, and the child's pid names it, so the group goes with the child.
+    fn kill_tree(&mut self) -> io::Result<()> {
+        reap(self.child).map(|_| ())
+    }
+
+    fn wait(&mut self) -> WaitFuture<'_> {
+        let (record, shim) = (self.record.clone(), self.shim);
+        Box::pin(async move {
+            loop {
+                // Read the shim's liveness before the record: a shim that is gone has written
+                // everything it will, so the record read after that is the final one.
+                let alive = is_running(shim);
+                if let Some(code) = Record::read_from(&record)?.exit {
+                    return Ok(status_of(code));
+                }
+                if !alive {
+                    return Err(io::Error::other("the session ended without an exit record"));
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        })
+    }
+
+    /// Not available for a session: the container's members are read through its holder, and an
+    /// attached session has none.
+    fn members(&self) -> io::Result<Vec<ProcessKey>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a session's members are held by its shim",
+        ))
+    }
+}
+
+/// One output stream of a session, read from the shim's file as it grows. It ends when the
+/// session has ended and the file holds no more bytes: the exit is recorded, or the shim is gone.
+struct Tail {
+    record: PathBuf,
+    shim: ProcessKey,
+    file: File,
+    pause: Option<Pin<Box<Sleep>>>,
+}
+
+impl Tail {
+    fn open(record: &Path, shim: ProcessKey, file: &Path, offset: u64) -> io::Result<Self> {
+        let mut file = File::open(file)?;
+        file.seek(SeekFrom::Start(offset))?;
+        Ok(Self {
+            record: record.to_owned(),
+            shim,
+            file,
+            pause: None,
+        })
+    }
+
+    /// Whether the session has ended: its exit is in the record, or its shim is no longer
+    /// running. Read before the file, so that the file read after a true answer is the last.
+    fn ended(&self) -> io::Result<bool> {
+        if Record::read_from(&self.record)?.exit.is_some() {
+            return Ok(true);
+        }
+        Ok(!is_running(self.shim))
+    }
+}
+
+impl AsyncRead for Tail {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        loop {
+            if let Some(pause) = self.pause.as_mut() {
+                ready!(pause.as_mut().poll(cx));
+                self.pause = None;
+            }
+            let ended = match self.ended() {
+                Ok(ended) => ended,
+                Err(e) => return Poll::Ready(Err(e)),
+            };
+            let this = &mut *self;
+            match this.file.read(buf.initialize_unfilled()) {
+                Ok(n) if n > 0 => {
+                    buf.advance(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(_) if ended => return Poll::Ready(Ok(())),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+            self.pause = Some(Box::pin(tokio::time::sleep(POLL)));
+        }
+    }
+}
+
+/// The status a shim-recorded exit code stands for. On Unix the code sits in the wait status'
+/// exit byte, as a child that called `exit` would have it.
+fn status_of(code: i32) -> ExitStatus {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatus::from_raw((code & 0xff) << 8)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(code.cast_unsigned())
+    }
+}
+
+/// A session directory name no other session of this daemon, or an earlier one, has.
+fn session_name() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!(
+        "{}-{nanos:x}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn utf8(text: &OsStr) -> io::Result<String> {
+    text.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| invalid("a spec value that is not UTF-8"))
 }

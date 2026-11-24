@@ -620,6 +620,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_shim_attach_by_pid",
+        issue: 8,
+        breaks: "attach checks the shim's pid only, so a record whose pid changed hands is attached",
+        package: "bosun-proc",
+        check: Check::Test("attach_refuses_a_record_whose_pid_changed_hands"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_runner_inline_daemon_comments",
         issue: 52,
         breaks: "the prompt builder inlines the daemon's own comments",

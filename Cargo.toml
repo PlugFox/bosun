@@ -197,6 +197,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_control_no_operator_token)",
   # #99: the git guards and the Projects v2 backend in the loop.
   "cfg(mutant_loop_skip_guards)",
+  # #70: the stage-1 read methods and CLI commands.
+  "cfg(mutant_cli_action_without_command)",
+  "cfg(mutant_api_queue_other_identity)",
 ] }
 
 [workspace.lints.clippy]

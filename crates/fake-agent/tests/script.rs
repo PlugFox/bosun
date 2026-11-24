@@ -129,6 +129,34 @@ fn a_script_error_exits_with_125() {
     );
 }
 
+/// A copy of `fake-agent` named like another tool reads the script named like it (#70).
+#[test]
+fn a_copy_reads_the_script_next_to_it() {
+    let scratch = tempfile::tempdir().unwrap();
+    let empty_config = scratch.path().join("gitconfig");
+    std::fs::write(&empty_config, "").unwrap();
+    let copy = scratch
+        .path()
+        .join(format!("gh{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(env!("CARGO_BIN_EXE_fake-agent"), &copy).unwrap();
+    std::fs::write(
+        scratch.path().join("gh.script"),
+        "print synthetic-login
+",
+    )
+    .unwrap();
+    let output = isolated(copy.to_str().unwrap(), scratch.path(), &empty_config)
+        .args(["api", "graphql", "--jq", ".data.viewer.login"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "synthetic-login
+"
+    );
+}
+
 #[test]
 fn the_script_dir_picks_the_items_script_and_wait_waits_for_its_file() {
     let scratch = tempfile::tempdir().unwrap();

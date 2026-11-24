@@ -670,7 +670,7 @@ identity = 'personal'
     let released = home.ok(&["kill", "--release"]);
     assert!(released.contains("released"), "{released}");
 
-    // Without the token's file the switches fail before they reach the daemon.
+    // Without the token's file the switches fail before they ask the daemon to act.
     let output = Command::new(env!("CARGO_BIN_EXE_bosun"))
         .args(["kill"])
         .env("BOSUN_CONFIG", home.path("config.toml"))

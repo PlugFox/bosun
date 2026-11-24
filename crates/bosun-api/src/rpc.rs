@@ -39,6 +39,8 @@ pub mod code {
     pub const UNAUTHORIZED: i32 = -32003;
     /// The agent's tool is over its per-attempt cap; the call is recorded as refused (#63).
     pub const RATE_CAPPED: i32 = -32004;
+    /// The item, session or card the request names is not known (#70).
+    pub const NOT_FOUND: i32 = -32005;
 }
 
 /// A request or notification.

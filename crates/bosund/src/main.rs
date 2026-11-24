@@ -36,15 +36,20 @@
 
 mod agent;
 mod api;
+mod board;
 mod commits;
 mod config_watch;
 mod control;
 mod events;
 mod executor;
+mod item;
 mod listen;
+mod overview;
 mod state;
 #[cfg(test)]
 mod stream_tests;
+#[cfg(test)]
+mod view_tests;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

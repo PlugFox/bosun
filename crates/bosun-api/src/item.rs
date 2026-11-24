@@ -1,0 +1,188 @@
+//! The `item.*` and `session.*` methods (#4, #70): one item's detail, restart-item, and the
+//! sessions bosun spawned.
+//!
+//! Item ids are the daemon's: `<repo>#<card>`, the repository's name in the configuration and
+//! the card's number on its board. Session ids are the provider's, as bosun assigned them at
+//! spawn.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::RepoRef;
+
+/// Params of `item.get`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ItemParams {
+    pub identity: String,
+    /// The item id, `<repo>#<card>`.
+    pub item: String,
+}
+
+/// Result of `item.get`: everything the store holds of one item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ItemDetail {
+    pub identity: String,
+    pub item: String,
+    pub repo: RepoRef,
+    /// Its state now (`ready`, `claimed`, `running`, `parked`, `verifying`, `landing`, `done`,
+    /// `needs_you`, `cancelled`).
+    pub state: String,
+    /// The park reason, outcome or needs-you reason of the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The current attempt; 0 before the first.
+    pub attempt: u32,
+    /// Attempts that failed and counted.
+    pub failed: u32,
+    pub created_ms: i64,
+    /// When it entered its state.
+    pub updated_ms: i64,
+    /// The snapshot its next attempt runs from, once claimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotView>,
+    /// Every arrow it took, in order.
+    pub transitions: Vec<TransitionView>,
+    /// Its attempts, by number.
+    pub attempts: Vec<AttemptView>,
+    /// What its agents said through `bosun-mcp` (questions, summaries, notes), in order.
+    pub calls: Vec<AgentCallView>,
+}
+
+/// The snapshot of an item (#5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotView {
+    pub hash: String,
+    pub taken_ms: i64,
+    /// The normalised body the agent and the verdict were given.
+    pub body: String,
+    /// The commit the item started from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
+    /// The branch HEAD was on at claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// One arrow of an item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TransitionView {
+    /// From 1 within the item.
+    pub seq: u32,
+    pub attempt: u32,
+    pub from: String,
+    pub to: String,
+    /// The park reason, outcome or reason of `to`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_to: Option<String>,
+    /// The event that caused it.
+    pub cause: String,
+    pub ts_ms: i64,
+}
+
+/// One attempt of an item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AttemptView {
+    pub number: u32,
+    /// `spawned`, `exited`, `verdict_running`, `pass`, `fail`, ...
+    pub state: String,
+    pub started_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_ms: Option<i64>,
+    /// The hash of the snapshot it ran from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_hash: Option<String>,
+    /// Its sessions, in order.
+    pub sessions: Vec<SessionInfo>,
+    /// Its verdict runs, in order.
+    pub verdicts: Vec<VerdictView>,
+}
+
+/// One verdict run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VerdictView {
+    pub run: u32,
+    /// The command that ran: the snapshot's verdict.
+    pub command: String,
+    pub started_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_ms: Option<i64>,
+    /// `pass`, `fail` or `timeout`; absent while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    /// The line of the verdict's output that says what it found, if one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_line: Option<String>,
+}
+
+/// One call of an item's agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentCallView {
+    pub attempt: u32,
+    /// `question`, `blocking_question`, `summary` or `note`.
+    pub kind: String,
+    pub body: String,
+    /// The call was over its tool's cap and refused.
+    pub refused: bool,
+    pub ts_ms: i64,
+}
+
+/// One session bosun spawned: in [`AttemptView::sessions`], and the result of `session.get`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionInfo {
+    pub item: String,
+    pub attempt: u32,
+    /// The session's number within the item: the `spawn` of its events.
+    pub spawn: u32,
+    /// The provider session id bosun assigned (a resume keeps it).
+    pub session: String,
+    pub provider: String,
+    /// `fresh`, `resume` or `reset`.
+    pub mode: String,
+    pub started_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_ms: Option<i64>,
+    /// `ok`, `limit`, `auth` or `crash`; absent while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<String>,
+    /// It has not ended.
+    pub running: bool,
+}
+
+/// Params of `session.get`: exactly one of `session` and `item`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionParams {
+    pub identity: String,
+    /// A provider session id; with a resume, its latest spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// An item id: its latest session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+}
+
+/// Params of `item.restart`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RestartParams {
+    /// The operator token the daemon wrote at start (see [`crate::control`]). Missing, it is
+    /// refused like a wrong one.
+    #[serde(default)]
+    pub operator: String,
+    pub identity: String,
+    /// The item id, `<repo>#<card>`; it must be in flight.
+    pub item: String,
+}
+
+/// Result of `item.restart`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RestartResult {
+    pub item: String,
+    /// The label put on the card: the loop kills the session, takes a new snapshot and
+    /// starts again, then removes it (#5).
+    pub label: String,
+}

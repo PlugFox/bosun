@@ -261,6 +261,11 @@ impl Loop {
             let _ = task.kill.send(true);
             let _ = task.handle.await;
         }
+        // Worktree mode: the old worktree is closed with its work kept; the claim opens a new one.
+        if let Some(wt) = &claimed.worktree {
+            self.close_worktree(wt, Some(&item)).await;
+            return;
+        }
         let config = self.config();
         let Some((repo, _)) = lookup(&config, &self.shared.options.repo) else {
             return;

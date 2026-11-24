@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.guard_ignored AS \"ignored?: String\",\n                      a.guard_git_config AS \"git_config?: String\"\n               FROM attempt a JOIN item i ON i.id = a.item_id\n               WHERE i.item_key = ? AND a.number = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "ignored?: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "guard_ignored"
+          }
+        }
+      },
+      {
+        "name": "git_config?: String",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "guard_git_config"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "cd031d9f5a4f174877f4754af5ed47d0d115632d6cd05ad0a9564edf8d8ad4d2"
+}

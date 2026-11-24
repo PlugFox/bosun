@@ -481,6 +481,25 @@ pub(crate) async fn session_child(
     Ok(())
 }
 
+pub(crate) async fn attempt_guards(
+    conn: &mut SqliteConnection,
+    item: &ItemId,
+    attempt: u32,
+    ignored_json: &str,
+    git_config_json: &str,
+) -> Result<(), Error> {
+    let attempt = attempt_id(conn, item, attempt).await?;
+    sqlx::query!(
+        "UPDATE attempt SET guard_ignored = ?, guard_git_config = ? WHERE id = ?",
+        ignored_json,
+        git_config_json,
+        attempt,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn end_run(conn: &mut SqliteConnection, end: &RunEnd) -> Result<(), Error> {
     let attempt = attempt_id(conn, &end.item, end.attempt).await?;
     let (exit, reset) = codec::exit(end.exit);

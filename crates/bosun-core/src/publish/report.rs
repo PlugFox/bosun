@@ -646,6 +646,7 @@ fn reason_text(reason: Reason) -> &'static str {
         Reason::Guard(Guard::GitConfig) => "git's own configuration changed",
         Reason::LandingRefused => "landing was refused",
         Reason::Handshake => "the session's bosun MCP server did not start, twice",
+        Reason::Identity => "the identity checks refused the session",
     }
 }
 

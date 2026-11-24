@@ -13,7 +13,7 @@
 //! | `Claim` | the claim task ([`claim`]): claim write and re-read (#5), snapshot, static lint, base capture, the verdict on the base commit (D7), the configuration and policy hashes |
 //! | `Spawn` | the session task ([`session`]): fail-closed identity checks, the prompt, the agent environment, the run row, the spawn with the power request held, the stream, the exit, the session's commit range |
 //! | `Kill` | the running task's kill signal; for a blocking question, after [`Options::question_grace`] |
-//! | `CheckPreconditions` | the verdict preconditions of `bosun-git` (and the guards of #59, see [`guards`]) |
+//! | `CheckPreconditions` | the guards of #59 ([`guards`]: protected paths, new ignored files, git's own configuration), then the verdict preconditions of `bosun-git` |
 //! | `RunVerdict` | the verdict task ([`verdict`]): always the snapshot's command |
 //! | `Land` | `local` landing: nothing to push |
 //! | `Project`, `Comment`, `Report` | the store's outbox, written with the transition; sending it is #65 |
@@ -35,6 +35,23 @@
 //! item leaves its commits there. An item that ends anywhere else has its work saved under
 //! `refs/bosun/items/<item>` (uncommitted changes as one extra commit) and the checkout is
 //! reset to the item's base, so the next item starts from a clean tree on the claim branch.
+//!
+//! # Guards and trailers (#59, #99)
+//!
+//! Git's own configuration is recorded at claim, the ignored files before each attempt's first
+//! session; both are stored on the attempt's row. Before the verdict, a protected path the
+//! commits touched (unless the snapshot's `allow-protected` lists it), a new ignored file
+//! outside the build directories or a change of git's configuration is Needs you with the
+//! guard, and the verdict does not run. Every session's git gets the trailer hooks in its own
+//! directory (`Item:`, `Run:`, `Session:` with the attempt's values); a commit without them is
+//! a `trailer_missing` line of the report, one with other values fails the preconditions.
+//!
+//! # The board
+//!
+//! The queue a repository names is connected at the loop's first poll ([`board`]). A board
+//! error that pauses the repository (`Setup`, `Scope`, another daemon's claim marker) holds
+//! every claim for [`BOARD_RETRY`]; a rate limit holds them for its wait; a card that left the
+//! board at claim cancels its item.
 //!
 //! # Parking
 //!
@@ -60,6 +77,7 @@
 //! commands (#65), and crash recovery (#68): an item found in flight at start keeps its
 //! repository waiting for #68.
 
+pub(crate) mod board;
 mod claim;
 mod git;
 mod hold;
@@ -100,6 +118,10 @@ pub(crate) const QUESTION_GRACE: Duration = Duration::from_secs(10);
 /// CLI starts its MCP servers before its first turn; this leaves room for a slow start of the
 /// CLI itself.
 pub(crate) const HANDSHAKE: Duration = Duration::from_mins(1);
+
+/// How long a board error that pauses the repository holds its claims before the board is
+/// asked again (#99): the user fixes the board, the token or the other daemon meanwhile.
+pub(crate) const BOARD_RETRY: Duration = Duration::from_mins(5);
 
 /// The MCP server of agent sessions: `bosun-mcp` next to this executable (as `cargo install`
 /// and a release archive place it), else on `PATH`, else the bare name, which the agent CLI
@@ -242,6 +264,8 @@ pub(crate) struct Claimed {
     pub(crate) snapshot: bosun_queue::Snapshot,
     /// The repository at claim, for the preconditions.
     pub(crate) base: bosun_git::Base,
+    /// Git's own configuration at claim, for the guards (#59).
+    pub(crate) git_config: bosun_git::GitConfig,
     /// The repository's configuration hash at claim.
     pub(crate) repo_hash: String,
     /// The repository's policy hash at claim.
@@ -259,6 +283,8 @@ pub(crate) enum ClaimOutcome {
     Lint(Vec<String>),
     /// The claim could not be carried out; the item goes back to Ready.
     Failed(String),
+    /// The board refused the claim ([`Loop::board_error`] says what follows).
+    Board(bosun_queue::QueueError),
 }
 
 /// What a task reports to the loop.
@@ -297,6 +323,8 @@ struct Current {
     failing: Vec<String>,
     /// The running session's child, for the wake check.
     child: park::ChildSlot,
+    /// The ignored files before the first session of the attempt numbered here (#59).
+    ignored: Option<(u32, Arc<bosun_git::Ignored>)>,
 }
 
 /// A lint result, cached per card body.
@@ -456,6 +484,33 @@ impl Loop {
         self.halted = true;
     }
 
+    /// A board error of a poll or a claim (#5, #61). One that pauses the repository (the
+    /// board does not match the configuration, the token lost a scope, another daemon claims
+    /// on this board) holds every claim for [`BOARD_RETRY`], then the board is asked again; a
+    /// rate limit holds them for the wait the server named; anything else is retried at the
+    /// next poll.
+    fn board_error(&mut self, what: &str, error: &bosun_queue::QueueError) {
+        let hold = if error.pauses_repository() {
+            self.shared.trouble(format!(
+                "{what}: {error}; the repository is paused, retried in {} min",
+                BOARD_RETRY.as_secs() / 60
+            ));
+            Some(BOARD_RETRY)
+        } else if let bosun_queue::QueueError::RateLimited(limit) = error {
+            let now = u64::try_from(now_ms() / 1000).unwrap_or_default();
+            let wait = limit.wait(now);
+            self.shared
+                .trouble(format!("{what}: {error}; waiting {} s", wait.as_secs()));
+            Some(wait)
+        } else {
+            self.shared.trouble(format!("{what}: {error}"));
+            None
+        };
+        if let Some(hold) = hold {
+            self.backoff = Some(Instant::now() + hold);
+        }
+    }
+
     /// Applies `event` to the item in flight, then every event its effects produce at once.
     async fn apply(&mut self, event: Event) {
         let mut pending = VecDeque::from([event]);
@@ -603,6 +658,10 @@ impl Loop {
         if self.hashes_changed(&claimed) {
             return Some(Event::ConfigChanged);
         }
+        if cur.ignored.as_ref().is_none_or(|(n, _)| *n != attempt) {
+            self.record_guards(attempt, &claimed).await;
+        }
+        let cur = self.current.as_ref()?;
         let (kill, kill_rx) = watch::channel(false);
         let shared = self.shared.clone();
         let config = self.config();
@@ -642,6 +701,56 @@ impl Loop {
             cur.child = child;
         }
         None
+    }
+
+    /// Before the first session of `attempt`: records the ignored files (#59) and stores them
+    /// with git's configuration at claim on the attempt's row, for crash recovery (#68). A
+    /// snapshot that cannot be taken leaves none, and the attempt fails its preconditions.
+    async fn record_guards(&mut self, attempt: u32, claimed: &Claimed) {
+        let config = self.config();
+        let Some((repo, _)) = lookup(&config, &self.shared.options.repo) else {
+            return;
+        };
+        let path = repo.path.clone();
+        let ignored =
+            match blocking(move || bosun_git::Ignored::capture(&bosun_git::Git::new(path))).await {
+                Ok(ignored) => Arc::new(ignored),
+                Err(e) => {
+                    self.shared
+                        .trouble(format!("the ignored files cannot be recorded: {e}"));
+                    return;
+                }
+            };
+        let Some(cur) = self.current.as_mut() else {
+            return;
+        };
+        cur.ignored = Some((attempt, ignored.clone()));
+        let write = Write::AttemptGuards {
+            item: cur.item.id.clone(),
+            attempt,
+            ignored_json: serde_json::Value::from(
+                ignored.paths.iter().cloned().collect::<Vec<_>>(),
+            )
+            .to_string(),
+            git_config_json: serde_json::Value::Object(
+                claimed
+                    .git_config
+                    .files
+                    .iter()
+                    .map(|(path, digest)| {
+                        (
+                            path.to_string_lossy().into_owned(),
+                            serde_json::Value::from(digest.clone()),
+                        )
+                    })
+                    .collect(),
+            )
+            .to_string(),
+        };
+        if let Err(e) = self.shared.deps.writer.write(vec![write]).await {
+            self.shared
+                .trouble(format!("the guard snapshots cannot be stored: {e}"));
+        }
     }
 
     async fn start_verdict(&mut self, attempt: u32, run: u32) {
@@ -702,8 +811,50 @@ impl Loop {
         let Some((repo, _)) = lookup(&config, &self.shared.options.repo) else {
             return Event::ConfigChanged;
         };
-        let path = repo.path.clone();
+        let Some(ignored) = cur
+            .ignored
+            .as_ref()
+            .filter(|(n, _)| *n == attempt)
+            .map(|(_, ignored)| ignored.clone())
+        else {
+            self.shared.trouble(format!(
+                "attempt {attempt} has no ignored-file snapshot; it fails its preconditions"
+            ));
+            return Event::Preconditions {
+                attempt,
+                passed: false,
+            };
+        };
         let item = cur.item.id.clone();
+
+        // The guards first: a refusal is Needs you, whatever the preconditions say.
+        let (guard_repo, guard_claimed) = (repo.clone(), claimed.clone());
+        let refused = blocking(move || guards(&guard_repo, &guard_claimed, &ignored)).await;
+        match refused {
+            Ok(refusals) => {
+                if let Some((guard, _)) = refusals.first() {
+                    let text: Vec<String> = refusals.iter().map(|(_, r)| r.to_string()).collect();
+                    self.shared.trouble(format!(
+                        "{item}: attempt {attempt} is refused before its verdict: {}",
+                        text.join("; ")
+                    ));
+                    return Event::Refused {
+                        attempt,
+                        guard: *guard,
+                    };
+                }
+            }
+            Err(e) => {
+                self.shared
+                    .trouble(format!("the guards could not be checked: {e}"));
+                return Event::Preconditions {
+                    attempt,
+                    passed: false,
+                };
+            }
+        }
+
+        let path = repo.path.clone();
         let runs = self
             .shared
             .deps
@@ -714,15 +865,10 @@ impl Loop {
         let checked =
             blocking(move || git::preconditions(&path, &claimed.base, &item, &runs)).await;
         match checked {
-            Ok(reasons) if reasons.is_empty() => {
-                if let Some(guard) = guards() {
-                    return Event::Refused { attempt, guard };
-                }
-                Event::Preconditions {
-                    attempt,
-                    passed: true,
-                }
-            }
+            Ok(reasons) if reasons.is_empty() => Event::Preconditions {
+                attempt,
+                passed: true,
+            },
             Ok(reasons) => {
                 let text: Vec<String> = reasons.iter().map(ToString::to_string).collect();
                 eprintln!(
@@ -808,6 +954,19 @@ impl Loop {
                     ClaimOutcome::Failed(e) => {
                         self.shared.trouble(format!("claiming {item} failed: {e}"));
                         self.backoff = Some(Instant::now() + Duration::from_mins(1));
+                        Event::ClaimLost
+                    }
+                    // The card left the board meanwhile (#5): the item is cancelled.
+                    ClaimOutcome::Board(e) if e.is_cancel() => {
+                        self.shared
+                            .trouble(format!("claiming {item}: {e}; cancelled"));
+                        Event::User(bosun_core::UserCommand::Cancel)
+                    }
+                    ClaimOutcome::Board(e) => {
+                        self.board_error(&format!("claiming {item}"), &e);
+                        if self.backoff.is_none() {
+                            self.backoff = Some(Instant::now() + Duration::from_mins(1));
+                        }
                         Event::ClaimLost
                     }
                 };
@@ -920,8 +1079,7 @@ impl Loop {
         let changes = match blocking(move || queue.poll(cursor.as_ref())).await {
             Ok(changes) => changes,
             Err(e) => {
-                self.shared
-                    .trouble(format!("the board cannot be read: {e}"));
+                self.board_error("the board cannot be read", &e);
                 return;
             }
         };
@@ -1051,6 +1209,7 @@ impl Loop {
             power: None,
             failing: Vec::new(),
             child: park::ChildSlot::default(),
+            ignored: None,
         });
         self.apply(Event::Claim).await;
     }
@@ -1128,9 +1287,42 @@ impl Loop {
     }
 }
 
-/// The guards of #59 that send an item to Needs you before its verdict (ignored files, git's
-/// configuration, protected paths). `bosun-git`'s snapshots for them are #59 (PR #94); until it
-/// lands, no guard refuses. The seam: capture at claim into [`Claimed`], compare here.
-fn guards() -> Option<bosun_core::Guard> {
-    None
+/// The guards of #59 that send an item to Needs you before its verdict, each with what it
+/// found: protected paths the item's commits touched that its snapshot does not allow, new
+/// ignored files outside the build directories since `ignored` (before the attempt's first
+/// session), and changes to git's own configuration since the claim. Empty when none refuses.
+fn guards(
+    repo: &Repo,
+    claimed: &Claimed,
+    ignored: &bosun_git::Ignored,
+) -> Result<Vec<(bosun_core::Guard, bosun_git::Refusal)>, bosun_git::Error> {
+    use bosun_core::Guard;
+    use bosun_git::Refusal;
+
+    if cfg!(mutant_loop_skip_guards) {
+        // Mutant: the loop skips the guards of #59 and goes on to the preconditions.
+        return Ok(Vec::new());
+    }
+    let git = bosun_git::Git::new(&repo.path);
+    let mut refusals = bosun_git::protected(
+        &git,
+        &claimed.base,
+        |path| repo.policy.protects(path),
+        &claimed.snapshot.contract.allow_protected,
+    )?;
+    refusals.extend(bosun_git::ignored(&git, ignored, &repo.build_dirs)?);
+    refusals.extend(bosun_git::config(&git, &claimed.git_config)?);
+    Ok(refusals
+        .into_iter()
+        .map(|refusal| {
+            let guard = match &refusal {
+                Refusal::Protected { .. } => Guard::ProtectedPath,
+                Refusal::NewIgnored { .. } => Guard::IgnoredFile,
+                // A change of git's configuration, and any refusal added later: Needs you all
+                // the same.
+                _ => Guard::GitConfig,
+            };
+            (guard, refusal)
+        })
+        .collect())
 }

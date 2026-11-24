@@ -407,6 +407,7 @@ fn reason_of(state: State) -> Option<String> {
             Reason::Guard(_) => "guard",
             Reason::LandingRefused => "landing_refused",
             Reason::Handshake => "handshake",
+            Reason::Identity => "identity",
         },
         _ => return None,
     };

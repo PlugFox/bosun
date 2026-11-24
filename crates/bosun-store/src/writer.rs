@@ -92,6 +92,15 @@ pub enum Write {
         pid: u32,
         pid_started_ms: i64,
     },
+    /// The guard snapshots of #59 for an attempt (#99), as JSON: the ignored files before its
+    /// first session and git's own configuration at claim. Crash recovery (#68) compares the
+    /// repository with them again.
+    AttemptGuards {
+        item: ItemId,
+        attempt: u32,
+        ignored_json: String,
+        git_config_json: String,
+    },
     /// A session ended; clears the attempt's child process.
     RunEnded(RunEnd),
     /// The commit range of a session that ended: each commit of it is linked to the session
@@ -335,6 +344,12 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             pid,
             pid_started_ms,
         } => work::session_child(conn, &item, attempt, pid, pid_started_ms).await,
+        Write::AttemptGuards {
+            item,
+            attempt,
+            ignored_json,
+            git_config_json,
+        } => work::attempt_guards(conn, &item, attempt, &ignored_json, &git_config_json).await,
         Write::RunEnded(end) => work::end_run(conn, &end).await,
         Write::RunCommits(range) => work::run_commits(conn, &range).await,
         Write::VerdictStarted(start) => work::start_verdict(conn, &start).await,

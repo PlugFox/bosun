@@ -431,8 +431,8 @@ fn daemon_id() -> String {
         .collect()
 }
 
-/// Starts the loop of every repository whose queue is a local file (#62). A Projects v2 board
-/// is not run by the loop yet.
+/// Starts the loop of every repository with a queue: a local file (#62) or a Projects v2 board
+/// (#99).
 fn start_loops(
     config: &Config,
     state: &State,
@@ -444,18 +444,27 @@ fn start_loops(
     let daemon_id = daemon_id();
     let mut loops = Vec::new();
     for (name, repo) in &config.repos {
-        let file = match &repo.queue {
-            Some(Queue::LocalFile { file }) => file.clone(),
+        let Some(served) = state.identities.get(&repo.identity) else {
+            continue;
+        };
+        // The board: a local file, or a Projects v2 board connected at the loop's first poll
+        // (#99), polled at the backend's active pace rather than the local file's.
+        let (queue, poll): (executor::board::Shared, Duration) = match &repo.queue {
+            Some(Queue::LocalFile { file }) => (Arc::new(LocalFile::new(file)), LOOP_POLL),
+            Some(Queue::Projects { owner, number }) => {
+                let Some(identity) = config.identities.get(&repo.identity) else {
+                    continue;
+                };
+                (
+                    Arc::new(executor::board::projects_v2(identity, repo, owner, *number)),
+                    bosun_queue::projects_v2::ACTIVE,
+                )
+            }
             Some(_) => {
-                eprintln!(
-                    "bosund: repository {name}: only a local-file queue is run in this version"
-                );
+                eprintln!("bosund: repository {name}: its queue kind is not run in this version");
                 continue;
             }
             None => continue,
-        };
-        let Some(served) = state.identities.get(&repo.identity) else {
-            continue;
         };
         let work_dir = served
             .database
@@ -468,7 +477,7 @@ fn start_loops(
             daemon_id: daemon_id.clone(),
             agent: agent.clone(),
             work_dir,
-            poll: LOOP_POLL,
+            poll,
             recheck: Duration::from_mins(1),
             question_grace: executor::QUESTION_GRACE,
             mcp: mcp.clone(),
@@ -481,7 +490,7 @@ fn start_loops(
             reader: served.store.reader().clone(),
             writer: served.store.writer().clone(),
             events: served.events.clone(),
-            queue: Arc::new(LocalFile::new(file)),
+            queue,
             spawner: Arc::new(NativeSpawner),
             power: Arc::new(SystemPower),
             logins: Arc::new(executor::GhLogins),

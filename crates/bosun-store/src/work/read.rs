@@ -347,6 +347,30 @@ impl Reader {
             .collect()
     }
 
+    /// The guard snapshots recorded for attempt `attempt` of `item` (#99), as JSON: the ignored
+    /// files and git's own configuration. `None` when the attempt has none recorded.
+    ///
+    /// # Errors
+    ///
+    /// A database error.
+    pub async fn attempt_guards(
+        &self,
+        item: &ItemId,
+        attempt: u32,
+    ) -> Result<Option<(String, String)>, Error> {
+        let row = sqlx::query!(
+            r#"SELECT a.guard_ignored AS "ignored?: String",
+                      a.guard_git_config AS "git_config?: String"
+               FROM attempt a JOIN item i ON i.id = a.item_id
+               WHERE i.item_key = ? AND a.number = ?"#,
+            item.0,
+            attempt,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|row| row.ignored.zip(row.git_config)))
+    }
+
     /// The sessions bosun spawned for `item`, in order.
     ///
     /// # Errors

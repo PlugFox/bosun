@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bosun_api::{EventBody, OutputStream};
 use bosun_config::{Config, Repo};
 use bosun_core::{Event, Exit, ItemId, Rules, SpawnMode};
-use bosun_git::Git;
+use bosun_git::{Git, Hooks, Trailers};
 use bosun_proc::ChildSpec;
 use bosun_runner::claude::{ClaudeRunner, mcp_config};
 use bosun_runner::{
@@ -276,10 +276,13 @@ async fn resumed_id(shared: &Shared, run: &Run) -> Option<SessionId> {
 }
 
 /// Runs one session to its end and records it. Returns the machine's event: its exit as the
-/// runner classified it, `auth` when the identity checks refused (#2), `crash` when it could
-/// not be started, and `resume_failed` when a resume crashed before the session came up (the
-/// CLI found no conversation to resume, #66): the machine then resets the tree to the last
-/// commit and starts a fresh session, uncounted.
+/// runner classified it, `identity_refused` when the identity checks refused (#2, #99),
+/// `crash` when it could not be started, and `resume_failed` when a resume crashed before the
+/// session came up (the CLI found no conversation to resume, #66): the machine then resets the
+/// tree to the last commit and starts a fresh session, uncounted.
+///
+/// The session's git carries the trailer hooks of #59: every commit it makes gets `Item:`,
+/// `Run:` and `Session:` with the attempt's values.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn session(
     shared: &Arc<Shared>,
@@ -297,8 +300,8 @@ pub(crate) async fn session(
         shared.trouble("the agent CLI `claude` was not found on PATH");
         return crash;
     };
-    // Fail closed before spawn (#2, rule 2). There is no identity reason in the store yet:
-    // a refusal here is Needs you as `auth`, with the refusal logged.
+    // Fail closed before spawn (#2, rule 2): a refusal here is Needs you as `identity`, with
+    // the refusal logged (#99).
     let bundle = {
         let (repo, name, identity) = (repo.path.clone(), repo.identity.clone(), identity.clone());
         let shared = shared.clone();
@@ -313,7 +316,10 @@ pub(crate) async fn session(
         Ok(bundle) => bundle,
         Err(e) => {
             shared.trouble(format!("{}: {e}", run.item));
-            return run.exited(Exit::Auth);
+            return Event::IdentityRefused {
+                attempt: run.attempt,
+                spawn: run.spawn,
+            };
         }
     };
 
@@ -366,7 +372,7 @@ pub(crate) async fn session(
         .work_dir
         .join("sessions")
         .join(session_id.as_str());
-    let files = (|| -> Result<(SessionDir, PathBuf, PathBuf), String> {
+    let files = (|| -> Result<(SessionDir, PathBuf, PathBuf, Hooks), String> {
         let dir = SessionDir::create(dir).map_err(|e| e.to_string())?;
         let system = dir.0.join("system.md");
         std::fs::write(&system, &prompt.system).map_err(|e| e.to_string())?;
@@ -376,9 +382,11 @@ pub(crate) async fn session(
             &mcp_file(shared, repo, &run.item, &session_id, credential.token())?,
         )
         .map_err(|e| format!("{}: {e}", mcp.display()))?;
-        Ok((dir, system, mcp))
+        let hooks = Hooks::install(dir.0.join("git-hooks"))
+            .map_err(|e| format!("the trailer hooks: {e}"))?;
+        Ok((dir, system, mcp, hooks))
     })();
-    let (session_dir, system_file, mcp_config_file) = match files {
+    let (session_dir, system_file, mcp_config_file, hooks) = match files {
         Ok(files) => files,
         Err(e) => {
             shared.trouble(format!("{}: the session files: {e}", run.item));
@@ -405,24 +413,27 @@ pub(crate) async fn session(
         SpawnMode::Resume => runner.resume_command(&session_id, &ctx),
         SpawnMode::Fresh | SpawnMode::Reset => runner.command(&ctx),
     };
-    let env = match identity::agent_env(&bundle, &shared.options.work_dir) {
+    let mut env = match identity::agent_env(&bundle, &shared.options.work_dir) {
         Ok(env) => env,
         Err(e) => {
             shared.trouble(format!("{}: the agent environment: {e}", run.item));
             return crash;
         }
     };
+    // The trailer hooks of #59 (D6 of #7), in the session's directory: only this session's git
+    // reaches them, through command-scope configuration after the identity's own entries.
+    env.add_git_config(hooks.git_config());
+    let trailers = Trailers {
+        item: run.item.0.clone(),
+        run: git::run_label(run.attempt, run.spawn),
+        session: session_id.to_string(),
+    };
+    for (name, value) in Hooks::env(&trailers) {
+        env.add_session_var(&name, value);
+    }
     let mut vars: Vec<(OsString, OsString)> =
         env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect();
     vars.extend(command.env.iter().cloned());
-    // What the trailer hook of #59 reads; harmless without it.
-    for (name, value) in [
-        ("BOSUN_ITEM", run.item.0.clone()),
-        ("BOSUN_RUN", git::run_label(run.attempt, run.spawn)),
-        ("BOSUN_SESSION", session_id.to_string()),
-    ] {
-        vars.push((name.into(), value.into()));
-    }
 
     let start_head = {
         let git_repo = git_repo.clone();

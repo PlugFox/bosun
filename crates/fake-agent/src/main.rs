@@ -31,6 +31,7 @@
 //! | `write <path> <text>` | writes the text and a line break to the file, creating its directories (an untracked file) |
 //! | `commit <path> <message>` | writes the message to the file, then `git add` and `git commit -m <message>` |
 //! | `git <args>` | runs git with the whitespace-separated arguments |
+//! | `unset <name>` | the later `commit` and `git` commands run without the variable (an agent turning the trailer marker off, say) |
 //! | `stdin <path>` | copies standard input to the file (to check the prompt) |
 //! | `argv <path>` | writes the arguments, one per line (to check the command) |
 //! | `sleep <ms>` | sleeps |
@@ -48,10 +49,14 @@ mod mcp;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 /// The exit code of a script error, chosen to be unlike an agent CLI's.
 const SCRIPT_ERROR: u8 = 125;
+
+/// The variables `unset` removed from the git commands that follow.
+static UNSET: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 fn main() -> ExitCode {
     match run() {
@@ -176,6 +181,13 @@ fn step(
             git(&["commit", "-q", "-m", message])
         }
         "git" => git(&rest.split_whitespace().collect::<Vec<_>>()),
+        "unset" => {
+            UNSET
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(rest.to_owned());
+            Ok(())
+        }
         "stdin" => {
             let mut input = Vec::new();
             std::io::stdin()
@@ -248,7 +260,11 @@ fn write_file(path: &Path, text: &str) -> Result<(), String> {
 }
 
 fn git(args: &[&str]) -> Result<(), String> {
-    let status = Command::new("git")
+    let mut command = Command::new("git");
+    for name in UNSET.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+        command.env_remove(name);
+    }
+    let status = command
         .args(args)
         .status()
         .map_err(|e| format!("cannot run git: {e}"))?;

@@ -489,6 +489,75 @@ mod tests {
         conn.close().await.unwrap();
     }
 
+    /// #99: migration 9 rebuilds `item` to allow the reason `identity` and gives `attempt` its
+    /// guard snapshots; an item of version 8 with an attempt survives it, the foreign keys still
+    /// hold, and the attempt's guards are written and read back.
+    #[tokio::test]
+    async fn an_item_of_version_8_survives_migration_9_and_its_attempt_takes_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = open(&path, &Options::default(), &up_to(8)).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO repo (id, path) VALUES (1, '/fixture/repo');
+             INSERT INTO item (id, item_key, repo_id, state, reason, attempt_number, seq,
+                               created_ms, updated_ms)
+             VALUES (3, 'demo#1', 1, 'needs_you', 'handshake', 1, 4, 10, 20);
+             INSERT INTO attempt (id, item_id, number, state, spawn, started_ms)
+             VALUES (1, 3, 1, 'exited', 1, 10);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let pool = store.reader().pool();
+        let broken: Vec<(String, i64)> =
+            sqlx::query_as("SELECT \"table\", rowid FROM pragma_foreign_key_check")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        assert!(broken.is_empty(), "{broken:?}");
+        let id = bosun_core::ItemId::new("demo#1");
+        assert_eq!(store.reader().attempt_guards(&id, 1).await.unwrap(), None);
+        store
+            .writer()
+            .write(vec![crate::Write::AttemptGuards {
+                item: id.clone(),
+                attempt: 1,
+                ignored_json: "[\"x.log\"]".to_owned(),
+                git_config_json: "{}".to_owned(),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.reader().attempt_guards(&id, 1).await.unwrap(),
+            Some(("[\"x.log\"]".to_owned(), "{}".to_owned()))
+        );
+        store.close().await.unwrap();
+
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE item SET reason = 'identity' WHERE id = 3")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let refused = sqlx::query("UPDATE item SET reason = 'unknown' WHERE id = 3")
+            .execute(&mut conn)
+            .await;
+        assert!(refused.is_err());
+        conn.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn a_newer_database_is_refused_untouched() {
         let dir = tempfile::tempdir().unwrap();

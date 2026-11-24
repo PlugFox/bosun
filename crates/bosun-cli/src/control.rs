@@ -51,7 +51,7 @@ pub(crate) fn endpoint(global: &Global) -> Result<Endpoint, Failure> {
 
 /// Connects, then reads the operator token: a daemon that is down is exit code 4, whatever
 /// token file an earlier run left.
-async fn connect_operator(global: &Global) -> Result<(Client, String), Failure> {
+pub(crate) async fn connect_operator(global: &Global) -> Result<(Client, String), Failure> {
     let client = connect(global).await?;
     let token = bosun_client::operator::read(&endpoint(global)?)
         .map_err(|e| Failure::new(exit::FAILED, e))?;

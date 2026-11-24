@@ -18,6 +18,7 @@
 //! bosun lint <repo>#<card> | bosun lint --repo <name> <card>
 //! bosun session tail <repo>#<card> | <session id>
 //! bosun tui [--identity <name>]
+//! bosun with [--repo <name>] [--identity <name>] <resource>... -- <command> [args...]
 //! ```
 //!
 //! Every command also takes `--format text|json` (default `text`; `report` also takes `md`,
@@ -87,6 +88,12 @@
 //!   kept current by the event stream across daemon restarts, with the actions of the shared
 //!   table behind their confirmations. It refuses a daemon that is down at start (4) and an
 //!   unknown API version (6); later it waits for the daemon. It ignores `--format`.
+//! - `with`: runs a command under the daemon's leases of the named resources, the leases items
+//!   take (`lease.acquire`, `lease.release`, with the operator token; `with.rs`): it waits
+//!   until the whole set is granted, runs the command with inherited standard streams,
+//!   releases the lease and exits with the command's exit code (128 + the signal of a command
+//!   a signal killed). When the daemon is down or refuses, the command is not run and the exit
+//!   code is the usual one. It ignores `--format`.
 //!
 //! `--name` names the registration (default `bosun`): a second daemon, or a test.
 //!
@@ -136,6 +143,9 @@
 //! | 6 | the daemon speaks an API version this `bosun` does not know |
 //! | 7 | `doctor`: a check did not pass |
 //!
+//! Once its command ran, `with` exits with the command's own code instead (130 when Ctrl-C
+//! ends its wait).
+//!
 //! Errors go to stderr, prefixed `bosun: `; nothing is printed on stdout then, except by
 //! `doctor`, which prints its checks with 0 and with 7 alike, and `lint`, which prints the
 //! findings of a card that is not claimable with 1.
@@ -149,6 +159,7 @@ mod markdown;
 mod render;
 mod shape;
 mod time;
+mod with;
 mod work;
 
 use std::io::Write as _;
@@ -285,6 +296,10 @@ enum Command {
     /// confirmations.
     #[command(after_help = EXIT_CODES)]
     Tui,
+    /// Runs a command under the leases of resources, as items take them: waits until granted,
+    /// runs it, releases them, and exits with the command's exit code.
+    #[command(after_help = EXIT_CODES)]
+    With(with::WithArgs),
 }
 
 #[derive(Debug, Args)]
@@ -818,6 +833,19 @@ fn main() -> ExitCode {
             return ExitCode::from(exit::FAILED);
         }
     };
+    if let Command::With(args) = &cli.command {
+        // The command's own exit code, which may not fit a `u8` (Windows).
+        match runtime.block_on(with::with(&cli.global, args)) {
+            Ok(code) => {
+                drop(runtime);
+                std::process::exit(code);
+            }
+            Err(failure) => {
+                eprintln!("bosun: {}", failure.message);
+                return ExitCode::from(failure.code);
+            }
+        }
+    }
     match runtime.block_on(run(cli, now_ms())) {
         Ok(text) => {
             let mut stdout = std::io::stdout().lock();

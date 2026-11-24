@@ -164,6 +164,186 @@ async fn two_items_that_need_the_same_resource_never_overlap_and_the_wait_is_rec
     }
 }
 
+/// `[resource.rig]`: exclusive, machine-wide.
+const RIG: &str = "[resource.rig]\nkind = \"device\"\ncapacity = 1\nscope = \"machine\"\n";
+
+/// The daemon's API over the scene's configuration with `leases` as its manager: what
+/// `bosun with` calls. Its identities are opened apart from the scene's own store connection.
+async fn lease_api(scene: &Scene, leases: &Arc<Leases>) -> crate::state::State {
+    std::fs::create_dir_all(scene.path("claude").join("projects")).unwrap();
+    let identities = crate::state::open(&scene.config(), "lease-epoch", EventOptions::default())
+        .await
+        .map_err(|(_, e)| e)
+        .unwrap();
+    crate::state::State {
+        started_ms: 0,
+        identities,
+        credentials: scene.credentials.clone(),
+        control: scene.control.clone(),
+        leases: leases.clone(),
+    }
+}
+
+/// A child process of this test that runs until `release` exists: a `fake-agent` whose script
+/// waits for the file.
+fn waiting_child(scene: &Scene, release: &Path) -> std::process::Child {
+    let script = scene.path("command.script");
+    std::fs::write(&script, format!("wait {}\n", release.display())).unwrap();
+    Command::new(fake_agent())
+        .arg("--fake-script")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// A command of the test's own (a child that waits for a file) takes `rig` through
+/// `lease.acquire` with its pid and is granted; then a card that needs `rig` goes to Ready. For
+/// 2 s after it asks for `rig` the item has no run. The child exits: its lease goes with its process, the item runs and
+/// ends Done, and its `lease_wait` row for `rig` shows the wait (at least 1.5 s).
+/// `mutant_api_lease_acquire_always_grants` answers granted without leasing, so the item runs
+/// at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_command_holding_a_resource_blocks_an_item_until_it_exits() {
+    let mut scene = Scene::with_worktrees(None).await;
+    scene.config_more = RIG.to_owned();
+    configure(&scene);
+    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    scene.leases = Some(leases.clone());
+    let api = lease_api(&scene, &leases).await;
+    let mut conn = crate::api::Connection::default();
+
+    let release = scene.path("release");
+    let mut child = waiting_child(&scene, &release);
+    let acquired = rpc(
+        &api,
+        &mut conn,
+        "lease.acquire",
+        serde_json::json!({
+            "operator": control::TOKEN,
+            "identity": "test",
+            "resources": ["rig"],
+            "pid": child.id(),
+        }),
+    )
+    .await;
+    assert_eq!(acquired["result"]["granted"], true, "{acquired}");
+
+    scene.write_board(&[card_needing(1, "test -f done.txt", &["rig"])]);
+    scene.script(1, &["commit done.txt done".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    // From when the item asks for `rig` (a loop that does not ask runs it instead).
+    let item = Holder::Item(ItemId::new("demo#1"));
+    wait_for("the item to wait for rig", LIMIT, async || {
+        leases.is_waiting(&item) || !scene.runs(1).await.is_empty()
+    })
+    .await;
+    let held_until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < held_until {
+        assert!(
+            scene.runs(1).await.is_empty(),
+            "the item ran while the command held rig"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    std::fs::write(&release, "x").unwrap();
+    let status = tokio::task::spawn_blocking(move || child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success(), "{status:?}");
+    let state = ended(&scene, 1, LIMIT).await;
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+
+    let rows = scene.store.reader().lease_waits(0, i64::MAX).await.unwrap();
+    let row = rows
+        .iter()
+        .find(|r| r.resource == "rig" && r.holder == "item demo#1")
+        .unwrap_or_else(|| panic!("no wait of demo#1 for rig: {rows:?}"));
+    let granted = row.granted_ms.expect("the wait was granted");
+    assert!(
+        granted - row.filed_ms >= 1500,
+        "the item waited only {} ms: {row:?}",
+        granted - row.filed_ms
+    );
+    task.abort();
+    watcher.abort();
+    crate::state::shut_down(api.identities).await;
+}
+
+/// `lease.acquire` and `lease.release` without the operator token, and with a wrong one, are
+/// refused as unauthorized, and nothing is leased; with the token the same request is granted
+/// (`mutant_api_lease_without_operator` leases without it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lease_call_without_the_operator_token_is_refused() {
+    use bosun_api::rpc::code;
+
+    let mut scene = Scene::new().await;
+    scene.config_more = RIG.to_owned();
+    configure(&scene);
+    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    let api = lease_api(&scene, &leases).await;
+    let mut conn = crate::api::Connection::default();
+    let me = this_process();
+    let pid = std::process::id();
+    let acquire = |operator: Option<&str>| {
+        let mut params = serde_json::json!({"identity": "test", "resources": ["rig"], "pid": pid});
+        if let Some(operator) = operator {
+            params["operator"] = operator.into();
+        }
+        params
+    };
+    let release = |operator: Option<&str>| {
+        let mut params = serde_json::json!({ "pid": pid });
+        if let Some(operator) = operator {
+            params["operator"] = operator.into();
+        }
+        params
+    };
+
+    for operator in [None, Some(""), Some("bosun-operator-forged")] {
+        let refused = rpc(&api, &mut conn, "lease.acquire", acquire(operator)).await;
+        assert_eq!(
+            error_code(&refused),
+            Some(code::UNAUTHORIZED.into()),
+            "{operator:?}: {refused}"
+        );
+        assert_eq!(leases.holds(&me), Vec::<String>::new(), "{operator:?}");
+        assert!(!leases.is_waiting(&me), "{operator:?}");
+    }
+
+    let granted = rpc(
+        &api,
+        &mut conn,
+        "lease.acquire",
+        acquire(Some(control::TOKEN)),
+    )
+    .await;
+    assert_eq!(granted["result"]["granted"], true, "{granted}");
+    assert_eq!(leases.holds(&me), ["rig"]);
+    for operator in [None, Some(""), Some("bosun-operator-forged")] {
+        let refused = rpc(&api, &mut conn, "lease.release", release(operator)).await;
+        assert_eq!(
+            error_code(&refused),
+            Some(code::UNAUTHORIZED.into()),
+            "{operator:?}: {refused}"
+        );
+        assert_eq!(leases.holds(&me), ["rig"], "{operator:?}");
+    }
+    let released = rpc(
+        &api,
+        &mut conn,
+        "lease.release",
+        release(Some(control::TOKEN)),
+    )
+    .await;
+    assert_eq!(released["result"]["released"], true, "{released}");
+    assert_eq!(leases.holds(&me), Vec::<String>::new());
+    crate::state::shut_down(api.identities).await;
+}
+
 /// One repository with `[resource.target]` as its shared build directory under the variable
 /// `BUILD_DIR_FOR_TEST`; its setup sleeps a second and stamps the directory. The session
 /// commits `a.txt`; the verdict passes only when the directory is in its environment and

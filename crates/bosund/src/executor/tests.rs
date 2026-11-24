@@ -427,6 +427,7 @@ impl Scene {
             identities: BTreeMap::new(),
             credentials: credentials.clone(),
             control: control.clone(),
+            leases: Arc::new(crate::leases::Leases::none()),
         });
         tokio::spawn(async move {
             crate::state::serve(listener, &api, std::future::pending()).await;
@@ -1128,6 +1129,7 @@ async fn agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_
         identities: BTreeMap::new(),
         credentials: scene.credentials.clone(),
         control: scene.control.clone(),
+        leases: Arc::new(crate::leases::Leases::none()),
     };
     let mut conn = crate::api::Connection::default();
     let own = |extra: serde_json::Value| {

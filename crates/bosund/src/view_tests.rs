@@ -80,6 +80,7 @@ impl World {
                 identities,
                 credentials: crate::agent::Credentials::default(),
                 control: crate::control::Control::with_token(TOKEN, None),
+                leases: std::sync::Arc::new(crate::leases::Leases::none()),
             },
             dir,
         };

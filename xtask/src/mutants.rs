@@ -1583,6 +1583,16 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_git_merge_signed",
+        issue: 126,
+        breaks: "a squash or merge commit is signed, so landing waits on a signing program",
+        package: "bosun-git",
+        check: Check::Test(
+            "merge::tests::a_repository_that_signs_its_commits_still_lands_unsigned",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

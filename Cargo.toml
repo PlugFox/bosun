@@ -260,6 +260,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #126: landing modes.
   "cfg(mutant_git_squash_skip_tree_check)",
   "cfg(mutant_git_merge_drop_trailers)",
+  "cfg(mutant_git_merge_signed)",
 ] }
 
 [workspace.lints.clippy]

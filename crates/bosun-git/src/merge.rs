@@ -16,6 +16,9 @@
 //! trailers (one of each, replacing any the message had); a fast-forward lands the item's own
 //! commits, which already carry them.
 //!
+//! The new commits are never signed, whatever the repository's `commit.gpgSign` says (decided
+//! on #126): an unattended landing must not depend on a signing agent or a pinentry prompt.
+//!
 //! Every git command goes through [`Git::command`], so no repository hook runs.
 
 use std::fmt;
@@ -174,7 +177,15 @@ pub fn merge_commit(
         Method::NoFf => &[&target, &item],
     };
     let message = with_trailers(repo, message, trailers)?;
-    let mut args = vec!["commit-tree", &tree];
+    // Explicitly unsigned (decided on #126). `commit-tree` reads no `commit.gpgSign` today, so
+    // the flag guards against a git that starts to.
+    // Mutant (`mutant_git_merge_signed`): the commit is signed, as the repository asks.
+    let sign = if cfg!(mutant_git_merge_signed) {
+        "--gpg-sign"
+    } else {
+        "--no-gpg-sign"
+    };
+    let mut args = vec!["commit-tree", sign, &tree];
     for parent in parents {
         args.extend(["-p", parent]);
     }
@@ -416,5 +427,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(stale, Error::StaleTarget { .. }), "{stale:?}");
+    }
+
+    #[test]
+    fn a_repository_that_signs_its_commits_still_lands_unsigned() {
+        let (_dir, repo, target, item) = setup();
+        let verified = head(&repo, &format!("{item}^{{tree}}"));
+        // Signing is on, and the program that would sign does not exist.
+        git(&repo, &["config", "commit.gpgSign", "true"]);
+        git(
+            &repo,
+            &["config", "gpg.program", "bosun-no-such-signing-program"],
+        );
+
+        for method in [Method::Squash, Method::NoFf] {
+            let landed = merge_commit(
+                &Git::new(&repo),
+                method,
+                &target,
+                &item,
+                &verified,
+                "Land the item\n",
+                &trailers(),
+            )
+            .unwrap_or_else(|e| panic!("{method}: {e}"));
+            let raw = git(&repo, &["cat-file", "commit", &landed]);
+            assert!(!raw.contains("gpgsig"), "{method}: {raw}");
+        }
     }
 }

@@ -1112,7 +1112,8 @@ impl Loop {
                 // Mutant (`mutant_loop_no_midrun_poll`): the board is not read while an item is
                 // in flight.
                 self.sync_board().await;
-                self.pace.polled(now, true, false);
+                let (rate, wall) = self.quota();
+                self.pace.polled(now, true, false, rate.as_ref(), wall);
             }
             return;
         }
@@ -1125,8 +1126,23 @@ impl Loop {
         }
         let cursor = self.cursor.clone();
         self.schedule().await;
-        self.pace
-            .polled(now, self.current.is_some(), self.cursor != cursor);
+        let (rate, wall) = self.quota();
+        self.pace.polled(
+            now,
+            self.current.is_some(),
+            self.cursor != cursor,
+            rate.as_ref(),
+            wall,
+        );
+    }
+
+    /// The board's quota as last seen, and the Unix seconds now, for [`board::Pace`].
+    fn quota(&self) -> (Option<bosun_queue::RateLimit>, u64) {
+        let wall = self.shared.deps.clock.wall_ms() / 1000;
+        (
+            self.shared.deps.queue.rate_limit(),
+            u64::try_from(wall).unwrap_or_default(),
+        )
     }
 
     /// After a sleep: the running session's child is revalidated by its pid and start time

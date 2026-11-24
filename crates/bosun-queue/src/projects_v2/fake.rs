@@ -170,6 +170,8 @@ struct State {
     clock: u64,
     next_id: u64,
     log: Vec<String>,
+    /// The quota every response reports, when a test set one ([`FakeGitHub::set_rate_limit`]).
+    rate_limit: Option<RateLimit>,
 }
 
 impl State {
@@ -255,6 +257,12 @@ impl FakeGitHub {
                 ..State::default()
             }),
         }
+    }
+
+    /// Makes every response from now on report `rate_limit` as the quota, rather than
+    /// [`QUOTA`] less the requests made so far.
+    pub fn set_rate_limit(&self, rate_limit: RateLimit) {
+        self.lock().rate_limit = Some(rate_limit);
     }
 
     /// Makes `login` the viewer: the login the backend's token belongs to, which writes its
@@ -539,12 +547,12 @@ impl GraphQl for FakeGitHub {
             .to_owned();
         state.log.push(operation.clone());
         let used = state.log.len() as u64;
-        let rate_limit = RateLimit {
+        let rate_limit = state.rate_limit.clone().unwrap_or(RateLimit {
             limit: QUOTA,
             remaining: QUOTA.saturating_sub(used),
             used,
             reset: 1_900_000_000,
-        };
+        });
         let fault = state
             .faults
             .iter()

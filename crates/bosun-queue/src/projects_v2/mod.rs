@@ -1220,6 +1220,10 @@ impl<T: GraphQl> Queue for ProjectsV2<T> {
         };
         Ok(self.card(column, &located.issue, &mut PollStats::default()))
     }
+
+    fn rate_limit(&self) -> Option<RateLimit> {
+        Self::rate_limit(self)
+    }
 }
 
 /// Whether a message names GitHub's secondary rate limit.

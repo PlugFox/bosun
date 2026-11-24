@@ -13,6 +13,22 @@
 //! deleted, transferred or converted mid-run leaves the board's listing, and a card missing
 //! from two polls cancels the item and kills its session, not only at claim.
 //!
+//! A closed issue stays on the board with [`Card::closed`]: the user's cancel, at once
+//! (#111, [`super::commands`]); a closed card is never claimed.
+//!
+//! # One board per repository (#111)
+//!
+//! [`Board::of`] builds a repository's board once, at daemon start; the loop and the API's
+//! `queue.*` and `item.restart` share it, so a Projects v2 board is read and written by the
+//! same backend whoever asks, and connected once.
+//!
+//! # Visibility (#5, #111)
+//!
+//! The verdict output tails of the sticky report are published only on a repository known to
+//! be private. [`Visibility`] asks GitHub once (`repository { visibility }` through the
+//! identity's `gh`, for the repository `origin` names) and keeps the answer; until an answer
+//! comes, and for a repository GitHub cannot tell about, the repository counts as public.
+//!
 //! # The pace (#60, #106)
 //!
 //! [`Pace`] says when the board is read next. A local file is read every tick. A Projects v2
@@ -21,14 +37,14 @@
 
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use bosun_config::{Identity, Repo};
+use bosun_config::{Config, Identity, Queue as QueueConfig, Repo};
 use bosun_git::Git;
 use bosun_identity::{Env, inherited};
 use bosun_queue::projects_v2::{Binding, GhCli, Pacer, ProjectRef};
-use bosun_queue::{Card, Changes, Cursor, ItemId, Owned, ProjectsV2, Queue, QueueError};
+use bosun_queue::{Card, Changes, Cursor, ItemId, LocalFile, Owned, ProjectsV2, Queue, QueueError};
 
 use super::identity;
 
@@ -71,6 +87,127 @@ impl Pace {
 
 /// A queue backend, shared by the loop and its tasks.
 pub(crate) type Shared = Arc<dyn Queue + Send + Sync>;
+
+/// A repository's board, built once at start and shared by its loop and the API.
+#[derive(Clone)]
+pub(crate) struct Board {
+    /// The backend.
+    pub(crate) queue: Shared,
+    /// Whether its reads follow the poller's pace (a Projects v2 board) rather than every tick.
+    pub(crate) idle_backoff: bool,
+    /// Whether the repository is public.
+    pub(crate) visibility: Arc<Visibility>,
+}
+
+impl fmt::Debug for Board {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Board")
+            .field("idle_backoff", &self.idle_backoff)
+            .field("visibility", &self.visibility)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Board {
+    /// The board of `repo` in `config`: a local file, or a Projects v2 board connected on
+    /// first use. Nothing is read here. The error says why the repository has none this
+    /// version reads.
+    pub(crate) fn of(config: &Config, repo: &Repo) -> Result<Self, String> {
+        let identity = config
+            .identities
+            .get(&repo.identity)
+            .ok_or_else(|| format!("the identity {} is not configured", repo.identity))?;
+        let visibility = Arc::new(visibility(identity, repo));
+        match &repo.queue {
+            Some(QueueConfig::LocalFile { file }) => Ok(Self {
+                queue: Arc::new(LocalFile::new(file)),
+                idle_backoff: false,
+                visibility,
+            }),
+            Some(QueueConfig::Projects { owner, number }) => Ok(Self {
+                queue: Arc::new(projects_v2(identity, repo, owner, *number)),
+                idle_backoff: true,
+                visibility,
+            }),
+            Some(_) => Err("this queue kind is not read by this version".to_owned()),
+            None => Err("the repository has no queue".to_owned()),
+        }
+    }
+}
+
+/// How a [`Visibility`] asks: `Ok(true)` for a public repository.
+pub(crate) type ReadVisibility = Box<dyn Fn() -> Result<bool, String> + Send + Sync>;
+
+/// Whether a repository is public, asked once; see the module docs.
+pub(crate) struct Visibility {
+    read: ReadVisibility,
+    known: OnceLock<bool>,
+}
+
+impl fmt::Debug for Visibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Visibility")
+            .field("known", &self.known.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Visibility {
+    pub(crate) fn new(read: ReadVisibility) -> Self {
+        Self {
+            read,
+            known: OnceLock::new(),
+        }
+    }
+
+    /// A repository whose visibility is known already.
+    #[cfg(test)]
+    pub(crate) fn fixed(public: bool) -> Self {
+        let visibility = Self::new(Box::new(|| Err("not asked".to_owned())));
+        let _ = visibility.known.set(public);
+        visibility
+    }
+
+    /// Whether the repository is public: the answer kept, else GitHub asked (blocking). A
+    /// question that fails counts as public and is asked again next time.
+    pub(crate) fn public(&self) -> bool {
+        if let Some(public) = self.known.get() {
+            return *public;
+        }
+        match (self.read)() {
+            Ok(public) => *self.known.get_or_init(|| public),
+            Err(e) => {
+                eprintln!(
+                    "bosund: the repository's visibility cannot be read ({e}); verdict output \
+                     stays off its reports"
+                );
+                true
+            }
+        }
+    }
+}
+
+/// The visibility of `repo`, asked through its identity's `gh` for the repository its
+/// `origin` names.
+fn visibility(identity: &Identity, repo: &Repo) -> Visibility {
+    let (name, identity, path) = (repo.identity.clone(), identity.clone(), repo.path.clone());
+    Visibility::new(Box::new(move || {
+        let transport = gh(&name, &identity, &path).map_err(|e| e.to_string())?;
+        let repository = origin_repository(&path).map_err(|e| e.to_string())?;
+        bosun_queue::projects_v2::is_public(&transport, &repository).map_err(|e| e.to_string())
+    }))
+}
+
+/// `gh api graphql` under the identity's own `gh` configuration (D5 of #7).
+fn gh(name: &str, identity: &Identity, path: &Path) -> Result<GhCli, QueueError> {
+    let bundle = identity::bundle(name, identity, path).map_err(QueueError::Setup)?;
+    let env = Env::tool(&bundle, &inherited());
+    let mut transport = GhCli::new("gh", env.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
+    if bundle.host != bosun_config::DEFAULT_GITHUB_HOST {
+        transport = transport.with_hostname(bundle.host.clone());
+    }
+    Ok(transport)
+}
 
 /// How a [`Lazy`] board is connected.
 pub(crate) type Connect = Box<dyn Fn() -> Result<Shared, QueueError> + Send + Sync>;
@@ -129,6 +266,10 @@ impl Queue for Lazy {
         self.queue()?.upsert_comment(item, key, body)
     }
 
+    fn add_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
+        self.queue()?.add_label(item, label)
+    }
+
     fn remove_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
         self.queue()?.remove_label(item, label)
     }
@@ -162,17 +303,12 @@ pub(crate) fn projects_v2(identity: &Identity, repo: &Repo, owner: &str, number:
     let (name, identity, path) = (repo.identity.clone(), identity.clone(), repo.path.clone());
     let project = ProjectRef::new(owner, number);
     Lazy::new(Box::new(move || {
-        let bundle = identity::bundle(&name, &identity, &path).map_err(QueueError::Setup)?;
+        let transport = gh(&name, &identity, &path)?;
         let binding = Binding::new(
             origin_repository(&path)?,
             [project.clone()],
             identity.author_allowlist.iter().cloned(),
         );
-        let env = Env::tool(&bundle, &inherited());
-        let mut transport = GhCli::new("gh", env.iter().map(|(k, v)| (k.to_owned(), v.to_owned())));
-        if bundle.host != bosun_config::DEFAULT_GITHUB_HOST {
-            transport = transport.with_hostname(bundle.host.clone());
-        }
         Ok(Arc::new(ProjectsV2::connect(transport, binding)?) as Shared)
     }))
 }
@@ -196,7 +332,27 @@ mod tests {
 
     use bosun_queue::projects_v2::{ACTIVE, IDLE_MAX};
 
-    use super::{Pace, repository_of};
+    use super::{Pace, Visibility, repository_of};
+
+    /// #111: the visibility is asked until GitHub answers, then kept; no answer is public.
+    #[test]
+    fn the_visibility_is_asked_until_answered_and_then_kept() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        let visibility = Visibility::new(Box::new(move || {
+            match counter.fetch_add(1, Ordering::SeqCst) {
+                0 => Err("offline".to_owned()),
+                _ => Ok(false),
+            }
+        }));
+        assert!(visibility.public(), "no answer: public");
+        assert!(!visibility.public(), "private");
+        assert!(!visibility.public());
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        assert!(Visibility::fixed(true).public());
+    }
 
     /// The reads of `pace` over `span` of a fake clock ticking every `tick`, each reporting
     /// `active` and no change.

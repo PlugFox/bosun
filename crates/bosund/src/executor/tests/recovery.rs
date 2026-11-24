@@ -86,6 +86,10 @@ impl Queue for DyingAfterReport {
         std::process::abort();
     }
 
+    fn add_label(&self, item: bosun_queue::ItemId, label: &str) -> Result<(), QueueError> {
+        self.0.add_label(item, label)
+    }
+
     fn remove_label(&self, item: bosun_queue::ItemId, label: &str) -> Result<(), QueueError> {
         self.0.remove_label(item, label)
     }

@@ -24,3 +24,4 @@ mod items;
 
 pub use estimate::{BYTES_PER_TOKEN, estimates};
 pub use exact::{Scope, exact};
+pub use items::item_row;

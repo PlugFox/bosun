@@ -12,6 +12,7 @@
 //! column = "Ready"               # Backlog, Ready, In progress, Verify, Done, Needs you
 //! labels = ["restart"]           # optional
 //! draft = false                  # optional; a draft fails lint in Ready
+//! closed = true                  # optional; a closed issue: cancels its item, never claimed
 //! note = "attempt 2"             # optional; written by the daemon
 //! body = '''
 //! What to do, for the agent.
@@ -90,7 +91,7 @@ pub const DAEMON_AUTHOR: &str = "bosun";
 pub const DEFAULT_AUTHOR: &str = "local";
 
 const CARD_KEYS: &[&str] = &[
-    "id", "title", "column", "labels", "draft", "note", "body", "comment",
+    "id", "title", "column", "labels", "draft", "closed", "note", "body", "comment",
 ];
 const COMMENT_KEYS: &[&str] = &["author", "key", "body"];
 
@@ -126,14 +127,7 @@ impl LocalFile {
         &self.path
     }
 
-    /// Puts `label` on the card of `item`, as the user would: `bosun restart-item` puts the
-    /// `restart` label (#5, #70), which the loop acts on and removes. A label the card already
-    /// carries is left as it is, so a replay writes nothing.
-    ///
-    /// # Errors
-    ///
-    /// [`QueueError::NotFound`] when the item has no card; otherwise the write failed.
-    pub fn add_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
+    fn put_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
         self.edit(item, |card| {
             if !card.contains_key("labels") {
                 card.insert("labels", Item::Value(Value::Array(toml_edit::Array::new())));
@@ -175,6 +169,12 @@ column = {}",
             if card.draft {
                 text.push_str(
                     "draft = true
+",
+                );
+            }
+            if card.closed {
+                text.push_str(
+                    "closed = true
 ",
                 );
             }
@@ -393,6 +393,10 @@ impl Queue for LocalFile {
         self.comment_write(item, key, body, true)
     }
 
+    fn add_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
+        self.put_label(item, label)
+    }
+
     fn remove_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
         self.edit(item, |card| {
             let Some(labels) = card.get_mut("labels").and_then(Item::as_array_mut) else {
@@ -492,6 +496,12 @@ fn read_card(table: &Table) -> Result<Card, String> {
             .as_bool()
             .ok_or_else(|| at("`draft` must be true or false".into()))?,
     };
+    let closed = match table.get("closed") {
+        None => false,
+        Some(item) => item
+            .as_bool()
+            .ok_or_else(|| at("`closed` must be true or false".into()))?,
+    };
     let comments = match table.get("comment") {
         None => Vec::new(),
         Some(item) => item
@@ -509,6 +519,7 @@ fn read_card(table: &Table) -> Result<Card, String> {
         body,
         labels,
         draft,
+        closed,
         comments,
         blocked_by: Vec::new(),
     })
@@ -704,6 +715,16 @@ mod tests {
     }
 
     #[test]
+    fn suite_add_label_is_idempotent() {
+        testsuite::add_label_is_idempotent(&mut LocalHarness::new());
+    }
+
+    #[test]
+    fn suite_a_closed_card_is_read_closed() {
+        testsuite::a_closed_card_is_read_closed(&mut LocalHarness::new());
+    }
+
+    #[test]
     fn suite_runs_whole() {
         testsuite::run(LocalHarness::new);
     }
@@ -887,6 +908,7 @@ mod tests {
             body: "has ''' inside\nand \\ backslash\n".into(),
             labels: vec!["restart".into(), "a b".into()],
             draft: true,
+            closed: true,
             comments: vec![Comment {
                 author: "me".into(),
                 key: Some("k".into()),

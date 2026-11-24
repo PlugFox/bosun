@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO item_note (item_id, kind, body, ts_ms) VALUES (?, ?, ?, ?)\n         ON CONFLICT (item_id, kind) DO UPDATE SET body = excluded.body, ts_ms = excluded.ts_ms",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "bfcfa8417f0865994565af7206e5141b02184b4fb98139fec50fdd2c2b477a2d"
+}

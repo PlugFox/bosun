@@ -7,9 +7,13 @@
 //!   board's own `Retry-After` for a rate limit).
 //! - **Rendered at send time.** A row holds what to write, never a body. The sticky report is
 //!   rendered from the database when it is sent ([`report_facts`]), a Needs-you comment from
-//!   its reason (a question from the agent's recorded call), and a column write sends the
-//!   column of the item's state now. So a replay can never put an older report or column on
-//!   the board than the database holds.
+//!   its reason (a question from the agent's recorded call, lint findings and a budget's figure
+//!   from the item's notes, #111), and a column write sends the column of the item's state
+//!   now. So a replay can never put an older report or column on the board than the database
+//!   holds, and a row pending across a daemon restart renders as it would have before.
+//! - **Figures.** The report's cost is the item's runs, exact (#72: every session bosun spawned
+//!   for it, sub-agents included), and each attempt names the models its sessions ran. Its
+//!   verdict output tails are published only on a repository known to be private (#5).
 //! - **Keyed.** A comment carries its row's effect key as its hidden key, the sticky report
 //!   the item's report key: a send whose response was lost is replayed without a duplicate.
 //! - **Acknowledged by revision.** A report row that absorbed a newer write while its send
@@ -53,14 +57,81 @@ const PAUSE_BACKOFF: Duration = Duration::from_mins(5);
 /// A question or a comment body, in characters.
 const COMMENT_CAP: usize = 8_000;
 
+/// The kind of an item's note ([`Write::ItemNote`]) that holds its last lint findings.
+pub(crate) const NOTE_LINT: &str = "lint";
+/// The kind of an item's note that holds the figure of the budget cap that tripped.
+pub(crate) const NOTE_BUDGET: &str = "budget";
+
+/// Stores the lint findings of `item` for its Needs-you comment (#111).
+pub(crate) async fn note_findings(
+    writer: &bosun_store::Writer,
+    item: &ItemId,
+    findings: &[String],
+) -> Result<(), String> {
+    let body = serde_json::to_string(findings).map_err(|e| e.to_string())?;
+    writer
+        .write(vec![Write::ItemNote {
+            item: item.clone(),
+            kind: NOTE_LINT.to_owned(),
+            body,
+            at_ms: super::now_ms(),
+        }])
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The budget cap that sent an item to Needs you: `item_eqv` (eqv) or `item_wall_clock`
+/// (milliseconds of active time).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BudgetFigure {
+    pub(crate) cap: String,
+    pub(crate) used: u64,
+    pub(crate) limit: u64,
+}
+
+impl BudgetFigure {
+    /// The figure in words.
+    pub(crate) fn text(&self) -> String {
+        if self.cap == "item_wall_clock" {
+            format!(
+                "active wall clock {} of its {} cap",
+                minutes(self.used),
+                minutes(self.limit)
+            )
+        } else {
+            format!(
+                "{} eqv of its {} eqv cap",
+                group(self.used),
+                group(self.limit)
+            )
+        }
+    }
+}
+
+/// Milliseconds as whole minutes.
+fn minutes(ms: u64) -> String {
+    format!("{} min", group(ms / 60_000))
+}
+
+/// `n` with thousands separated by commas.
+fn group(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// What the loop tells the drainer, and the facts of the board it remembers for rendering.
 #[derive(Debug, Default)]
 pub(crate) struct Board {
     wake: Notify,
     /// Card titles from the last poll, by item.
     titles: Mutex<BTreeMap<ItemId, String>>,
-    /// The last lint findings of an item, for its Needs-you comment.
-    findings: Mutex<BTreeMap<ItemId, Vec<String>>>,
 }
 
 impl Board {
@@ -75,29 +146,12 @@ impl Board {
         map.extend(titles);
     }
 
-    /// Remembers the lint findings of `item`.
-    pub(crate) fn note_findings(&self, item: &ItemId, findings: &[String]) {
-        self.findings
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(item.clone(), findings.to_vec());
-    }
-
     fn title(&self, item: &ItemId) -> Option<String> {
         self.titles
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(item)
             .cloned()
-    }
-
-    fn findings(&self, item: &ItemId) -> Vec<String> {
-        self.findings
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(item)
-            .cloned()
-            .unwrap_or_default()
     }
 }
 
@@ -347,12 +401,36 @@ impl Drainer {
         let title = self.board.title(item).unwrap_or_else(|| item.to_string());
         let config = self.config.borrow().clone();
         let path = lookup(&config, &self.shared.options.repo).map(|(repo, _)| repo.path.clone());
-        let facts = report_facts(&self.shared.deps.reader, item, title, path).await?;
-        // The daemon does not know whether the repository is public: tails stay off (#5).
+        let facts = report_facts(
+            &self.shared.deps.reader,
+            item,
+            title,
+            &self.shared.options.repo,
+            path,
+        )
+        .await?;
+        // The tails only on a repository known to be private (#5, #111).
+        let public = if cfg!(mutant_report_tails_on_public) {
+            // Mutant: the visibility is not asked; every repository gets its tails.
+            false
+        } else {
+            let visibility = self.shared.deps.visibility.clone();
+            blocking(move || visibility.public()).await
+        };
         Ok(publish::render_report(
             &facts,
-            ReportOptions::for_repository(true),
+            ReportOptions::for_repository(public),
         ))
+    }
+
+    /// The note of `kind` on `item`, if one was stored.
+    async fn note(&self, item: &ItemId, kind: &str) -> Result<Option<String>, String> {
+        self.shared
+            .deps
+            .reader
+            .item_note(item, kind)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// The new comment of a Needs-you row: its reason; a question's own text.
@@ -395,7 +473,11 @@ impl Drainer {
             }
             Reason::Lint => {
                 body.push_str("The card fails lint and was not claimed.");
-                let findings = self.board.findings(item);
+                let findings: Vec<String> = self
+                    .note(item, NOTE_LINT)
+                    .await?
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    .unwrap_or_default();
                 if !findings.is_empty() {
                     body.push('\n');
                 }
@@ -407,6 +489,11 @@ impl Drainer {
             }
             other => {
                 body.push_str(reason_text(other));
+                if other == Reason::Budget
+                    && let Some(figure) = budget_figure(&self.shared.deps.reader, item).await?
+                {
+                    let _ = write!(body, ": {}", figure.text());
+                }
                 body.push_str(
                     ". The item report above has the facts. Move the card to Ready to retry \
                      with a fresh attempt counter, or to Backlog to cancel.",
@@ -466,13 +553,23 @@ fn park_reason(name: &str) -> Option<ParkReason> {
     })
 }
 
-/// The facts of the item report of `item`, from the database (#5). `repo` is the checkout,
-/// for the landed commits and the diff stat.
+/// The figure stored when the item's budget sent it to Needs you, if any.
+async fn budget_figure(reader: &Reader, item: &ItemId) -> Result<Option<BudgetFigure>, String> {
+    Ok(reader
+        .item_note(item, NOTE_BUDGET)
+        .await
+        .map_err(|e| e.to_string())?
+        .and_then(|text| serde_json::from_str(&text).ok()))
+}
+
+/// The facts of the item report of `item`, from the database (#5). `name` is the repository's
+/// name in the configuration; `repo` is the checkout, for the landed commits and the diff stat.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn report_facts(
     reader: &Reader,
     item: &ItemId,
     title: String,
+    name: &str,
     repo: Option<std::path::PathBuf>,
 ) -> Result<ReportFacts, String> {
     let e = |e: bosun_store::Error| e.to_string();
@@ -488,6 +585,29 @@ pub(crate) async fn report_facts(
     let calls = reader.agent_calls(item).await.map_err(e)?;
     let transitions = reader.transitions(item).await.map_err(e)?;
     let flaky = reader.flaky_tests(item).await.map_err(e)?;
+    // The item's runs, exact, as `bosun report` bills them (#72).
+    let row = bosun_heat::item_row(
+        reader,
+        item,
+        bosun_api::RepoRef {
+            name: Some(name.to_owned()),
+            path: stored.repo.clone(),
+        },
+    )
+    .await
+    .map_err(e)?;
+    let models_of = |number: u32| -> Option<String> {
+        let attempt = row.as_ref()?.attempts.iter().find(|a| a.number == number)?;
+        let mut models: Vec<&bosun_api::ModelRow> = attempt
+            .models
+            .iter()
+            .filter(|m| m.sums.messages > 0)
+            .collect();
+        // The model that cost the most first.
+        models.sort_by(|a, b| b.sums.eqv.total_cmp(&a.sums.eqv));
+        let names: Vec<&str> = models.iter().map(|m| m.model.as_str()).collect();
+        (!names.is_empty()).then(|| names.join(", "))
+    };
 
     let verdict = snapshot
         .as_ref()
@@ -521,7 +641,7 @@ pub(crate) async fn report_facts(
             AttemptFacts {
                 number,
                 state: row.attempt.state,
-                model: None,
+                model: models_of(number),
                 sessions,
                 crash_retries: row.attempt.crash_retries,
                 verdict,
@@ -611,11 +731,26 @@ pub(crate) async fn report_facts(
         pull_request: None,
     });
 
+    let detail = if stored.item.state == State::NeedsYou(Reason::Budget) {
+        budget_figure(reader, item).await?.map(|f| f.text())
+    } else {
+        None
+    };
+    let runs = row.as_ref().map(|r| &r.runs);
+    let bill = publish::Bill {
+        eqv: runs.map_or(0.0, |r| r.eqv),
+        input_tokens: runs.map_or(0, |r| r.input),
+        output_tokens: runs.map_or(0, |r| r.output),
+        cache_read_tokens: runs.map_or(0, |r| r.cache_read),
+        cache_write_tokens: runs.map_or(0, |r| r.cache_write_5m + r.cache_write_1h),
+        wall_clock_ms: row.as_ref().map_or(0, |r| r.wall_clock_ms),
+        commits: u32::try_from(commits.len()).unwrap_or(u32::MAX),
+    };
     Ok(ReportFacts {
         item: item.clone(),
         title,
         state: stored.item.state,
-        detail: None,
+        detail,
         verdict,
         attempts: attempts_facts,
         flaky_tests: flaky.into_iter().map(|(_, name)| name).collect(),
@@ -623,10 +758,7 @@ pub(crate) async fn report_facts(
         landing,
         diff,
         summary,
-        bill: publish::Bill {
-            commits: u32::try_from(commits.len()).unwrap_or(u32::MAX),
-            ..publish::Bill::default()
-        },
+        bill,
     })
 }
 

@@ -133,6 +133,15 @@ pub enum Write {
         node_id: String,
         at_ms: i64,
     },
+    /// What the daemon found about an item for its Needs-you comment (#111): the lint
+    /// findings of a bounce (`kind` `lint`), the figure of a budget cap (`budget`). Writing a
+    /// kind again replaces its body.
+    ItemNote {
+        item: ItemId,
+        kind: String,
+        body: String,
+        at_ms: i64,
+    },
     /// Tests that failed on a verdict's first run and passed on its re-run (#44 D).
     FlakyTests {
         item: ItemId,
@@ -372,6 +381,12 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             node_id,
             at_ms,
         } => work::upsert_board_comment(conn, &item, &key, &node_id, at_ms).await,
+        Write::ItemNote {
+            item,
+            kind,
+            body,
+            at_ms,
+        } => work::upsert_item_note(conn, &item, &kind, &body, at_ms).await,
         Write::FlakyTests {
             item,
             attempt,

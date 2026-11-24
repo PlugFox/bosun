@@ -10,10 +10,9 @@ use bosun_api::rpc::{ErrorObject, code};
 use bosun_api::{EventBody, Wide};
 use bosun_client::framing;
 use bosun_client::{Endpoint, Stream};
-use bosun_config::{Config, Queue, Repo, SystemProbe};
+use bosun_config::{Config, Repo, SystemProbe};
 use bosun_ingest::{Handle, Ingest, Options as IngestOptions, Report, claude};
 use bosun_proc::{NativeSpawner, SystemPower};
-use bosun_queue::LocalFile;
 use bosun_store::{Options as StoreOptions, Store};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
@@ -45,6 +44,9 @@ pub(crate) struct Served {
     pub(crate) transcripts: PathBuf,
     /// The repositories bound to this identity, by name.
     pub(crate) repos: Vec<(String, Repo)>,
+    /// The board of each of [`Served::repos`], built once and shared by its loop and the API
+    /// (#111); the error says why a repository has none this version reads.
+    pub(crate) boards: BTreeMap<String, Result<executor::board::Board, String>>,
     /// The logins whose card text the snapshot inlines (`author_allowlist`), lowercased: what
     /// `queue.get` needs to tell an edit waiting for the next claim (#70).
     pub(crate) author_allowlist: Vec<String>,
@@ -253,6 +255,10 @@ pub(crate) async fn open(
             .filter(|(_, repo)| repo.identity == plan.identity)
             .map(|(name, repo)| (name.clone(), repo.clone()))
             .collect::<Vec<_>>();
+        let boards = repos
+            .iter()
+            .map(|(name, repo)| (name.clone(), executor::board::Board::of(config, repo)))
+            .collect();
         let commits = Commits::new(
             store.reader().clone(),
             store.writer().clone(),
@@ -275,6 +281,7 @@ pub(crate) async fn open(
                 database: plan.database,
                 transcripts: plan.claude_projects,
                 repos,
+                boards,
                 author_allowlist,
                 store,
                 ingest: bosun_ingest::spawn(ingest),
@@ -479,24 +486,19 @@ fn start_loops(
         };
         // The board: a local file, or a Projects v2 board connected at the loop's first poll
         // (#99), polled at the backend's active pace rather than the local file's, backing
-        // off while idle (#106).
-        let idle_backoff = matches!(repo.queue, Some(Queue::Projects { .. }));
-        let (queue, poll): (executor::board::Shared, Duration) = match &repo.queue {
-            Some(Queue::LocalFile { file }) => (Arc::new(LocalFile::new(file)), LOOP_POLL),
-            Some(Queue::Projects { owner, number }) => {
-                let Some(identity) = config.identities.get(&repo.identity) else {
-                    continue;
-                };
-                (
-                    Arc::new(executor::board::projects_v2(identity, repo, owner, *number)),
-                    bosun_queue::projects_v2::ACTIVE,
-                )
-            }
-            Some(_) => {
-                eprintln!("bosund: repository {name}: its queue kind is not run in this version");
+        // off while idle (#106). The API reads and writes the same one (#111).
+        let board = match served.boards.get(name) {
+            Some(Ok(board)) => board.clone(),
+            Some(Err(e)) if repo.queue.is_some() => {
+                eprintln!("bosund: repository {name}: {e}; its loop does not run");
                 continue;
             }
-            None => continue,
+            _ => continue,
+        };
+        let (idle_backoff, poll) = if board.idle_backoff {
+            (true, bosun_queue::projects_v2::ACTIVE)
+        } else {
+            (false, LOOP_POLL)
         };
         let work_dir = served
             .database
@@ -524,7 +526,8 @@ fn start_loops(
             reader: served.store.reader().clone(),
             writer: served.store.writer().clone(),
             events: served.events.clone(),
-            queue,
+            queue: board.queue,
+            visibility: board.visibility,
             spawner: Arc::new(NativeSpawner),
             power: Arc::new(SystemPower),
             logins: Arc::new(executor::GhLogins),

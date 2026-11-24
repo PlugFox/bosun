@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT n.body FROM item_note n JOIN item i ON i.id = n.item_id\n             WHERE i.item_key = ? AND n.kind = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "body",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item_note",
+            "name": "body"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6e21426121188fca33005d2e20562b339c18a6a8fab8370a52dea581642f6a7a"
+}

@@ -11,8 +11,10 @@
 //! ([`FakeGitHub::requests`]).
 //!
 //! The mutations the backend sends (`UpdateStatus`, `AddComment`, `UpdateComment`,
-//! `RemoveLabels`) are carried out as the viewer ([`FakeGitHub::set_viewer`]), the login the
-//! token belongs to. Faults are
+//! `AddLabels`, `RemoveLabels`) are carried out as the viewer ([`FakeGitHub::set_viewer`]), the
+//! login the token belongs to. A label exists in a repository once an issue of it carries the
+//! label or [`FakeGitHub::define_label`] made it; a repository is private unless
+//! [`FakeGitHub::set_visibility`] says otherwise. Faults are
 //! injected per operation: [`FakeGitHub::fail_next`] (a lost response, a secondary rate limit,
 //! a lost scope) and [`FakeGitHub::after_next`] (the user acting right after a request, before
 //! the backend's next one).
@@ -49,6 +51,8 @@ pub struct FakeIssue {
     pub comments: Vec<FakeComment>,
     /// GitHub's issue dependencies: the issues blocking this one, as (`owner/name`, number).
     pub blocked_by: Vec<(String, u64)>,
+    /// Closed (`state: CLOSED`).
+    pub closed: bool,
 }
 
 /// A comment of the fake.
@@ -156,6 +160,10 @@ struct State {
     transferred: BTreeMap<(String, u64), (String, u64)>,
     /// (repository, number) of discussions converted from issues.
     discussions: BTreeSet<(String, u64)>,
+    /// (repository, name) of labels defined without an issue carrying them.
+    labels: BTreeSet<(String, String)>,
+    /// `PUBLIC`, `PRIVATE` or `INTERNAL`, by repository; private when not set.
+    visibility: BTreeMap<String, String>,
     viewer: String,
     faults: Vec<(String, Fault)>,
     hooks: Vec<(String, Hook)>,
@@ -466,6 +474,29 @@ impl FakeGitHub {
         state.discussions.insert(key);
     }
 
+    /// Defines the label `name` in `repository`, carried by no issue yet.
+    pub fn define_label(&self, repository: &str, name: &str) {
+        let mut state = self.lock();
+        state.repositories.insert(repository.to_owned());
+        state
+            .labels
+            .insert((repository.to_owned(), name.to_owned()));
+    }
+
+    /// Makes `repository` `PUBLIC`, `PRIVATE` or `INTERNAL`.
+    pub fn set_visibility(&self, repository: &str, visibility: &str) {
+        let mut state = self.lock();
+        state.repositories.insert(repository.to_owned());
+        state
+            .visibility
+            .insert(repository.to_owned(), visibility.to_owned());
+    }
+
+    /// Closes issue `number` of `repository`, as the user would; its `updatedAt` moves.
+    pub fn close_issue(&self, repository: &str, number: u64) {
+        self.issue(repository, number, |issue| issue.closed = true);
+    }
+
     /// The next request of `operation` meets `fault`.
     pub fn fail_next(&self, operation: &str, fault: Fault) {
         self.lock().faults.push((operation.to_owned(), fault));
@@ -554,6 +585,9 @@ impl GraphQl for FakeGitHub {
             "AddComment" => add_comment(&mut state, variables),
             "UpdateComment" => update_comment(&mut state, variables),
             "RemoveLabels" => remove_labels(&mut state, variables),
+            "Label" => label_query(&state, variables),
+            "AddLabels" => add_labels(&mut state, variables),
+            "Visibility" => visibility(&state, variables),
             other => {
                 return Err(TransportError::Malformed(format!(
                     "the fake does not know the operation `{other}`"
@@ -731,6 +765,8 @@ fn issue_json(state: &State, key: &(String, u64), stored: &Stored, variables: &V
         "number": key.1,
         "title": issue.title,
         "body": issue.body,
+        "closed": issue.closed,
+        "state": if issue.closed { "CLOSED" } else { "OPEN" },
         "author": issue.author.as_ref().map(|l| json!({ "login": l })),
         "editor": issue.editor.as_ref().map(|l| json!({ "login": l })),
         "labels": { "nodes": issue.labels.iter().map(|n| json!({ "id": label_id(n), "name": n }))
@@ -928,6 +964,73 @@ fn update_comment(state: &mut State, variables: &Value) -> Value {
 /// The node id the fake gives the label `name`.
 fn label_id(name: &str) -> String {
     format!("LA_{name}")
+}
+
+/// The label `name` of the repository, if an issue carries it or it was defined.
+fn label_query(state: &State, variables: &Value) -> Value {
+    let repository = repository_of(variables);
+    if !state.repositories.contains(&repository) {
+        return json!({
+            "data": { "repository": null },
+            "errors": not_found("Could not resolve to a Repository."),
+        });
+    }
+    let name = var(variables, "label").as_str().unwrap_or_default();
+    let exists = state
+        .labels
+        .contains(&(repository.clone(), name.to_owned()))
+        || state
+            .issues
+            .iter()
+            .any(|((r, _), s)| *r == repository && s.issue.labels.iter().any(|l| l == name));
+    let label = if exists {
+        json!({ "id": label_id(name), "name": name })
+    } else {
+        Value::Null
+    };
+    json!({ "data": { "repository": { "label": label } } })
+}
+
+fn add_labels(state: &mut State, variables: &Value) -> Value {
+    let subject = var(variables, "labelable").as_str().unwrap_or_default();
+    let names: Vec<String> = var(variables, "labels")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|id| id.strip_prefix("LA_").map(str::to_owned))
+        .collect();
+    let Some(key) = state.issue_by_node(subject).map(|(key, _)| key.clone()) else {
+        return json!({
+            "data": { "addLabelsToLabelable": null },
+            "errors": not_found("Could not resolve to a node."),
+        });
+    };
+    let updated_at = state.tick();
+    if let Some(stored) = state.issues.get_mut(&key) {
+        for name in names {
+            if !stored.issue.labels.contains(&name) {
+                stored.issue.labels.push(name);
+            }
+        }
+        stored.updated_at = updated_at;
+    }
+    json!({ "data": { "addLabelsToLabelable": { "clientMutationId": null } } })
+}
+
+fn visibility(state: &State, variables: &Value) -> Value {
+    let repository = repository_of(variables);
+    if !state.repositories.contains(&repository) {
+        return json!({
+            "data": { "repository": null },
+            "errors": not_found("Could not resolve to a Repository."),
+        });
+    }
+    let visibility = state
+        .visibility
+        .get(&repository)
+        .map_or("PRIVATE", String::as_str);
+    json!({ "data": { "repository": { "visibility": visibility } } })
 }
 
 fn remove_labels(state: &mut State, variables: &Value) -> Value {

@@ -727,6 +727,27 @@ pub(crate) async fn upsert_board_comment(
     Ok(())
 }
 
+pub(crate) async fn upsert_item_note(
+    conn: &mut SqliteConnection,
+    item: &ItemId,
+    kind: &str,
+    body: &str,
+    at_ms: i64,
+) -> Result<(), Error> {
+    let item = item_id(conn, item).await?;
+    sqlx::query!(
+        "INSERT INTO item_note (item_id, kind, body, ts_ms) VALUES (?, ?, ?, ?)
+         ON CONFLICT (item_id, kind) DO UPDATE SET body = excluded.body, ts_ms = excluded.ts_ms",
+        item,
+        kind,
+        body,
+        at_ms,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn insert_flaky_tests(
     conn: &mut SqliteConnection,
     item: &ItemId,

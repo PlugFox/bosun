@@ -1,5 +1,6 @@
 //! The read methods and restart-item of #70 over a served state: two identities, each with a
-//! local-file board, their stores written as the loop writes them.
+//! local-file board, their stores written as the loop writes them; and the same methods on a
+//! fake Projects v2 board (#111).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,7 @@ fn card(id: u64, column: Column, verdict: Option<&str>, prose: &str) -> Card {
         body: body(verdict, prose),
         labels: Vec::new(),
         draft: false,
+        closed: false,
         comments: Vec::new(),
         blocked_by: Vec::new(),
     }
@@ -428,6 +430,106 @@ async fn restart_item_puts_the_label_under_the_operator_token() {
             )
             .await,
         i64::from(code::NOT_FOUND)
+    );
+    world.close().await;
+}
+
+/// The repository the fake Projects v2 board of `alpha` holds the issues of.
+const FAKE_REPO: &str = "synthetic-owner/alpha";
+
+/// #111: `queue.get`, `queue.lint` and `item.restart` on a Projects v2 board, through the
+/// backend the loop uses (connected on first use, here the fake GitHub): the board in its
+/// columns with the lint of Ready cards, one card's lint, and the `restart` label put on the
+/// issue of the item in flight.
+#[tokio::test]
+async fn the_queue_methods_and_restart_item_work_on_a_projects_v2_board() {
+    use std::sync::Arc;
+
+    use bosun_queue::ProjectsV2;
+    use bosun_queue::projects_v2::fake::{FakeGitHub, FakeItem};
+    use bosun_queue::projects_v2::{Binding, ProjectRef};
+
+    use crate::executor::board::{Board, Lazy, Shared, Visibility};
+
+    let mut world = World::new().await;
+    world.claim_three().await;
+    let fake = Arc::new(FakeGitHub::new());
+    fake.add_project(
+        "synthetic-owner",
+        1,
+        &Column::ALL.map(bosun_queue::Column::name),
+    );
+    let cards = [
+        card(1, Column::Ready, Some("true"), "Good."),
+        card(2, Column::Ready, None, "No contract block."),
+        card(3, Column::InProgress, Some("true"), "In flight."),
+    ];
+    for c in &cards {
+        fake.issue(FAKE_REPO, c.id.0, |issue| {
+            issue.title = format!("{} on GitHub", c.title);
+            issue.body.clone_from(&c.body);
+            issue.author = Some("me".to_owned());
+        });
+    }
+    let items: Vec<FakeItem<'_>> = cards
+        .iter()
+        .map(|c| FakeItem::Issue(FAKE_REPO, c.id.0, Some(c.column.name())))
+        .collect();
+    fake.set_items(0, &items);
+    fake.define_label(FAKE_REPO, "restart");
+    let connect = fake.clone();
+    let queue = Lazy::new(Box::new(move || {
+        let binding = Binding::new(FAKE_REPO, [ProjectRef::new("synthetic-owner", 1)], ["me"]);
+        Ok(Arc::new(ProjectsV2::connect(connect.clone(), binding)?) as Shared)
+    }));
+    let board = Board {
+        queue: Arc::new(queue),
+        idle_backoff: true,
+        visibility: Arc::new(Visibility::fixed(false)),
+    };
+    world
+        .state
+        .identities
+        .get_mut("a")
+        .unwrap()
+        .boards
+        .insert("alpha".to_owned(), Ok(board));
+
+    let view = world
+        .ok("queue.get", json!({"identity": "a", "repo": "alpha"}))
+        .await;
+    assert!(view["repos"][0]["error"].is_null(), "{view}");
+    assert_eq!(card_of(&view, "Ready", 1)["title"], "Card 1 on GitHub");
+    assert_eq!(card_of(&view, "In progress", 3)["state"], "running");
+    assert_eq!(card_of(&view, "Ready", 1)["lint"], json!([]));
+    assert_eq!(card_of(&view, "Ready", 2)["lint"][0]["severity"], "error");
+
+    let lint = world
+        .ok(
+            "queue.lint",
+            json!({"identity": "a", "repo": "alpha", "card": 2}),
+        )
+        .await;
+    assert_eq!(lint["claimable"], false, "{lint}");
+    let lint = world
+        .ok(
+            "queue.lint",
+            json!({"identity": "a", "repo": "alpha", "card": 1}),
+        )
+        .await;
+    assert_eq!(lint["claimable"], true, "{lint}");
+
+    let ask = json!({"operator": TOKEN, "identity": "a", "item": "alpha#3"});
+    let result = world.ok("item.restart", ask).await;
+    assert_eq!(result, json!({"item": "alpha#3", "label": "restart"}));
+    assert_eq!(fake.issue_now(FAKE_REPO, 3).labels, ["restart"]);
+    // The local file of the configuration is not the board any more.
+    assert_eq!(labels(&world.board_path("alpha"), 3), Vec::<String>::new());
+    assert_eq!(
+        fake.count("Resolve"),
+        1,
+        "connected once: {:?}",
+        fake.requests()
     );
     world.close().await;
 }

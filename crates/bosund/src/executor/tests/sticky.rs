@@ -103,6 +103,11 @@ impl Queue for Faulty {
         self.comment_write(|| self.inner.upsert_comment(item, key, body))
     }
 
+    fn add_label(&self, item: bosun_queue::ItemId, label: &str) -> Result<(), QueueError> {
+        self.down()?;
+        self.inner.add_label(item, label)
+    }
+
     fn remove_label(&self, item: bosun_queue::ItemId, label: &str) -> Result<(), QueueError> {
         self.down()?;
         self.inner.remove_label(item, label)
@@ -134,17 +139,6 @@ fn keyed(scene: &Scene, n: u64, prefix: &str) -> Vec<Comment> {
         .into_iter()
         .filter(|c| c.key.as_deref().is_some_and(|k| k.starts_with(prefix)))
         .collect()
-}
-
-/// Waits until the outbox of the scene's repository is empty.
-async fn drained(scene: &Scene) {
-    wait_for("the outbox to drain", Duration::from_secs(60), async || {
-        outbox::pending(scene.store.reader(), "demo")
-            .await
-            .unwrap()
-            .is_empty()
-    })
-    .await;
 }
 
 /// Acts as the user on card `n`: `edit` changes it, the board is written back.
@@ -701,4 +695,47 @@ async fn a_kill_mid_drain_sends_no_further_row() {
     task.abort();
     watcher.abort();
     assert!(queue.writes.load(Ordering::SeqCst) > at_kill);
+}
+
+/// #111: a card bounced by lint while the kill switch holds every board write leaves its
+/// Needs-you comment in the outbox. The daemon restarts (a new loop, nothing in memory), the
+/// switch is released, and the comment is posted with the findings of the bounce.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lint_bounce_pending_across_a_restart_is_posted_with_its_findings() {
+    let scene = Scene::new().await;
+    let mut bad = card(1, "Bad", "true", "Item one.");
+    bad.body = "No contract block at all.".to_owned();
+    scene.write_board(&[bad]);
+    scene.control.set_killed(true);
+    let (task, watcher) = scene.start(None);
+    wait_for("the bounce", Duration::from_secs(30), async || {
+        scene.state(1).await == Some(State::NeedsYou(Reason::Lint))
+    })
+    .await;
+    task.abort();
+    watcher.abort();
+    let _ = task.await;
+    assert!(
+        !outbox::pending(scene.store.reader(), "demo")
+            .await
+            .unwrap()
+            .is_empty(),
+        "the comment waits in the outbox"
+    );
+    assert_eq!(keyed(&scene, 1, "demo#1/"), Vec::<Comment>::new());
+
+    // The daemon again: a fresh loop.
+    let (task, watcher) = scene.start(None);
+    scene.control.set_killed(false);
+    drained(&scene).await;
+    task.abort();
+    watcher.abort();
+    let comments = keyed(&scene, 1, "demo#1/");
+    assert_eq!(comments.len(), 1, "{comments:#?}");
+    let body = &comments[0].body;
+    assert!(body.contains("fails lint"), "{body}");
+    assert!(
+        body.contains("was not claimed.\n\n- "),
+        "no findings: {body}"
+    );
 }

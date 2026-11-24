@@ -51,6 +51,16 @@ pub trait Queue {
     /// [`QueueError::InvalidKey`], [`QueueError::NotFound`], or the write failed.
     fn upsert_comment(&self, item: ItemId, key: &str, body: &str) -> Result<(), QueueError>;
 
+    /// Puts the label `label` on `item`, as the user would: `bosun restart-item` puts the
+    /// `restart` label (#5, #70), which the loop acts on and removes. A label the item already
+    /// carries is left as it is, so a replay writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`QueueError::NotFound`] when the item has no card; [`QueueError::Setup`] when the
+    /// board has no such label to put; otherwise the write failed.
+    fn add_label(&self, item: ItemId, label: &str) -> Result<(), QueueError>;
+
     /// Removes the label `label` from `item` (the `restart` label the daemon consumes, #5).
     /// Removing a label the item does not carry is a no-op.
     ///
@@ -96,7 +106,7 @@ pub struct Changes {
     pub cards: Vec<Card>,
     /// Cards that were not on the board at the cursor.
     pub added: Vec<ItemId>,
-    /// Cards whose title, body, labels, draft flag or dependencies changed since the cursor. Comments are not
+    /// Cards whose title, body, labels, draft or closed flag or dependencies changed since the cursor. Comments are not
     /// tracked here: they are read from [`Changes::cards`] when the item is snapshotted.
     pub edited: Vec<ItemId>,
     /// Cards that changed column since the cursor.
@@ -189,7 +199,7 @@ impl Changes {
 struct Mark {
     id: ItemId,
     column: Column,
-    /// A digest of the title, body, labels, draft flag and dependencies.
+    /// A digest of the title, body, labels, draft and closed flags and dependencies.
     digest: String,
 }
 
@@ -205,7 +215,9 @@ impl Mark {
             hasher.update((part.len() as u64).to_le_bytes());
             hasher.update(part.as_bytes());
         }
-        hasher.update([u8::from(card.draft)]);
+        // The closed flag in the draft flag's byte: an open card's digest is what it was before
+        // cards carried the flag.
+        hasher.update([u8::from(card.draft) | (u8::from(card.closed) << 1)]);
         for blocker in &card.blocked_by {
             hasher.update(blocker.0.to_le_bytes());
         }
@@ -476,6 +488,7 @@ mod tests {
             body: body.to_owned(),
             labels: Vec::new(),
             draft: false,
+            closed: false,
             comments: Vec::new(),
             blocked_by: Vec::new(),
         }

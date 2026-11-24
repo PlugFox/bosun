@@ -208,6 +208,8 @@ pub(crate) struct Deps {
     pub(crate) writer: Writer,
     pub(crate) events: Events,
     pub(crate) queue: Arc<dyn Queue + Send + Sync>,
+    /// Whether the repository is public: the sticky report's verdict tails (#5, #111).
+    pub(crate) visibility: Arc<board::Visibility>,
     pub(crate) spawner: Arc<dyn Spawner>,
     pub(crate) power: Arc<dyn Power>,
     pub(crate) logins: Arc<dyn Logins>,
@@ -1024,7 +1026,12 @@ impl Loop {
                     }
                     ClaimOutcome::Lost => Event::ClaimLost,
                     ClaimOutcome::Lint(findings) => {
-                        self.board.note_findings(&item, &findings);
+                        if let Err(e) =
+                            outbox::note_findings(&self.shared.deps.writer, &item, &findings).await
+                        {
+                            self.shared
+                                .trouble(format!("the lint findings of {item}: {e}"));
+                        }
                         self.shared.publish(EventBody::LintFindings {
                             repo: self.shared.options.repo.clone(),
                             card: item.to_string(),
@@ -1194,7 +1201,8 @@ impl Loop {
         for card in &changes.cards {
             let id = item_id(&repo_name, card.id);
             let free = stored.get(&id).is_none_or(|s| s.item.state == State::Ready);
-            let ready = card.column == Column::Ready && free;
+            // A closed issue is never claimed (#111).
+            let ready = card.column == Column::Ready && free && !card.closed;
             let linted = if ready {
                 Some(self.lint(card, repo, &on_board).await)
             } else {
@@ -1222,7 +1230,12 @@ impl Loop {
             if !self.register(repo, &card, &id).await {
                 return;
             }
-            self.board.note_findings(&id, &findings);
+            // Stored before the bounce queues its comment: a comment still pending when the
+            // daemon restarts is posted with them (#111).
+            if let Err(e) = outbox::note_findings(&self.shared.deps.writer, &id, &findings).await {
+                self.halt(&e);
+                return;
+            }
             self.shared.publish(EventBody::LintFindings {
                 repo: repo_name.clone(),
                 card: id.to_string(),

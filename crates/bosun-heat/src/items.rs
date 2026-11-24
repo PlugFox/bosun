@@ -221,6 +221,57 @@ pub(crate) async fn items(
     Ok(out)
 }
 
+/// The row of one item as the loop's section reports it (#72), whatever its time: its runs
+/// exact, per attempt and by model. What the item's sticky report shows of its cost and
+/// models (#111). `None` when the store has no such item.
+///
+/// # Errors
+///
+/// A database error, or a stored value that does not read back.
+pub async fn item_row(
+    reader: &Reader,
+    id: &bosun_core::ItemId,
+    repo: RepoRef,
+) -> Result<Option<ItemRow>, bosun_store::Error> {
+    let Some(item) = reader.item(id).await? else {
+        return Ok(None);
+    };
+    let history = ItemHistory {
+        item,
+        detail: None,
+        attempts: reader.attempts(id).await?,
+        runs: reader.runs(id).await?,
+        transitions: reader.transitions(id).await?,
+        flaky_tests: reader.flaky_tests(id).await?,
+        agent_calls: reader.agent_calls(id).await?,
+    };
+    let sessions: BTreeSet<SessionKey> = history
+        .runs
+        .iter()
+        .map(|r| (r.provider.clone(), r.session_key.clone()))
+        .collect();
+    let (table, folds, _) = fold_sessions(reader, &sessions).await?;
+    let Folded {
+        attempts,
+        sessions,
+        fold,
+        wall_clock_ms,
+    } = attempts(&history, &folds, &table, &mut Vec::new());
+    let to_ms = history.transitions.last().map_or(0, |t| t.ts_ms);
+    Ok(Some(ItemRow {
+        item: id.0.clone(),
+        repo,
+        state: history.item.item.state.as_str().to_owned(),
+        detail: None,
+        failed: history.item.item.failed,
+        runs: fold.sums(&table),
+        sessions,
+        wall_clock_ms,
+        parked: parked(&history, to_ms).into_values().collect(),
+        attempts,
+    }))
+}
+
 /// The attempts of one item, with the item's runs folded.
 struct Folded {
     attempts: Vec<AttemptReport>,

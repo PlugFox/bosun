@@ -397,6 +397,7 @@ mod tests {
             body: format!("Prose.\n\n```bosun\n{block}{extra}```\n"),
             labels: Vec::new(),
             draft: false,
+            closed: false,
             comments: Vec::new(),
             blocked_by: Vec::new(),
         }

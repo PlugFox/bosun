@@ -154,6 +154,9 @@ pub struct Card {
     pub labels: Vec<String>,
     /// A draft card: no issue behind it. Ignored outside Backlog; fails lint in Ready.
     pub draft: bool,
+    /// The issue behind the card is closed (#5): closing it cancels the item, and a closed
+    /// card is never claimed. The local file's `closed = true`.
+    pub closed: bool,
     /// The item's comments, oldest first.
     pub comments: Vec<Comment>,
     /// Blockers the backend knows besides the contract's `blocked-by`: GitHub's own issue

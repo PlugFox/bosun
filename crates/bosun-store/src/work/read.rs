@@ -635,6 +635,22 @@ impl Reader {
         .await?)
     }
 
+    /// The note of `kind` on `item` ([`crate::Write::ItemNote`]), if one was written.
+    ///
+    /// # Errors
+    ///
+    /// A database error.
+    pub async fn item_note(&self, item: &ItemId, kind: &str) -> Result<Option<String>, Error> {
+        Ok(sqlx::query_scalar!(
+            "SELECT n.body FROM item_note n JOIN item i ON i.id = n.item_id
+             WHERE i.item_key = ? AND n.kind = ?",
+            item.0,
+            kind,
+        )
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     /// The flaky tests of `item`: attempt number and test name, in order.
     ///
     /// # Errors

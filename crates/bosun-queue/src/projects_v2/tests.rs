@@ -85,6 +85,7 @@ impl Harness for FakeHarness {
                 issue.body.clone_from(&card.body);
                 issue.author = Some(OWNER.to_owned());
                 issue.labels.clone_from(&card.labels);
+                issue.closed = card.closed;
                 issue.comments = card
                     .comments
                     .iter()
@@ -172,6 +173,16 @@ fn suite_lint_target_reads_the_live_card() {
 #[test]
 fn suite_remove_label_is_idempotent() {
     testsuite::remove_label_is_idempotent(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_add_label_is_idempotent() {
+    testsuite::add_label_is_idempotent(&mut FakeHarness::new());
+}
+
+#[test]
+fn suite_a_closed_card_is_read_closed() {
+    testsuite::a_closed_card_is_read_closed(&mut FakeHarness::new());
 }
 
 // Start-up resolution.
@@ -1027,4 +1038,41 @@ fn the_identitys_own_comments_keep_their_key_but_never_their_text() {
     let card = listed.lint_target(ItemId(1)).unwrap();
     let keys: Vec<Option<&str>> = card.comments.iter().map(|c| c.key.as_deref()).collect();
     assert_eq!(keys, [Some("report:1"), None]);
+}
+
+/// #111: the visibility of the repository, read once by the daemon for the verdict tails; a
+/// repository the identity cannot see is an error, which the daemon takes for public.
+#[test]
+fn the_visibility_of_a_repository() {
+    let fake = FakeGitHub::new();
+    fake.issue(REPO, 1, |_| {});
+    assert!(!is_public(&fake, REPO).unwrap(), "private unless set");
+    fake.set_visibility(REPO, "PUBLIC");
+    assert!(is_public(&fake, REPO).unwrap());
+    fake.set_visibility(REPO, "INTERNAL");
+    assert!(!is_public(&fake, REPO).unwrap(), "internal is not public");
+    assert!(matches!(
+        is_public(&fake, OTHER_REPO),
+        Err(QueueError::Setup(_))
+    ));
+    assert!(matches!(
+        is_public(&fake, "no-slash"),
+        Err(QueueError::Setup(_))
+    ));
+}
+
+/// #111: a label the repository does not have is not created; the write says so.
+#[test]
+fn a_label_the_repository_lacks_is_a_setup_error() {
+    let fake = Arc::new(FakeGitHub::new());
+    fake.add_project(ORG, 1, &COLUMNS);
+    fake.issue(REPO, 1, |issue| issue.author = Some(OWNER.to_owned()));
+    fake.set_items(0, &[FakeItem::Issue(REPO, 1, Some("In progress"))]);
+    let queue = connect(&fake, &[1]);
+    let error = setup_error(queue.add_label(ItemId(1), "restart"));
+    assert!(error.contains("no label `restart`"), "{error}");
+    assert_eq!(fake.count("AddLabels"), 0);
+    fake.define_label(REPO, "restart");
+    queue.add_label(ItemId(1), "restart").unwrap();
+    assert_eq!(fake.issue_now(REPO, 1).labels, ["restart"]);
 }

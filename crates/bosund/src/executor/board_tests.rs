@@ -1,5 +1,6 @@
-//! The scenarios of #106 against the loop on the fake Projects v2 board: the daemon's own
-//! markers past the author allowlist, and a card that leaves the board mid-run.
+//! The scenarios of #106 and #111 against the loop on the fake Projects v2 board: the daemon's
+//! own markers past the author allowlist, a card that leaves the board or whose issue is closed
+//! mid-run, and the verdict tails by the repository's visibility.
 
 use super::*;
 
@@ -145,6 +146,133 @@ async fn an_issue_deleted_mid_session_cancels_the_item_and_kills_the_session() {
     watcher.abort();
     assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 1);
     assert!(!scene.repo.join("one.txt").exists());
+}
+
+/// The child of the session of item 1, once it is recorded.
+async fn session_child(scene: &Scene) -> bosun_proc::ProcessKey {
+    let mut children = Vec::new();
+    wait_for(
+        "the session's child to be recorded",
+        Duration::from_secs(30),
+        async || {
+            children = scene.store.reader().children().await.unwrap();
+            !children.is_empty()
+        },
+    )
+    .await;
+    let child = &children[0];
+    bosun_proc::ProcessKey {
+        pid: child.pid,
+        start: bosun_proc::start_time(child.pid)
+            .unwrap()
+            .expect("the session runs"),
+    }
+}
+
+/// #111: the user closes the issue of the item in flight during its session; the card stays
+/// in its column. The close is a cancel: the item is cancelled and its session killed
+/// (`mutant_queue_closed_not_cancel`: the card is read by its column, and the session runs on).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_issue_closed_mid_session_cancels_the_item_and_kills_the_session() {
+    let scene = Scene::on_projects().await;
+    let fake = scene.projects.clone().unwrap();
+    let p = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[
+        card(1, "One", "test -f one.txt", "Item one."),
+        card(2, "Two", "test -f two.txt", "Item two."),
+    ]);
+    // Closed while in Ready: never claimed.
+    fake.close_issue(BOARD_REPO, 2);
+    scene.script(
+        1,
+        &[
+            format!("write {} x", p("flag1")),
+            // Waits (at most a minute) for a file nobody writes.
+            format!("wait {}", p("never")),
+            "commit one.txt one".to_owned(),
+        ],
+    );
+    scene.script(2, &["commit two.txt two".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    wait_file(&scene.path("flag1")).await;
+    let key = session_child(&scene).await;
+    assert!(bosun_proc::is_running(key));
+
+    fake.close_issue(BOARD_REPO, 1);
+    let state = ended_or_cancelled(&scene, 1, Duration::from_secs(10)).await;
+    assert_eq!(state, State::Cancelled);
+    wait_for("no child", Duration::from_secs(5), async || {
+        !bosun_proc::is_running(key)
+    })
+    .await;
+    // Nothing else is claimed: card 2's issue is closed.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 1);
+    assert!(!scene.repo.join("one.txt").exists());
+    assert!(
+        matches!(scene.state(2).await, None | Some(State::Ready)),
+        "{:?}",
+        scene.state(2).await
+    );
+}
+
+/// The body of the daemon's sticky report on issue `n` of the fake, once it says `wanted`.
+async fn report_saying(fake: &FakeGitHub, n: u64, wanted: &str) -> String {
+    let key = bosun_core::publish::report_key(&ItemId::new(format!("demo#{n}")));
+    let mut body = String::new();
+    wait_for(
+        &format!("the report of {n} to say {wanted:?}"),
+        Duration::from_secs(30),
+        async || {
+            body = fake
+                .issue_now(BOARD_REPO, n)
+                .comments
+                .iter()
+                .find(|c| bosun_queue::marker::extract(&c.body).is_some_and(|(k, _)| k == key))
+                .map_or_else(String::new, |c| c.body.clone());
+            body.contains(wanted)
+        },
+    )
+    .await;
+    body
+}
+
+/// #111: the sticky report of a Done item carries its verdict output tail on a private
+/// repository and leaves it out on a public one, as GitHub reports the repository's visibility
+/// (`mutant_report_tails_on_public`: the visibility is not asked, and the public repository's
+/// report carries the tail).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_verdict_tail_is_published_on_a_private_repository_only() {
+    for public in [false, true] {
+        let scene = Scene::on_projects().await;
+        let fake = scene.projects.clone().unwrap();
+        if public {
+            fake.set_visibility(BOARD_REPO, "PUBLIC");
+        }
+        scene.write_board(&[card(
+            1,
+            "One",
+            "echo SYNTHETIC-TAIL-LINE && test -f one.txt",
+            "Item one.",
+        )]);
+        scene.script(1, &["commit one.txt one".to_owned()]);
+        let (task, watcher) = scene.start(None);
+        let state = ended(&scene, 1, Duration::from_secs(60)).await;
+        assert_eq!(state, State::Done(Outcome::Pass), "public {public}");
+        drained(&scene).await;
+        let report = report_saying(&fake, 1, "Done:").await;
+        task.abort();
+        watcher.abort();
+        let tail = report.contains("<details><summary>Attempt 1");
+        let withheld = report.contains("Verdict output is not published");
+        assert_eq!(
+            (tail, withheld),
+            (!public, public),
+            "public {public}: {report}"
+        );
+    }
 }
 
 /// Waits for item `card` to leave the daemon's states; at most `limit`.

@@ -257,14 +257,9 @@ async fn restart(state: &State, served: &Served, id: &str) -> Result<RestartResu
         .rsplit_once('#')
         .and_then(|(repo, n)| Some((repo, n.parse::<u64>().ok()?)))
         .ok_or_else(|| ErrorObject::new(code::INVALID_PARAMS, format!("{id:?} is no item id")))?;
-    let (_, repo) = crate::board::repo_named(state, served, repo_name)?;
-    let Some(bosun_config::Queue::LocalFile { file }) = &repo.queue else {
-        return Err(ErrorObject::new(
-            code::FAILED,
-            format!("repository {repo_name}: only a local-file board is written by this version"),
-        ));
-    };
-    let board = bosun_queue::LocalFile::new(file);
+    let (name, _) = crate::board::repo_named(state, served, repo_name)?;
+    let board = crate::board::board_of(served, name)
+        .map_err(|e| ErrorObject::new(code::FAILED, format!("repository {repo_name}: {e}")))?;
     tokio::task::spawn_blocking(move || board.add_label(bosun_queue::ItemId(card), RESTART_LABEL))
         .await
         .map_err(|e| ErrorObject::new(code::INTERNAL_ERROR, e.to_string()))?

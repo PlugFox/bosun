@@ -20,7 +20,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::Git;
+use crate::{Git, Reason};
 
 /// What [`rebase_onto`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,7 +181,13 @@ impl From<crate::Error> for Error {
 pub fn rebase_onto(worktree: &Git, target: &str) -> Result<Rebase, Error> {
     let out = worktree
         .command()
-        .args(["rebase", "--quiet", "--no-autostash", target])
+        .args([
+            "rebase",
+            "--quiet",
+            "--no-autostash",
+            "--end-of-options",
+            target,
+        ])
         .output()
         .map_err(|source| crate::Error::Spawn { source })?;
     if out.status.success() {
@@ -233,6 +239,7 @@ pub fn fast_forward(repo: &Git, branch: &str, to: &str) -> Result<FastForward, E
                 "rev-parse",
                 "--verify",
                 "--quiet",
+                "--end-of-options",
                 &format!("{to}^{{commit}}"),
             ],
             None,
@@ -240,7 +247,16 @@ pub fn fast_forward(repo: &Git, branch: &str, to: &str) -> Result<FastForward, E
         .trim()
         .to_owned();
     let head = repo
-        .run(&["rev-parse", "--verify", "--quiet", &full], None)?
+        .run(
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &full,
+            ],
+            None,
+        )?
         .trim()
         .to_owned();
     if !repo.test(&["merge-base", "--is-ancestor", &head, &to])? {
@@ -270,10 +286,14 @@ pub fn fast_forward(repo: &Git, branch: &str, to: &str) -> Result<FastForward, E
             },
         });
     }
-    let files: Vec<String> = checkout
-        .run(&["status", "--porcelain", "--untracked-files=all"], None)?
-        .lines()
-        .map(|l| l.get(3..).unwrap_or(l).to_owned())
+    // The same test of a clean checkout as the verdict's (untracked files count).
+    let files: Vec<String> = crate::clean_tree(&checkout)?
+        .into_iter()
+        .flat_map(|reason| match reason {
+            Reason::Dirty { entries } => entries,
+            _ => Vec::new(),
+        })
+        .map(|entry| entry.get(3..).unwrap_or(&entry).to_owned())
         .collect();
     // Mutant (`mutant_git_ff_dirty_checkout`): local changes are not looked at.
     if !files.is_empty() && !cfg!(mutant_git_ff_dirty_checkout) {
@@ -284,7 +304,10 @@ pub fn fast_forward(repo: &Git, branch: &str, to: &str) -> Result<FastForward, E
             },
         });
     }
-    checkout.run(&["merge", "--ff-only", "--quiet", &to], None)?;
+    checkout.run(
+        &["merge", "--ff-only", "--quiet", "--end-of-options", &to],
+        None,
+    )?;
     Ok(FastForward::Moved { from: head, to })
 }
 
@@ -302,18 +325,21 @@ fn holder(repo: &Git, full: &str) -> Result<Option<Holder>, Error> {
     for entry in list.split("\n\n") {
         let mut path = None;
         let mut checked_out = false;
-        let mut bare = false;
+        let mut skip = false;
         for line in entry.lines() {
             if let Some(p) = line.strip_prefix("worktree ") {
                 path = Some(PathBuf::from(p));
             } else if line.strip_prefix("branch ") == Some(full) {
                 checked_out = true;
-            } else if line == "bare" {
-                bare = true;
+            } else if line == "bare" || line == "prunable" || line.starts_with("prunable ") {
+                // A bare repository has no checkout; a prunable entry's directory is gone (or
+                // is no longer its worktree), so nothing there can be overwritten.
+                skip = true;
             }
         }
         let Some(path) = path else { continue };
-        if bare {
+        // A stale entry git has not flagged yet: its directory is gone.
+        if skip || !path.is_dir() {
             continue;
         }
         let operation = operation(&Git::new(&path), full)?;
@@ -664,5 +690,41 @@ mod tests {
         assert_eq!((branch.as_str(), at, to), ("land", &before, &other));
         assert!(error.to_string().contains("nothing moved"), "{error}");
         assert_eq!(head(&repo, "land"), before);
+    }
+
+    #[test]
+    fn a_worktree_whose_directory_is_gone_does_not_hold_the_branch() {
+        let (dir, repo) = setup();
+        let from = head(&repo, "main");
+        git(&repo, &["branch", "land"]);
+        let to = commit(&repo, "b.txt", "second\n");
+        let wt = worktree(&dir, &repo, "land");
+        // Deleted behind git's back: its entry stays until a prune.
+        std::fs::remove_dir_all(&wt).unwrap();
+        assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("prunable"));
+
+        let moved = fast_forward(&Git::new(&repo), "land", &to).unwrap();
+        assert_eq!(
+            moved,
+            FastForward::Moved {
+                from,
+                to: to.clone()
+            }
+        );
+        assert_eq!(head(&repo, "land"), to);
+    }
+
+    #[test]
+    fn a_target_that_looks_like_an_option_is_a_revision() {
+        let (_dir, repo) = setup();
+        git(&repo, &["checkout", "--quiet", "-b", "topic"]);
+        commit(&repo, "t.txt", "topic\n");
+        let before = head(&repo, "HEAD");
+
+        // As an option, `--root` would rebase the whole branch and succeed.
+        let error = rebase_onto(&Git::new(&repo), "--root").unwrap_err();
+        assert!(matches!(error, Error::Git(_)), "{error:?}");
+        assert_eq!(head(&repo, "HEAD"), before);
+        assert_eq!(status(&repo), "");
     }
 }

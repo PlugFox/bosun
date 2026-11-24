@@ -1134,7 +1134,7 @@ const MUTANTS: &[Mutant] = &[
     },
     Mutant {
         name: "mutant_control_keep_operator_token",
-        issue: 67,
+        issue: 117,
         breaks: "a daemon stopped cleanly leaves its operator token file behind",
         package: "bosund",
         check: Check::Test("control::tests::a_clean_stop_removes_only_its_own_token"),

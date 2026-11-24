@@ -240,6 +240,33 @@ pub(crate) fn spawn_contained(
     Ok((child, container))
 }
 
+/// Spawns `command` suspended in a new job, calls `before_run` with its pid and start time,
+/// and only then resumes it: the child runs no instruction before `before_run` has returned
+/// `Ok`. When it fails, the child is killed and the error returned. No console window is
+/// created.
+pub(crate) fn spawn_gated(
+    command: &mut std::process::Command,
+    before_run: impl FnOnce(u32, u64) -> io::Result<()>,
+) -> io::Result<(std::process::Child, Container)> {
+    use std::os::windows::process::CommandExt;
+
+    let container = Container::new()?;
+    command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let started = container
+        .assign(child.as_raw_handle())
+        .and_then(|()| creation_time(child.as_raw_handle()))
+        .and_then(|start| before_run(pid, start))
+        .and_then(|()| resume(pid));
+    if let Err(e) = started {
+        child.kill().ok();
+        child.wait().ok();
+        return Err(e);
+    }
+    Ok((child, container))
+}
+
 fn creation_time(process: RawHandle) -> io::Result<u64> {
     let zero = || FILETIME {
         dwLowDateTime: 0,

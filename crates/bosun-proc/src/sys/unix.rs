@@ -165,6 +165,122 @@ pub(crate) fn spawn_contained(
     Ok((child, Container { pgid }))
 }
 
+/// A pipe whose two ends are closed on `exec`.
+fn pipe() -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let mut fds: [libc::c_int; 2] = [-1; 2];
+    // SAFETY: `fds` is a writable array of two descriptors, as `pipe` requires.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `pipe` just opened both descriptors and nothing else owns them.
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    for fd in [&read, &write] {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the descriptor is live and owned above; `F_SETFD` takes an integer flag.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok((read, write))
+}
+
+/// Spawns `command` as the leader of a new process group (on Linux with the parent-death
+/// signal, as [`spawn_contained`]), calls `before_run` with its pid and start time, and only
+/// then lets it `exec`: the program runs no instruction before `before_run` has returned `Ok`.
+/// When it fails, the child exits before `exec` and the spawn fails.
+///
+/// Unix has no suspended start, so the forked child itself holds the gate: before `exec` it
+/// writes its pid to one pipe and blocks reading a byte from another. A second thread reads the
+/// pid, calls `before_run` and writes the byte (or closes the pipe, which fails the `exec`),
+/// while this thread blocks in `spawn`, which waits for the `exec`. The spawn happens on the
+/// calling thread, the one the parent-death signal is tied to. `command` is spent: the gate's
+/// descriptors are closed when this returns.
+pub(crate) fn spawn_gated(
+    command: &mut std::process::Command,
+    before_run: impl FnOnce(u32, u64) -> io::Result<()> + Send,
+) -> io::Result<(std::process::Child, Container)> {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    // The child reports its pid on `report`; the shim opens `gate` once the pid is recorded.
+    let (report_read, report_write) = pipe()?;
+    let (gate_read, gate_write) = pipe()?;
+    let (report_fd, gate_read_fd, gate_write_fd) = (
+        report_write.as_raw_fd(),
+        gate_read.as_raw_fd(),
+        gate_write.as_raw_fd(),
+    );
+    command.process_group(0);
+    #[cfg(target_os = "linux")]
+    let parent = pid_t(std::process::id())?;
+    // SAFETY: the closure runs in the forked child before `exec` and calls only `prctl`,
+    // `getppid`, `getpid`, `close`, `write` and `read`, all async-signal-safe; it allocates
+    // nothing and takes no lock. The descriptors it names are open in the child: they are
+    // owned by this function until `spawn` has returned.
+    unsafe {
+        command.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+            }
+            // The child's copy of the gate's write end: without it, the gate reads end of file
+            // when the shim closes its own, or dies.
+            libc::close(gate_write_fd);
+            let pid = libc::getpid().to_ne_bytes();
+            let written = libc::write(report_fd, pid.as_ptr().cast(), pid.len());
+            if usize::try_from(written).ok() != Some(pid.len()) {
+                return Err(io::Error::last_os_error());
+            }
+            libc::close(report_fd);
+            let mut go = 0_u8;
+            loop {
+                match libc::read(gate_read_fd, (&raw mut go).cast(), 1) {
+                    1 => return Ok(()),
+                    -1 if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) => {}
+                    _ => return Err(io::Error::from_raw_os_error(libc::ECANCELED)),
+                }
+            }
+        });
+    }
+    let (spawned, gated) = std::thread::scope(|scope| {
+        let gate = scope.spawn(move || -> io::Result<()> {
+            let mut report = std::fs::File::from(report_read);
+            let mut pid = [0_u8; std::mem::size_of::<libc::pid_t>()];
+            // End of file when the fork failed: `report_write` is dropped below.
+            report.read_exact(&mut pid)?;
+            let pid = u32::try_from(libc::pid_t::from_ne_bytes(pid))
+                .map_err(|_| io::Error::other("a negative pid"))?;
+            let start =
+                read_start(pid, true)?.ok_or_else(|| io::Error::other("the child has no start"))?;
+            before_run(pid, start)?;
+            std::fs::File::from(gate_write).write_all(&[1])
+        });
+        let spawned = command.spawn();
+        drop(report_write);
+        let gated = gate
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("the gate thread panicked")));
+        (spawned, gated)
+    });
+    drop(gate_read);
+    let mut child = spawned?;
+    if let Err(e) = gated {
+        child.kill().ok();
+        child.wait().ok();
+        return Err(e);
+    }
+    let pgid = pid_t(child.id())?;
+    Ok((child, Container { pgid }))
+}
+
 /// The start time of a child this process spawned and has not reaped: even if it has
 /// already exited, its pid stays reserved until the wait.
 pub(crate) fn child_start_time(child: &tokio::process::Child) -> io::Result<u64> {

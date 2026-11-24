@@ -1492,6 +1492,15 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("spawn::tests::members_lists_the_processes_left_in_the_container"),
         platform: None,
     },
+    // #129: the session shim.
+    Mutant {
+        name: "mutant_shim_no_exit_record",
+        issue: 129,
+        breaks: "the shim never writes the child's exit into its record",
+        package: "bosun-proc",
+        check: Check::Test("the_exit_of_a_child_nobody_waited_for_is_in_the_record"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

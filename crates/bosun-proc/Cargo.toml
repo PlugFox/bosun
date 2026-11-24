@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The session shim (#8, #129): std only, so `unsafe` stays in this crate.
+[[bin]]
+name = "bosun-shim"
+path = "src/bin/bosun-shim.rs"
+
 [dependencies]
 tokio = { workspace = true, features = ["process"] }
 

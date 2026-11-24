@@ -74,6 +74,7 @@ pub const CHECKS: &[(&str, Check)] = &[
         "lint_target_reads_the_live_card",
         lint_target_reads_the_live_card,
     ),
+    ("remove_label_is_idempotent", remove_label_is_idempotent),
 ];
 
 /// Runs every check, each on a fresh harness from `new`.
@@ -421,4 +422,33 @@ pub fn lint_target_reads_the_live_card(harness: &mut dyn Harness) {
     assert!(live.body.contains("cargo test"), "{}", live.body);
     assert_eq!(live.labels, ["restart"]);
     assert_eq!(live.title, "Card 1");
+}
+
+/// `remove_label` removes one label and keeps the others; removing it again, or a label the
+/// item never had, is a no-op; an unknown item is refused.
+///
+/// # Panics
+///
+/// When the backend fails the check.
+pub fn remove_label_is_idempotent(harness: &mut dyn Harness) {
+    let mut cards = vec![card(1, Column::Verify, "true")];
+    cards[0].labels = vec!["restart".to_owned(), "keep".to_owned()];
+    harness.user_writes(&cards);
+    let queue = harness.queue();
+    queue
+        .remove_label(ItemId(1), "restart")
+        .expect("remove_label");
+    queue
+        .remove_label(ItemId(1), "restart")
+        .expect("remove_label replayed");
+    queue
+        .remove_label(ItemId(1), "never")
+        .expect("remove_label of an absent label");
+    let live = queue.lint_target(ItemId(1)).expect("lint_target");
+    assert_eq!(live.labels, ["keep"]);
+    assert_eq!(live.column, Column::Verify);
+    assert!(matches!(
+        queue.remove_label(ItemId(9), "restart"),
+        Err(QueueError::NotFound(_))
+    ));
 }

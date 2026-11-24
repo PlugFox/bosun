@@ -393,6 +393,17 @@ impl Queue for LocalFile {
         self.comment_write(item, key, body, true)
     }
 
+    fn remove_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
+        self.edit(item, |card| {
+            let Some(labels) = card.get_mut("labels").and_then(Item::as_array_mut) else {
+                return false;
+            };
+            let before = labels.len();
+            labels.retain(|l| l.as_str() != Some(label));
+            labels.len() != before
+        })
+    }
+
     fn lint_target(&self, item: ItemId) -> Result<Card, QueueError> {
         self.cards()?
             .into_iter()
@@ -685,6 +696,11 @@ mod tests {
     #[test]
     fn suite_lint_target_reads_the_live_card() {
         testsuite::lint_target_reads_the_live_card(&mut LocalHarness::new());
+    }
+
+    #[test]
+    fn suite_remove_label_is_idempotent() {
+        testsuite::remove_label_is_idempotent(&mut LocalHarness::new());
     }
 
     #[test]

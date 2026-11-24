@@ -1,0 +1,676 @@
+//! The outbox drainer (#5, #65): every board write of the loop is a row of the store's outbox,
+//! written with its transition, and this task sends the rows of one repository, in order,
+//! until the board acknowledges each.
+//!
+//! - **In order.** The due rows are sent oldest first; the first that fails ends the pass, so
+//!   a later write never overtakes an earlier one. It is tried again after a backoff (the
+//!   board's own `Retry-After` for a rate limit).
+//! - **Rendered at send time.** A row holds what to write, never a body. The sticky report is
+//!   rendered from the database when it is sent ([`report_facts`]), a Needs-you comment from
+//!   its reason (a question from the agent's recorded call), and a column write sends the
+//!   column of the item's state now. So a replay can never put an older report or column on
+//!   the board than the database holds.
+//! - **Keyed.** A comment carries its row's effect key as its hidden key, the sticky report
+//!   the item's report key: a send whose response was lost is replayed without a duplicate.
+//! - **Acknowledged by revision.** A report row that absorbed a newer write while its send
+//!   was in flight stays pending (the store's [`bosun_store::Write::Acknowledge`]), so the
+//!   newer state is sent too.
+//! - **An outage never stops an item.** The drainer is its own task: the loop records its
+//!   rows and goes on; `landing` does not wait for the board. The board catches up after.
+//!
+//! While the kill switch is thrown (`Control::board_writes_stopped`, #67) no row is sent;
+//! they wait in the outbox and go out in order once it is released.
+//!
+//! A row whose item left the board (its card removed, its issue deleted or transferred) is
+//! dropped. A revert of a foreign change ([`super::commands`]) is a column write keyed outside
+//! the transitions' range; it also posts one explanatory comment per item state.
+
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use bosun_config::Config;
+use bosun_core::publish::{
+    self, AgentSummary, AttemptFacts, DiffStat, Landing, LandingMode, ParkedFacts, ReportFacts,
+    ReportOptions, VerdictFacts,
+};
+use bosun_core::{Column, ItemId, Outcome, ParkReason, Reason, State};
+use bosun_queue::{Owned, QueueError};
+use bosun_store::{AgentCallKind, OutboxOp, OutboxRow, Reader, Write};
+use tokio::sync::{Notify, watch};
+
+use super::{Shared, blocking, lookup};
+
+/// Effect indexes from here up are reverts of foreign changes, not effects of a transition
+/// (whose indexes are small): [`revert_index`].
+pub(crate) const REVERT_FLOOR: u32 = 1_000_000_000;
+
+/// The longest wait before a failed row is tried again.
+const MAX_BACKOFF: Duration = Duration::from_mins(1);
+/// The wait after an error that pauses the repository (a lost scope, a renamed column).
+const PAUSE_BACKOFF: Duration = Duration::from_mins(5);
+/// A question or a comment body, in characters.
+const COMMENT_CAP: usize = 8_000;
+
+/// What the loop tells the drainer, and the facts of the board it remembers for rendering.
+#[derive(Debug, Default)]
+pub(crate) struct Board {
+    wake: Notify,
+    /// Card titles from the last poll, by item.
+    titles: Mutex<BTreeMap<ItemId, String>>,
+    /// The last lint findings of an item, for its Needs-you comment.
+    findings: Mutex<BTreeMap<ItemId, Vec<String>>>,
+}
+
+impl Board {
+    /// New rows were recorded: drain now.
+    pub(crate) fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    /// Remembers the titles of the cards of a poll.
+    pub(crate) fn note_titles(&self, titles: impl IntoIterator<Item = (ItemId, String)>) {
+        let mut map = self.titles.lock().unwrap_or_else(PoisonError::into_inner);
+        map.extend(titles);
+    }
+
+    /// Remembers the lint findings of `item`.
+    pub(crate) fn note_findings(&self, item: &ItemId, findings: &[String]) {
+        self.findings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(item.clone(), findings.to_vec());
+    }
+
+    fn title(&self, item: &ItemId) -> Option<String> {
+        self.titles
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(item)
+            .cloned()
+    }
+
+    fn findings(&self, item: &ItemId) -> Vec<String> {
+        self.findings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(item)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// The index of a revert written at `now_ms`: distinct per millisecond (for weeks), above
+/// every transition's.
+pub(crate) fn revert_index(now_ms: i64) -> u32 {
+    let span = i64::from(u32::MAX - REVERT_FLOOR);
+    REVERT_FLOOR + u32::try_from(now_ms.rem_euclid(span)).unwrap_or(0)
+}
+
+/// The board's daemon-owned state of a machine column.
+pub(crate) fn owned(column: Column) -> Owned {
+    match column {
+        Column::InProgress => Owned::InProgress,
+        Column::Verify => Owned::Verify,
+        Column::Done => Owned::Done,
+        Column::NeedsYou => Owned::NeedsYou,
+    }
+}
+
+/// The board's number of the card of `item` (`<repo>#<n>`).
+pub(crate) fn card_of(item: &ItemId) -> Option<bosun_queue::ItemId> {
+    let (_, n) = item.0.rsplit_once('#')?;
+    n.parse().ok().map(bosun_queue::ItemId)
+}
+
+/// The (attempt, seq, index) of an effect key `<item>/a<attempt>/t<seq>/e<index>`.
+fn key_parts(key: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = key.rsplitn(4, '/');
+    let index = parts.next()?.strip_prefix('e')?.parse().ok()?;
+    let seq = parts.next()?.strip_prefix('t')?.parse().ok()?;
+    let attempt = parts.next()?.strip_prefix('a')?.parse().ok()?;
+    Some((attempt, seq, index))
+}
+
+/// The pending rows of `repo` (due or not), from the store.
+pub(crate) async fn pending(reader: &Reader, repo: &str) -> Result<Vec<OutboxRow>, String> {
+    let prefix = format!("{repo}#");
+    let rows = reader.outbox(i64::MAX).await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| r.item.0.starts_with(&prefix))
+        .collect())
+}
+
+/// Runs the drainer of the loop's repository until aborted.
+pub(crate) async fn run(
+    shared: Arc<Shared>,
+    board: Arc<Board>,
+    config: watch::Receiver<Arc<Config>>,
+) {
+    let mut drainer = Drainer {
+        shared,
+        board,
+        config,
+        bodies: HashMap::new(),
+    };
+    loop {
+        drainer.drain().await;
+        let poll = drainer.shared.options.poll;
+        tokio::select! {
+            () = drainer.board.wake.notified() => {}
+            () = tokio::time::sleep(poll) => {}
+        }
+    }
+}
+
+/// How one send ended.
+enum Sent {
+    /// The board has it (or the item left the board): acknowledge.
+    Done,
+    /// Try again later; the pass ends here.
+    Retry(QueueError),
+}
+
+struct Drainer {
+    shared: Arc<Shared>,
+    board: Arc<Board>,
+    config: watch::Receiver<Arc<Config>>,
+    /// `mutant_outbox_stored_body`: the body first rendered for each row, kept for replays.
+    bodies: HashMap<i64, String>,
+}
+
+impl Drainer {
+    /// Sends the due rows of the repository in order; stops at the first that fails.
+    async fn drain(&mut self) {
+        let deps = &self.shared.deps;
+        let now = deps.clock.wall_ms();
+        let prefix = format!("{}#", self.shared.options.repo);
+        let rows = match deps.reader.outbox(now).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.shared
+                    .trouble(format!("the outbox cannot be read: {e}"));
+                return;
+            }
+        };
+        for row in rows.into_iter().filter(|r| r.item.0.starts_with(&prefix)) {
+            // The kill switch (#67): nothing more is written to any board; the rows wait.
+            if self.shared.deps.control.board_writes_stopped() {
+                return;
+            }
+            let write = match self.send(&row).await {
+                Ok(Sent::Done) => Write::Acknowledge {
+                    id: row.id,
+                    revision: row.revision,
+                    at_ms: self.shared.deps.clock.wall_ms(),
+                },
+                Ok(Sent::Retry(e)) => {
+                    let now = self.shared.deps.clock.wall_ms();
+                    let wait = backoff(&e, row.tries, now);
+                    self.shared.trouble(format!(
+                        "the board write {} waits {} s: {e}",
+                        row.effect_key,
+                        wait.as_secs()
+                    ));
+                    let write = Write::SendFailed {
+                        id: row.id,
+                        error: e.to_string(),
+                        retry_at_ms: now + i64::try_from(wait.as_millis()).unwrap_or(i64::MAX),
+                    };
+                    if let Err(e) = self.shared.deps.writer.write(vec![write]).await {
+                        self.shared
+                            .trouble(format!("the outbox cannot be written: {e}"));
+                    }
+                    return;
+                }
+                Err(e) => {
+                    self.shared.trouble(format!(
+                        "the board write {} cannot be rendered: {e}",
+                        row.effect_key
+                    ));
+                    return;
+                }
+            };
+            if let Err(e) = self.shared.deps.writer.write(vec![write]).await {
+                self.shared
+                    .trouble(format!("the outbox cannot be written: {e}"));
+                return;
+            }
+        }
+    }
+
+    /// Renders and sends one row. `Err` when the store cannot be read.
+    async fn send(&mut self, row: &OutboxRow) -> Result<Sent, String> {
+        let reader = &self.shared.deps.reader;
+        let Some(card) = card_of(&row.item) else {
+            return Ok(Sent::Done);
+        };
+        let stored = reader
+            .item(&row.item)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("item {} is not recorded", row.item))?;
+        let state = stored.item.state;
+        let queue = self.shared.deps.queue.clone();
+        let result = match row.op {
+            OutboxOp::Project(_) => {
+                // The column of the item's state now: a replay never moves the card back.
+                let Some(owned) = state.column().map(owned) else {
+                    return Ok(Sent::Done);
+                };
+                let revert = key_parts(&row.effect_key)
+                    .filter(|(_, _, index)| *index >= REVERT_FLOOR)
+                    .map(|(_, seq, _)| {
+                        (
+                            format!("revert:{}/t{seq}", row.item),
+                            revert_body(state, owned.column()),
+                        )
+                    });
+                blocking(move || {
+                    queue.project(card, owned, None)?;
+                    if let Some((key, body)) = revert {
+                        queue.comment(card, &body, &key)?;
+                    }
+                    Ok(())
+                })
+                .await
+            }
+            OutboxOp::Comment(reason) => {
+                let body = self.comment_body(row, reason).await?;
+                let key = Self::key(&row.effect_key, row.tries);
+                blocking(move || queue.comment(card, &body, &key)).await
+            }
+            OutboxOp::UpsertComment => {
+                // The sticky report is created at claim (#5): an item never claimed (a lint
+                // bounce, a claim lost or refused) gets none.
+                if reader
+                    .snapshot(&row.item)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+                {
+                    return Ok(Sent::Done);
+                }
+                let body = if cfg!(mutant_outbox_stored_body) {
+                    // Mutant: the body rendered for the first send is replayed as it was.
+                    if let Some(body) = self.bodies.get(&row.id) {
+                        body.clone()
+                    } else {
+                        let body = self.report(&row.item).await?;
+                        self.bodies.insert(row.id, body.clone());
+                        body
+                    }
+                } else {
+                    self.report(&row.item).await?
+                };
+                let key = Self::key(&publish::report_key(&row.item), row.tries);
+                blocking(move || queue.upsert_comment(card, &key, &body)).await
+            }
+        };
+        Ok(match result {
+            Ok(()) => Sent::Done,
+            Err(e) if e.is_cancel() => {
+                eprintln!(
+                    "bosund: repository {}: {e}; the board write {} is dropped",
+                    self.shared.options.repo, row.effect_key
+                );
+                Sent::Done
+            }
+            Err(e @ QueueError::InvalidKey(_)) => {
+                self.shared.trouble(format!(
+                    "the board write {} is dropped: {e}",
+                    row.effect_key
+                ));
+                Sent::Done
+            }
+            Err(e) => Sent::Retry(e),
+        })
+    }
+
+    /// The hidden key a comment is sent under.
+    fn key(key: &str, tries: u32) -> String {
+        if cfg!(mutant_outbox_no_key) {
+            // Mutant: no idempotence key; every send is a new comment.
+            format!("{key}/{tries}")
+        } else {
+            key.to_owned()
+        }
+    }
+
+    async fn report(&self, item: &ItemId) -> Result<String, String> {
+        let title = self.board.title(item).unwrap_or_else(|| item.to_string());
+        let config = self.config.borrow().clone();
+        let path = lookup(&config, &self.shared.options.repo).map(|(repo, _)| repo.path.clone());
+        let facts = report_facts(&self.shared.deps.reader, item, title, path).await?;
+        // The daemon does not know whether the repository is public: tails stay off (#5).
+        Ok(publish::render_report(
+            &facts,
+            ReportOptions::for_repository(true),
+        ))
+    }
+
+    /// The new comment of a Needs-you row: its reason; a question's own text.
+    async fn comment_body(&self, row: &OutboxRow, reason: Reason) -> Result<String, String> {
+        let item = &row.item;
+        let mut body = format!("**bosun: {item} needs you.** ");
+        match reason {
+            Reason::Question => {
+                let attempt = key_parts(&row.effect_key).map_or(0, |(a, _, _)| a);
+                let calls = self
+                    .shared
+                    .deps
+                    .reader
+                    .agent_calls(item)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let question = calls
+                    .iter()
+                    .rev()
+                    .find(|c| {
+                        c.attempt == attempt
+                            && !c.refused
+                            && c.kind == AgentCallKind::Question { blocking: true }
+                    })
+                    .map_or("", |c| c.body.as_str());
+                let _ = write!(
+                    body,
+                    "The agent asked a blocking question in attempt {attempt} (its text, \
+                     not checked by bosun):\n\n"
+                );
+                let text = publish::sanitise(&publish::redact(question), COMMENT_CAP);
+                for line in text.lines() {
+                    body.push_str("> ");
+                    body.push_str(line);
+                    body.push('\n');
+                }
+                body.push_str(
+                    "\nAnswer by editing the card, then move it to Ready for a fresh attempt.",
+                );
+            }
+            Reason::Lint => {
+                body.push_str("The card fails lint and was not claimed.");
+                let findings = self.board.findings(item);
+                if !findings.is_empty() {
+                    body.push('\n');
+                }
+                for finding in findings {
+                    body.push_str("\n- ");
+                    body.push_str(&publish::sanitise_inline(&finding, 500));
+                }
+                body.push_str("\n\nFix the card, then move it to Ready.");
+            }
+            other => {
+                body.push_str(reason_text(other));
+                body.push_str(
+                    ". The item report above has the facts. Move the card to Ready to retry \
+                     with a fresh attempt counter, or to Backlog to cancel.",
+                );
+            }
+        }
+        Ok(body)
+    }
+}
+
+/// The wait before row `tries` (failed `tries` times before) is sent again after `e`.
+fn backoff(e: &QueueError, tries: u32, now_ms: i64) -> Duration {
+    match e {
+        QueueError::RateLimited(limit) => limit.wait(u64::try_from(now_ms / 1000).unwrap_or(0)),
+        e if e.pauses_repository() => PAUSE_BACKOFF,
+        _ => Duration::from_secs(1u64 << tries.min(6)).min(MAX_BACKOFF),
+    }
+}
+
+fn reason_text(reason: Reason) -> &'static str {
+    match reason {
+        Reason::Lint => "The card fails lint",
+        Reason::Cycle => "The card is in a `blocked-by` cycle",
+        Reason::Question => "The agent asked a blocking question",
+        Reason::Auth => "The provider's authentication expired",
+        Reason::Budget => "The item's budget was exceeded",
+        Reason::ParkCap => "The item was parked and resumed too many times",
+        Reason::ConfigChanged => {
+            "The configuration or the permission policy changed during the item"
+        }
+        Reason::AttemptsExhausted => "The failed attempts reached the limit",
+        Reason::Guard(_) => "A guard refused the attempt before its verdict",
+        Reason::LandingRefused => "Landing was refused",
+        Reason::Handshake => "The session's MCP server did not start, again after one retry",
+        Reason::Identity => "The identity checks before a session refused it",
+    }
+}
+
+/// The comment that explains a reverted foreign change.
+fn revert_body(state: State, column: bosun_queue::Column) -> String {
+    format!(
+        "**bosun:** this card is the daemon's while its item is `{}`; a change bosun did not \
+         make was reverted to {column}. To cancel the item, move the card to Backlog; to start \
+         it over, to Ready; to accept it as done, to Done; to restart its session, add the \
+         `restart` label.",
+        state.as_str()
+    )
+}
+
+fn park_reason(name: &str) -> Option<ParkReason> {
+    Some(match name {
+        "limit" => ParkReason::Limit,
+        "paused" => ParkReason::Paused,
+        "killed" => ParkReason::Killed,
+        "daily_cap" => ParkReason::DailyCap,
+        _ => return None,
+    })
+}
+
+/// The facts of the item report of `item`, from the database (#5). `repo` is the checkout,
+/// for the landed commits and the diff stat.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn report_facts(
+    reader: &Reader,
+    item: &ItemId,
+    title: String,
+    repo: Option<std::path::PathBuf>,
+) -> Result<ReportFacts, String> {
+    let e = |e: bosun_store::Error| e.to_string();
+    let stored = reader
+        .item(item)
+        .await
+        .map_err(e)?
+        .ok_or_else(|| format!("item {item} is not recorded"))?;
+    let snapshot = reader.snapshot(item).await.map_err(e)?;
+    let attempts = reader.attempts(item).await.map_err(e)?;
+    let runs = reader.runs(item).await.map_err(e)?;
+    let verdicts = reader.verdict_runs(item).await.map_err(e)?;
+    let calls = reader.agent_calls(item).await.map_err(e)?;
+    let transitions = reader.transitions(item).await.map_err(e)?;
+    let flaky = reader.flaky_tests(item).await.map_err(e)?;
+
+    let verdict = snapshot
+        .as_ref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s.contract_json).ok())
+        .and_then(|c| c["verdict"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let attempts_facts = attempts
+        .iter()
+        .map(|row| {
+            let number = row.attempt.number;
+            let mut sessions: Vec<String> = Vec::new();
+            for run in runs.iter().filter(|r| r.attempt == number) {
+                if !sessions.contains(&run.session_key) {
+                    sessions.push(run.session_key.clone());
+                }
+            }
+            let done: Vec<_> = verdicts
+                .iter()
+                .filter(|v| v.attempt == number && v.result.is_some())
+                .collect();
+            let verdict = done.first().and_then(|first| {
+                let last = done.last()?;
+                Some(VerdictFacts {
+                    first: first.result?,
+                    rerun: done.get(1).and_then(|v| v.result),
+                    duration_ms: done.iter().filter_map(|v| v.duration_ms).sum(),
+                    line: last.verdict_line.clone().unwrap_or_default(),
+                    tail: last.tail.clone().unwrap_or_default(),
+                })
+            });
+            AttemptFacts {
+                number,
+                state: row.attempt.state,
+                model: None,
+                sessions,
+                crash_retries: row.attempt.crash_retries,
+                verdict,
+            }
+        })
+        .collect();
+
+    let mut parked = Vec::new();
+    for (at, t) in transitions.iter().enumerate() {
+        if t.to != "parked" {
+            continue;
+        }
+        let (Some(reason), Some(next)) = (
+            t.to_detail.as_deref().and_then(park_reason),
+            transitions.get(at + 1),
+        ) else {
+            continue;
+        };
+        parked.push(ParkedFacts {
+            reason,
+            ms: u64::try_from(next.ts_ms - t.ts_ms).unwrap_or(0),
+        });
+    }
+
+    let last_attempt = attempts.last().map(|a| a.attempt.number);
+    let summary = match last_attempt {
+        Some(attempt) => reader.summary(item, attempt).await.map_err(e)?.map(|call| {
+            let (decisions, followups) = match &call.kind {
+                AgentCallKind::Summary {
+                    decisions,
+                    followups,
+                } => (decisions.clone(), followups.clone()),
+                _ => (Vec::new(), Vec::new()),
+            };
+            AgentSummary {
+                attempt,
+                head: call.head_sha.clone().unwrap_or_default(),
+                done: call.body.clone(),
+                decisions,
+                deviations: Vec::new(),
+                questions: calls
+                    .iter()
+                    .filter(|c| {
+                        c.attempt == attempt
+                            && !c.refused
+                            && c.kind == AgentCallKind::Question { blocking: false }
+                    })
+                    .map(|c| c.body.clone())
+                    .collect(),
+                followups,
+            }
+        }),
+        None => None,
+    };
+
+    let base = snapshot.as_ref().and_then(|s| s.base_sha.clone());
+    let head = runs.iter().rev().find_map(|r| r.head_sha.clone());
+    let (commits, diff) = match (repo, base, head) {
+        (Some(path), Some(base), Some(head)) if base != head => {
+            blocking(move || {
+                let git = bosun_git::Git::new(path);
+                let commits = super::git::range(&git, &base, &head).unwrap_or_default();
+                let diff = git
+                    .run(&["diff", "--shortstat", &base, &head], None)
+                    .ok()
+                    .map(|out| shortstat(&out));
+                (commits, diff)
+            })
+            .await
+        }
+        _ => (Vec::new(), None),
+    };
+    let landing = matches!(
+        stored.item.state,
+        State::Done(Outcome::Pass | Outcome::Flaky)
+    )
+    .then(|| Landing {
+        mode: LandingMode::Local,
+        branch: snapshot
+            .as_ref()
+            .and_then(|s| s.branch.clone())
+            .map_or_else(String::new, |b| {
+                b.strip_prefix("refs/heads/")
+                    .map_or(b.clone(), str::to_owned)
+            }),
+        commits: commits.clone(),
+        pull_request: None,
+    });
+
+    Ok(ReportFacts {
+        item: item.clone(),
+        title,
+        state: stored.item.state,
+        detail: None,
+        verdict,
+        attempts: attempts_facts,
+        flaky_tests: flaky.into_iter().map(|(_, name)| name).collect(),
+        parked,
+        landing,
+        diff,
+        summary,
+        bill: publish::Bill {
+            commits: u32::try_from(commits.len()).unwrap_or(u32::MAX),
+            ..publish::Bill::default()
+        },
+    })
+}
+
+/// `git diff --shortstat` as a diff stat.
+fn shortstat(out: &str) -> DiffStat {
+    let mut stat = DiffStat {
+        files: 0,
+        insertions: 0,
+        deletions: 0,
+        protected: Vec::new(),
+    };
+    for part in out.trim().split(',') {
+        let mut words = part.split_whitespace();
+        let Some(n) = words.next().and_then(|n| n.parse::<u64>().ok()) else {
+            continue;
+        };
+        match words.next() {
+            Some(w) if w.starts_with("file") => stat.files = u32::try_from(n).unwrap_or(u32::MAX),
+            Some(w) if w.starts_with("insertion") => stat.insertions = n,
+            Some(w) if w.starts_with("deletion") => stat.deletions = n,
+            _ => {}
+        }
+    }
+    stat
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effect_keys_and_card_numbers_parse() {
+        assert_eq!(key_parts("demo#3/a2/t17/e1"), Some((2, 17, 1)));
+        assert_eq!(key_parts("my/repo#3/a0/t1/e0"), Some((0, 1, 0)));
+        assert_eq!(key_parts("report:demo#3"), None);
+        assert_eq!(
+            card_of(&ItemId::new("demo#12")),
+            Some(bosun_queue::ItemId(12))
+        );
+        assert_eq!(card_of(&ItemId::new("demo")), None);
+        assert!(revert_index(1_764_000_000_000) >= REVERT_FLOOR);
+    }
+
+    #[test]
+    fn shortstat_reads_every_part() {
+        let stat = shortstat(" 3 files changed, 10 insertions(+), 2 deletions(-)\n");
+        assert_eq!((stat.files, stat.insertions, stat.deletions), (3, 10, 2));
+        let stat = shortstat(" 1 file changed, 1 deletion(-)\n");
+        assert_eq!((stat.files, stat.insertions, stat.deletions), (1, 0, 1));
+    }
+}

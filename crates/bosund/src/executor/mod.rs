@@ -15,8 +15,8 @@
 //! | `Kill` | the running task's kill signal; for a blocking question, after [`Options::question_grace`] |
 //! | `CheckPreconditions` | the guards of #59 ([`guards`]: protected paths, new ignored files, git's own configuration), then the verdict preconditions of `bosun-git` |
 //! | `RunVerdict` | the verdict task ([`verdict`]): always the snapshot's command |
-//! | `Land` | `local` landing: nothing to push |
-//! | `Project`, `Comment`, `Report` | the store's outbox, written with the transition; sending it is #65 |
+//! | `Land` | `local` landing: nothing to push; it never waits for the board |
+//! | `Project`, `Comment`, `Report` | the store's outbox, written with the transition; sent by the drainer ([`outbox`]) |
 //!
 //! Long effects run as tasks that report back an [`Event`]; the loop applies it like any
 //! other, so a stale report (the item moved on meanwhile) takes no arrow.
@@ -24,7 +24,8 @@
 //! # What changes during a run
 //!
 //! The board is polled every [`Options::poll`]: an edited, added or reordered card takes effect
-//! at the next poll. A claimed item runs from its snapshot: a body edit applies only at its next
+//! at the next poll. A user's action on a daemon-owned card is a command ([`commands`]): cancel,
+//! start over, retry, the `restart` label, a manual Done; anything else is reverted. A claimed item runs from its snapshot: a body edit applies only at its next
 //! claim. The configuration arrives through a watch channel ([`crate::config_watch`]); a change
 //! of the repository's configuration hash or its policy hash while an item is in flight sends
 //! the item to Needs you (#2).
@@ -73,15 +74,16 @@
 //! The agent's calls are answered by [`crate::agent`] (#63) under the credential each session
 //! is issued at spawn; a blocking question comes back here as [`Event::Question`].
 //!
-//! The `bosun-mcp` server and its handshake (#64), the outbox drainer, the sticky report and user
-//! commands (#65), and crash recovery (#68): an item found in flight at start keeps its
-//! repository waiting for #68.
+//! The `bosun-mcp` server and its handshake (#64), and crash recovery (#68): an item found in
+//! flight at start keeps its repository waiting for #68.
 
 pub(crate) mod board;
 mod claim;
+mod commands;
 mod git;
 mod hold;
 mod identity;
+mod outbox;
 mod park;
 mod session;
 #[cfg(test)]
@@ -359,6 +361,21 @@ pub(crate) struct Loop {
     watch: hold::Watch,
     /// Wakes on every change of the control state.
     control: watch::Receiver<u64>,
+    /// The outbox drainer's wake-up and what it renders from the board.
+    board: Arc<outbox::Board>,
+    /// Items whose `restart` label was acted on and is still on the card.
+    restarts: BTreeSet<ItemId>,
+    /// Items whose card the last poll did not see: a second poll without it is a cancel.
+    absent: BTreeSet<ItemId>,
+}
+
+/// Aborts its task when dropped: the drainer ends with its loop.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl fmt::Debug for Loop {
@@ -390,6 +407,9 @@ impl Loop {
             gaps,
             watch: hold::Watch::default(),
             control,
+            board: Arc::default(),
+            restarts: BTreeSet::new(),
+            absent: BTreeSet::new(),
         }
     }
 
@@ -397,6 +417,11 @@ impl Loop {
     /// the configuration channel closes. Aborting the task kills the child in flight: its
     /// container is dropped.
     pub(crate) async fn run(mut self) {
+        let _drainer = AbortOnDrop(tokio::spawn(outbox::run(
+            self.shared.clone(),
+            self.board.clone(),
+            self.config.clone(),
+        )));
         let mut tick = tokio::time::interval(self.shared.options.poll);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         while !self.halted {
@@ -460,6 +485,7 @@ impl Loop {
             }])
             .await
             .map_err(|e| e.to_string())?;
+        self.board.wake();
         for body in events::transition(&stepped.item.id, &stepped.transition) {
             self.shared.publish(body);
         }
@@ -556,7 +582,11 @@ impl Loop {
         let mut follow = Vec::new();
         for effect in effects {
             match effect.kind {
-                EffectKind::Claim => self.start_claim(effect),
+                EffectKind::Claim => {
+                    // A restart claims again: the old attempt's work is set aside first.
+                    self.before_claim().await;
+                    self.start_claim(effect);
+                }
                 EffectKind::Spawn {
                     attempt,
                     spawn,
@@ -584,9 +614,16 @@ impl Loop {
                 }
                 EffectKind::RunVerdict { attempt, run } => self.start_verdict(attempt, run).await,
                 // `local` landing (#7): nothing to push; the trailers are injected at commit
-                // time (#59) and the report is the outbox's (#65).
-                EffectKind::Land { .. } => follow.push(Event::Landed),
-                // Queued in the outbox with the transition; sent by #65.
+                // time (#59) and the report is the outbox's (#65), which landing never waits
+                // for: an outage of the board never stops an item.
+                EffectKind::Land { .. } => {
+                    if cfg!(mutant_outbox_stop_on_outage) {
+                        // Mutant: landing waits until the board has every write of the item.
+                        self.wait_for_board().await;
+                    }
+                    follow.push(Event::Landed);
+                }
+                // Queued in the outbox with the transition; sent by the drainer.
                 EffectKind::Project(_) | EffectKind::Comment(_) | EffectKind::Report => {}
             }
         }
@@ -636,6 +673,21 @@ impl Loop {
         if let Some(old) = cur.task.replace(Task { kill, handle }) {
             let _ = old.kill.send(true);
             old.handle.abort();
+        }
+    }
+
+    /// `mutant_outbox_stop_on_outage`: waits until the item in flight has no write left in the
+    /// outbox.
+    async fn wait_for_board(&self) {
+        let Some(item) = self.current.as_ref().map(|c| c.item.id.clone()) else {
+            return;
+        };
+        loop {
+            match outbox::pending(&self.shared.deps.reader, &self.shared.options.repo).await {
+                Ok(rows) if rows.iter().all(|r| r.item != item) => return,
+                Err(_) => return,
+                Ok(_) => tokio::time::sleep(self.shared.options.poll).await,
+            }
         }
     }
 
@@ -944,6 +996,7 @@ impl Loop {
                     }
                     ClaimOutcome::Lost => Event::ClaimLost,
                     ClaimOutcome::Lint(findings) => {
+                        self.board.note_findings(&item, &findings);
                         self.shared.publish(EventBody::LintFindings {
                             repo: self.shared.options.repo.clone(),
                             card: item.to_string(),
@@ -1013,6 +1066,8 @@ impl Loop {
             if matches!(cur.item.state, State::Parked(_)) {
                 self.apply(Event::Tick).await;
             }
+            // The user's commands on the item in flight.
+            self.sync_board().await;
             return;
         }
         if self.waiting || self.backoff.is_some_and(|t| Instant::now() < t) {
@@ -1074,36 +1129,9 @@ impl Loop {
         let Some((repo, identity)) = lookup(&config, &repo_name) else {
             return;
         };
-        let queue = self.shared.deps.queue.clone();
-        let cursor = self.cursor.clone();
-        let changes = match blocking(move || queue.poll(cursor.as_ref())).await {
-            Ok(changes) => changes,
-            Err(e) => {
-                self.board_error("the board cannot be read", &e);
-                return;
-            }
+        let Some(commands::Synced { changes, stored }) = self.sync_board().await else {
+            return;
         };
-        if !changes.is_empty() {
-            self.shared.publish(EventBody::QueueChanged {
-                repo: repo_name.clone(),
-                hash: claim::text_hash(changes.cursor.as_str()),
-            });
-        }
-        self.cursor = Some(changes.cursor.clone());
-
-        let stored = match self.shared.deps.reader.items(false).await {
-            Ok(items) => items,
-            Err(e) => {
-                self.shared
-                    .trouble(format!("the store cannot be read: {e}"));
-                return;
-            }
-        };
-        let stored: BTreeMap<ItemId, bosun_store::StoredItem> = stored
-            .into_iter()
-            .filter(|s| s.repo == repo.key)
-            .map(|s| (s.item.id.clone(), s))
-            .collect();
         if stored.values().any(|s| s.item.state.is_active()) {
             self.waiting = true;
             self.shared.trouble(
@@ -1147,6 +1175,7 @@ impl Loop {
             if !self.register(repo, &card, &id).await {
                 return;
             }
+            self.board.note_findings(&id, &findings);
             self.shared.publish(EventBody::LintFindings {
                 repo: repo_name.clone(),
                 card: id.to_string(),

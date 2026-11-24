@@ -51,6 +51,14 @@ pub trait Queue {
     /// [`QueueError::InvalidKey`], [`QueueError::NotFound`], or the write failed.
     fn upsert_comment(&self, item: ItemId, key: &str, body: &str) -> Result<(), QueueError>;
 
+    /// Removes the label `label` from `item` (the `restart` label the daemon consumes, #5).
+    /// Removing a label the item does not carry is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// [`QueueError::NotFound`] when the item has no card; otherwise the write failed.
+    fn remove_label(&self, item: ItemId, label: &str) -> Result<(), QueueError>;
+
     /// The card of `item` as the card lint reads it, fresh from the board.
     ///
     /// # Errors

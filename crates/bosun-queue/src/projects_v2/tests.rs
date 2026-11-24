@@ -169,6 +169,11 @@ fn suite_lint_target_reads_the_live_card() {
     testsuite::lint_target_reads_the_live_card(&mut FakeHarness::new());
 }
 
+#[test]
+fn suite_remove_label_is_idempotent() {
+    testsuite::remove_label_is_idempotent(&mut FakeHarness::new());
+}
+
 // Start-up resolution.
 
 #[test]

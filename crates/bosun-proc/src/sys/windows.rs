@@ -180,7 +180,7 @@ impl Container {
 
 /// Resumes every thread of the suspended process `pid`: just the main one, for a process
 /// created with `CREATE_SUSPENDED`.
-fn resume(pid: u32) -> io::Result<()> {
+pub(crate) fn resume_pid(pid: u32) -> io::Result<()> {
     // SAFETY: a thread snapshot of the whole system; the flags are valid and the process id is
     // ignored for `TH32CS_SNAPTHREAD`.
     let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
@@ -227,11 +227,29 @@ pub(crate) fn spawn_contained(
     command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
     let mut child = command.spawn()?;
     let started = match (child.raw_handle(), child.id()) {
-        (Some(handle), Some(pid)) => container.assign(handle).and_then(|()| resume(pid)),
+        (Some(handle), Some(pid)) => container.assign(handle).and_then(|()| resume_pid(pid)),
         _ => Err(io::Error::other("a fresh child has no handle")),
     };
     if let Err(e) = started {
         child.start_kill().ok();
+        return Err(e);
+    }
+    Ok((child, container))
+}
+
+/// Starts `command` held back in a new job: its main thread stays suspended until
+/// [`resume_pid`], so it runs no instruction outside the job. Dropping the container kills the
+/// job's processes, so a child that is never resumed ends with its container.
+pub(crate) fn spawn_stopped(
+    command: &mut std::process::Command,
+) -> io::Result<(std::process::Child, Container)> {
+    use std::os::windows::process::CommandExt;
+
+    let container = Container::new()?;
+    command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+    let mut child = command.spawn()?;
+    if let Err(e) = container.assign(child.as_raw_handle()) {
+        child.kill().ok();
         return Err(e);
     }
     Ok((child, container))

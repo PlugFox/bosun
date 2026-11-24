@@ -33,5 +33,15 @@ windows-sys = { workspace = true, features = [
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt"] }
 
+# The session shim (#8): runs one child in a container for the daemon, std only in its own code.
+[[bin]]
+name = "bosun-shim"
+path = "src/bin/bosun-shim.rs"
+
+# The child of the shim tests: a role per behaviour (#8), not a product.
+[[bin]]
+name = "bosun-proc-helper"
+path = "src/bin/bosun-proc-helper.rs"
+
 [lints]
 workspace = true

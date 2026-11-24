@@ -139,6 +139,67 @@ pub(crate) fn spawn_contained(
     Ok((child, Container { pgid }))
 }
 
+/// `kill(pid, signal)` for a child this process spawned. A child that has already exited is
+/// not an error: its exit is reported by the wait.
+fn signal_child(pid: u32, signal: libc::c_int) -> io::Result<()> {
+    let pid = pid_t(pid)?;
+    // SAFETY: `kill` has no memory preconditions; any pid and signal are valid arguments.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(e)
+    }
+}
+
+/// Starts `command` as the leader of a new process group, then stops it with `SIGSTOP`.
+///
+/// Unlike Windows, the child is not held before its first instruction: `spawn` returns only
+/// once the child has exec'd, so a stop inside the pre-exec hook would block the spawn. The
+/// child runs from its exec until the stop; [`resume_pid`] (`SIGCONT`) lets it go on.
+pub(crate) fn spawn_stopped(
+    command: &mut std::process::Command,
+) -> io::Result<(std::process::Child, Container)> {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+    #[cfg(target_os = "linux")]
+    {
+        let parent = pid_t(std::process::id())?;
+        // SAFETY: the closure runs in the forked child before `exec` and calls only `prctl`
+        // and `getppid`, both async-signal-safe; it allocates nothing and takes no lock.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                // The parent may have died before the signal was armed.
+                if libc::getppid() != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
+    let child = command.spawn()?;
+    let container = Container {
+        pgid: pid_t(child.id())?,
+    };
+    if let Err(e) = signal_child(child.id(), libc::SIGSTOP) {
+        container.kill();
+        return Err(e);
+    }
+    Ok((child, container))
+}
+
+/// Lets a child stopped by [`spawn_stopped`] run.
+pub(crate) fn resume_pid(pid: u32) -> io::Result<()> {
+    signal_child(pid, libc::SIGCONT)
+}
+
 /// The start time of a child this process spawned and has not reaped: even if it has
 /// already exited, its pid stays reserved until the wait.
 pub(crate) fn child_start_time(child: &tokio::process::Child) -> io::Result<u64> {

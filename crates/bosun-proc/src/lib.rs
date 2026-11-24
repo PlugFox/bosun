@@ -1,6 +1,6 @@
 //! Child processes (#7, #50): spawning into a container, tree kill, reaping by pid and start
 //! time, the power request, and on Windows the security descriptor of the local endpoint (D2,
-//! #71). Containment back ends and the session shim come in stage 2 (#8).
+//! #71). Containment back ends come in stage 2 (#8).
 //!
 //! - [`Spawner`] starts a child from a [`ChildSpec`] (argv, a constructed environment, a working
 //!   directory) inside a container, with separate stdout and stderr pipes, and hands back a
@@ -17,6 +17,9 @@
 //!   disk floor of worktrees (#8). A missing path is an error, never an unlimited volume.
 //! - `pipe` (Windows): `pipe::OwnerOnly` creates the daemon's named pipe with a DACL that admits
 //!   only the user it runs as, and `pipe::dacl` reads a handle's DACL back.
+//! - [`shim`] (#8): the session shim's spec and record, and [`shim::run`], which the
+//!   `bosun-shim` binary calls: a child run in a container that outlives the daemon's death,
+//!   with its output drained to files, its exit recorded and its wall-clock cap enforced.
 //!
 //! # Containers
 //!
@@ -46,6 +49,7 @@ mod local_time;
 #[cfg(windows)]
 pub mod pipe;
 mod power;
+pub mod shim;
 mod spawn;
 mod sys;
 

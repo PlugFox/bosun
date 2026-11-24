@@ -612,6 +612,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_shim_no_exit_record",
+        issue: 8,
+        breaks: "the shim does not write its child's exit code into the record",
+        package: "bosun-proc",
+        check: Check::Test("the_exit_of_a_child_nobody_waited_for_is_in_the_record"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_runner_inline_daemon_comments",
         issue: 52,
         breaks: "the prompt builder inlines the daemon's own comments",

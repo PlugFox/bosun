@@ -1556,6 +1556,25 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("land::tests::a_dirty_checkout_of_the_target_defers_the_fast_forward"),
         platform: None,
     },
+    // #126: landing modes.
+    Mutant {
+        name: "mutant_git_squash_skip_tree_check",
+        issue: 126,
+        breaks: "a squash lands a tree other than the verified one",
+        package: "bosun-git",
+        check: Check::Test("merge::tests::a_squash_that_differs_from_the_verified_tree_is_refused"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_merge_drop_trailers",
+        issue: 126,
+        breaks: "a squash or merge commit lands without the Item, Run and Session trailers",
+        package: "bosun-git",
+        check: Check::Test(
+            "merge::tests::each_method_ends_with_the_verified_tree_and_the_trailers",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

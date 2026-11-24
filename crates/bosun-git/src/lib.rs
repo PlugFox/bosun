@@ -58,11 +58,17 @@
 //! [`land`] rebases an item's branch onto its target (a conflict is aborted and reported) and
 //! fast-forwards the target, deferring when its checkout is dirty or mid-operation.
 //!
+//! # Landing modes (#8)
+//!
+//! [`merge::merge_commit`] builds the commit an item lands as (`ff`, `squash` or `no-ff`) with
+//! plumbing, refusing a tree other than the verified one; a new commit gets the trailers.
+//!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
 
 mod base;
 mod invoke;
 pub mod land;
+pub mod merge;
 mod message;
 mod precondition;
 mod protect;

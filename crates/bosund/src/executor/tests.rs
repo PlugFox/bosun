@@ -32,6 +32,24 @@ use crate::events::{Events, Options as EventOptions};
 mod recovery;
 mod sticky;
 
+/// Removes from `command` every variable it would inherit from a bosun session (#134): each
+/// `BOSUN_*` and the command-scope configuration (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
+/// `GIT_CONFIG_VALUE_*`) that points git at the session's hooks, so a scene's git behaves the
+/// same inside a session and outside one. (`bosun-git`'s tests have their own copy.)
+fn without_session(command: &mut Command) -> &mut Command {
+    for (name, _) in std::env::vars_os() {
+        let text = name.to_string_lossy();
+        if text.starts_with("BOSUN_")
+            || text == "GIT_CONFIG_COUNT"
+            || text.starts_with("GIT_CONFIG_KEY_")
+            || text.starts_with("GIT_CONFIG_VALUE_")
+        {
+            command.env_remove(&name);
+        }
+    }
+    command
+}
+
 /// How long a session that asked a blocking question may go on in these scenarios.
 const GRACE: Duration = Duration::from_secs(2);
 
@@ -247,7 +265,7 @@ impl Scene {
     }
 
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = without_session(&mut Command::new("git"))
             .arg("-C")
             .arg(&self.repo)
             .args(args)

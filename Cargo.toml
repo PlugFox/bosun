@@ -264,6 +264,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_git_merge_signed)",
   # #137: the reasons of a refusal before the verdict.
   "cfg(mutant_executor_drop_precondition_reasons)",
+  # #134: the trailer hook acts only in the item's checkout; tests' git drops the session.
+  "cfg(mutant_git_trailers_everywhere)",
+  "cfg(mutant_git_test_env_inherited)",
 ] }
 
 [workspace.lints.clippy]

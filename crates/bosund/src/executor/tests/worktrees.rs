@@ -1,8 +1,11 @@
-//! Worktree mode in the loop (#8, E19): with `repo.demo.worktree` an item's session, guards,
-//! preconditions and verdict run in its worktree off the daemon's clone, and the user's
+//! Worktree mode in the loop (#8, E19): with `repo.demo.worktree` an item's session, guards
+//! and preconditions run in its worktree off the daemon's clone, each verdict run in a set-up
+//! checkout of the worktree's head (only what was committed), and the user's
 //! checkout is guarded by E4 as amended by E21: a switched HEAD is Needs you before any
 //! verdict runs, the user's own commits and edits are not (edits are reported). A failing
 //! `setup` is Needs you with no session started.
+
+use std::collections::BTreeSet;
 
 use bosun_api::EventFilter;
 use bosun_store::{WorktreeKind, WorktreeState};
@@ -283,4 +286,136 @@ async fn a_failing_setup_needs_the_user_and_starts_no_session() {
     assert_eq!(scene.runs(1).await.len(), 0);
     assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
     assert_eq!(root_entries(&scene), [workspace::CLONE]);
+}
+
+/// The verdict rows of `card`: the throwaway checkouts its verdict runs ran in.
+async fn verdict_rows(scene: &Scene, card: u64) -> Vec<bosun_store::WorktreeRow> {
+    scene
+        .store
+        .reader()
+        .worktrees(&item(card))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.kind == WorktreeKind::Verdict)
+        .collect()
+}
+
+/// The session commits `a.txt`, changes it again without committing and leaves an untracked
+/// `b.txt`: the verdict, run in a checkout of the commit, sees the committed `a.txt` and no
+/// `b.txt`. The item ends Done in one attempt, and its `uncommitted` note names both files
+/// (`mutant_loop_verdict_in_item_worktree` runs the verdict among them: it fails).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_verdict_sees_only_what_was_committed() {
+    let scene = Scene::with_worktrees(None).await;
+    scene.write_board(&[card(
+        1,
+        "Committed only",
+        "test -f a.txt && test ! -f b.txt && grep -q committed-text a.txt",
+        "Item one.",
+    )]);
+    scene.script(
+        1,
+        &[
+            "commit a.txt committed-text".to_owned(),
+            "write a.txt changed-later".to_owned(),
+            "write b.txt untracked".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let runs = scene.runs(1).await;
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let attempts: BTreeSet<u32> = scene
+        .store
+        .reader()
+        .verdict_runs(&item(1))
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.attempt)
+        .collect();
+    assert_eq!(attempts, BTreeSet::from([1]));
+    let note = scene
+        .store
+        .reader()
+        .item_note(&item(1), outbox::NOTE_UNCOMMITTED)
+        .await
+        .unwrap()
+        .expect("an uncommitted note");
+    let paths: Vec<String> = serde_json::from_str(&note).unwrap();
+    assert!(paths.iter().any(|p| p == "a.txt"), "{paths:?}");
+    assert!(paths.iter().any(|p| p == "b.txt"), "{paths:?}");
+}
+
+/// With `setup = "echo ready > setup-ran"` the verdict checkout is set up too: a verdict that
+/// needs `setup-ran` and the committed `a.txt` passes, and the item ends Done
+/// (`mutant_loop_verdict_checkout_without_setup` skips the setup there: it fails).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_setup_command_runs_in_the_verdict_checkout() {
+    let scene = Scene::with_worktrees(Some("echo ready > setup-ran")).await;
+    scene.write_board(&[card(
+        1,
+        "Set up for the verdict",
+        "test -f setup-ran && test -f a.txt",
+        "Item one.",
+    )]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let rows = verdict_rows(&scene, 1).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+}
+
+/// A verdict that fails its first run and passes when re-run: each run had its own checkout,
+/// and both are gone once the item is Done. Two rows of kind `verdict`, both `removed`; the
+/// worktree root holds only the clone, and the clone no `bosun/*-v*` branch
+/// (`mutant_loop_keep_verdict_checkout` leaves them behind).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_verdict_checkout_is_removed_after_each_run() {
+    let scene = Scene::with_worktrees(None).await;
+    // Outside the repository: the run on the base commit is the first, the attempt's first run
+    // the second (it fails), its re-run the third.
+    let count = sh_path(&scene.path("count1"));
+    scene.write_board(&[card(
+        1,
+        "Fails once",
+        &format!(
+            "n=$(cat {count} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {count}; \
+             if [ $n -eq 2 ]; then exit 1; fi; [ $n -ge 2 ] && test -f a.txt"
+        ),
+        "Item one.",
+    )]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let verdicts = scene.store.reader().verdict_runs(&item(1)).await.unwrap();
+    assert_eq!(verdicts.len(), 2, "{verdicts:?}");
+    let rows = verdict_rows(&scene, 1).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row.state, WorktreeState::Removed, "{row:?}");
+        assert!(!Path::new(&row.path).exists(), "{}", row.path);
+    }
+    assert_eq!(root_entries(&scene), [workspace::CLONE]);
+    let clone = scene.worktree_root().join(workspace::CLONE);
+    assert_eq!(
+        git_in(&scene, &clone, &["branch", "--list", "bosun/*-v*"]),
+        ""
+    );
 }

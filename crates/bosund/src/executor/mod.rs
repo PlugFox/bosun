@@ -38,9 +38,13 @@
 //! reset to the item's base, so the next item starts from a clean tree on the claim branch.
 //!
 //! With `repo.<name>.worktree` (#8, E19), and only then, the item runs in its own worktree off
-//! the daemon's clone instead ([`workspace`], opened at claim): the session, the guards, the
-//! preconditions and the verdict run there ([`Claimed::workdir`]), while the identity checks
-//! still look at the user's repository. The user's checkout is captured at claim and compared
+//! the daemon's clone instead ([`workspace`], opened at claim): the session, the guards and the
+//! preconditions run there ([`Claimed::workdir`]), while the identity checks still look at the
+//! user's repository. The clean tree is not a precondition there: what the session left
+//! uncommitted is noted (`uncommitted`), and every verdict run judges the commit, in a
+//! throwaway checkout of the worktree's head, set up and closed again ([`verdict`]). The
+//! verdict on the base commit at claim still runs in the item's fresh worktree. The user's
+//! checkout is captured at claim and compared
 //! before every verdict ([`checkout`], E4 as amended by E21). Every item, Done or not, ends
 //! with its worktree closed and its work kept in the clone under `refs/bosun/items/<item>`.
 //!
@@ -961,19 +965,26 @@ impl Loop {
             }
         }
 
+        self.git_preconditions(&item, attempt, claimed).await
+    }
+
+    /// The verdict preconditions of `bosun-git`. In worktree mode (E19) the verdict runs in a
+    /// checkout of the commit, so what is left uncommitted is noted, not refused.
+    async fn git_preconditions(&self, item: &ItemId, attempt: u32, claimed: Arc<Claimed>) -> Event {
         let path = claimed.workdir.clone();
-        let runs = self
-            .shared
-            .deps
-            .reader
-            .runs(&item)
-            .await
-            .unwrap_or_default();
+        let runs = self.shared.deps.reader.runs(item).await.unwrap_or_default();
+        let worktree = claimed.worktree.is_some();
         let checked = {
             let item = item.clone();
-            blocking(move || git::preconditions(&path, &claimed.base, &item, &runs)).await
+            blocking(move || git::preconditions(&path, &claimed.base, &item, &runs, worktree)).await
         };
-        match checked {
+        if let Ok(checked) = &checked
+            && !checked.uncommitted.is_empty()
+        {
+            self.note_uncommitted(item, attempt, &checked.uncommitted)
+                .await;
+        }
+        match checked.map(|c| c.reasons) {
             Ok(reasons) if reasons.is_empty() => Event::Preconditions {
                 attempt,
                 passed: true,
@@ -985,7 +996,7 @@ impl Loop {
                     self.shared.options.repo,
                     text.join("; ")
                 );
-                self.refused(&item, attempt, text).await;
+                self.refused(item, attempt, text).await;
                 Event::Preconditions {
                     attempt,
                     passed: false,
@@ -994,7 +1005,7 @@ impl Loop {
             Err(e) => {
                 let why = format!("the preconditions could not be checked: {e}");
                 self.shared.trouble(why.clone());
-                self.unchecked(&item, attempt, why).await
+                self.unchecked(item, attempt, why).await
             }
         }
     }
@@ -1066,6 +1077,28 @@ impl Loop {
         if let Err(e) = self.shared.deps.writer.write(vec![write]).await {
             self.shared
                 .trouble(format!("the reasons of the refusal cannot be stored: {e}"));
+        }
+    }
+
+    /// Worktree mode: `paths` were left uncommitted by `attempt`. They are stored as the item's
+    /// `uncommitted` note and reported once; the verdict does not see them.
+    async fn note_uncommitted(&self, item: &ItemId, attempt: u32, paths: &[String]) {
+        self.shared.trouble(format!(
+            "{item}: attempt {attempt} left {} uncommitted path(s) in its worktree, which the \
+             verdict does not see: {}",
+            paths.len(),
+            paths.join(", ")
+        ));
+        let note = Write::ItemNote {
+            item: item.clone(),
+            kind: outbox::NOTE_UNCOMMITTED.to_owned(),
+            body: serde_json::to_string(paths).unwrap_or_default(),
+            at_ms: now_ms(),
+        };
+        if let Err(e) = self.shared.deps.writer.write(vec![note]).await {
+            self.shared.trouble(format!(
+                "the uncommitted paths of {item} cannot be stored: {e}"
+            ));
         }
     }
 

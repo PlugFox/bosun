@@ -43,15 +43,31 @@ pub(crate) fn range(git: &Git, base: &str, head: &str) -> Result<Vec<String>, Er
     Ok(out.lines().map(str::to_owned).collect())
 }
 
+/// The most paths of an `uncommitted` note.
+pub(crate) const UNCOMMITTED_CAP: usize = 50;
+
+/// What [`preconditions`] found.
+#[derive(Debug, Default)]
+pub(crate) struct Checked {
+    /// Why the attempt fails its preconditions; empty when they hold.
+    pub(crate) reasons: Vec<Reason>,
+    /// Worktree mode: the paths left uncommitted or untracked, at most [`UNCOMMITTED_CAP`].
+    /// The verdict runs in a checkout of the commit, so they are not verified, and not an
+    /// error either.
+    pub(crate) uncommitted: Vec<String>,
+}
+
 /// The verdict preconditions of the item claimed at `base`. The trailers a commit may carry
 /// are the item's own: its id, its runs' labels and its sessions' ids, plus the co-author line
-/// the provider writes.
+/// the provider writes. With `worktree` (worktree mode, E19) the clean tree is not one of them:
+/// what is not committed is listed in [`Checked::uncommitted`] instead.
 pub(crate) fn preconditions(
     repo: &Path,
     base: &Base,
     item: &ItemId,
     runs: &[RunRow],
-) -> Result<Vec<Reason>, Error> {
+    worktree: bool,
+) -> Result<Checked, Error> {
     let git = Git::new(repo);
     let mut expected = Expected {
         item: BTreeSet::from([item.to_string()]),
@@ -70,7 +86,30 @@ pub(crate) fn preconditions(
             .filter(|v| PROVIDER_CO_AUTHOR.is_match(v))
             .collect();
     }
-    bosun_git::check(&git, base, &expected)
+    if !worktree {
+        return Ok(Checked {
+            reasons: bosun_git::check(&git, base, &expected)?,
+            uncommitted: Vec::new(),
+        });
+    }
+    let mut reasons = bosun_git::ancestry(&git, base)?;
+    reasons.extend(bosun_git::refs(&git, base)?);
+    reasons.extend(bosun_git::messages(&git, base, &expected)?);
+    let mut uncommitted: Vec<String> = Vec::new();
+    for reason in bosun_git::clean_tree(&git)? {
+        if let Reason::Dirty { entries } = reason {
+            // A porcelain v1 entry is `XY path`.
+            for path in entries.iter().map(|e| e.get(3..).unwrap_or(e)) {
+                if uncommitted.len() < UNCOMMITTED_CAP && !uncommitted.iter().any(|p| p == path) {
+                    uncommitted.push(path.to_owned());
+                }
+            }
+        }
+    }
+    Ok(Checked {
+        reasons,
+        uncommitted,
+    })
 }
 
 /// Removes what is untracked and not ignored, and every uncommitted change: the checkout was

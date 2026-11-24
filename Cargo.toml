@@ -230,6 +230,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #133: the repository's default model.
   "cfg(mutant_runner_no_default_model)",
   "cfg(mutant_config_queue_without_model)",
+  # #121: resource leases.
+  "cfg(mutant_lease_one_by_one)",
+  "cfg(mutant_lease_keep_dead_holder)",
 ] }
 
 [workspace.lints.clippy]

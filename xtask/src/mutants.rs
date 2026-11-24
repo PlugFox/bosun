@@ -986,7 +986,35 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test(SCENARIO_62),
         platform: None,
     },
+    // #63: the agent.* methods, the per-session credential, rate caps.
+    Mutant {
+        name: "mutant_agent_any_item",
+        issue: 63,
+        breaks: "an agent credential admits a call naming another item",
+        package: "bosund",
+        check: Check::Test(SCENARIO_63),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_agent_no_rate_cap",
+        issue: 63,
+        breaks: "an agent tool has no per-attempt cap",
+        package: "bosund",
+        check: Check::Test(SCENARIO_63),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_agent_first_summary_wins",
+        issue: 63,
+        breaks: "the first summary of an attempt wins, not the last",
+        package: "bosun-store",
+        check: Check::Test("work::tests::the_last_accepted_summary_of_an_attempt_wins"),
+        platform: None,
+    },
 ];
+
+/// The agent.* scenario of #63, which hosts two mutants.
+const SCENARIO_63: &str = "executor::tests::agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_session";
 
 /// The scenario suite of the loop (#62), which hosts several mutants.
 const SCENARIO_62: &str =

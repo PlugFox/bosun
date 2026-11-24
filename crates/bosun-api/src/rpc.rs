@@ -34,6 +34,11 @@ pub mod code {
     pub const UNKNOWN_IDENTITY: i32 = -32001;
     /// The identity's store or ingest failed to do what was asked.
     pub const FAILED: i32 = -32002;
+    /// The request's agent credential does not admit it: missing, unknown or revoked, bound to
+    /// another item, or presented to a method outside `agent.*` (#63).
+    pub const UNAUTHORIZED: i32 = -32003;
+    /// The agent's tool is over its per-attempt cap; the call is recorded as refused (#63).
+    pub const RATE_CAPPED: i32 = -32004;
 }
 
 /// A request or notification.

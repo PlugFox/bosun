@@ -226,6 +226,7 @@ dependencies = [
  "bosun-queue",
  "bosun-runner",
  "bosun-store",
+ "getrandom",
  "regex",
  "serde",
  "serde_json",

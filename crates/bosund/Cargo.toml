@@ -22,6 +22,8 @@ bosun-proc = { path = "../bosun-proc" }
 bosun-queue = { path = "../bosun-queue" }
 bosun-runner = { path = "../bosun-runner" }
 bosun-store = { path = "../bosun-store" }
+# The agent credentials (#63).
+getrandom.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

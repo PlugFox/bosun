@@ -479,9 +479,16 @@ impl Reader {
         item: &ItemId,
         attempt: u32,
     ) -> Result<Option<AgentCallRow>, Error> {
-        Ok(self.agent_calls(item).await?.into_iter().rfind(|c| {
+        let summary = |c: &AgentCallRow| {
             c.attempt == attempt && !c.refused && matches!(c.kind, AgentCallKind::Summary { .. })
-        }))
+        };
+        let mut calls = self.agent_calls(item).await?.into_iter();
+        // Mutant `mutant_agent_first_summary_wins` (#63): the first summary wins, not the last.
+        Ok(if cfg!(mutant_agent_first_summary_wins) {
+            calls.find(summary)
+        } else {
+            calls.rfind(summary)
+        })
     }
 
     /// The children recorded as running, of every item: what crash recovery reaps.

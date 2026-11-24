@@ -19,6 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::agent::Credentials;
 use crate::api::{self, Answer};
 use crate::commits::Commits;
 use crate::config_watch;
@@ -58,6 +59,8 @@ pub(crate) struct Served {
 pub(crate) struct State {
     pub(crate) started_ms: i64,
     pub(crate) identities: BTreeMap<String, Served>,
+    /// The live agent credentials of every identity's sessions (#63).
+    pub(crate) credentials: Credentials,
 }
 
 impl State {
@@ -66,6 +69,7 @@ impl State {
         Self {
             started_ms: 0,
             identities: BTreeMap::new(),
+            credentials: Credentials::default(),
         }
     }
 
@@ -139,6 +143,7 @@ pub(crate) async fn run(
     let state = Arc::new(State {
         started_ms: now_ms(),
         identities,
+        credentials: Credentials::default(),
     });
 
     let progress = tokio::spawn(watch_ingest(state.clone()));
@@ -276,11 +281,12 @@ pub(crate) async fn serve(
 async fn connection(state: Arc<State>, stream: Box<dyn Stream>) {
     let (read, mut write) = tokio::io::split(stream);
     let mut read = BufReader::new(read);
+    let mut conn = api::Connection::default();
     while let Ok(Some(line)) = framing::read_line(&mut read).await {
         if line.trim().is_empty() {
             continue;
         }
-        match api::handle_line(&state, &line).await {
+        match api::handle_line(&state, &mut conn, &line).await {
             Answer::Reply(None) => {}
             Answer::Reply(Some(response)) => {
                 if framing::write_message(&mut write, &response).await.is_err() {
@@ -439,6 +445,7 @@ fn start_loops(
             work_dir,
             poll: LOOP_POLL,
             recheck: Duration::from_mins(1),
+            question_grace: executor::QUESTION_GRACE,
             #[cfg(test)]
             failpoint: None,
         };
@@ -450,6 +457,7 @@ fn start_loops(
             spawner: Arc::new(NativeSpawner),
             power: Arc::new(SystemPower),
             logins: Arc::new(executor::GhLogins),
+            credentials: state.credentials.clone(),
         };
         eprintln!("bosund: repository {name}: the loop runs");
         loops.push(tokio::spawn(

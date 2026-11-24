@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use bosun_api::rpc::{self, ErrorObject, Request, Response, code};
 use bosun_api::{
-    API_VERSION, CommitScan, DaemonStatus, Estimates, EventBody, FailedFile, HelloResult,
-    IngestStatus, LastPass, Method, ModelRow, PassReport, Picodollars, ReingestResult, RepoRef,
-    RepoRow, Report, ReportParams, SessionRow, TokenSums, TokensByModel, TokensByRepo,
+    AGENT_GROUP, API_VERSION, CommitScan, DaemonStatus, Estimates, EventBody, FailedFile,
+    HelloResult, IngestStatus, LastPass, Method, ModelRow, PassReport, Picodollars, ReingestResult,
+    RepoRef, RepoRow, Report, ReportParams, SessionRow, TokenSums, TokensByModel, TokensByRepo,
     TokensBySession, TokensParams, TokensSummary, UnpricedModel, Wide, method,
 };
 use bosun_core::{Cost, PriceTable};
@@ -15,6 +15,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::agent;
 use crate::events::Subscriber;
 use crate::state::{Served, State};
 
@@ -28,16 +29,37 @@ pub(crate) enum Answer {
     Subscribe(Response, Subscriber),
 }
 
-/// Answers one line.
-pub(crate) async fn handle_line(state: &State, line: &str) -> Answer {
+/// What one connection has shown of itself.
+#[derive(Debug, Default)]
+pub(crate) struct Connection {
+    /// It called `agent.*`: an agent session's server, which may call nothing else (#63).
+    agent: bool,
+}
+
+/// Answers one line of `conn`.
+pub(crate) async fn handle_line(state: &State, conn: &mut Connection, line: &str) -> Answer {
     let request = match request(line) {
         Ok(request) => request,
         Err(response) => return Answer::Reply(Some(*response)),
     };
-    if request.method == method::EventsSubscribe::NAME {
+    let outcome = if request.method.starts_with(AGENT_GROUP) {
+        // `agent.*` admits only a live credential naming its item (#63).
+        conn.agent = true;
+        agent::dispatch(&state.credentials, &request.method, request.params).await
+    } else if conn.agent || request.params.get("credential").is_some() {
+        // An agent credential admits `agent.*` only, on its connection too.
+        Err(ErrorObject::new(
+            code::UNAUTHORIZED,
+            format!(
+                "an agent credential admits agent.* only, not {}",
+                request.method
+            ),
+        ))
+    } else if request.method == method::EventsSubscribe::NAME {
         return subscribe(state, request);
-    }
-    let outcome = dispatch(state, &request.method, request.params).await;
+    } else {
+        dispatch(state, &request.method, request.params).await
+    };
     let Some(id) = request.id else {
         return Answer::Reply(None);
     };
@@ -133,7 +155,7 @@ fn failed(e: impl std::fmt::Display) -> ErrorObject {
 }
 
 /// Parses the params of `M` and runs `f` on them.
-async fn call<M, F, Fut>(params_value: Value, f: F) -> Result<Value, ErrorObject>
+pub(crate) async fn call<M, F, Fut>(params_value: Value, f: F) -> Result<Value, ErrorObject>
 where
     M: Method,
     F: FnOnce(M::Params) -> Fut,
@@ -485,7 +507,7 @@ mod tests {
 
     async fn answer(line: &str) -> Option<Value> {
         let state = State::empty();
-        match handle_line(&state, line).await {
+        match handle_line(&state, &mut Connection::default(), line).await {
             Answer::Reply(response) => response.map(|r| serde_json::to_value(r).unwrap()),
             Answer::Subscribe(..) => panic!("subscribed with no identity"),
         }

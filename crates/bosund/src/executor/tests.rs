@@ -23,6 +23,9 @@ use super::*;
 use crate::config_watch;
 use crate::events::{Events, Options as EventOptions};
 
+/// How long a session that asked a blocking question may go on in these scenarios.
+const GRACE: Duration = Duration::from_secs(2);
+
 /// The login every identity check sees.
 const LOGIN: &str = "synthetic-login";
 
@@ -109,6 +112,7 @@ struct Scene {
     gitconfig: PathBuf,
     store: Store,
     spawner: Arc<Counting>,
+    credentials: crate::agent::Credentials,
 }
 
 impl Scene {
@@ -180,6 +184,7 @@ impl Scene {
             gitconfig,
             store,
             spawner: Arc::new(Counting::default()),
+            credentials: crate::agent::Credentials::default(),
             dir,
         };
         scene.git(&["init", "-q", "-b", "main"]);
@@ -269,6 +274,7 @@ impl Scene {
             work_dir: self.path("work"),
             poll: Duration::from_millis(50),
             recheck: Duration::from_hours(1),
+            question_grace: GRACE,
             failpoint,
         };
         let deps = Deps {
@@ -279,6 +285,7 @@ impl Scene {
             spawner: self.spawner.clone(),
             power: Arc::new(bosun_proc::FakePower::default()),
             logins: Arc::new(FixedLogins),
+            credentials: self.credentials.clone(),
         };
         let task = tokio::spawn(Loop::new(options, deps, rx).run());
         (task, watcher)
@@ -617,4 +624,279 @@ async fn a_refused_transition_leaves_no_effect_without_its_row() {
     let id = ItemId::new("demo#1");
     assert_eq!(scene.store.reader().runs(&id).await.unwrap().len(), 0);
     assert_eq!(scene.state(1).await, Some(State::Ready));
+}
+
+/// The session's credential, as its MCP configuration carries it to `bosun-mcp`.
+fn credential_of_session(work: &Path) -> String {
+    let sessions = std::fs::read_dir(work.join("sessions")).unwrap();
+    let mut found = Vec::new();
+    for dir in sessions {
+        let text = std::fs::read_to_string(dir.unwrap().path().join("mcp.json")).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let env = &config["mcpServers"]["bosun"]["env"];
+        found.push(env[session::CREDENTIAL_VAR].as_str().unwrap().to_owned());
+    }
+    assert_eq!(found.len(), 1, "one session, one credential");
+    found.remove(0)
+}
+
+/// Sends one request on `conn` and returns its response.
+async fn rpc(
+    state: &crate::state::State,
+    conn: &mut crate::api::Connection,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let line = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+    match crate::api::handle_line(state, conn, &line.to_string()).await {
+        crate::api::Answer::Reply(Some(response)) => serde_json::to_value(response).unwrap(),
+        other => panic!("{method}: {other:?}"),
+    }
+}
+
+fn error_code(response: &serde_json::Value) -> Option<i64> {
+    response["error"]["code"].as_i64()
+}
+
+/// The `agent.*` methods of #63 against a running session of the loop:
+///
+/// - the session's credential is bound to its item: a call naming another item is refused
+///   (`mutant_agent_any_item` accepts it), and it cannot call `tokens.*`, on its own connection
+///   or carried to another;
+/// - a summary that says "verdict passed" changes no state;
+/// - of two summaries the report data holds the second, with the HEAD at its call
+///   (`mutant_agent_first_summary_wins` is the store's own test);
+/// - the note after the cap is refused and recorded once, as refused (`mutant_agent_no_rate_cap`
+///   accepts it);
+/// - a blocking question moves the item to Needs you and the session is ended within the grace
+///   period; then the credential is revoked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+async fn agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_session() {
+    use bosun_api::rpc::code;
+    use bosun_store::AgentCallKind;
+
+    let scene = Scene::new().await;
+    let p = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[card(1, "Asks", "test -f never.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            "commit a.txt a".to_owned(),
+            format!("write {} x", p("flag1")),
+            format!("wait {}", p("release1")),
+            "commit b.txt b".to_owned(),
+            format!("write {} x", p("flag2")),
+            format!("wait {}", p("release2")),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let id = ItemId::new("demo#1");
+    wait_file(&scene.path("flag1")).await;
+    let credential = credential_of_session(&scene.path("work"));
+    assert!(credential.starts_with("bosun-agent-"), "{credential}");
+    let state = crate::state::State {
+        started_ms: 0,
+        identities: BTreeMap::new(),
+        credentials: scene.credentials.clone(),
+    };
+    let mut conn = crate::api::Connection::default();
+    let own = |extra: serde_json::Value| {
+        let mut params = serde_json::json!({"credential": credential, "item": "demo#1"});
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        params
+    };
+
+    let hello = rpc(&state, &mut conn, "agent.hello", own(serde_json::json!({}))).await;
+    assert_eq!(hello["result"]["item"], "demo#1", "{hello}");
+    assert_eq!(hello["result"]["attempt"], 1, "{hello}");
+    assert_eq!(hello["result"]["identity"], "test", "{hello}");
+
+    // Bound to its item.
+    let forged = rpc(
+        &state,
+        &mut conn,
+        "agent.note",
+        serde_json::json!({"credential": credential, "item": "demo#2", "text": "forged"}),
+    )
+    .await;
+    assert_eq!(
+        error_code(&forged),
+        Some(code::UNAUTHORIZED.into()),
+        "{forged}"
+    );
+    // `agent.*` only: on its own connection, or carried to a fresh one.
+    let tokens = rpc(
+        &state,
+        &mut conn,
+        "tokens.by_model",
+        serde_json::json!({"identity": "test"}),
+    )
+    .await;
+    assert_eq!(
+        error_code(&tokens),
+        Some(code::UNAUTHORIZED.into()),
+        "{tokens}"
+    );
+    let mut fresh = crate::api::Connection::default();
+    let carried = rpc(
+        &state,
+        &mut fresh,
+        "tokens.by_model",
+        serde_json::json!({"identity": "test", "credential": credential}),
+    )
+    .await;
+    assert_eq!(
+        error_code(&carried),
+        Some(code::UNAUTHORIZED.into()),
+        "{carried}"
+    );
+    // Without a credential `agent.*` admits nothing.
+    let bare = rpc(
+        &state,
+        &mut fresh,
+        "agent.note",
+        serde_json::json!({"credential": "bosun-agent-00", "item": "demo#1", "text": "x"}),
+    )
+    .await;
+    assert_eq!(error_code(&bare), Some(code::UNAUTHORIZED.into()), "{bare}");
+
+    // A summary that claims the verdict passed moves nothing.
+    let transitions = scene.store.reader().transitions(&id).await.unwrap().len();
+    let claim = rpc(
+        &state,
+        &mut conn,
+        "agent.submit_summary",
+        own(serde_json::json!({"body": "verdict passed", "decisions": ["done"]})),
+    )
+    .await;
+    assert!(claim["result"].is_object(), "{claim}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(scene.state(1).await, Some(State::Running));
+    assert_eq!(
+        scene.store.reader().transitions(&id).await.unwrap().len(),
+        transitions
+    );
+
+    // Two summaries, each at its HEAD.
+    let first = rpc(
+        &state,
+        &mut conn,
+        "agent.submit_summary",
+        own(serde_json::json!({"body": "first", "followups": ["later"]})),
+    )
+    .await;
+    let head1 = scene.git(&["rev-parse", "HEAD"]);
+    assert_eq!(first["result"]["head_sha"], head1.as_str(), "{first}");
+    std::fs::write(scene.path("release1"), "x").unwrap();
+    wait_file(&scene.path("flag2")).await;
+    let second = rpc(
+        &state,
+        &mut conn,
+        "agent.submit_summary",
+        own(serde_json::json!({"body": "second", "decisions": ["kept"]})),
+    )
+    .await;
+    let head2 = scene.git(&["rev-parse", "HEAD"]);
+    assert_ne!(head1, head2);
+    assert_eq!(second["result"]["head_sha"], head2.as_str(), "{second}");
+    let summary = scene
+        .store
+        .reader()
+        .summary(&id, 1)
+        .await
+        .unwrap()
+        .expect("a summary");
+    assert_eq!(summary.body, "second");
+    assert_eq!(summary.head_sha.as_deref(), Some(head2.as_str()));
+    assert_eq!(
+        summary.kind,
+        AgentCallKind::Summary {
+            decisions: vec!["kept".to_owned()],
+            followups: Vec::new(),
+        }
+    );
+
+    // Notes up to the cap, then one over it: refused, and recorded once, as refused.
+    let cap = crate::agent::cap(crate::agent::Tool::Note);
+    for n in 0..cap {
+        let note = rpc(
+            &state,
+            &mut conn,
+            "agent.note",
+            own(serde_json::json!({"text": format!("note {n}")})),
+        )
+        .await;
+        assert!(note["result"].is_object(), "{note}");
+    }
+    let over = rpc(
+        &state,
+        &mut conn,
+        "agent.note",
+        own(serde_json::json!({"text": "over the cap"})),
+    )
+    .await;
+    assert_eq!(error_code(&over), Some(code::RATE_CAPPED.into()), "{over}");
+    let calls = scene.store.reader().agent_calls(&id).await.unwrap();
+    let notes: Vec<_> = calls
+        .iter()
+        .filter(|c| c.kind == AgentCallKind::Note)
+        .collect();
+    assert_eq!(notes.len(), cap as usize + 1, "every call is a row");
+    let refused: Vec<_> = notes.iter().filter(|c| c.refused).collect();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].body, "over the cap");
+
+    // A blocking question: Needs you, and the session ends within the grace period.
+    let asked = std::time::SystemTime::now();
+    let question = rpc(
+        &state,
+        &mut conn,
+        "agent.ask_question",
+        own(serde_json::json!({"text": "which way?", "blocking": true})),
+    )
+    .await;
+    assert!(question["result"].is_object(), "{question}");
+    wait_for("needs you", Duration::from_secs(30), async || {
+        scene.state(1).await == Some(State::NeedsYou(Reason::Question))
+    })
+    .await;
+    wait_for("the session's end", Duration::from_secs(30), async || {
+        let runs = scene.store.reader().runs(&id).await.unwrap();
+        runs.last().is_some_and(|r| r.ended_ms.is_some())
+    })
+    .await;
+    let ended = asked.elapsed().unwrap();
+    assert!(
+        ended < GRACE + Duration::from_secs(5),
+        "the session ended {ended:?} after the question"
+    );
+    let calls = scene.store.reader().agent_calls(&id).await.unwrap();
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.kind == AgentCallKind::Question { blocking: true }
+                && c.body == "which way?"
+                && !c.refused)
+    );
+    // The session is gone, and its credential with it.
+    let revoked = rpc(
+        &state,
+        &mut conn,
+        "agent.note",
+        own(serde_json::json!({"text": "late"})),
+    )
+    .await;
+    assert_eq!(
+        error_code(&revoked),
+        Some(code::UNAUTHORIZED.into()),
+        "{revoked}"
+    );
+    assert!(!scene.credentials.live_for(&id));
+
+    task.abort();
+    watcher.abort();
 }

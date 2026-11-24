@@ -28,12 +28,23 @@ const REGION_START_KEY: &str = "pr:facts:start";
 /// The key of the marker that closes it.
 const REGION_END_KEY: &str = "pr:facts:end";
 /// The agent's summary in the body, in characters after sanitising: the rest of
-/// [`BODY_CAP`] leaves room for the fact block.
-const SUMMARY_CAP: usize = 48_000;
-/// One fact's label or value, in characters after sanitising.
+/// [`BODY_CAP`] leaves room for the region and the closing reference.
+const SUMMARY_CAP: usize = 40_000;
+/// One fact's label, in characters after sanitising.
+const FACT_LABEL_CAP: usize = 100;
+/// One fact's value, in characters after sanitising.
 const FACT_CAP: usize = 500;
 /// Facts listed; the rest are counted.
 const FACTS_MAX: usize = 40;
+/// One fact's line at most: `- label: value` and its newline.
+const FACT_LINE_MAX: usize = "- ".len() + FACT_LABEL_CAP + ": ".len() + FACT_CAP + 1;
+/// The region at most: the listed facts, plus the two markers, the blank lines and the line
+/// counting the omitted facts.
+const REGION_MAX: usize = FACTS_MAX * FACT_LINE_MAX + 512;
+/// What follows the region at most: a blank line and `Closes #` with the largest issue number.
+const CLOSING_MAX: usize = "\n\nCloses #".len() + 20;
+// The summary, a blank line, the region and the closing reference fit GitHub's cap.
+const _: () = assert!(SUMMARY_CAP + "\n\n".len() + REGION_MAX + CLOSING_MAX <= BODY_CAP);
 /// The body's line when the agent's summary is empty.
 const NO_DESCRIPTION: &str = "*No description was given.*";
 /// The squash message's subject, in characters.
@@ -106,14 +117,19 @@ pub fn update(existing: &str, facts: &[(&str, &str)]) -> String {
     }
 }
 
-/// The byte range of the daemon's region in `body`: the first end marker and the last start
-/// marker before it, so a stray start marker never swallows the text after it.
+/// The byte range of the daemon's region in `body`: the last start marker that an end marker
+/// follows, through the first end marker after it. A stray start marker before the region
+/// never swallows the text after it, and a stray end marker (one with no start before it, or
+/// a second one after the region) is ordinary text: the region is found again on every
+/// update.
 fn find_region(body: &str) -> Option<(usize, usize)> {
     let start_marker = marker(REGION_START_KEY);
     let end_marker = marker(REGION_END_KEY);
-    let end = body.find(&end_marker)?;
-    let start = body[..end].rfind(&start_marker)?;
-    Some((start, end + end_marker.len()))
+    body.rmatch_indices(&start_marker).find_map(|(start, _)| {
+        let from = start + start_marker.len();
+        let end = from + body[from..].find(&end_marker)?;
+        Some((start, end + end_marker.len()))
+    })
 }
 
 /// The daemon's region: the two markers and the fact block between them.
@@ -121,7 +137,7 @@ fn region(facts: &[(&str, &str)]) -> String {
     let mut out = marker(REGION_START_KEY);
     out.push_str("\n\n");
     for (label, value) in facts.iter().take(FACTS_MAX) {
-        let label = sanitise_inline(label, FACT_CAP);
+        let label = sanitise_inline(label, FACT_LABEL_CAP);
         let value = sanitise_inline(&redact(first_chars(value, FACT_CAP * 4)), FACT_CAP);
         let _ = writeln!(out, "- {label}: {value}");
     }
@@ -133,7 +149,7 @@ fn region(facts: &[(&str, &str)]) -> String {
     }
     out.push('\n');
     out.push_str(&marker(REGION_END_KEY));
-    debug_assert!(chars(&out) < BODY_CAP - SUMMARY_CAP);
+    debug_assert!(chars(&out) <= REGION_MAX, "{} > {REGION_MAX}", chars(&out));
     out
 }
 
@@ -141,7 +157,7 @@ fn region(facts: &[(&str, &str)]) -> String {
 /// verb, then the separator (spaces and an optional colon), then the reference.
 static CLOSING: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?i)(?P<verb>\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b)\s*:?\s*",
+        r"(?i)(?P<verb>\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b)(?P<sep>\s*:?\s*)",
         r"(?P<reference>#\d+|[\w.-]+/[\w.-]+#\d+|gh-\d+|https?://\S+/issues/\d+)",
     ))
     .expect("valid regex")
@@ -215,8 +231,9 @@ fn summary_text(text: &str) -> String {
 /// unbracketed, across lines.
 fn neutralise(text: &str) -> String {
     // Neither pass can assemble a new match: the first puts a word between a verb and its
-    // reference, the second removes brackets and stars without moving any text.
-    let out = CLOSING.replace_all(text, "$verb (see $reference)");
+    // reference, the second removes brackets and stars without moving any text. The verb's
+    // separator is kept as written, so a paragraph break between them stays one.
+    let out = CLOSING.replace_all(text, "${verb}${sep}(see ${reference})");
     SKIP_CI
         .replace_all(&out, "($bracketed$starred)")
         .into_owned()
@@ -295,6 +312,66 @@ mod tests {
     }
 
     #[test]
+    fn a_stray_end_marker_does_not_break_the_update() {
+        let end = marker(REGION_END_KEY);
+        let first = body("Did the thing.", FACTS, 7);
+        let new_facts: &[(&str, &str)] = &[("Verdict", "failed")];
+        let fresh = region(new_facts);
+        let (start, stop) = find_region(&first).expect("region");
+        for edited in [
+            // An end marker with no start before it, ahead of the region.
+            format!("{end}\nnote\n{first}"),
+            // A second end marker after the region.
+            format!("{}{end}{}", &first[..stop], &first[stop..]),
+            // Only stray end markers, no region at all.
+            format!("before {end} after"),
+        ] {
+            let once = update(&edited, new_facts);
+            assert_eq!(once.matches(&fresh).count(), 1, "{once}");
+            assert_eq!(
+                update(&once, new_facts),
+                once,
+                "a second update changes nothing"
+            );
+            // Every stray end marker is kept as the person left it.
+            assert_eq!(
+                once.matches(&end).count(),
+                edited.matches(&end).count() + usize::from(find_region(&edited).is_none()),
+                "{once}"
+            );
+        }
+        // The region after a leading stray end marker is rewritten in place.
+        let edited = format!("{end}\nnote\n{first}");
+        let shift = edited.len() - first.len();
+        assert_eq!(
+            update(&edited, new_facts),
+            format!(
+                "{}{fresh}{}",
+                &edited[..shift + start],
+                &edited[shift + stop..]
+            )
+        );
+    }
+
+    #[test]
+    fn the_largest_body_stays_under_the_cap() {
+        // Every character escapes, so each sanitised piece is as long as its cap allows.
+        let summary = "<".repeat(SUMMARY_CAP * 8);
+        let label = "*".repeat(FACT_LABEL_CAP * 8);
+        let value = "_".repeat(FACT_CAP * 8);
+        let facts: Vec<(&str, &str)> = (0..=FACTS_MAX * 2)
+            .map(|_| (label.as_str(), value.as_str()))
+            .collect();
+        let out = body(&summary, &facts, u64::MAX);
+        let (_, region_text) = split(&out, u64::MAX);
+        assert!(chars(&region_text) <= REGION_MAX, "{}", chars(&region_text));
+        assert!(chars(&out) <= BODY_CAP, "{}", chars(&out));
+        // The caps were reached, so the bound is tested where it binds.
+        assert!(chars(&region_text) > FACTS_MAX * FACT_LINE_MAX * 9 / 10);
+        assert!(chars(&out) > SUMMARY_CAP + REGION_MAX * 9 / 10);
+    }
+
+    #[test]
     fn the_hostile_corpus_stays_inert_in_a_pull_request_body() {
         let all = CORPUS.join("\n\n");
         for summary in CORPUS.iter().copied().chain([all.as_str()]) {
@@ -367,6 +444,20 @@ mod tests {
             assert!(!text.lines().next().unwrap_or("").is_empty(), "{message}");
             assert!(!text.lines().next().unwrap_or("").contains('\n'));
         }
+    }
+
+    #[test]
+    fn a_squash_message_keeps_its_paragraph_breaks() {
+        let message = squash_message(
+            "Title",
+            "First paragraph.\n\nFixes\n\n#12\n\nResolves:\n\nowner/repo#3\n\nLast one.",
+            &trailers(),
+        );
+        assert_eq!(
+            message,
+            "Title\n\nFirst paragraph.\n\nFixes\n\n(see #12)\n\n> Resolves:\n\n(see owner/repo#3)\n\n\
+             Last one.\n\nItem: owner/repo#7\nRun: a1s1\nSession: s-123\n"
+        );
     }
 
     #[test]

@@ -73,4 +73,5 @@ pub use trailer::{
 };
 
 pub mod land;
+pub mod merge;
 pub mod worktree;

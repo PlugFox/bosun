@@ -542,6 +542,24 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_git_squash_skip_tree_check",
+        issue: 8,
+        breaks: "a squash is written without comparing its tree with the verified one",
+        package: "bosun-git",
+        check: Check::Test("merge::tests::a_squash_that_differs_from_the_verified_tree_is_refused"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_merge_drop_trailers",
+        issue: 8,
+        breaks: "a squash or merge commit lands without the Item, Run and Session trailers of the item",
+        package: "bosun-git",
+        check: Check::Test(
+            "merge::tests::each_method_ends_with_the_verified_tree_and_the_trailers",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_proc_kill_parent_only",
         issue: 50,
         breaks: "kill_tree kills the direct child only, not its container",

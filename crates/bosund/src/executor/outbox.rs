@@ -528,6 +528,7 @@ fn reason_text(reason: Reason) -> &'static str {
         Reason::AttemptsExhausted => "The failed attempts reached the limit",
         Reason::Guard(_) => "A guard refused the attempt before its verdict",
         Reason::LandingRefused => "Landing was refused",
+        Reason::Setup => "The worktree's setup command failed",
         Reason::Handshake => "The session's MCP server did not start, again after one retry",
         Reason::Identity => "The identity checks before a session refused it",
     }

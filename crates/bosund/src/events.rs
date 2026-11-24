@@ -441,6 +441,7 @@ pub(crate) fn reason_of(state: State) -> Option<String> {
             Reason::AttemptsExhausted => "attempts_exhausted",
             Reason::Guard(_) => "guard",
             Reason::LandingRefused => "landing_refused",
+            Reason::Setup => "setup",
             Reason::Handshake => "handshake",
             Reason::Identity => "identity",
         },

@@ -1710,6 +1710,33 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("work::tests::a_lease_wait_is_filed_granted_and_released_once"),
         platform: None,
     },
+    // #151: landing by rebase-then-reverify in the item machine.
+    Mutant {
+        name: "mutant_core_rebased_lands_unverified",
+        issue: 151,
+        breaks: "a rebased commit lands on the verdict that passed before the rebase",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_rebased_commit_is_verified_again_before_it_lands"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_landing_failure_uncounted",
+        issue: 151,
+        breaks: "a rebased commit failing its verdict starts a new attempt uncounted",
+        package: "bosun-core",
+        check: Check::Test(
+            "item::tests::a_rebased_commit_that_fails_its_verdict_is_a_failed_attempt",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_conflict_sessions_unbounded",
+        issue: 151,
+        breaks: "every landing conflict starts another session",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_second_conflict_needs_the_user"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

@@ -1384,3 +1384,52 @@ async fn a_lease_wait_is_filed_granted_and_released_once() {
     );
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_item_after_a_conflict_reads_back_with_its_counter() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    store.writer().write(vec![register()]).await.unwrap();
+    let mut item = Item::new(id());
+    let mut batch = Vec::new();
+    // The happy path up to its landing, then a conflict: one session of the same attempt.
+    let mut events = happy_path();
+    events.pop();
+    events.push(|item| Event::Conflict {
+        attempt: current(item).0,
+    });
+    for event in events {
+        let stepped = go(&item, &event(&item));
+        batch.push(transition(&stepped));
+        item = stepped.item;
+    }
+    assert_eq!((item.state, item.conflicts), (State::Running, 1));
+    store.writer().write(batch).await.unwrap();
+    let stored = store.reader().item(&id()).await.unwrap().unwrap();
+    assert_eq!(stored.item, item);
+    assert_eq!(stored.item.conflicts, 1);
+
+    // A failed setup is Needs you with its own reason.
+    let other = ItemId::new("local:demo#2");
+    store
+        .writer()
+        .write(vec![Write::Item(NewItem {
+            item: other.clone(),
+            repo: REPO.to_owned(),
+            card_key: Some("card-2".to_owned()),
+            at_ms: T0,
+        })])
+        .await
+        .unwrap();
+    let claimed = go(&Item::new(other.clone()), &Event::Claim);
+    let setup = go(&claimed.item, &Event::SetupFailed);
+    assert_eq!(setup.item.state, State::NeedsYou(bosun_core::Reason::Setup));
+    store
+        .writer()
+        .write(vec![transition(&claimed), transition(&setup)])
+        .await
+        .unwrap();
+    let stored = store.reader().item(&other).await.unwrap().unwrap();
+    assert_eq!(stored.item, setup.item);
+    store.close().await.unwrap();
+}

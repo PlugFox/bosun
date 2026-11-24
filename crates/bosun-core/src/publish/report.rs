@@ -696,7 +696,9 @@ fn reason_text(reason: Reason) -> &'static str {
         Reason::Guard(Guard::ProtectedPath) => "a commit touches a protected path",
         Reason::Guard(Guard::IgnoredFile) => "a new ignored file outside the build directories",
         Reason::Guard(Guard::GitConfig) => "git's own configuration changed",
+        Reason::Guard(Guard::Checkout) => "the user's checkout changed during the run",
         Reason::LandingRefused => "landing was refused",
+        Reason::Setup => "the worktree's setup command failed",
         Reason::Handshake => "the session's bosun MCP server did not start, twice",
         Reason::Identity => "the identity checks refused the session",
     }

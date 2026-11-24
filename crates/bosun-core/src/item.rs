@@ -2,7 +2,11 @@
 //!
 //! ```text
 //! ready -> claimed -> running -> verifying -> landing -> done
-//!             |          |           |            +-> needs_you   (push or PR refused)
+//!             |          |           |            +-> needs_you   (push or PR refused,
+//!             |          |           |            |                second conflict)
+//!             |          |           |            +-> landing     (rebased: verdict again)
+//!             |          |           |            +-> running     (re-verdict failed, or
+//!             |          |           |            |                first conflict: one session)
 //!             |          |           +-> running        (verdict failed, attempts left)
 //!             |          |           +-> needs_you      (attempts exhausted, guard)
 //!             |          +-> parked -> running          (limit, pause, kill, daily cap)
@@ -26,6 +30,14 @@
 //! cap, a crash retry and a lost daemon do not count. The uncounted parks and resumes that the
 //! agent can provoke (a limit, a crash, a failed resume, a lost session) are capped per item;
 //! the cap is Needs you, so a printed fake limit cannot park an item forever.
+//!
+//! Landing (#8, E20) is one keyed [`EffectKind::Land`] and has no state of its own besides
+//! [`State::Landing`]: the executor rebases the item branch onto the target's head and reports
+//! [`Event::Rebased`], and the rebased commit is verified again ([`EffectKind::RunVerdict`])
+//! before the target is fast-forwarded. A verdict that passed before the rebase is never
+//! accepted as a verdict on the target branch; a failing re-verdict is a failed attempt. A
+//! conflict gets one session of the same attempt with the conflict as its prompt; a second
+//! conflict is Needs you. A failed worktree setup is Needs you and counts nothing.
 //!
 //! Invariant 2 of #1: an agent-originated event ([`Actor::Agent`]: a question, a summary, a
 //! note) and the text of an exit can move an item to Needs you or nowhere. Only a verdict run
@@ -144,6 +156,9 @@ pub enum Guard {
     IgnoredFile,
     /// Git's own configuration (hooks, config, excludes, attributes) changed.
     GitConfig,
+    /// The user's checkout (HEAD, refs, status) captured at claim changed during the item: a
+    /// switched or detached HEAD, a ref deleted or moved to a non-descendant (#8, E4 and E21).
+    Checkout,
 }
 
 /// Why an item needs the user. Each is posted as a new comment.
@@ -167,8 +182,10 @@ pub enum Reason {
     AttemptsExhausted,
     /// A guard before the verdict refused the attempt.
     Guard(Guard),
-    /// Landing was refused (push or pull request refused, conflict).
+    /// Landing was refused (push or pull request refused, a second conflict).
     LandingRefused,
+    /// The worktree's setup failed (#8): not an attempt failure.
+    Setup,
     /// The session's MCP server (`bosun-mcp`) did not say hello in time, again after one
     /// uncounted retry (#64): the agent would run without its tools.
     Handshake,
@@ -377,6 +394,19 @@ pub enum Event {
     Landed,
     /// The landing step was refused.
     LandingRefused,
+    /// The landing step rebased the item branch onto the target's head; the rebased commit is
+    /// verified again before it lands.
+    Rebased {
+        /// The attempt being landed.
+        attempt: u32,
+    },
+    /// The rebase onto the target's head conflicted.
+    Conflict {
+        /// The attempt being landed.
+        attempt: u32,
+    },
+    /// The worktree's setup (its creation or its setup command) failed.
+    SetupFailed,
     /// The clock: a parked item wakes once its time has come and no hold is active.
     Tick,
     /// The kill switch was thrown.
@@ -418,6 +448,9 @@ impl Event {
             Self::Verdict { .. } => "verdict",
             Self::Landed => "landed",
             Self::LandingRefused => "landing_refused",
+            Self::Rebased { .. } => "rebased",
+            Self::Conflict { .. } => "conflict",
+            Self::SetupFailed => "setup_failed",
             Self::Tick => "tick",
             Self::KillSwitch => "kill_switch",
             Self::BudgetExceeded => "budget_exceeded",
@@ -509,6 +542,8 @@ pub struct Item {
     pub failed: u32,
     /// Uncounted parks and resumes since the counter was last reset.
     pub uncounted: u32,
+    /// Conflict sessions since the counters were last reset.
+    pub conflicts: u32,
     /// The last daemon boot whose recovery this item went through.
     pub boot: u32,
 }
@@ -527,6 +562,7 @@ impl Item {
             runs: 0,
             failed: 0,
             uncounted: 0,
+            conflicts: 0,
             boot: 0,
         }
     }
@@ -770,17 +806,19 @@ impl Draft {
             Event::Preconditions { .. } | Event::Refused { .. } | Event::Verdict { .. } => {
                 self.verification(event)?;
             }
-            Event::Landed => {
-                self.expect(&[State::Landing])?;
-                let outcome = match self.item.attempt.as_ref()?.state {
-                    AttemptState::Flaky => Outcome::Flaky,
-                    _ => Outcome::Pass,
-                };
-                self.item.state = State::Done(outcome);
-            }
-            Event::LandingRefused => {
-                self.expect(&[State::Landing])?;
-                self.needs_you(Reason::LandingRefused);
+            Event::Landed
+            | Event::LandingRefused
+            | Event::Rebased { .. }
+            | Event::Conflict { .. } => self.landing(event)?,
+            Event::SetupFailed => {
+                self.expect(&[
+                    State::Claimed,
+                    State::Running,
+                    State::Verifying,
+                    State::Landing,
+                ])?;
+                self.kill_child();
+                self.needs_you(Reason::Setup);
             }
             Event::Tick => self.tick()?,
             Event::KillSwitch => self.kill_switch()?,
@@ -832,13 +870,74 @@ impl Draft {
                 run,
                 result,
             } => {
-                self.expect(&[State::Verifying])?;
+                // In Landing, the verdict of the rebased commit (#8).
+                self.expect(&[State::Verifying, State::Landing])?;
                 self.current(*attempt)?;
                 if self.item.attempt.as_ref()?.run != *run {
                     return None;
                 }
+                let landing = self.item.state == State::Landing;
                 self.attempt_step(AttemptEvent::VerdictFinished(*result))?;
-                self.verdict_finished();
+                let failed = self.item.attempt.as_ref().is_some_and(|a| a.state.failed());
+                if landing && failed && cfg!(mutant_core_landing_failure_uncounted) {
+                    // Mutant (`mutant_core_landing_failure_uncounted`): the failed re-verdict
+                    // starts the next attempt without counting the failed one.
+                    self.start(Next::NewAttempt);
+                } else {
+                    self.verdict_finished();
+                }
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// The landing events (#8): the rebase onto the target's head, its conflict, the end.
+    fn landing(&mut self, event: &Event) -> Option<()> {
+        match event {
+            Event::Landed => {
+                self.expect(&[State::Landing])?;
+                // Only a verdict that passed leads on: not a rebased commit still verifying.
+                let outcome = match self.item.attempt.as_ref()?.state {
+                    AttemptState::Pass => Outcome::Pass,
+                    AttemptState::Flaky => Outcome::Flaky,
+                    _ => return None,
+                };
+                self.item.state = State::Done(outcome);
+            }
+            Event::LandingRefused => {
+                self.expect(&[State::Landing])?;
+                self.needs_you(Reason::LandingRefused);
+            }
+            Event::Rebased { attempt } => {
+                self.expect(&[State::Landing])?;
+                self.current(*attempt)?;
+                if cfg!(mutant_core_rebased_lands_unverified) {
+                    // Mutant (`mutant_core_rebased_lands_unverified`): the rebased commit lands
+                    // on the verdict that passed before the rebase.
+                    if !self.item.attempt.as_ref()?.state.passed() {
+                        return None;
+                    }
+                    self.effects.push(EffectKind::Land { attempt: *attempt });
+                    return Some(());
+                }
+                // A verdict that passed before the rebase is never a verdict on the target.
+                self.attempt_step(AttemptEvent::Reverify)?;
+                self.run_verdict();
+            }
+            Event::Conflict { attempt } => {
+                self.expect(&[State::Landing])?;
+                self.current(*attempt)?;
+                // Mutant (`mutant_core_conflict_sessions_unbounded`): every conflict starts
+                // another session.
+                if self.item.conflicts == 0 || cfg!(mutant_core_conflict_sessions_unbounded) {
+                    self.item.conflicts = 1;
+                    // The session's commits get a verdict of their own, re-run rule included.
+                    self.attempt_mut().first_run = None;
+                    self.start(Next::Reset);
+                } else {
+                    self.needs_you(Reason::LandingRefused);
+                }
             }
             _ => return None,
         }
@@ -1163,6 +1262,7 @@ impl Draft {
     fn reset_counters(&mut self) {
         self.item.failed = 0;
         self.item.uncounted = 0;
+        self.item.conflicts = 0;
         self.item.attempt = None;
     }
 
@@ -1596,6 +1696,183 @@ mod tests {
         assert_eq!(step(&v, &old_run, &ctx()), None, "a run finishes once");
     }
 
+    /// The kinds of a step's effects.
+    fn kinds(stepped: &Stepped) -> Vec<EffectKind> {
+        stepped.transition.effects.iter().map(|e| e.kind).collect()
+    }
+
+    fn rebased(item: &Item) -> Event {
+        Event::Rebased {
+            attempt: cur(item).0,
+        }
+    }
+
+    fn conflict(item: &Item) -> Event {
+        Event::Conflict {
+            attempt: cur(item).0,
+        }
+    }
+
+    #[test]
+    fn a_rebased_commit_is_verified_again_before_it_lands() {
+        let item = attempt(running(), &[RunResult::Pass]);
+        assert_eq!(item.state, State::Landing);
+        let (attempt, _, old_run) = cur(&item);
+        let again = go(&item, &rebased(&item), &ctx());
+        assert_eq!(again.transition.cause, "rebased");
+        assert_eq!(again.item.state, State::Landing);
+        let run = cur(&again.item).2;
+        assert_eq!(run, old_run + 1, "a new verdict run");
+        let effects = kinds(&again);
+        assert!(effects.contains(&EffectKind::RunVerdict { attempt, run }));
+        assert!(
+            !effects.contains(&EffectKind::Land { attempt }),
+            "the verdict before the rebase is not a verdict on the target"
+        );
+        let item = again.item;
+        assert_eq!(step(&item, &rebased(&item), &ctx()), None, "rebased once");
+        let old = Event::Verdict {
+            attempt,
+            run: old_run,
+            result: RunResult::Pass,
+        };
+        assert_eq!(step(&item, &old, &ctx()), None, "the old run is ignored");
+        assert_eq!(
+            step(&item, &Event::Landed, &ctx()),
+            None,
+            "not landed before the rebased commit passes"
+        );
+
+        let passed = go(&item, &verdict(&item, RunResult::Pass), &ctx());
+        assert_eq!(passed.item.state, State::Landing);
+        assert!(kinds(&passed).contains(&EffectKind::Land { attempt }));
+        let done = go(&passed.item, &Event::Landed, &ctx()).item;
+        assert_eq!(done.state, State::Done(Outcome::Pass));
+    }
+
+    #[test]
+    fn a_rebased_commit_that_fails_its_verdict_is_a_failed_attempt() {
+        let landing = attempt(running(), &[RunResult::Pass]);
+        let item = go(&landing, &rebased(&landing), &ctx()).item;
+        let rerun = go(&item, &verdict(&item, RunResult::Fail), &ctx());
+        assert_eq!(rerun.item.state, State::Landing, "re-run once first");
+        assert!(
+            kinds(&rerun)
+                .iter()
+                .any(|k| matches!(k, EffectKind::RunVerdict { .. }))
+        );
+        let failed = go(&rerun.item, &verdict(&rerun.item, RunResult::Fail), &ctx());
+        assert_eq!(failed.item.state, State::Running);
+        assert_eq!((failed.item.failed, cur(&failed.item).0), (1, 2));
+        assert!(kinds(&failed).iter().any(|k| matches!(
+            k,
+            EffectKind::Spawn {
+                attempt: 2,
+                mode: SpawnMode::Fresh,
+                ..
+            }
+        )));
+
+        // With the limit reached, the failed re-verdict is Needs you.
+        let last = Ctx {
+            rules: Rules {
+                max_attempts: 1,
+                ..Rules::default()
+            },
+            ..ctx()
+        };
+        let v = go(&rerun.item, &verdict(&rerun.item, RunResult::Fail), &last).item;
+        assert_eq!(v.state, State::NeedsYou(Reason::AttemptsExhausted));
+        assert_eq!(v.failed, 1);
+
+        // Fail then pass is flaky and lands.
+        let flaky = go(&rerun.item, &verdict(&rerun.item, RunResult::Pass), &ctx());
+        assert_eq!(flaky.item.state, State::Landing);
+        assert_eq!(
+            flaky.item.attempt.as_ref().unwrap().state,
+            AttemptState::Flaky
+        );
+        assert!(kinds(&flaky).contains(&EffectKind::Land { attempt: 1 }));
+        assert_eq!(flaky.item.failed, 0);
+    }
+
+    #[test]
+    fn a_second_conflict_needs_the_user() {
+        let landing = attempt(running(), &[RunResult::Pass]);
+        let (number, spawn, _) = cur(&landing);
+        let first = go(&landing, &conflict(&landing), &ctx());
+        assert_eq!(first.transition.cause, "conflict");
+        assert_eq!(first.item.state, State::Running);
+        assert_eq!(first.item.conflicts, 1);
+        assert_eq!(cur(&first.item).0, number, "the same attempt");
+        assert!(kinds(&first).contains(&EffectKind::Spawn {
+            attempt: number,
+            spawn: spawn + 1,
+            mode: SpawnMode::Reset,
+        }));
+        assert_eq!(step(&first.item, &conflict(&first.item), &ctx()), None);
+
+        // The session exits, its commits verify and reach landing again.
+        let again = attempt(first.item, &[RunResult::Pass]);
+        assert_eq!(again.state, State::Landing);
+        let second = go(&again, &conflict(&again), &ctx());
+        assert_eq!(second.item.state, State::NeedsYou(Reason::LandingRefused));
+        assert!(kinds(&second).contains(&EffectKind::Comment(Reason::LandingRefused)));
+        assert!(
+            !kinds(&second)
+                .iter()
+                .any(|k| matches!(k, EffectKind::Spawn { .. }))
+        );
+        // A requeue resets the conflict counter with the others.
+        let requeued = go(&second.item, &Event::User(UserCommand::Requeue), &ctx()).item;
+        assert_eq!(requeued.conflicts, 0);
+    }
+
+    #[test]
+    fn a_setup_failure_needs_the_user_uncounted() {
+        let claimed = go(
+            &Item::new(ItemId::new("local:demo#3")),
+            &Event::Claim,
+            &ctx(),
+        )
+        .item;
+        let mut crashed = go(&running(), &exit(&running(), Exit::Crash), &ctx()).item;
+        assert_eq!(crashed.uncounted, 1);
+        crashed.failed = 1;
+        for item in [claimed, running(), crashed] {
+            let next = go(&item, &Event::SetupFailed, &ctx());
+            assert_eq!(next.transition.cause, "setup_failed");
+            assert_eq!(next.item.state, State::NeedsYou(Reason::Setup));
+            assert_eq!(
+                (next.item.failed, next.item.uncounted),
+                (item.failed, item.uncounted),
+                "from {:?}",
+                item.state
+            );
+            let effects = kinds(&next);
+            assert!(effects.contains(&EffectKind::Comment(Reason::Setup)));
+            assert!(effects.contains(&EffectKind::Project(Column::NeedsYou)));
+            assert_eq!(
+                effects.contains(&EffectKind::Kill),
+                item.state == State::Running,
+                "a running child is killed"
+            );
+            assert_eq!(step(&next.item, &Event::SetupFailed, &ctx()), None);
+        }
+    }
+
+    #[test]
+    fn the_checkout_guard_is_needs_you() {
+        let item = attempt(running(), &[]);
+        let refused = Event::Refused {
+            attempt: cur(&item).0,
+            guard: Guard::Checkout,
+        };
+        let next = go(&item, &refused, &ctx()).item;
+        assert_eq!(next.state, State::NeedsYou(Reason::Guard(Guard::Checkout)));
+        assert_eq!(next.failed, 0);
+    }
+
     // ---- Properties over random event sequences ----
 
     /// One step of a generated sequence: which event (chosen among those that fit the state,
@@ -1665,7 +1942,22 @@ mod tests {
                     result: RunResult::Timeout,
                 },
             ]),
-            State::Landing => events.extend([Event::Landed, Event::Landed]),
+            State::Landing => events.extend([
+                Event::Landed,
+                Event::Landed,
+                Event::Rebased { attempt },
+                Event::Conflict { attempt },
+                Event::Verdict {
+                    attempt,
+                    run,
+                    result: RunResult::Pass,
+                },
+                Event::Verdict {
+                    attempt,
+                    run,
+                    result: RunResult::Fail,
+                },
+            ]),
             _ => {}
         }
         // Rare: these end the item or need the user.
@@ -1676,6 +1968,7 @@ mod tests {
                 guard: Guard::IgnoredFile,
             },
             Event::BudgetExceeded,
+            Event::SetupFailed,
             Event::User(UserCommand::Requeue),
             Event::User(UserCommand::Restart),
             Event::User(UserCommand::ManualDone),
@@ -1696,10 +1989,22 @@ mod tests {
         prop::collection::vec((any::<u8>(), prop::bool::weighted(0.1), any::<u8>()), 1..80)
     }
 
-    /// Runs a generated sequence; calls `check` after every step that took an arrow with the
-    /// item before, the event, the context and the result.
-    fn run(picks: &[Pick], mut check: impl FnMut(&Item, &Event, &Ctx, &Stepped)) {
-        let mut item = Item::new(ItemId::new("local:demo#7"));
+    /// Runs a generated sequence from a new item; calls `check` after every step that took an
+    /// arrow with the item before, the event, the context and the result.
+    fn run(picks: &[Pick], check: impl FnMut(&Item, &Event, &Ctx, &Stepped)) {
+        run_from(Item::new(ItemId::new("local:demo#7")), picks, check);
+    }
+
+    /// The starts of the generated sequences besides a new item: one that has passed its
+    /// verdict and is landing, which the generator alone never reaches (it produces no passing
+    /// verdict outside landing).
+    fn landing() -> Item {
+        attempt(running(), &[RunResult::Pass])
+    }
+
+    /// Runs a generated sequence from `start`.
+    fn run_from(start: Item, picks: &[Pick], mut check: impl FnMut(&Item, &Event, &Ctx, &Stepped)) {
+        let mut item = start;
         for (i, &(choice, stale, h)) in picks.iter().enumerate() {
             let events = events_for(&item, stale);
             let event = &events[usize::from(choice) % events.len()];
@@ -1744,45 +2049,49 @@ mod tests {
         /// An agent-originated event moves an item to Needs you or nowhere.
         #[test]
         fn agent_events_lead_to_needs_you_only(picks in picks()) {
-            let mut bad = None;
-            run(&picks, |before, event, _, stepped| {
-                if event.actor() == Actor::Agent
-                    && !matches!(stepped.item.state, State::NeedsYou(_))
-                    && bad.is_none()
-                {
-                    bad = Some((before.state, event.clone(), stepped.item.state));
-                }
-            });
-            prop_assert_eq!(bad, None);
+            for start in [Item::new(ItemId::new("local:demo#7")), landing()] {
+                let mut bad = None;
+                run_from(start, &picks, |before, event, _, stepped| {
+                    if event.actor() == Actor::Agent
+                        && !matches!(stepped.item.state, State::NeedsYou(_))
+                        && bad.is_none()
+                    {
+                        bad = Some((before.state, event.clone(), stepped.item.state));
+                    }
+                });
+                prop_assert_eq!(bad, None);
+            }
         }
 
         /// Applying the same event twice yields the same keys and no new effect; every key is
         /// unique over a sequence.
         #[test]
         fn the_same_event_twice_adds_nothing(picks in picks()) {
-            let mut problems = Vec::new();
-            let mut transitions = BTreeSet::new();
-            let mut effects = BTreeSet::new();
-            run(&picks, |before, event, ctx, stepped| {
-                if step(before, event, ctx).as_ref() != Some(stepped) {
-                    problems.push(format!("not deterministic: {event:?}"));
-                }
-                if let Some(again) = step(&stepped.item, event, ctx) {
-                    problems.push(format!(
-                        "{event:?} applied twice: {:?} -> {:?}",
-                        stepped.item.state, again.item.state
-                    ));
-                }
-                if !transitions.insert(stepped.transition.key.to_string()) {
-                    problems.push(format!("duplicate key {}", stepped.transition.key));
-                }
-                for effect in &stepped.transition.effects {
-                    if !effects.insert(effect.key.to_string()) {
-                        problems.push(format!("duplicate key {}", effect.key));
+            for start in [Item::new(ItemId::new("local:demo#7")), landing()] {
+                let mut problems = Vec::new();
+                let mut transitions = BTreeSet::new();
+                let mut effects = BTreeSet::new();
+                run_from(start, &picks, |before, event, ctx, stepped| {
+                    if step(before, event, ctx).as_ref() != Some(stepped) {
+                        problems.push(format!("not deterministic: {event:?}"));
                     }
-                }
-            });
-            prop_assert!(problems.is_empty(), "{problems:#?}");
+                    if let Some(again) = step(&stepped.item, event, ctx) {
+                        problems.push(format!(
+                            "{event:?} applied twice: {:?} -> {:?}",
+                            stepped.item.state, again.item.state
+                        ));
+                    }
+                    if !transitions.insert(stepped.transition.key.to_string()) {
+                        problems.push(format!("duplicate key {}", stepped.transition.key));
+                    }
+                    for effect in &stepped.transition.effects {
+                        if !effects.insert(effect.key.to_string()) {
+                            problems.push(format!("duplicate key {}", effect.key));
+                        }
+                    }
+                });
+                prop_assert!(problems.is_empty(), "{problems:#?}");
+            }
         }
 
         /// The text of an exit never changes what the machine does.

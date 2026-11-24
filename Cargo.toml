@@ -186,6 +186,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_no_park_cap)",
   "cfg(mutant_loop_auth_retries)",
   "cfg(mutant_loop_skip_wake_check)",
+  # #64: bosun-mcp, the per-session MCP configuration, the hello handshake.
+  "cfg(mutant_mcp_skip_handshake)",
+  "cfg(mutant_mcp_extra_tool)",
+  "cfg(mutant_mcp_config_in_tree)",
 ] }
 
 [workspace.lints.clippy]

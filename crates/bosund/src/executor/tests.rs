@@ -2,6 +2,10 @@
 //! on Windows, as npm installs `claude`), the local-file queue, a real git repository, a real
 //! store, the real verdict shell. Nothing touches the user's own configuration, agent or daemon:
 //! every path is in a temporary directory and the login probe is a fake.
+//!
+//! As the agent CLI does, `fake-agent` starts the session's MCP servers from `--mcp-config`:
+//! the real `bosun-mcp`, which calls the scene's own endpoint, served with the scene's
+//! credentials (#64).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -29,9 +33,9 @@ const GRACE: Duration = Duration::from_secs(2);
 /// The login every identity check sees.
 const LOGIN: &str = "synthetic-login";
 
-/// `fake-agent`, built next to this test binary.
-fn fake_agent() -> &'static Path {
-    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+/// `fake-agent` and `bosun-mcp`, built next to this test binary.
+fn built() -> &'static (PathBuf, PathBuf) {
+    static BUILT: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
     BUILT.get_or_init(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         let mut build = Command::new(cargo);
@@ -41,6 +45,8 @@ fn fake_agent() -> &'static Path {
                 "--locked",
                 "--package",
                 "fake-agent",
+                "--package",
+                "bosun-mcp",
                 "--message-format=json",
             ])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -49,15 +55,48 @@ fn fake_agent() -> &'static Path {
             build.arg("--release");
         }
         let out = build.output().unwrap();
-        assert!(out.status.success(), "building fake-agent failed");
-        // Where cargo put it, whatever the target and build directories are.
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|m| m["target"]["name"] == "fake-agent")
-            .find_map(|m| m["executable"].as_str().map(PathBuf::from))
-            .expect("cargo names the fake-agent executable")
+        assert!(
+            out.status.success(),
+            "building fake-agent and bosun-mcp failed"
+        );
+        // Where cargo put them, whatever the target and build directories are.
+        let messages = String::from_utf8_lossy(&out.stdout);
+        let executable = |name: &str| {
+            messages
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|m| m["target"]["name"] == name)
+                .find_map(|m| m["executable"].as_str().map(PathBuf::from))
+                .unwrap_or_else(|| panic!("cargo names the {name} executable"))
+        };
+        (executable("fake-agent"), executable("bosun-mcp"))
     })
+}
+
+fn fake_agent() -> &'static Path {
+    &built().0
+}
+
+fn bosun_mcp() -> &'static Path {
+    &built().1
+}
+
+/// A fresh endpoint for one scene's API.
+fn scene_endpoint(dir: &Path) -> bosun_client::Endpoint {
+    if cfg!(windows) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        bosun_client::Endpoint::new(format!(
+            "bosun-test-loop-{}-{n}-{nanos}",
+            std::process::id()
+        ))
+    } else {
+        bosun_client::Endpoint::new(dir.join("bosund.sock"))
+    }
 }
 
 /// A path as a POSIX shell in a verdict reads it.
@@ -148,6 +187,12 @@ struct Scene {
     credentials: crate::agent::Credentials,
     clock: Arc<TestClock>,
     probe: Arc<Probe>,
+    /// The endpoint the scene's API is served on, for `bosun-mcp`.
+    endpoint: bosun_client::Endpoint,
+    /// The MCP server sessions get: the real `bosun-mcp` unless a scenario breaks it.
+    mcp: PathBuf,
+    /// How long after spawn `bosun-mcp` has to say hello.
+    handshake: Duration,
 }
 
 impl Scene {
@@ -211,6 +256,18 @@ impl Scene {
         let store = Store::open(d.join("db").join("bosun.db"), StoreOptions::default())
             .await
             .unwrap();
+        // The scene's API, holding only the credentials: what `bosun-mcp` calls.
+        let credentials = crate::agent::Credentials::default();
+        let endpoint = scene_endpoint(d);
+        let listener = crate::listen::claim(&endpoint).await.unwrap();
+        let api = Arc::new(crate::state::State {
+            started_ms: 0,
+            identities: BTreeMap::new(),
+            credentials: credentials.clone(),
+        });
+        tokio::spawn(async move {
+            crate::state::serve(listener, &api, std::future::pending()).await;
+        });
         let scene = Self {
             repo: d.join("repo"),
             board: d.join("board.toml"),
@@ -219,12 +276,15 @@ impl Scene {
             gitconfig,
             store,
             spawner: Arc::new(Counting::default()),
-            credentials: crate::agent::Credentials::default(),
             clock: Arc::new(TestClock {
                 system: SystemClock::new(),
                 ahead_ms: AtomicI64::new(0),
             }),
             probe: Arc::new(Probe::default()),
+            credentials,
+            endpoint,
+            mcp: bosun_mcp().to_owned(),
+            handshake: Duration::from_secs(30),
             dir,
         };
         scene.git(&["init", "-q", "-b", "main"]);
@@ -315,6 +375,9 @@ impl Scene {
             poll: Duration::from_millis(50),
             recheck: Duration::from_hours(1),
             question_grace: GRACE,
+            mcp: self.mcp.clone(),
+            endpoint: self.endpoint.clone(),
+            handshake: self.handshake,
             failpoint,
         };
         let deps = Deps {
@@ -1249,4 +1312,152 @@ async fn after_a_sleep_a_dead_child_is_retried_once_uncounted_and_a_live_one_run
     assert_eq!(state, State::Done(Outcome::Pass));
     assert_eq!(modes(&scene.runs(2).await), [(1, SpawnMode::Fresh)]);
     assert_eq!(scene.item(2).await.unwrap().uncounted, 0);
+}
+
+/// The flag after `--mcp-config` in a session's argv, as `fake-agent`'s `argv` wrote it.
+fn mcp_config_of(argv: &Path) -> PathBuf {
+    let argv = std::fs::read_to_string(argv).unwrap();
+    let mut words = argv.lines();
+    words.find(|w| *w == "--mcp-config").expect("--mcp-config");
+    PathBuf::from(words.next().expect("its file"))
+}
+
+/// The configuration is readable by the user only.
+fn assert_private(path: &Path) {
+    #[cfg(windows)]
+    {
+        let file = std::fs::File::open(path).unwrap();
+        bosun_proc::pipe::OwnerOnly::new()
+            .unwrap()
+            .verify(&file)
+            .unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{}", path.display());
+    }
+}
+
+/// #64, through the real `bosun-mcp` that `fake-agent` starts from the session's MCP
+/// configuration:
+///
+/// - `tools/list` names exactly the three tools (`mutant_mcp_extra_tool` is `bosun-mcp`'s own
+///   test);
+/// - a tool call reaches the store through the API, as a row of the session's attempt;
+/// - the configuration is outside the working tree (`mutant_mcp_config_in_tree` writes it
+///   into the tree), readable by the user only, and gone after the session; the tree stays
+///   clean and the item reaches Done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_call_reaches_the_store_through_bosun_mcp_and_the_configuration_stays_private() {
+    use bosun_store::AgentCallKind;
+
+    let scene = Scene::new().await;
+    let p = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[card(1, "Talks", "test -f done.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            format!("argv {}", p("argv.txt")),
+            format!("mcp-tools bosun {}", p("tools.txt")),
+            r#"mcp bosun note {"text": "from the agent"}"#.to_owned(),
+            format!("write {} x", p("flag")),
+            format!("wait {}", p("release")),
+            "commit done.txt done".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let id = ItemId::new("demo#1");
+    wait_file(&scene.path("flag")).await;
+
+    assert_eq!(
+        std::fs::read_to_string(scene.path("tools.txt")).unwrap(),
+        "ask_question\nsubmit_summary\nnote\n"
+    );
+    let calls = scene.store.reader().agent_calls(&id).await.unwrap();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].kind, AgentCallKind::Note);
+    assert_eq!(calls[0].body, "from the agent");
+    assert_eq!(calls[0].attempt, 1);
+    assert!(!calls[0].refused);
+    assert_eq!(
+        calls[0].head_sha.as_deref(),
+        Some(scene.git(&["rev-parse", "HEAD"]).as_str())
+    );
+
+    let config = mcp_config_of(&scene.path("argv.txt"));
+    let repo = scene.repo.canonicalize().unwrap();
+    let canonical = config.canonicalize().unwrap();
+    assert!(
+        !canonical.starts_with(&repo),
+        "{} is in the working tree",
+        config.display()
+    );
+    assert_private(&config);
+    assert_eq!(scene.git(&["status", "--porcelain", "--ignored"]), "");
+
+    std::fs::write(scene.path("release"), "").unwrap();
+    wait_for("done", Duration::from_secs(60), async || {
+        matches!(scene.state(1).await, Some(State::Done(_)))
+    })
+    .await;
+    assert!(
+        !config.exists(),
+        "{} outlived its session",
+        config.display()
+    );
+    task.abort();
+    watcher.abort();
+}
+
+/// #64: a session whose `bosun-mcp` cannot start never says hello. It is killed at the
+/// handshake's timeout and started again, uncounted (the attempt stays 1, nothing failed); the
+/// second miss is Needs you (`handshake`). `mutant_mcp_skip_handshake` lets the session run on
+/// without its tools, and the item reaches Done instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_whose_mcp_server_cannot_start_is_retried_once_then_needs_you() {
+    let mut scene = Scene::new().await;
+    scene.mcp = scene.path("bin").join("no-such-bosun-mcp");
+    scene.handshake = Duration::from_secs(2);
+    scene.write_board(&[card(1, "Toolless", "test -f done.txt", "Item one.")]);
+    // Longer than the handshake: the timeout, not the end of the session, finds the miss.
+    scene.script(
+        1,
+        &["sleep 5000".to_owned(), "commit done.txt done".to_owned()],
+    );
+    let (task, watcher) = scene.start(None);
+    let id = ItemId::new("demo#1");
+    wait_for("an end", Duration::from_secs(60), async || {
+        matches!(
+            scene.state(1).await,
+            Some(State::NeedsYou(_) | State::Done(_))
+        )
+    })
+    .await;
+    assert_eq!(
+        scene.state(1).await,
+        Some(State::NeedsYou(Reason::Handshake))
+    );
+    let stored = scene.store.reader().item(&id).await.unwrap().unwrap().item;
+    assert_eq!(
+        stored.attempt.as_ref().map(|a| a.number),
+        Some(1),
+        "{stored:?}"
+    );
+    assert_eq!(stored.failed, 0, "{stored:?}");
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 2);
+    let runs = scene.store.reader().runs(&id).await.unwrap();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(
+        runs.iter().all(|r| r.exit == Some(bosun_core::Exit::Crash)),
+        "{runs:?}"
+    );
+    // Killed at the timeout, well before the script's end.
+    for run in &runs {
+        let lasted = run.ended_ms.unwrap() - run.started_ms;
+        assert!(lasted < 4_500, "a session lasted {lasted} ms");
+    }
+    task.abort();
+    watcher.abort();
 }

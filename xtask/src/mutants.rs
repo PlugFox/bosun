@@ -1046,6 +1046,34 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_mcp_skip_handshake",
+        issue: 64,
+        breaks: "a session whose bosun-mcp never says hello runs on without its tools",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::a_session_whose_mcp_server_cannot_start_is_retried_once_then_needs_you",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_mcp_extra_tool",
+        issue: 64,
+        breaks: "bosun-mcp lists a `done` tool",
+        package: "bosun-mcp",
+        check: Check::Test("server::tests::tools_list_is_exactly_the_three_tools"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_mcp_config_in_tree",
+        issue: 64,
+        breaks: "the per-session MCP configuration is written into the working tree",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::a_tool_call_reaches_the_store_through_bosun_mcp_and_the_configuration_stays_private",
+        ),
+        platform: None,
+    },
 ];
 
 /// The agent.* scenario of #63, which hosts two mutants.

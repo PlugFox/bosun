@@ -406,6 +406,7 @@ fn reason_of(state: State) -> Option<String> {
             Reason::AttemptsExhausted => "attempts_exhausted",
             Reason::Guard(_) => "guard",
             Reason::LandingRefused => "landing_refused",
+            Reason::Handshake => "handshake",
         },
         _ => return None,
     };

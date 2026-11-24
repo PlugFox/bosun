@@ -645,6 +645,7 @@ fn reason_text(reason: Reason) -> &'static str {
         Reason::Guard(Guard::IgnoredFile) => "a new ignored file outside the build directories",
         Reason::Guard(Guard::GitConfig) => "git's own configuration changed",
         Reason::LandingRefused => "landing was refused",
+        Reason::Handshake => "the session's bosun MCP server did not start, twice",
     }
 }
 

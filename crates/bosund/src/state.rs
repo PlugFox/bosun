@@ -156,7 +156,7 @@ pub(crate) async fn run(
         config_watch::INTERVAL,
         config_watch::Reported::default(),
     );
-    let loops = start_loops(&config, &state, &config_rx);
+    let loops = start_loops(&config, &state, &config_rx, &endpoint);
     drop(config_rx);
     serve(listener, &state, stop).await;
     // The watcher holds the sender: without it every loop ends, killing its child first.
@@ -414,8 +414,10 @@ fn start_loops(
     config: &Config,
     state: &State,
     config_rx: &watch::Receiver<Arc<Config>>,
+    endpoint: &Endpoint,
 ) -> Vec<JoinHandle<()>> {
     let agent = bosun_config::tools::find_program("claude", std::env::var_os("PATH").as_deref());
+    let mcp = executor::find_mcp();
     let daemon_id = daemon_id();
     let mut loops = Vec::new();
     for (name, repo) in &config.repos {
@@ -446,6 +448,9 @@ fn start_loops(
             poll: LOOP_POLL,
             recheck: Duration::from_mins(1),
             question_grace: executor::QUESTION_GRACE,
+            mcp: mcp.clone(),
+            endpoint: endpoint.clone(),
+            handshake: executor::HANDSHAKE,
             #[cfg(test)]
             failpoint: None,
         };

@@ -2,14 +2,18 @@
 //! DACL back, through `windows-sys`.
 
 use std::ffi::{OsStr, OsString, c_void};
+use std::fs::File;
 use std::io;
 use std::mem;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::path::Path;
 use std::ptr;
 
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
+use windows_sys::Win32::Foundation::{
+    ERROR_SUCCESS, GENERIC_WRITE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
     SDDL_REVISION_1, SE_KERNEL_OBJECT,
@@ -18,6 +22,9 @@ use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
     DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetTokenInformation,
     PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, READ_CONTROL,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -167,6 +174,37 @@ impl Descriptor {
             options
                 .create_with_security_attributes_raw(addr, (&raw mut attributes).cast::<c_void>())
         }
+    }
+}
+
+impl Descriptor {
+    /// Creates the new file `path` for writing with this descriptor; fails if it exists.
+    pub(crate) fn create_file(&self, path: &Path) -> io::Result<File> {
+        let name = wide(path.as_os_str());
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(mem::size_of::<SECURITY_ATTRIBUTES>())
+                .expect("SECURITY_ATTRIBUTES is a few bytes"),
+            lpSecurityDescriptor: self.0.0,
+            bInheritHandle: 0,
+        };
+        // SAFETY: `name` is NUL-terminated, `attributes` is a valid `SECURITY_ATTRIBUTES` whose
+        // descriptor is a valid self-relative descriptor; all outlive the call. No template.
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_WRITE | READ_CONTROL,
+                0,
+                &raw const attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `handle` is a valid file handle this call just opened and nothing else owns.
+        Ok(unsafe { File::from_raw_handle(handle) })
     }
 }
 

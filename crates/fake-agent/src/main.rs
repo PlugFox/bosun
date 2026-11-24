@@ -8,8 +8,14 @@
 //! `FAKE_AGENT_SCRIPT`. With `--fake-script-dir <dir>` instead, the script is
 //! `<dir>/<item>.script`, where `<item>` is the variable `BOSUN_ITEM` (the item the daemon
 //! spawned the session for) with every character but ASCII letters, digits, `-` and `_` turned
-//! into `_`: one fake agent can play a different part for each item of a run. Every other argument is ignored, so a runner's real argv (the `claude`
-//! flags) can be passed unchanged. The working directory is the one the spawner gives.
+//! into `_`: one fake agent can play a different part for each item of a run. Every other
+//! argument is ignored, so a runner's real argv (the `claude` flags) can be passed unchanged.
+//! The working directory is the one the spawner gives.
+//!
+//! With `--mcp-config <file>`, as the agent CLI does, every MCP server the file lists is
+//! started and initialized before the script runs; one that fails is reported on standard
+//! error and left out, and the script runs anyway. The servers are stopped (their stdin closed)
+//! when the script ends.
 //!
 //! # Script
 //!
@@ -29,11 +35,15 @@
 //! | `argv <path>` | writes the arguments, one per line (to check the command) |
 //! | `sleep <ms>` | sleeps |
 //! | `wait <path>` | waits until the file exists (at most 60 s, then a script error) |
+//! | `mcp-tools <server> <path>` | writes the names the server's `tools/list` returned, one per line |
+//! | `mcp <server> <tool> <json>` | calls the tool with the JSON object as its arguments; the result goes to standard error |
 //! | `exit <code>` | exits with the code; the end of the script exits with 0 |
 //! | `once <marker> <command>` | runs the command (`exit` too) only when the file `marker` does not exist, creating it first: a resumed or retried session of the same script plays a later part |
 //!
 //! A script error (a missing script, an unknown command, a failed git command) is reported on
 //! standard error and exits with [`SCRIPT_ERROR`].
+
+mod mcp;
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -89,6 +99,15 @@ fn run() -> Result<u8, String> {
     let text = std::fs::read_to_string(&script)
         .map_err(|e| format!("cannot read the script {}: {e}", script.display()))?;
     let base = script.parent().unwrap_or(Path::new("."));
+    let mut servers = match args.iter().position(|a| a == "--mcp-config") {
+        Some(at) => {
+            let file = args
+                .get(at + 1)
+                .ok_or_else(|| "--mcp-config needs a file".to_owned())?;
+            mcp::Servers::start(Path::new(file))?
+        }
+        None => mcp::Servers::default(),
+    };
 
     for (number, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -116,12 +135,18 @@ fn run() -> Result<u8, String> {
                 .parse()
                 .map_err(|_| at(format!("bad exit code {rest:?}")));
         }
-        step(command, rest, base, &args).map_err(at)?;
+        step(command, rest, base, &args, &mut servers).map_err(at)?;
     }
     Ok(0)
 }
 
-fn step(command: &str, rest: &str, base: &Path, args: &[String]) -> Result<(), String> {
+fn step(
+    command: &str,
+    rest: &str,
+    base: &Path,
+    args: &[String],
+    servers: &mut mcp::Servers,
+) -> Result<(), String> {
     match command {
         "replay" => {
             let bytes = std::fs::read(base.join(rest)).map_err(io(rest))?;
@@ -175,6 +200,35 @@ fn step(command: &str, rest: &str, base: &Path, args: &[String]) -> Result<(), S
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
+            Ok(())
+        }
+        "mcp-tools" => {
+            let (server, path) = rest
+                .split_once(' ')
+                .ok_or_else(|| "mcp-tools needs a server and a path".to_owned())?;
+            let text: String = servers
+                .get(server)?
+                .tools
+                .iter()
+                .flat_map(|t| {
+                    [
+                        t.as_str(),
+                        "
+",
+                    ]
+                })
+                .collect();
+            std::fs::write(path, text).map_err(io(path))
+        }
+        "mcp" => {
+            let mut words = rest.splitn(3, ' ');
+            let (Some(server), Some(tool)) = (words.next(), words.next()) else {
+                return Err("mcp needs a server, a tool and arguments".to_owned());
+            };
+            let arguments: serde_json::Value = serde_json::from_str(words.next().unwrap_or("{}"))
+                .map_err(|e| format!("mcp arguments: {e}"))?;
+            let result = servers.call(server, tool, &arguments)?;
+            eprintln!("{result}");
             Ok(())
         }
         other => Err(format!("unknown command {other:?}")),

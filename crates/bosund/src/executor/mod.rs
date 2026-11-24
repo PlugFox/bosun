@@ -88,6 +88,27 @@ pub(crate) use park::{Alive, Clock, SystemClock};
 /// write down what it has (#7).
 pub(crate) const QUESTION_GRACE: Duration = Duration::from_secs(10);
 
+/// How long after spawn a session's `bosun-mcp` has to call `agent.hello` (#64). The agent
+/// CLI starts its MCP servers before its first turn; this leaves room for a slow start of the
+/// CLI itself.
+pub(crate) const HANDSHAKE: Duration = Duration::from_mins(1);
+
+/// The MCP server of agent sessions: `bosun-mcp` next to this executable (as `cargo install`
+/// and a release archive place it), else on `PATH`, else the bare name, which the agent CLI
+/// looks up itself; if it is not there, the handshake fails and says so.
+pub(crate) fn find_mcp() -> PathBuf {
+    let name = format!("bosun-mcp{}", std::env::consts::EXE_SUFFIX);
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(&name)))
+        .filter(|p| p.is_file());
+    sibling
+        .or_else(|| {
+            bosun_config::tools::find_program("bosun-mcp", std::env::var_os("PATH").as_deref())
+        })
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
 /// The fixed parts of one repository's loop.
 pub(crate) struct Options {
     /// The repository's name in the configuration.
@@ -105,6 +126,12 @@ pub(crate) struct Options {
     pub(crate) recheck: Duration,
     /// How long a session that asked a blocking question may go on before it is killed.
     pub(crate) question_grace: Duration,
+    /// The MCP server every session's configuration starts ([`find_mcp`]).
+    pub(crate) mcp: PathBuf,
+    /// The daemon's endpoint, which `bosun-mcp` connects to.
+    pub(crate) endpoint: bosun_client::Endpoint,
+    /// How long after spawn `bosun-mcp` has to say hello ([`HANDSHAKE`]).
+    pub(crate) handshake: Duration,
     /// Test only: a transition this returns `true` for fails to be written.
     #[cfg(test)]
     pub(crate) failpoint: Option<Failpoint>,

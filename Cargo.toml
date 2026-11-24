@@ -136,6 +136,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_ingest_exec_is_read)",
   "cfg(mutant_ingest_unknown_is_read)",
   "cfg(mutant_queue_lint_off)",
+  "cfg(mutant_queue_lint_functions_are_programs)",
   "cfg(mutant_queue_local_no_key)",
   "cfg(mutant_queue_stale_poll)",
   "cfg(mutant_identity_inherit_env)",

@@ -1,9 +1,12 @@
 //! Just enough of the POSIX shell grammar to lint a verdict: the programs it runs and the shape
 //! of its last pipeline. Never used to run anything; the verdict shell does that.
 //!
-//! Constructs this reader does not follow (`case`, here-documents, function definitions) make
-//! the analysis [`Analysis::opaque`]: the program list is then incomplete and lint checks only
-//! what it found before them.
+//! Constructs this reader does not follow (`case`, here-documents) make the analysis
+//! [`Analysis::opaque`]: the program list is then incomplete and lint checks only what it found
+//! before them. Function definitions are followed: their names are recorded in
+//! [`Analysis::functions`] and are not programs, while their bodies are read like any command.
+
+use std::collections::BTreeSet;
 
 /// A word after quote removal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +65,9 @@ pub(crate) struct Analysis {
     pub(crate) programs: Vec<String>,
     /// The steps of the last pipeline.
     pub(crate) last_pipeline: Vec<Step>,
+    /// The names the script defines as functions, `name() ...` or `function name ...`. A command
+    /// word naming one of them, after its definition, is not a program.
+    pub(crate) functions: BTreeSet<String>,
     /// The command uses syntax this reader does not follow; see the module docs.
     pub(crate) opaque: bool,
 }
@@ -297,7 +303,7 @@ pub(crate) fn analyse(command: &str) -> Analysis {
                 command_position = true;
             }
             Token::Op("(") if !step.words.is_empty() => {
-                // `name() { ... }`: a function definition.
+                // A `(` after a command's words is not a shell construct this reader follows.
                 opaque = true;
                 break;
             }
@@ -329,14 +335,42 @@ pub(crate) fn analyse(command: &str) -> Analysis {
                 }
                 match word.text.as_str() {
                     "for" | "select" => in_for = true,
-                    "case" | "function" => {
+                    "case" => {
                         opaque = true;
                         break;
                     }
+                    // `function name [()] body`: the body follows as commands.
+                    "function" => {
+                        let Some(Token::Word(name)) = tokens.next() else {
+                            opaque = true;
+                            break;
+                        };
+                        analysis.functions.insert(name.text);
+                        if matches!(tokens.peek(), Some(Token::Op("("))) {
+                            tokens.next();
+                            if !matches!(tokens.next(), Some(Token::Op(")"))) {
+                                opaque = true;
+                                break;
+                            }
+                        }
+                    }
                     keyword if KEYWORDS.contains(&keyword) => {}
                     _ if is_assignment(&word) => {}
+                    // `name() body`: the body follows as commands.
+                    _ if matches!(tokens.peek(), Some(Token::Op("("))) => {
+                        tokens.next();
+                        if !matches!(tokens.next(), Some(Token::Op(")"))) {
+                            opaque = true;
+                            break;
+                        }
+                        analysis.functions.insert(word.text);
+                    }
                     _ => {
-                        if word.literal {
+                        // A function the script already defined is not a program; a call before
+                        // its definition still is (the shell runs top to bottom).
+                        let defined = !cfg!(mutant_queue_lint_functions_are_programs)
+                            && analysis.functions.contains(&word.text);
+                        if word.literal && !defined {
                             analysis.programs.push(word.text.clone());
                         }
                         step.words.push(word);
@@ -392,8 +426,25 @@ mod tests {
     fn unfollowed_syntax_is_opaque() {
         assert!(analyse("case $x in a) foo;; esac").opaque);
         assert!(analyse("cat <<EOF\nx\nEOF").opaque);
-        assert!(analyse("f() { true; }; f").opaque);
         assert!(!analyse("cargo test").opaque);
+    }
+
+    #[test]
+    fn function_definitions_are_followed_not_programs() {
+        let analysis = analyse("n() { ls \"$d\" | grep -c x; }; b=$(n); test \"$(n)\" -eq \"$b\"");
+        assert!(!analysis.opaque);
+        assert_eq!(analysis.programs, ["ls", "grep", "test"]);
+        assert_eq!(analysis.functions, BTreeSet::from(["n".to_owned()]));
+        assert_eq!(
+            programs("function f { wc -l; }; f; f() (cd a; true)"),
+            ["wc", "cd", "true"]
+        );
+        assert!(!analyse("function f { wc -l; }; f").opaque);
+    }
+
+    #[test]
+    fn a_call_before_the_definition_is_still_a_program() {
+        assert_eq!(programs("n; n() { true; }"), ["n", "true"]);
     }
 
     #[test]

@@ -442,6 +442,22 @@ mod tests {
     }
 
     #[test]
+    fn a_function_the_verdict_defines_is_not_a_missing_program() {
+        // Defined and called by the verdict (as a command, and inside a substitution): claimable.
+        let lint = run(&card(
+            3,
+            Some("n() { grep -c x \"$d\"; }; n; b=$(n); echo \"$(n)\" \"$b\""),
+            "",
+        ));
+        assert_eq!(lint.findings, []);
+        assert!(lint.claimable());
+        // Called but never defined: still a missing program.
+        let lint = run(&card(4, Some("n() { grep -c x \"$d\"; }; m"), ""));
+        assert_eq!(codes(&lint), [&Code::ProgramMissing("m".into())]);
+        assert!(!lint.claimable());
+    }
+
+    #[test]
     fn a_clean_card_is_claimable() {
         let lint = run(&card(
             2,

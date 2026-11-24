@@ -56,6 +56,8 @@ pub(crate) struct Served {
     pub(crate) commit_task: JoinHandle<()>,
     /// The identity's events; the loop (#62) publishes here too.
     pub(crate) events: Events,
+    /// This start's number in the identity's store: what crash recovery (#68) runs under.
+    pub(crate) boot: u32,
 }
 
 /// Everything a request can reach.
@@ -231,6 +233,20 @@ pub(crate) async fn open(
             let _ = store.close().await;
             return Err((identities, format!("identity {}: {e}", plan.identity)));
         }
+        // Every loop of the identity recovers under this start's number (#68).
+        let boot = match executor::next_boot(store.reader(), store.writer()).await {
+            Ok(boot) => boot,
+            Err(e) => {
+                let _ = store.close().await;
+                return Err((
+                    identities,
+                    format!(
+                        "identity {}: the start cannot be recorded: {e}",
+                        plan.identity
+                    ),
+                ));
+            }
+        };
         let repos = config
             .repos
             .iter()
@@ -265,6 +281,7 @@ pub(crate) async fn open(
                 commits,
                 commit_task,
                 events: Events::new(epoch, options),
+                boot,
             },
         );
     }
@@ -499,6 +516,7 @@ fn start_loops(
             mcp: mcp.clone(),
             endpoint: endpoint.clone(),
             handshake: executor::HANDSHAKE,
+            boot: Some(served.boot),
             #[cfg(test)]
             failpoint: None,
         };

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO snapshot (item_id, snapshot_key, taken_ms, hash, body, contract_json,\n                                 comments_json, config_hash, policy_hash, base_sha, branch,\n                                 base_refs, base_stash)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n           ON CONFLICT (snapshot_key) DO NOTHING\n           RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 13
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "c0fa4a187ed342330c875576bb350a9bfa3f3b4c22311685a2ba2040b8466656"
+}

@@ -77,8 +77,14 @@
 //! The agent's calls are answered by [`crate::agent`] (#63) under the credential each session
 //! is issued at spawn; a blocking question comes back here as [`Event::Question`].
 //!
-//! The `bosun-mcp` server and its handshake (#64), and crash recovery (#68): an item found in
-//! flight at start keeps its repository waiting for #68.
+//! The `bosun-mcp` server and its handshake (#64).
+//!
+//! # Crash recovery
+//!
+//! See [`recover`]: at start, before the first claim and before the outbox drainer starts, the
+//! items a previous daemon left in flight are recovered from the store: the user's commands on
+//! the board first, then the surviving children reaped, then the lost work handed back to the
+//! machine (resumed, verified again or landed again, uncounted).
 
 pub(crate) mod board;
 mod claim;
@@ -88,6 +94,7 @@ mod hold;
 mod identity;
 mod outbox;
 mod park;
+mod recover;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -114,6 +121,7 @@ use crate::events::{self, Events};
 
 pub(crate) use identity::{GhLogins, Logins};
 pub(crate) use park::{Alive, Clock, SystemClock};
+pub(crate) use recover::next_boot;
 
 /// How long a session that asked a blocking question may go on before it is killed: time to
 /// write down what it has (#7).
@@ -170,6 +178,9 @@ pub(crate) struct Options {
     pub(crate) endpoint: bosun_client::Endpoint,
     /// How long after spawn `bosun-mcp` has to say hello ([`HANDSHAKE`]).
     pub(crate) handshake: Duration,
+    /// This start's boot number ([`recover::next_boot`], one per store); `None`: the loop
+    /// records one itself before it recovers.
+    pub(crate) boot: Option<u32>,
     /// Test only: a transition this returns `true` for fails to be written.
     #[cfg(test)]
     pub(crate) failpoint: Option<Failpoint>,
@@ -357,8 +368,10 @@ pub(crate) struct Loop {
     checked: Option<(Instant, Result<(), String>)>,
     /// No claim before this (after a failed claim).
     backoff: Option<Instant>,
-    /// An item of this repository was in flight at start; recovery (#68) owns it.
+    /// More than one item of this repository was in flight at start; the user sorts it out.
     waiting: bool,
+    /// Crash recovery has run ([`recover`]); nothing is claimed or sent before.
+    recovered: bool,
     /// The store refused a transition: the loop stops.
     halted: bool,
     /// The sleep detector.
@@ -412,6 +425,7 @@ impl Loop {
             checked: None,
             backoff: None,
             waiting: false,
+            recovered: false,
             halted: false,
             gaps,
             watch: hold::Watch::default(),
@@ -427,14 +441,18 @@ impl Loop {
     /// the configuration channel closes. Aborting the task kills the child in flight: its
     /// container is dropped.
     pub(crate) async fn run(mut self) {
-        let _drainer = AbortOnDrop(tokio::spawn(outbox::run(
-            self.shared.clone(),
-            self.board.clone(),
-            self.config.clone(),
-        )));
+        // The drainer starts once crash recovery has read the board (#68).
+        let mut drainer = None;
         let mut tick = tokio::time::interval(self.shared.options.poll);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         while !self.halted {
+            if drainer.is_none() && self.recovered {
+                drainer = Some(AbortOnDrop(tokio::spawn(outbox::run(
+                    self.shared.clone(),
+                    self.board.clone(),
+                    self.config.clone(),
+                ))));
+            }
             tokio::select! {
                 Some(done) = self.done_rx.recv() => self.on_done(done).await,
                 changed = self.config.changed() => {
@@ -1063,6 +1081,10 @@ impl Loop {
     }
 
     async fn on_tick(&mut self) {
+        if !self.recovered {
+            self.recovered = self.recover().await;
+            return;
+        }
         let clock = &self.shared.deps.clock;
         let gap = self.gaps.observe(clock.wall_ms(), clock.mono());
         if let Some(gap) = gap
@@ -1157,10 +1179,11 @@ impl Loop {
             return;
         };
         if stored.values().any(|s| s.item.state.is_active()) {
+            // Recovery made the item in flight current; another one is not the loop's to guess.
             self.waiting = true;
             self.shared.trouble(
-                "an item was in flight when the daemon stopped; the repository waits for crash \
-                 recovery (#68)",
+                "an item is in flight that the loop does not run; the repository waits for the \
+                 user",
             );
             return;
         }

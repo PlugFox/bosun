@@ -284,7 +284,8 @@ impl Reader {
     pub async fn snapshot(&self, item: &ItemId) -> Result<Option<Snapshot>, Error> {
         let row = sqlx::query!(
             "SELECT s.snapshot_key, s.taken_ms, s.hash, s.body, s.contract_json, s.comments_json,
-                    s.config_hash, s.policy_hash, s.base_sha, s.branch
+                    s.config_hash, s.policy_hash, s.base_sha, s.branch, s.base_refs,
+                    s.base_stash
              FROM item i JOIN snapshot s ON s.id = i.snapshot_id
              WHERE i.item_key = ?",
             item.0,
@@ -303,6 +304,8 @@ impl Reader {
             policy_hash: row.policy_hash,
             base_sha: row.base_sha,
             branch: row.branch,
+            base_refs_json: row.base_refs,
+            base_stash_json: row.base_stash,
         }))
     }
 

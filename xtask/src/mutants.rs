@@ -1275,6 +1275,46 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_recover_skip_reap",
+        issue: 68,
+        breaks: "recovery does not kill the children a previous daemon left running",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::recovery::a_daemon_killed_mid_session_resumes_once_and_leaves_no_child",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_recover_counts_crash",
+        issue: 68,
+        breaks: "the work lost with the daemon counts: a lost verdict run is a run that did not pass",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::recovery::a_daemon_killed_mid_verdict_runs_it_again_uncounted",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_recover_resume_before_board",
+        issue: 68,
+        breaks: "recovery resumes the lost session before it reads the user's cancel on the board",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::recovery::a_cancel_made_while_the_daemon_was_down_wins_over_the_resume",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_outbox_no_key",
+        issue: 68,
+        breaks: "a board write repeated after a daemon died before its acknowledgement duplicates",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::recovery::a_daemon_killed_between_a_board_write_and_its_acknowledgement_leaves_one_write",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

@@ -52,7 +52,10 @@
 //! The queue a repository names is connected at the loop's first poll ([`board`]). A board
 //! error that pauses the repository (`Setup`, `Scope`, another daemon's claim marker) holds
 //! every claim for [`BOARD_RETRY`]; a rate limit holds them for its wait; a card that left the
-//! board at claim cancels its item.
+//! board at claim cancels its item. The board is polled while an item is in flight too: a card
+//! gone from it (deleted, transferred, converted) for two polls cancels the item and kills its
+//! session ([`commands`], #65, #106). A Projects v2 board is read at the poller's pace ([`board::Pace`]):
+//! 30 s while active, backing off to five minutes while idle.
 //!
 //! # Parking
 //!
@@ -152,8 +155,11 @@ pub(crate) struct Options {
     /// The identity's directory for session files (system prompt, MCP configuration) and the
     /// empty `gh` configuration of agent sessions.
     pub(crate) work_dir: PathBuf,
-    /// How often the board is polled and parked items are woken.
+    /// How often the loop ticks: the board is polled and parked items are woken.
     pub(crate) poll: Duration,
+    /// Whether board reads follow the poller's pace (#60, #106: every tick while an item is in
+    /// flight, backing off while idle) rather than every tick: a Projects v2 board.
+    pub(crate) idle_backoff: bool,
     /// How long a passed identity check before a claim is trusted.
     pub(crate) recheck: Duration,
     /// How long a session that asked a blocking question may go on before it is killed.
@@ -367,6 +373,8 @@ pub(crate) struct Loop {
     restarts: BTreeSet<ItemId>,
     /// Items whose card the last poll did not see: a second poll without it is a cancel.
     absent: BTreeSet<ItemId>,
+    /// When the board is read next (#106).
+    pace: board::Pace,
 }
 
 /// Aborts its task when dropped: the drainer ends with its loop.
@@ -392,6 +400,7 @@ impl Loop {
         let (done_tx, done_rx) = mpsc::unbounded_channel();
         let gaps = park::Gaps::new(options.poll);
         let control = deps.control.subscribe();
+        let pace = board::Pace::new(options.idle_backoff, options.poll);
         Self {
             shared: Arc::new(Shared { options, deps }),
             config,
@@ -410,6 +419,7 @@ impl Loop {
             board: Arc::default(),
             restarts: BTreeSet::new(),
             absent: BTreeSet::new(),
+            pace,
         }
     }
 
@@ -1066,14 +1076,28 @@ impl Loop {
             if matches!(cur.item.state, State::Parked(_)) {
                 self.apply(Event::Tick).await;
             }
-            // The user's commands on the item in flight.
-            self.sync_board().await;
+            // The user's commands on the item in flight, and a card gone from the board (#106),
+            // at the board's active pace.
+            let now = self.shared.deps.clock.mono();
+            if self.pace.due(now) && !cfg!(mutant_loop_no_midrun_poll) {
+                // Mutant (`mutant_loop_no_midrun_poll`): the board is not read while an item is
+                // in flight.
+                self.sync_board().await;
+                self.pace.polled(now, true, false);
+            }
             return;
         }
         if self.waiting || self.backoff.is_some_and(|t| Instant::now() < t) {
             return;
         }
+        let now = self.shared.deps.clock.mono();
+        if !self.pace.due(now) {
+            return;
+        }
+        let cursor = self.cursor.clone();
         self.schedule().await;
+        self.pace
+            .polled(now, self.current.is_some(), self.cursor != cursor);
     }
 
     /// After a sleep: the running session's child is revalidated by its pid and start time

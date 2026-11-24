@@ -26,7 +26,11 @@
 //!   reported: a comment whose author (or last editor) is off the list is dropped and counted
 //!   in [`PollStats::dropped_comments`]; a body whose author or editor is off the list is
 //!   replaced by an empty one (so the card fails lint rather than inlining it) and listed in
-//!   [`PollStats::dropped_bodies`]. Logins compare ignoring ASCII case, as on GitHub.
+//!   [`PollStats::dropped_bodies`]. Logins compare ignoring ASCII case, as on GitHub. The
+//!   identity's own comments that carry a hidden key (`viewerDidAuthor`, edited by no one
+//!   else) are kept whatever the list says, with their key and an empty body (#106): the
+//!   daemon must see its own claim markers and stickies, and a second daemon's, even when its
+//!   login is not on its own list. Their text is never reported, so never inlined.
 //! - **Dependencies.** GitHub's own issue dependencies (`blockedBy`) within the repository are
 //!   reported in [`Card::blocked_by`], beside the contract's `blocked-by` (see
 //!   [`Card::blockers`]). A blocker in another repository cannot be named by an [`ItemId`] and
@@ -799,7 +803,9 @@ impl<T: GraphQl> ProjectsV2<T> {
         author.is_some_and(on_list) && editor.is_none_or(on_list)
     }
 
-    /// The card of `issue` in `column`, with the allowlist applied.
+    /// The card of `issue` in `column`, with the allowlist applied: content by a login off the
+    /// list is dropped, except the identity's own keyed comments, which keep their key (for the
+    /// claim check and the sticky lookup) and lose their text.
     fn card(&self, column: Column, issue: &Issue, stats: &mut PollStats) -> Card {
         let id = ItemId(issue.number);
         let filter = !cfg!(mutant_queue_no_author_filter);
@@ -811,11 +817,21 @@ impl<T: GraphQl> ProjectsV2<T> {
         };
         let mut comments = Vec::new();
         for comment in &issue.comments {
-            if filter && !self.allowed(comment.author.as_deref(), comment.editor.as_deref()) {
+            let marked = marker::extract(&comment.body);
+            let allowed =
+                !filter || self.allowed(comment.author.as_deref(), comment.editor.as_deref());
+            // The identity's own keyed comments pass the allowlist (#106): the daemon must see
+            // its claim markers and stickies, and a second daemon's, even when its login is off
+            // its own list. Their text is not reported.
+            let own = !cfg!(mutant_queue_markers_through_allowlist)
+                && marked.is_some()
+                && own_unedited(comment);
+            if !allowed && !own {
                 *stats.dropped_comments.entry(id).or_default() += 1;
                 continue;
             }
-            let (key, body) = match marker::extract(&comment.body) {
+            let (key, body) = match marked {
+                Some((key, _)) if !allowed => (Some(key), String::new()),
                 Some((key, body)) => (Some(key), body.to_owned()),
                 None => (None, comment.body.clone()),
             };
@@ -1177,6 +1193,17 @@ fn number(value: &Value, pointer: &str) -> Result<u64, QueueError> {
 
 fn login(actor: &Value) -> Option<String> {
     actor["login"].as_str().map(str::to_owned)
+}
+
+/// Whether the identity wrote `comment` (`viewerDidAuthor`) and no other login edited it since.
+fn own_unedited(comment: &RawComment) -> bool {
+    comment.mine
+        && comment.editor.as_deref().is_none_or(|editor| {
+            comment
+                .author
+                .as_deref()
+                .is_some_and(|author| author.eq_ignore_ascii_case(editor))
+        })
 }
 
 fn raw_comment(node: &Value) -> RawComment {

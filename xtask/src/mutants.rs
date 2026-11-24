@@ -590,6 +590,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_queue_lint_functions_are_programs",
+        issue: 7,
+        breaks: "a function the verdict defines is resolved as a program, so the verdict is refused",
+        package: "bosun-queue",
+        check: Check::Test("lint::tests::a_function_the_verdict_defines_is_not_a_missing_program"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_queue_local_no_key",
         issue: 51,
         breaks: "the local-file backend does not look comments up by key before posting",

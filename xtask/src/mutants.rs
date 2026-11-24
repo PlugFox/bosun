@@ -1527,6 +1527,23 @@ const MUTANTS: &[Mutant] = &[
         // Process groups are Unix; the test reads the groups from `/proc`.
         platform: Some(Platform::Linux),
     },
+    // #148: the prompt through a stdin file of the shim.
+    Mutant {
+        name: "mutant_shim_stdin_closed",
+        issue: 148,
+        breaks: "the shim ignores the spec's stdin file and gives the child a closed stdin",
+        package: "bosun-proc",
+        check: Check::Test("a_child_reads_its_prompt_from_the_stdin_file"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_shim_accept_old_spec",
+        issue: 148,
+        breaks: "the version of a spec is not compared; an older spec is run",
+        package: "bosun-proc",
+        check: Check::Test("a_version_1_spec_is_refused_by_name"),
+        platform: None,
+    },
     // #124: item worktrees.
     Mutant {
         name: "mutant_git_worktree_skip_disk_floor",

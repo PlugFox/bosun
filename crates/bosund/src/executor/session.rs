@@ -36,7 +36,7 @@ use bosun_runner::{
 };
 use bosun_store::{RunCommits, RunEnd, RunStart, Write};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::watch;
 
 use super::park::ChildSlot;
@@ -558,7 +558,7 @@ pub(crate) async fn session(
         args: command.args.clone(),
         env: vars,
         cwd: command.cwd.clone(),
-        stdin: command.stdin.is_some(),
+        stdin: command.stdin.clone().map(String::into_bytes),
     };
     let tail_file = TailFile::open(tail_path(&shared.options.work_dir, session_id.as_str()));
     let spawned = match shared.deps.spawner.spawn(&spec) {
@@ -577,7 +577,6 @@ pub(crate) async fn session(
         mut tree,
         stdout,
         stderr,
-        stdin,
     } = spawned;
     let key = tree.key();
     set_child(&run.child, Some(key));
@@ -597,12 +596,6 @@ pub(crate) async fn session(
         mode: mode_name(run.mode).to_owned(),
         session: Some(session_id.to_string()),
     });
-    if let (Some(mut pipe), Some(text)) = (stdin, command.stdin.clone()) {
-        tokio::spawn(async move {
-            let _ = pipe.write_all(text.as_bytes()).await;
-            let _ = pipe.shutdown().await;
-        });
-    }
 
     let mut out = BufReader::new(stdout);
     let mut err = BufReader::new(stderr);

@@ -10,7 +10,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use bosun_proc::shim::{
-    Exit, Offsets, RECORD_VERSION, Record, ShimSpawner, Spec, attach, record_path, session_record,
+    Exit, Offsets, RECORD_VERSION, Record, STDIN_FILE, ShimSpawner, Spec, attach, record_path,
+    session_record,
 };
 use bosun_proc::{ChildSpec, ProcessKey, StartTime, is_running, reap, start_time};
 
@@ -45,6 +46,7 @@ fn spec(dir: &Path, role: &str, cap: Duration) -> Spec {
         cwd: dir.to_path_buf(),
         output_dir: dir.join("output"),
         wall_clock: cap,
+        stdin: None,
     }
 }
 
@@ -382,7 +384,7 @@ fn a_session_lists_its_container_and_kill_tree_ends_it() {
             .collect(),
         env: role_env("parent"),
         cwd: dir.path().to_path_buf(),
-        stdin: false,
+        stdin: None,
     };
     let session = dir.path().join("session");
     let (child, grandchild, listed, status, left, after) = runtime().block_on(async {
@@ -553,6 +555,83 @@ fn attach_to_a_finished_session_reads_the_rest_and_the_recorded_exit() {
     assert_eq!(status.code(), Some(3));
 }
 
+/// The bytes the `copy` role writes its standard input to, in its working directory.
+const COPY_FILE: &str = "stdin-copy";
+
+/// A child of `ShimSpawner` given two lines as its stdin reads exactly those bytes and then end
+/// of file (its copy is complete and it exits); once it has exited the stdin file is gone.
+#[test]
+fn a_child_reads_its_prompt_from_the_stdin_file() {
+    use tokio::io::AsyncReadExt;
+
+    let prompt = b"the first line of the prompt\r\nand the second, with no end".to_vec();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = ShimSpawner::new(
+        env!("CARGO_BIN_EXE_bosun-shim"),
+        dir.path().join("sessions"),
+        SLEEP,
+    );
+    let child = ChildSpec {
+        program: std::env::current_exe().expect("current exe"),
+        args: ["run_role", "--exact", "--nocapture", "--quiet"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        env: role_env("copy"),
+        cwd: dir.path().to_path_buf(),
+        stdin: Some(prompt.clone()),
+    };
+    let session = dir.path().join("session");
+    let (stdout, status) = runtime().block_on(async {
+        let mut spawned = shim.spawn_in(&child, &session).expect("spawn");
+        let mut stdout = String::new();
+        spawned
+            .stdout
+            .read_to_string(&mut stdout)
+            .await
+            .expect("stdout");
+        let status = tokio::time::timeout(PATIENCE, spawned.tree.wait())
+            .await
+            .expect("the child saw end of file and exited")
+            .expect("wait");
+        (stdout, status)
+    });
+    let copy = std::fs::read(dir.path().join(COPY_FILE)).expect("the child's copy");
+    assert!(status.success(), "{status}: {stdout}");
+    assert_eq!(copy, prompt, "the child read other bytes");
+    assert!(parse(&stdout).contains_key("eof"), "{stdout}");
+    assert!(
+        !session.join(STDIN_FILE).exists(),
+        "the stdin file outlived the child"
+    );
+}
+
+/// A spec whose header says version 1 (before the stdin file) is refused: the shim fails with
+/// its own code, starts nothing, and its error names both versions.
+#[test]
+fn a_version_1_spec_is_refused_by_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let text = spec(dir.path(), "speak", SLEEP).encode().expect("encode");
+    let old = text.replacen("bosun-shim-spec 2\n", "bosun-shim-spec 1\n", 1);
+    assert_ne!(old, text, "the header: {text}");
+    let path = dir.path().join("session.spec");
+    std::fs::write(&path, old).expect("write the spec");
+    let output = Command::new(env!("CARGO_BIN_EXE_bosun-shim"))
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run the shim");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(125), "{stderr}");
+    assert!(
+        stderr.contains("version 1") && stderr.contains("version 2"),
+        "the error names no versions: {stderr}"
+    );
+    assert!(!record_path(&path).exists(), "a child was started");
+}
+
 /// The `holder` role: spawns a `talk` session through `ShimSpawner` in [`DIR`], reads its
 /// stdout up to the first line, writes the record's path and the bytes read to `held`, and
 /// drops everything without a kill.
@@ -573,7 +652,7 @@ fn hold() {
             .collect(),
         env: role_env("talk"),
         cwd: dir.clone(),
-        stdin: false,
+        stdin: None,
     };
     let session = dir.join("session");
     runtime().block_on(async {
@@ -615,6 +694,15 @@ fn run_role() {
             std::process::exit(SPOKEN_CODE);
         }
         "holder" => hold(),
+        // Copies its stdin to `COPY_FILE` up to end of file, reports `eof`, exits.
+        "copy" => {
+            use std::io::Read;
+
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes).expect("stdin");
+            std::fs::write(COPY_FILE, &bytes).expect("the copy");
+            report(&mut std::io::stdout(), "eof", &bytes.len().to_string());
+        }
         // Says its first line, waits for `go` in its directory, says the rest and exits.
         "talk" => {
             report(&mut std::io::stdout(), "first", "line");

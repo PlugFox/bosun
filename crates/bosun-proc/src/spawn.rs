@@ -8,14 +8,14 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWriteExt as _};
 
 use crate::key::{ProcessKey, StartTime};
 use crate::sys;
 
 /// What to start: the program, its arguments, its whole environment and its working
 /// directory. Nothing is inherited from the daemon: the environment is exactly `env` (#2), and
-/// stdin is closed unless `stdin` asks for a pipe.
+/// stdin holds exactly the bytes of `stdin`, or nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildSpec {
     /// The program, a path or a name looked up on the daemon's `PATH`.
@@ -26,9 +26,9 @@ pub struct ChildSpec {
     pub env: Vec<(OsString, OsString)>,
     /// The working directory.
     pub cwd: PathBuf,
-    /// Give the child a standard input pipe ([`Spawned::stdin`]) instead of a closed one: an
-    /// agent CLI reads its prompt there.
-    pub stdin: bool,
+    /// The bytes the child reads on standard input, then end of file: an agent CLI reads its
+    /// prompt there. `None` is a closed stdin.
+    pub stdin: Option<Vec<u8>>,
 }
 
 /// One output stream of a child, read by the caller.
@@ -37,9 +37,6 @@ pub struct ChildSpec {
 /// not the daemon's own (the session shim of #8 relays the streams over its own channel) fits
 /// the same seam. The native one boxes tokio's pipe; reading it costs one virtual call per read.
 pub type Output = Box<dyn AsyncRead + Send + Unpin>;
-
-/// The standard input of a child, written by the caller; dropping it closes the pipe.
-pub type Input = Box<dyn AsyncWrite + Send + Unpin>;
 
 /// The future of [`Tree::wait`].
 pub type WaitFuture<'a> = Pin<Box<dyn Future<Output = io::Result<ExitStatus>> + Send + 'a>>;
@@ -82,8 +79,6 @@ pub struct Spawned {
     pub stdout: Output,
     /// The child's stderr.
     pub stderr: Output,
-    /// The child's stdin, when [`ChildSpec::stdin`] asked for it.
-    pub stdin: Option<Input>,
 }
 
 impl fmt::Debug for Spawned {
@@ -108,6 +103,9 @@ pub trait Spawner: Send + Sync + fmt::Debug {
 /// The in-process [`Spawner`]: the child is the daemon's own, in a Job Object on Windows and a
 /// process group on Unix (see the crate documentation).
 ///
+/// The bytes of [`ChildSpec::stdin`] go through a pipe, written by a task of its own that shuts
+/// the pipe down after the last byte (or when the child stops reading).
+///
 /// Dropping its [`Tree`] kills whatever is left of the tree: on Windows the job's last handle
 /// closes, on Unix the group is killed. Must be called inside a tokio runtime with the I/O
 /// driver enabled.
@@ -122,7 +120,7 @@ impl Spawner for NativeSpawner {
             .env_clear()
             .envs(spec.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&spec.cwd)
-            .stdin(if spec.stdin {
+            .stdin(if spec.stdin.is_some() {
                 Stdio::piped()
             } else {
                 Stdio::null()
@@ -135,7 +133,7 @@ impl Spawner for NativeSpawner {
             .ok_or_else(|| io::Error::other("the child has no pid"))?;
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
-        let stdin = child.stdin.take().map(|s| Box::new(s) as Input);
+        let pipe = child.stdin.take();
         let start = match sys::child_start_time(&child) {
             Ok(start) => start,
             Err(e) => {
@@ -151,11 +149,17 @@ impl Spawner for NativeSpawner {
             },
             container,
         };
+        if let (Some(mut pipe), Some(bytes)) = (pipe, spec.stdin.clone()) {
+            // A child that exits without reading breaks the pipe: nothing to report then.
+            tokio::spawn(async move {
+                let _ = pipe.write_all(&bytes).await;
+                let _ = pipe.shutdown().await;
+            });
+        }
         Ok(Spawned {
             tree: Box::new(tree),
             stdout: Box::new(stdout),
             stderr: Box::new(stderr),
-            stdin,
         })
     }
 }
@@ -272,6 +276,26 @@ mod tests {
         );
         assert!(helper::lines(&stderr).contains_key("stderr"), "{stderr}");
         assert!(!lines.contains_key("stderr"), "stderr reached stdout");
+    }
+
+    /// The bytes of `stdin` reach the child exactly, then end of file: it reads to the end and
+    /// exits.
+    #[test]
+    fn the_child_reads_the_bytes_of_its_stdin_then_end_of_file() {
+        let bytes = b"first line\nsecond line\r\n\x00\xff".to_vec();
+        let mut spec = helper::spec(Role::Copy);
+        spec.stdin = Some(bytes.clone());
+        let (seen, status) = runtime().block_on(async {
+            let mut spawned = NativeSpawner.spawn(&spec).expect("spawn");
+            let seen = helper::read_key(&mut spawned.stdout, "stdin").await;
+            let status = tokio::time::timeout(Duration::from_secs(30), spawned.tree.wait())
+                .await
+                .expect("the child saw end of file and exited")
+                .expect("wait");
+            (seen, status)
+        });
+        assert!(status.success(), "{status}");
+        assert_eq!(seen, helper::hex(&bytes));
     }
 
     #[test]

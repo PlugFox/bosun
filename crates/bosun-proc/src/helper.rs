@@ -32,16 +32,19 @@ pub(crate) enum Role {
     /// it was started (`escape`), exits. Windows: `CREATE_BREAKAWAY_FROM_JOB`, and when the job
     /// refuses breakaway, a plain detached process. Unix: `setsid`, a new session and group.
     Escape,
+    /// Reads its stdin to end of file and reports the bytes, hex-encoded, as `stdin`; exits.
+    Copy,
 }
 
 impl Role {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Sleep,
         Self::Speak,
         Self::Parent,
         Self::ParentStay,
         Self::Holder,
         Self::Escape,
+        Self::Copy,
     ];
 
     fn name(self) -> &'static str {
@@ -52,6 +55,7 @@ impl Role {
             Self::ParentStay => "parent-stay",
             Self::Holder => "holder",
             Self::Escape => "escape",
+            Self::Copy => "copy",
         }
     }
 }
@@ -82,7 +86,7 @@ pub(crate) fn spec(role: Role) -> ChildSpec {
         args: args(),
         env: env(role),
         cwd: std::env::temp_dir(),
-        stdin: false,
+        stdin: None,
     }
 }
 
@@ -122,6 +126,15 @@ pub(crate) async fn read_key(stdout: &mut Output, key: &str) -> String {
             return value;
         }
     }
+}
+
+/// `bytes` as lowercase hex, two digits each.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        write!(out, "{b:02x}").expect("writing to a string");
+        out
+    })
 }
 
 fn report(out: &mut impl Write, key: &str, value: impl std::fmt::Display) {
@@ -239,6 +252,13 @@ fn run_role() {
             let (grandchild, how) = spawn_escaping();
             report(&mut out, "grandchild", grandchild.id());
             report(&mut out, "escape", how);
+        }
+        Role::Copy => {
+            use std::io::Read;
+
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes).expect("stdin");
+            report(&mut out, "stdin", hex(&bytes));
         }
         Role::Holder => {
             let rt = tokio::runtime::Builder::new_current_thread()

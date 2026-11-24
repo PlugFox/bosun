@@ -383,7 +383,7 @@ pub async fn run(spawner: &dyn Spawner, spec: &VerdictSpec) -> io::Result<Verdic
         args: vec!["-c".into(), spec.command.clone().into()],
         env: spec.env.clone(),
         cwd: spec.cwd.clone(),
-        stdin: false,
+        stdin: None,
     };
     let timeout = if cfg!(mutant_runner_no_verdict_timeout) {
         // Never: a verdict that hangs holds the attempt forever.

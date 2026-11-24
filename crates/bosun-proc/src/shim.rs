@@ -4,15 +4,19 @@
 //! The daemon writes a [`Spec`] to a file and starts `bosun-shim <spec>`. The shim:
 //!
 //! 1. creates the container (the crate's Job Object with kill-on-close on Windows, a process
-//!    group on Unix) and starts the child in it, held before its first instruction;
+//!    group on Unix) and starts the child in it, held before its first instruction, with the
+//!    spec's stdin file (the prompt) as its standard input, or a closed one;
 //! 2. writes the [`Record`] next to the spec ([`record_path`]): its own pid and start time, the
 //!    child's, the output files and the format version, and only then lets the child run, so a
 //!    child that runs is always on record;
 //! 3. sends the child's stdout and stderr straight to two files in the output directory, which
 //!    the daemon tails by offset;
 //! 4. enforces the wall-clock cap itself: with the daemon dead nothing else would;
-//! 5. when the child exits, writes its exit into the record, kills what is left of the
-//!    container and exits with the child's code.
+//! 5. when the child exits, removes the stdin file, writes the exit into the record, kills what
+//!    is left of the container and exits with the child's code.
+//!
+//! The prompt is a file, not a pipe (E17 of #8): a pipe relayed by the daemon would die with
+//! the daemon, and the file outlives it.
 //!
 //! Kill-on-close is on the shim's own job handle: if the shim dies, cleanly or not, everything
 //! in the container dies with it. Unix is weaker (see the crate documentation): on Linux the
@@ -25,8 +29,8 @@
 //!
 //! # The daemon's side
 //!
-//! [`ShimSpawner`] is the crate's [`Spawner`] through the shim (#130): it writes the spec into a
-//! session directory, starts the shim binary whose path it was given, and waits for the first
+//! [`ShimSpawner`] is the crate's [`Spawner`] through the shim (#130): it writes the child's
+//! stdin bytes ([`STDIN_FILE`]) and the spec into a session directory, starts the shim binary whose path it was given, and waits for the first
 //! record. The [`Tree`] and the output it hands back read the shim's files, not pipes: stdout
 //! and stderr are tailed from the output files, the exit is read from the record, and the kill
 //! goes through the shim (the child is killed by pid and start time; the shim records its exit
@@ -70,7 +74,8 @@ const RECORD_HEADER: &str = "bosun-shim-record";
 /// The version of the record format, the number on its header line.
 pub const RECORD_VERSION: u32 = 1;
 /// The version of the spec format.
-pub const SPEC_VERSION: u32 = 1;
+/// Version 2 added the stdin file ([`Spec::stdin`]).
+pub const SPEC_VERSION: u32 = 2;
 
 /// The name of the child's stdout file in the output directory.
 pub const STDOUT_FILE: &str = "stdout";
@@ -78,7 +83,8 @@ pub const STDOUT_FILE: &str = "stdout";
 pub const STDERR_FILE: &str = "stderr";
 
 /// What the shim starts: as [`crate::ChildSpec`], plus where the output goes and how long the
-/// child may run. Nothing of the shim's environment is inherited, and stdin is closed.
+/// child may run. Nothing of the shim's environment is inherited; stdin is the file
+/// [`Spec::stdin`] names, or closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec {
     /// The program, a path or a name looked up on the shim's `PATH`.
@@ -94,6 +100,9 @@ pub struct Spec {
     pub output_dir: PathBuf,
     /// The wall-clock cap: the container is killed when the child has run this long.
     pub wall_clock: Duration,
+    /// The file the child reads as its standard input (the prompt), removed once the child
+    /// has exited; `None` is a closed stdin.
+    pub stdin: Option<PathBuf>,
 }
 
 /// How the child ended.
@@ -199,8 +208,12 @@ fn lines<'a>(text: &'a str, header: &str, version: u32) -> io::Result<Vec<(&'a s
         .strip_prefix(header)
         .and_then(|rest| rest.strip_prefix(' '))
         .ok_or_else(|| invalid(format!("not a {header} file")))?;
-    if found != version.to_string() {
-        return Err(invalid(format!("{header} version {found}, not {version}")));
+    // Mutant (`mutant_shim_accept_old_spec`): the version of a spec is not compared.
+    let compared = !(cfg!(mutant_shim_accept_old_spec) && header == SPEC_HEADER);
+    if compared && found != version.to_string() {
+        return Err(invalid(format!(
+            "a {header} of version {found}: this build reads version {version}"
+        )));
     }
     lines
         .filter(|line| !line.is_empty())
@@ -262,6 +275,9 @@ impl Spec {
         line("cwd", utf8(self.cwd.as_os_str())?);
         line("output", utf8(self.output_dir.as_os_str())?);
         line("wall-clock-ms", &self.wall_clock.as_millis().to_string());
+        if let Some(stdin) = &self.stdin {
+            line("stdin", utf8(stdin.as_os_str())?);
+        }
         Ok(out)
     }
 
@@ -272,7 +288,7 @@ impl Spec {
     /// When the text is not a spec of [`SPEC_VERSION`], or a field is missing or malformed.
     pub fn decode(text: &str) -> io::Result<Self> {
         let (mut program, mut cwd, mut output_dir, mut wall_clock) = (None, None, None, None);
-        let (mut args, mut env) = (Vec::new(), Vec::new());
+        let (mut args, mut env, mut stdin) = (Vec::new(), Vec::new(), None);
         for (key, value) in lines(text, SPEC_HEADER, SPEC_VERSION)? {
             match key {
                 "program" => program = Some(PathBuf::from(decode(value)?)),
@@ -289,6 +305,7 @@ impl Spec {
                 "wall-clock-ms" => {
                     wall_clock = Some(Duration::from_millis(number(key, &decode(value)?)?));
                 }
+                "stdin" => stdin = Some(PathBuf::from(decode(value)?)),
                 other => return Err(invalid(format!("an unknown spec key: {other}"))),
             }
         }
@@ -300,6 +317,7 @@ impl Spec {
             cwd: cwd.ok_or_else(|| missing("cwd"))?,
             output_dir: output_dir.ok_or_else(|| missing("output"))?,
             wall_clock: wall_clock.ok_or_else(|| missing("wall-clock-ms"))?,
+            stdin,
         })
     }
 
@@ -452,13 +470,22 @@ pub fn run(spec_path: &Path) -> io::Result<i32> {
     let own_start =
         sys::start_time(own_pid)?.ok_or_else(|| io::Error::other("the shim has no start time"))?;
 
+    let stdin = match &spec.stdin {
+        Some(_) if cfg!(mutant_shim_stdin_closed) => {
+            // Mutant (`mutant_shim_stdin_closed`): the stdin file is ignored; the child's
+            // stdin is closed.
+            Stdio::null()
+        }
+        Some(path) => Stdio::from(File::open(path)?),
+        None => Stdio::null(),
+    };
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
         .env_clear()
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .current_dir(&spec.cwd)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(File::create(&stdout)?)
         .stderr(File::create(&stderr)?);
 
@@ -508,6 +535,11 @@ pub fn run(spec_path: &Path) -> io::Result<i32> {
         }
     };
     waiter.join().ok();
+    if let Some(path) = &spec.stdin {
+        // Best effort, and before the exit is on record, so that whoever sees the exit finds the
+        // prompt gone: the session directory may be kept for long.
+        std::fs::remove_file(path).ok();
+    }
     let exit = match status.and_then(exit_of) {
         Ok(exit) => exit,
         Err(e) => {
@@ -531,6 +563,9 @@ pub fn run(spec_path: &Path) -> io::Result<i32> {
 pub const SPEC_FILE: &str = "session.spec";
 /// The name of the output directory in a session directory of [`ShimSpawner`].
 pub const OUTPUT_DIR: &str = "output";
+/// The name of the child's stdin file in a session directory of [`ShimSpawner`]: the bytes of
+/// [`ChildSpec::stdin`], until the child has exited.
+pub const STDIN_FILE: &str = "stdin";
 
 /// How often a reader of a session polls its files while nothing new is in them.
 const POLL: Duration = Duration::from_millis(20);
@@ -554,8 +589,9 @@ pub struct Offsets {
 
 /// The [`Spawner`] through the session shim (see the module documentation).
 ///
-/// The child's stdin is always closed: a [`ChildSpec`] that asks for a pipe is refused. Reading
-/// the output and waiting need a tokio runtime with the time driver enabled; the files are read
+/// The bytes of [`ChildSpec::stdin`] are written to [`STDIN_FILE`] in the session directory
+/// before the shim starts, and the shim gives the file to the child as its stdin. Reading the
+/// output and waiting need a tokio runtime with the time driver enabled; the files are read
 /// with plain (short, local) blocking reads.
 #[derive(Debug, Clone)]
 pub struct ShimSpawner {
@@ -582,20 +618,14 @@ impl ShimSpawner {
 
     /// Starts `spec` through the shim with `dir` as its session directory (created if missing):
     /// the spec is [`SPEC_FILE`] in it, the output [`OUTPUT_DIR`], the record
-    /// [`session_record`]. Returns once the shim has written its first record, that is, with
+    /// [`session_record`], and the child's stdin, when it has one, [`STDIN_FILE`]. Returns once the shim has written its first record, that is, with
     /// the child on record.
     ///
     /// # Errors
     ///
-    /// When `spec` asks for stdin, `dir` already holds a record, the spec cannot be written,
+    /// When `dir` already holds a record, the stdin file or the spec cannot be written,
     /// the shim cannot be started, or it exits or stalls without a record.
     pub fn spawn_in(&self, spec: &ChildSpec, dir: &Path) -> io::Result<Spawned> {
-        if spec.stdin {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "the session shim closes the child's stdin",
-            ));
-        }
         std::fs::create_dir_all(dir)?;
         let spec_path = dir.join(SPEC_FILE);
         let record = record_path(&spec_path);
@@ -605,6 +635,14 @@ impl ShimSpawner {
                 format!("a session is already recorded in {}", dir.display()),
             ));
         }
+        let stdin = match &spec.stdin {
+            Some(bytes) => {
+                let path = dir.join(STDIN_FILE);
+                write_private(&path, bytes)?;
+                Some(path)
+            }
+            None => None,
+        };
         Spec {
             program: spec.program.clone(),
             args: spec.args.clone(),
@@ -612,6 +650,7 @@ impl ShimSpawner {
             cwd: spec.cwd.clone(),
             output_dir: dir.join(OUTPUT_DIR),
             wall_clock: self.wall_clock,
+            stdin,
         }
         .write(&spec_path)?;
         let mut command = Command::new(&self.shim);
@@ -660,6 +699,23 @@ impl ShimSpawner {
         }
         session(&first, &record, Offsets::default(), Some(shim))
     }
+}
+
+/// Writes `bytes` to a new or truncated file at `path`; on Unix readable by its owner alone
+/// (mode 0600), since a prompt may say what the task is about.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 impl Spawner for ShimSpawner {
@@ -738,7 +794,6 @@ fn session(
         tree: Box::new(tree),
         stdout: Box::new(stdout) as Output,
         stderr: Box::new(stderr) as Output,
-        stdin: None,
     })
 }
 
@@ -941,6 +996,7 @@ mod tests {
             cwd: PathBuf::from("/work dir"),
             output_dir: PathBuf::from("/out"),
             wall_clock: Duration::from_secs(90),
+            stdin: Some(PathBuf::from("/session/stdin")),
         }
     }
 
@@ -948,14 +1004,21 @@ mod tests {
     fn a_spec_survives_its_file_whatever_its_values_hold() {
         let spec = spec();
         let text = spec.encode().expect("encode");
-        assert_eq!(text.lines().count(), 1 + 1 + 3 + 2 + 3, "{text}");
+        assert_eq!(text.lines().count(), 1 + 1 + 3 + 2 + 4, "{text}");
         assert_eq!(Spec::decode(&text).expect("decode"), spec);
+        let closed = Spec {
+            stdin: None,
+            ..spec
+        };
+        let text = closed.encode().expect("encode");
+        assert!(!text.contains("stdin="), "{text}");
+        assert_eq!(Spec::decode(&text).expect("decode"), closed);
     }
 
     #[test]
     fn a_spec_of_another_version_or_without_a_field_is_refused() {
         let text = spec().encode().expect("encode");
-        let other = text.replacen("bosun-shim-spec 1", "bosun-shim-spec 2", 1);
+        let other = text.replacen("bosun-shim-spec 2", "bosun-shim-spec 3", 1);
         assert!(Spec::decode(&other).is_err());
         let partial = text
             .lines()

@@ -13,6 +13,8 @@
 //!   acquire and one release on drop. [`SystemPower`] is the platform's, [`FakePower`] counts.
 //! - [`next_local_midnight`] and [`last_local_midnight`] read the machine's time zone, which
 //!   the standard library does not: the daily cap parks until local midnight (#67).
+//! - [`disk::free_space`] reads the bytes available on the volume that holds a path, for the
+//!   disk floor of item worktrees (#8).
 //! - `pipe` (Windows): `pipe::OwnerOnly` creates the daemon's named pipe with a DACL that admits
 //!   only the user it runs as, and `pipe::dacl` reads a handle's DACL back.
 //!
@@ -38,6 +40,7 @@
 //! workspace's `unsafe_code = "deny"`.
 #![allow(unsafe_code)]
 
+pub mod disk;
 mod key;
 mod local_time;
 #[cfg(windows)]

@@ -177,6 +177,26 @@ impl PowerRequest {
     }
 }
 
+/// `statvfs`: `f_bavail * f_frsize`, the bytes available to an unprivileged user on the
+/// volume that holds `path`.
+pub(crate) fn free_space(path: &std::path::Path) -> io::Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: `statvfs` is plain old data, so all zeroes is a valid value.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is NUL-terminated and outlives the call; `stat` is a live, writable
+    // `statvfs`.
+    if unsafe { libc::statvfs(path.as_ptr(), &raw mut stat) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // The field types differ across platforms (32-bit on macOS, 64-bit on Linux).
+    #[allow(clippy::useless_conversion, reason = "u64 already on some targets")]
+    let (blocks, size) = (u64::from(stat.f_bavail), u64::from(stat.f_frsize));
+    Ok(blocks.saturating_mul(size))
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_stat;

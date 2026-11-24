@@ -10,6 +10,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
     WAIT_OBJECT_0,
 };
+use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
@@ -279,4 +280,29 @@ impl Drop for PowerRequest {
         // handle afterwards (the `OwnedHandle` drop) would clear it as well.
         unsafe { PowerClearRequest(self.request.as_raw_handle(), PowerRequestSystemRequired) };
     }
+}
+
+/// `GetDiskFreeSpaceExW`: the bytes available to the calling user (quotas included) on the
+/// volume that holds `path`.
+pub(crate) fn free_space(path: &std::path::Path) -> io::Result<u64> {
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    wide.push(0);
+    let mut available: u64 = 0;
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the one out pointer is a live
+    // `u64`, and the two optional ones are null, which the function accepts.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &raw mut available,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(available)
 }

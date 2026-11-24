@@ -1463,6 +1463,17 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::a_worktree_root_inside_the_repository_is_refused"),
         platform: None,
     },
+    // #127: free disk space.
+    Mutant {
+        name: "mutant_proc_free_space_missing_is_unlimited",
+        issue: 127,
+        breaks: "a missing path reports unlimited free space",
+        package: "bosun-proc",
+        check: Check::Test(
+            "disk::tests::free_space_is_reported_for_a_directory_and_refused_for_a_missing_one",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

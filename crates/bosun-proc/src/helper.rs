@@ -28,15 +28,20 @@ pub(crate) enum Role {
     /// Spawns a `ParentStay` through `NativeSpawner`, reports the child's and the grandchild's
     /// pids, sleeps holding the job.
     Holder,
+    /// Starts a grandchild that tries to leave the container, reports its pid, exits. Windows:
+    /// a breakaway from the job, or a plain detached process when the job refuses it. Unix: a
+    /// new session with `setsid`.
+    Escape,
 }
 
 impl Role {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Sleep,
         Self::Speak,
         Self::Parent,
         Self::ParentStay,
         Self::Holder,
+        Self::Escape,
     ];
 
     fn name(self) -> &'static str {
@@ -46,8 +51,46 @@ impl Role {
             Self::Parent => "parent",
             Self::ParentStay => "parent-stay",
             Self::Holder => "holder",
+            Self::Escape => "escape",
         }
     }
+}
+
+/// The grandchild of an [`Role::Escape`] helper: a sleeper that asks to leave the container.
+#[cfg(windows)]
+fn escape() -> std::process::Child {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, DETACHED_PROCESS};
+
+    let mut breakaway = std_command(Role::Sleep);
+    breakaway.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
+    breakaway.spawn().unwrap_or_else(|_| {
+        // The job refuses the breakaway: the grandchild stays in it, detached from the console.
+        let mut plain = std_command(Role::Sleep);
+        plain.creation_flags(DETACHED_PROCESS);
+        plain.spawn().expect("spawn the detached grandchild")
+    })
+}
+
+/// The grandchild of an [`Role::Escape`] helper: a sleeper in a new session.
+#[cfg(unix)]
+fn escape() -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std_command(Role::Sleep);
+    // SAFETY: the closure runs in the forked child before `exec` and calls only `setsid`, which
+    // is async-signal-safe; it allocates nothing and takes no lock.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+        .spawn()
+        .expect("spawn the grandchild in a new session")
 }
 
 fn args() -> Vec<OsString> {
@@ -183,6 +226,14 @@ fn run_role() {
             if role == Role::ParentStay {
                 std::thread::sleep(SLEEP);
             }
+        }
+        Role::Escape => {
+            #[expect(
+                clippy::zombie_processes,
+                reason = "the grandchild must outlive its parent; its new parent reaps it"
+            )]
+            let grandchild = escape();
+            report(&mut out, "grandchild", grandchild.id());
         }
         Role::Holder => {
             let rt = tokio::runtime::Builder::new_current_thread()

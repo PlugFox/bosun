@@ -48,6 +48,64 @@ impl Container {
     pub(crate) fn kill(&self) {
         self.kill_all().ok();
     }
+
+    /// The pids of the processes in the group, the leader among them while it lives. Best
+    /// effort: a process that joins or leaves while this runs may be missing or extra.
+    pub(crate) fn members(&self) -> io::Result<Vec<u32>> {
+        group_members(self.pgid)
+    }
+}
+
+/// The pids of the processes whose process group is `pgid`, read from `/proc`. A process that
+/// exits during the scan is skipped.
+#[cfg(target_os = "linux")]
+fn group_members(group: libc::pid_t) -> io::Result<Vec<u32>> {
+    let mut pids = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let Ok(entry) = entry else { continue };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if parse_pgrp(&text) == Some(group) {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+/// The pids of the processes whose process group is `pgid`, from `libproc`. Best effort: the
+/// call answers only what its buffer holds, so a group larger than the buffer is cut short.
+#[cfg(target_os = "macos")]
+fn group_members(group: libc::pid_t) -> io::Result<Vec<u32>> {
+    const SLOTS: usize = 1024;
+    let mut buf = vec![0 as libc::pid_t; SLOTS];
+    let bytes = libc::c_int::try_from(SLOTS * std::mem::size_of::<libc::pid_t>())
+        .expect("the buffer is small");
+    // SAFETY: `buf` is writable for `bytes` bytes, the length it was sized to.
+    let written = unsafe { libc::proc_listpgrppids(group, buf.as_mut_ptr().cast(), bytes) };
+    if written < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let count =
+        usize::try_from(written).expect("non-negative") / std::mem::size_of::<libc::pid_t>();
+    buf.truncate(count.min(SLOTS));
+    Ok(buf
+        .into_iter()
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .filter(|&pid| pid != 0)
+        .collect())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn group_members(_group: libc::pid_t) -> io::Result<Vec<u32>> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 /// Spawns `command` as the leader of a new process group; on Linux it also dies with the
@@ -132,6 +190,15 @@ fn parse_stat(line: &str) -> Option<(char, u64)> {
     Some((state, start))
 }
 
+/// The process group (field 5) of a `/proc/<pid>/stat` line; the name is skipped as in
+/// [`parse_stat`].
+#[cfg(any(target_os = "linux", test))]
+fn parse_pgrp(line: &str) -> Option<libc::pid_t> {
+    let rest = &line[line.rfind(')')? + 1..];
+    // The state, then the parent pid, then the group.
+    rest.split_ascii_whitespace().nth(2)?.parse().ok()
+}
+
 #[cfg(target_os = "macos")]
 fn read_start(pid: u32, zombie: bool) -> io::Result<Option<u64>> {
     let pid = pid_t(pid)?;
@@ -199,13 +266,14 @@ pub(crate) fn free_space(path: &Path) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_stat;
+    use super::{parse_pgrp, parse_stat};
 
     #[test]
     fn stat_fields_are_counted_from_the_last_parenthesis() {
         let stat = "4242 (a (b) c) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 \
                     987654 1000 200 18446744073709551615\n";
         assert_eq!(parse_stat(stat), Some(('S', 987_654)));
+        assert_eq!(parse_pgrp(stat), Some(4242));
         assert_eq!(parse_stat("4242 (x"), None);
     }
 }

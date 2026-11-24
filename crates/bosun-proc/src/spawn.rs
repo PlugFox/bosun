@@ -10,7 +10,7 @@ use std::process::{ExitStatus, Stdio};
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::key::{ProcessKey, StartTime};
+use crate::key::{ProcessKey, StartTime, is_running, start_time};
 use crate::sys;
 
 /// What to start: the program, its arguments, its whole environment and its working
@@ -60,6 +60,16 @@ pub trait Tree: Send + fmt::Debug {
     /// Waits for the child itself to exit. Its descendants may outlive it, still inside the
     /// container until [`Tree::kill_tree`] or the drop.
     fn wait(&mut self) -> WaitFuture<'_>;
+
+    /// The processes left in the container: the child while it runs, and its descendants,
+    /// whether or not the child is alive. A process that has exited is never listed. On
+    /// Windows this is the job's list; on Linux the group, read from `/proc`; on macOS the
+    /// group through `libproc`, which is best effort and may miss members.
+    ///
+    /// # Errors
+    ///
+    /// When the operating system refuses the inspection.
+    fn members(&self) -> io::Result<Vec<ProcessKey>>;
 }
 
 /// A child as [`Spawner::spawn`] returns it: the tree, and its stdout and stderr as separate
@@ -173,6 +183,24 @@ impl Tree for NativeTree {
     fn wait(&mut self) -> WaitFuture<'_> {
         Box::pin(self.child.wait())
     }
+
+    fn members(&self) -> io::Result<Vec<ProcessKey>> {
+        if cfg!(mutant_proc_members_child_only) {
+            // Mutant (`mutant_proc_members_child_only`): the direct child alone is listed, so the
+            // descendants left in the container are invisible.
+            return Ok(is_running(self.key)
+                .then_some(self.key)
+                .into_iter()
+                .collect());
+        }
+        let mut members = Vec::new();
+        for pid in self.container.members()? {
+            if let Some(start) = start_time(pid)? {
+                members.push(ProcessKey { pid, start });
+            }
+        }
+        Ok(members)
+    }
 }
 
 impl Drop for NativeTree {
@@ -190,7 +218,6 @@ mod tests {
 
     use super::*;
     use crate::helper::{self, Role};
-    use crate::key::{is_running, start_time};
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -286,6 +313,84 @@ mod tests {
         // The drop cleans up whatever a broken kill left.
         drop(spawned);
         assert!(left.is_empty(), "still running: {left:?}");
+    }
+
+    /// Polls `tree` until it lists no process, for at most `limit`. Returns what it still lists.
+    fn members_within(tree: &dyn Tree, limit: Duration) -> Vec<ProcessKey> {
+        let deadline = Instant::now() + limit;
+        loop {
+            let members = tree.members().expect("members");
+            if members.is_empty() || Instant::now() >= deadline {
+                return members;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Windows: the child asks for a breakaway from its job. The test run's own job refuses it,
+    /// and so does the job of the spawner when it allows none, so the grandchild stays in the
+    /// container and `kill_tree` takes it. With the breakaway allowed it leaves, and lives on.
+    #[cfg(windows)]
+    #[test]
+    fn a_grandchild_that_tries_to_escape_dies_with_the_tree() {
+        let rt = runtime();
+        let (left, spawned) = rt.block_on(async {
+            let mut spawned = NativeSpawner
+                .spawn(&helper::spec(Role::Escape))
+                .expect("spawn");
+            let pid: u32 = helper::read_key(&mut spawned.stdout, "grandchild")
+                .await
+                .parse()
+                .expect("pid");
+            let grandchild = key_of(pid);
+            let status = spawned.tree.wait().await.expect("wait");
+            assert!(status.success(), "{status}");
+            assert!(is_running(grandchild), "the grandchild outlives its parent");
+            spawned.tree.kill_tree().expect("kill tree");
+            let left = survivors(&[grandchild], Duration::from_secs(5));
+            // Reaps what a broken kill left, so that no helper outlives the test.
+            for &key in &left {
+                crate::reap(key).ok();
+            }
+            (left, spawned)
+        });
+        drop(spawned);
+        assert!(left.is_empty(), "the grandchild escaped: {left:?}");
+    }
+
+    /// `members` lists every process left in the container: a grandchild that outlives the child
+    /// which started it is listed after the child has exited, and nothing is listed after the
+    /// kill.
+    #[test]
+    fn members_lists_the_processes_left_in_the_container() {
+        let rt = runtime();
+        let (grandchild, listed, after_kill, left, spawned) = rt.block_on(async {
+            let mut spawned = NativeSpawner
+                .spawn(&helper::spec(Role::Parent))
+                .expect("spawn");
+            let pid: u32 = helper::read_key(&mut spawned.stdout, "grandchild")
+                .await
+                .parse()
+                .expect("pid");
+            let grandchild = key_of(pid);
+            let status = spawned.tree.wait().await.expect("wait");
+            assert!(status.success(), "{status}");
+            let listed = spawned.tree.members().expect("members");
+            spawned.tree.kill_tree().expect("kill tree");
+            let left = survivors(&[grandchild], Duration::from_secs(5));
+            for &key in &left {
+                crate::reap(key).ok();
+            }
+            let after_kill = members_within(&*spawned.tree, Duration::from_secs(5));
+            (grandchild, listed, after_kill, left, spawned)
+        });
+        drop(spawned);
+        assert!(left.is_empty(), "still running: {left:?}");
+        assert!(
+            listed.contains(&grandchild),
+            "the grandchild is not listed: {listed:?}"
+        );
+        assert!(after_kill.is_empty(), "still listed: {after_kill:?}");
     }
 
     /// A holder process that owns the job and is killed without warning (`TerminateProcess`)

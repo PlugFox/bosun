@@ -595,6 +595,23 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_proc_allow_breakaway",
+        issue: 8,
+        breaks: "the Job Object lets its processes break away, so a grandchild can leave the container",
+        package: "bosun-proc",
+        check: Check::Test("spawn::tests::a_grandchild_that_tries_to_escape_dies_with_the_tree"),
+        // The breakaway is a Job Object limit; the escape test exists on Windows only.
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_proc_members_child_only",
+        issue: 8,
+        breaks: "members lists the direct child only, not the processes left in the container",
+        package: "bosun-proc",
+        check: Check::Test("spawn::tests::members_lists_the_processes_left_in_the_container"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_runner_inline_daemon_comments",
         issue: 52,
         breaks: "the prompt builder inlines the daemon's own comments",

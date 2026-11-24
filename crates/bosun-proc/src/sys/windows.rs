@@ -8,17 +8,19 @@ use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
-    WAIT_OBJECT_0,
+    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FILETIME, HANDLE,
+    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicProcessIdList,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject,
 };
 use windows_sys::Win32::System::Power::{
     PowerClearRequest, PowerCreateRequest, PowerRequestSystemRequired, PowerSetRequest,
@@ -67,6 +69,11 @@ impl Container {
             // all zeros is a valid value, meaning "no limits".
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // Mutant (`mutant_proc_allow_breakaway`): the job lets its processes break away, so a
+            // grandchild that asks to leave it (CREATE_BREAKAWAY_FROM_JOB) leaves it.
+            if cfg!(mutant_proc_allow_breakaway) {
+                info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            }
             // SAFETY: `job` is a live job handle with all access; the pointer and length
             // describe `info`, which outlives the call, and match the information class.
             let ok = unsafe {
@@ -107,6 +114,67 @@ impl Container {
     /// [`Container::kill_all`], best effort. The handle's close kills the rest regardless.
     pub(crate) fn kill(&self) {
         self.kill_all().ok();
+    }
+
+    /// The pids of the processes in the job that have not exited.
+    pub(crate) fn members(&self) -> io::Result<Vec<u32>> {
+        // The list is the header followed by the pids. When the buffer is too short the call
+        // fails with `ERROR_MORE_DATA`, and the header still says how many processes there are.
+        let mut slots = 16_usize;
+        loop {
+            // Words rather than bytes, so the buffer is aligned for the header. The header
+            // holds one pid slot already, so `slots` pids take `slots` words after its start.
+            let bytes = mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
+                + slots * mem::size_of::<usize>();
+            let mut buf = vec![0_usize; bytes.div_ceil(mem::size_of::<usize>())];
+            let capacity = u32::try_from(bytes).expect("a small buffer");
+            let mut returned = 0_u32;
+            // SAFETY: `buf` is writable for `capacity` bytes, and `returned` is a writable u32;
+            // the information class is the one whose structure the buffer starts with.
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.job.as_raw_handle(),
+                    JobObjectBasicProcessIdList,
+                    buf.as_mut_ptr().cast(),
+                    capacity,
+                    &raw mut returned,
+                )
+            };
+            // SAFETY: `buf` holds at least the header and is aligned for it (a `usize` is at
+            // least as aligned as its `u32` fields).
+            let header = unsafe { &*buf.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+            let (assigned, listed) = (
+                header.NumberOfAssignedProcesses as usize,
+                header.NumberOfProcessIdsInList as usize,
+            );
+            if ok == 0 {
+                let e = io::Error::last_os_error();
+                #[expect(clippy::cast_possible_wrap, reason = "Win32 error codes fit an i32")]
+                if e.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+                    return Err(e);
+                }
+                slots = assigned.max(slots * 2);
+                continue;
+            }
+            if listed < assigned || listed > slots {
+                // Processes joined the job between the two calls, or the pids overrun the buffer.
+                slots = assigned.max(slots * 2);
+                continue;
+            }
+            // The two u32 counts fill exactly one word, so the pids start at word 1 of `buf`.
+            let first_word = mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
+                / mem::size_of::<usize>();
+            let first = buf.as_ptr().wrapping_add(first_word);
+            // SAFETY: `buf` holds `slots + 1` words and `listed` ≤ `slots` (checked above), so
+            // the `listed` pids from word 1 lie inside `buf`; they are initialised by the call.
+            let ids = unsafe { std::slice::from_raw_parts(first, listed) };
+            return ids
+                .iter()
+                .map(|&id| {
+                    u32::try_from(id).map_err(|_| io::Error::other("a pid of a job is large"))
+                })
+                .collect();
+        }
     }
 }
 

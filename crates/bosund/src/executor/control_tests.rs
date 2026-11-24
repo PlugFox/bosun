@@ -246,6 +246,8 @@ async fn the_kill_switch_leaves_no_child_and_writes_no_board() {
             .expect("the session runs"),
     };
     assert!(bosun_proc::is_running(key));
+    // The writes queued before the kill (the claim's column and report) are sent first.
+    drained(&scene).await;
     let board = std::fs::read_to_string(&scene.board).unwrap();
 
     let thrown = Instant::now();

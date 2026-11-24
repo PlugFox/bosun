@@ -10,7 +10,7 @@ use bosun_api::rpc::{ErrorObject, code};
 use bosun_api::{EventBody, Wide};
 use bosun_client::framing;
 use bosun_client::{Endpoint, Stream};
-use bosun_config::{Config, Repo, SystemProbe};
+use bosun_config::{Budget, Config, Repo, SystemProbe};
 use bosun_ingest::{Handle, Ingest, Options as IngestOptions, Report, claude};
 use bosun_proc::{NativeSpawner, SystemPower};
 use bosun_store::{Options as StoreOptions, Store};
@@ -60,6 +60,33 @@ pub(crate) struct Served {
     pub(crate) events: Events,
     /// This start's number in the identity's store: what crash recovery (#68) runs under.
     pub(crate) boot: u32,
+    /// `[budget]` as in force: `tokens.pace` reads its reference from it (#74). Replaced by
+    /// each valid edit of the configuration ([`follow_budget`]).
+    pub(crate) budget: std::sync::Mutex<Budget>,
+}
+
+impl Served {
+    /// `[budget]` as in force now.
+    pub(crate) fn budget(&self) -> Budget {
+        self.budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Keeps every identity's [`Served::budget`] on the configuration in force, until the
+/// configuration's sender is dropped.
+async fn follow_budget(state: Arc<State>, mut config: watch::Receiver<Arc<Config>>) {
+    while config.changed().await.is_ok() {
+        let budget = config.borrow_and_update().budget.clone();
+        for served in state.identities.values() {
+            *served
+                .budget
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = budget.clone();
+        }
+    }
 }
 
 /// Everything a request can reach.
@@ -177,6 +204,7 @@ pub(crate) async fn run(
         config_watch::INTERVAL,
         config_watch::Reported::default(),
     );
+    let budget = tokio::spawn(follow_budget(state.clone(), config_rx.clone()));
     let loops = start_loops(&config, &state, &config_rx, &endpoint);
     drop(config_rx);
     serve(listener, &state, stop).await;
@@ -188,6 +216,8 @@ pub(crate) async fn run(
     }
     progress.abort();
     let _ = progress.await;
+    budget.abort();
+    let _ = budget.await;
     match Arc::try_unwrap(state) {
         Ok(state) => shut_down(state.identities).await,
         Err(_) => eprintln!("bosund: a connection outlived shutdown; stores left to the OS"),
@@ -289,6 +319,7 @@ pub(crate) async fn open(
                 commit_task,
                 events: Events::new(epoch, options),
                 boot,
+                budget: std::sync::Mutex::new(config.budget.clone()),
             },
         );
     }

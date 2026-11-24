@@ -1,4 +1,5 @@
-//! Drawing the frame, the Overview and the Queue (#4) from an [`App`].
+//! Drawing the frame, the Overview and the Queue (#4) from an [`App`]; the Session and Tokens
+//! tabs are drawn by `session.rs` and `tokens.rs`.
 //!
 //! The frame is the tab bar on the first line, the tab's body, a message line and the key
 //! line; a pending question is drawn over the body. The key line is built from the shared
@@ -32,6 +33,19 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     match app.tab {
         Tab::Overview => overview(frame, app, body, now_ms),
         Tab::Queue => queue(frame, app, body),
+        Tab::Session => {
+            let session = app.session.as_ref();
+            let daemon_now = session
+                .and_then(|s| app.identities.iter().find(|(n, _)| *n == s.identity))
+                .and_then(|(_, v)| {
+                    v.overview
+                        .as_ref()
+                        .map(|o| o.now_ms + (now_ms - v.fetched_ms).max(0))
+                })
+                .unwrap_or(now_ms);
+            crate::session::draw(frame, session, body, daemon_now);
+        }
+        Tab::Tokens => crate::tokens::draw(frame, app, body),
     }
     let said = app.message.as_deref().unwrap_or("");
     frame.render_widget(Paragraph::new(clip(said, message.width)), message);
@@ -48,15 +62,15 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
 /// `bosun  [1 Overview]  2 Queue` on the left, the link on the right.
 fn tab_bar(app: &App, width: u16) -> Line<'static> {
     let mut spans = vec![Span::styled(
-        " bosun ",
+        " bosun",
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    let mut used = 7;
+    let mut used = 6;
     for (n, tab) in Tab::ALL.into_iter().enumerate() {
         let label = if tab == app.tab {
-            format!(" [{} {}] ", n + 1, tab.title())
+            format!(" [{} {}]", n + 1, tab.title())
         } else {
-            format!("  {} {}  ", n + 1, tab.title())
+            format!(" {} {}", n + 1, tab.title())
         };
         used += label.len();
         let style = if tab == app.tab {
@@ -82,8 +96,9 @@ fn tab_bar(app: &App, width: u16) -> Line<'static> {
 /// The key line, from the shared table and the view's own keys.
 pub(crate) fn key_line(tab: Tab) -> String {
     let mut out = String::from(match tab {
-        Tab::Overview => " 1/2 tab  j/k move",
-        Tab::Queue => " 1/2 tab  hjkl move",
+        Tab::Overview => " 1-4 tab  j/k move",
+        Tab::Queue => " 1-4 tab  hjkl move",
+        Tab::Session | Tab::Tokens => " 1-4 tab",
     });
     for spec in ACTIONS {
         let _ = write!(out, "  {} {}", spec.key, spec.label);
@@ -93,7 +108,7 @@ pub(crate) fn key_line(tab: Tab) -> String {
 }
 
 /// `text` cut to `width` columns, with `~` where it was cut.
-fn clip(text: &str, width: impl Into<usize>) -> String {
+pub(crate) fn clip(text: &str, width: impl Into<usize>) -> String {
     let width = width.into();
     if text.chars().count() <= width {
         return text.to_owned();
@@ -494,6 +509,78 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    /// The app with the Session tab following alpha#3, fed the lines of a `fake-agent` stream.
+    fn session_app() -> App {
+        let mut app = app();
+        let _ = app.on_key(Key::Char('3'));
+        let (identity, item) = app.followed().expect("alpha#3 is in flight");
+        let mut view = crate::session::SessionView::new(identity, item);
+        view.replace(bosun_api::SessionTail {
+            identity: "personal".to_owned(),
+            item: "alpha#3".to_owned(),
+            epoch: "1-1".to_owned(),
+            head: 13,
+            lines: crate::session::tests::fake_agent_stream(),
+            gap: false,
+            truncated: false,
+            session: Some(bosun_api::SessionInfo {
+                item: "alpha#3".to_owned(),
+                attempt: 2,
+                spawn: 1,
+                session: "00000000-0000-4000-8000-000000000003".to_owned(),
+                provider: "claude".to_owned(),
+                mode: "fresh".to_owned(),
+                started_ms: NOW - 754_000,
+                ended_ms: None,
+                exit: None,
+                running: true,
+            }),
+            context: Some(bosun_api::ContextSize {
+                prompt: 92_400,
+                peak: 120_000,
+                model: "claude-opus-5-5".to_owned(),
+                ts_ms: NOW - 2_000,
+                window: Some(200_000),
+            }),
+        });
+        app.session = Some(view);
+        app
+    }
+
+    /// #74: the tail of a `fake-agent` stream renders at 80x24 with its tool calls collapsed:
+    /// a run of calls is one row, and no `tool:` line is drawn on its own.
+    #[test]
+    fn the_session_tab_renders_at_80x24() {
+        let text = screen(&session_app(), NOW + 10_000);
+        snapshot("session", &text);
+        assert!(text.contains("> 4 tool calls: Read x3, Grep"), "{text}");
+        assert!(text.contains("> 2 tool calls: Edit, Bash"), "{text}");
+        assert!(!text.contains("tool: "), "{text}");
+        assert!(text.contains("context  ["), "{text}");
+    }
+
+    /// #74: the speedometer's reference is the configured budget, and the tab says so; with
+    /// `mutant_tui_pace_unlabelled` the reference is drawn unlabelled.
+    #[test]
+    fn the_speedometer_labels_its_reference_configured() {
+        let mut app = app();
+        app.identities[0].1.pace = Some(crate::tokens::tests::pace("personal"));
+        let _ = app.on_key(Key::Char('4'));
+        let text = screen(&app, NOW);
+        let reference = text
+            .lines()
+            .find(|l| l.starts_with("ref "))
+            .unwrap_or_else(|| panic!("no reference line:\n{text}"));
+        assert!(
+            reference.contains("ref    configured "),
+            "the reference is not labelled configured: {reference}"
+        );
+        assert!(text.contains("speed "), "{text}");
+        assert!(text.contains("today "), "{text}");
+        assert!(text.contains("run "), "{text}");
+        snapshot("tokens", &text);
     }
 
     #[test]

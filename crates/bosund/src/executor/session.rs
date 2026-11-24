@@ -582,7 +582,7 @@ pub(crate) async fn session(
     let up = std::sync::atomic::AtomicBool::new(false);
     let on_line = |stream: OutputStream, bytes: &[u8], tail: &mut Tail| {
         let line = String::from_utf8_lossy(bytes).trim_end().to_owned();
-        let texts: Vec<String> = match stream {
+        let texts: Vec<(String, Option<String>)> = match stream {
             OutputStream::Stdout => {
                 let entries = runner.live_entries(&line);
                 if entries
@@ -591,7 +591,16 @@ pub(crate) async fn session(
                 {
                     up.store(true, Ordering::Relaxed);
                 }
-                let texts = entries.iter().map(entry_text).collect();
+                let texts = entries
+                    .iter()
+                    .map(|e| {
+                        let tool = match e {
+                            LiveEntry::Tool { name } => Some(name.clone()),
+                            _ => None,
+                        };
+                        (entry_text(e), tool)
+                    })
+                    .collect();
                 if let Some(reported) = runner.session_id(&line)
                     && reported != session_id
                     && !mismatch.swap(true, Ordering::Relaxed)
@@ -605,15 +614,16 @@ pub(crate) async fn session(
                 tail.push(line);
                 texts
             }
-            OutputStream::Stderr => vec![line],
+            OutputStream::Stderr => vec![(line, None)],
         };
-        for text in texts {
+        for (text, tool) in texts {
             shared.publish(EventBody::SessionOutput {
                 item: run.item.to_string(),
                 attempt: run.attempt,
                 spawn: run.spawn,
                 stream,
                 line: text,
+                tool,
             });
         }
     };

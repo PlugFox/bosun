@@ -223,6 +223,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #111: the stage-1 loose ends.
   "cfg(mutant_report_tails_on_public)",
   "cfg(mutant_queue_closed_not_cancel)",
+  # #74: the TUI's Session and Tokens tabs.
+  "cfg(mutant_tui_ignore_resync)",
+  "cfg(mutant_tui_pace_unlabelled)",
 ] }
 
 [workspace.lints.clippy]

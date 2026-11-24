@@ -1335,6 +1335,22 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_tui_ignore_resync",
+        issue: 74,
+        breaks: "the Session tab ignores a resync of its tail and keeps the lines it has, with a gap",
+        package: "bosun-tui",
+        check: Check::Test("feed::tests::after_a_resync_the_tail_is_refetched_with_no_gap"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_tui_pace_unlabelled",
+        issue: 74,
+        breaks: "the Tokens tab shows the reference pace without saying it is configured",
+        package: "bosun-tui",
+        check: Check::Test("view::tests::the_speedometer_labels_its_reference_configured"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

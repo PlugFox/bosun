@@ -533,3 +533,177 @@ async fn the_queue_methods_and_restart_item_work_on_a_projects_v2_board() {
     );
     world.close().await;
 }
+/// A stored message of window `session` at `ts_ms`: `input` uncached and `cached` read from
+/// the cache, of the reference model (one eqv per uncached input token).
+fn message(n: u64, session: &str, ts_ms: i64, input: u64, cached: u64) -> Vec<Write> {
+    let file = format!("file-{n}");
+    vec![
+        Write::SourceFile(bosun_store::SourceFile {
+            provider: "claude".to_owned(),
+            file_key: file.clone(),
+            path: format!("projects/p/{file}.jsonl"),
+            size: 100,
+            parsed_offset: 100,
+            parser_version: 1,
+            last_line_hash: None,
+            parsed_lines: Some(1),
+            last_ts_ms: None,
+        }),
+        Write::Message {
+            message: bosun_core::Message {
+                provider: "claude".to_owned(),
+                id: format!("msg-{n}"),
+                origin: bosun_core::Origin {
+                    ts_ms,
+                    file,
+                    window: bosun_core::WindowKey {
+                        session_id: session.to_owned(),
+                        agent_id: None,
+                    },
+                },
+                model: bosun_core::DEFAULT_REFERENCE_MODEL.to_owned(),
+                cwd: "/elsewhere".to_owned(),
+                usage: bosun_core::Usage {
+                    tokens: bosun_core::Tokens {
+                        input,
+                        cache_read: cached,
+                        ..bosun_core::Tokens::default()
+                    },
+                    raw: json!({}),
+                },
+                tool_calls: std::collections::BTreeMap::new(),
+            },
+            parser_version: 1,
+        },
+    ]
+}
+
+fn output(item: &str, line: &str, tool: Option<&str>) -> bosun_api::EventBody {
+    bosun_api::EventBody::SessionOutput {
+        item: item.to_owned(),
+        attempt: 1,
+        spawn: 1,
+        stream: bosun_api::OutputStream::Stdout,
+        line: line.to_owned(),
+        tool: tool.map(ToOwned::to_owned),
+    }
+}
+
+/// #74: `session.tail` returns the item's own output lines the ring holds, from `from_seq`
+/// on, with its latest session and the context size of that session's last message.
+#[tokio::test]
+async fn session_tail_returns_the_items_held_lines_and_its_context() {
+    let world = World::new().await;
+    world.claim_three().await;
+    let served = &world.state.identities["a"];
+    served.events.publish(output("alpha#3", "started", None));
+    served
+        .events
+        .publish(output("alpha#9", "another item", None));
+    served
+        .events
+        .publish(output("alpha#3", "tool: Read", Some("Read")));
+    let ask = json!({"identity": "a", "item": "alpha#3"});
+    let tail = world.ok("session.tail", ask.clone()).await;
+    let lines: Vec<&str> = tail["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["body"]["line"].as_str().unwrap())
+        .collect();
+    assert_eq!(lines, ["started", "tool: Read"], "{tail}");
+    assert_eq!(tail["lines"][1]["body"]["tool"], "Read");
+    assert_eq!(tail["lines"][1]["seq"], 3);
+    assert_eq!(tail["head"], 3);
+    assert_eq!(tail["epoch"], "view-epoch");
+    assert_eq!(tail["gap"], false);
+    assert_eq!(tail["session"]["session"], "session-3");
+    assert!(tail.get("context").is_none(), "{tail}");
+
+    let from = world
+        .ok(
+            "session.tail",
+            json!({"identity": "a", "item": "alpha#3", "from_seq": 2}),
+        )
+        .await;
+    assert_eq!(from["lines"].as_array().unwrap().len(), 1, "{from}");
+
+    // The last message of the session's main transcript is its context size.
+    let mut writes = message(1, "session-3", T0 + 20, 1_000, 60_000);
+    writes.extend(message(2, "session-3", T0 + 30, 500, 90_000));
+    writes.extend(message(3, "session-3", T0 + 40, 10, 80_000));
+    served.store.writer().write(writes).await.unwrap();
+    let tail = world.ok("session.tail", ask).await;
+    assert_eq!(tail["context"]["prompt"], 80_010, "{tail}");
+    assert_eq!(tail["context"]["peak"], 90_500);
+    assert_eq!(tail["context"]["window"], 200_000);
+
+    assert_eq!(
+        world
+            .refused("session.tail", json!({"identity": "b", "item": "alpha#3"}))
+            .await,
+        i64::from(code::NOT_FOUND)
+    );
+    world.close().await;
+}
+
+/// #74: `tokens.pace` puts the identity's recent eqv in its buckets and odometers, and its
+/// reference is the configured budget's, named so; without a daily budget there is none.
+#[tokio::test]
+async fn tokens_pace_measures_against_the_configured_budget() {
+    let mut world = World::new().await;
+    let now = crate::overview::now_ms();
+    world.state.started_ms = now - 3_600_000;
+    let ask = json!({"identity": "a"});
+    let pace = world.ok("tokens.pace", ask.clone()).await;
+    assert!(pace.get("reference").is_none(), "{pace}");
+    assert_eq!(
+        pace["buckets"].as_array().unwrap().len(),
+        crate::pace::BUCKETS
+    );
+    assert_eq!(pace["bucket_ms"], crate::pace::BUCKET_MS);
+
+    let served = &world.state.identities["a"];
+    let mut writes = message(1, "s", now - 30_000, 1_000, 0);
+    // Before the run, and so before the last hour too.
+    writes.extend(message(2, "s", now - 2 * 3_600_000, 7_000, 0));
+    served.store.writer().write(writes).await.unwrap();
+    // Identity b's messages are b's alone.
+    world.state.identities["b"]
+        .store
+        .writer()
+        .write(message(3, "t", now - 10_000, 50_000, 0))
+        .await
+        .unwrap();
+    {
+        let mut budget = served.budget.lock().unwrap();
+        budget.daily_eqv = Some(2_000_000);
+        budget.reserve_eqv = 500_000;
+    }
+    let pace = world.ok("tokens.pace", ask).await;
+    let buckets: Vec<f64> = pace["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b.as_f64().unwrap())
+        .collect();
+    assert!(
+        (buckets.iter().sum::<f64>() - 1_000.0).abs() < 1e-6,
+        "{pace}"
+    );
+    assert!(
+        (buckets[buckets.len() - 1] - 1_000.0).abs() < 1e-6,
+        "{pace}"
+    );
+    assert!((pace["run_eqv"].as_f64().unwrap() - 1_000.0).abs() < 1e-6);
+    let today = pace["today_eqv"].as_f64().unwrap();
+    let reference = &pace["reference"];
+    assert_eq!(reference["type"], "configured", "{pace}");
+    assert_eq!(reference["cap_eqv"], "1500000");
+    let left_ms = pace["reset_ms"].as_i64().unwrap() - now;
+    let minutes = f64::from(i32::try_from(left_ms / 1000).unwrap()) / 60.0;
+    let want = (1_500_000.0 - today) / minutes;
+    let got = reference["eqv_per_minute"].as_f64().unwrap();
+    assert!((got - want).abs() / want < 0.01, "{got} vs {want}");
+    world.close().await;
+}

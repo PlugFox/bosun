@@ -46,6 +46,7 @@ impl Default for Options {
 #[derive(Debug)]
 pub(crate) struct Stored {
     pub(crate) seq: u64,
+    ts_ms: i64,
     kind: &'static str,
     /// For a session output line, its item; output lines go to tail subscriptions only.
     output_of: Option<String>,
@@ -152,14 +153,12 @@ impl Events {
             let mut ring = lock(&self.inner.ring);
             let seq = ring.next;
             ring.next += 1;
-            let event = Event {
-                seq,
-                ts_ms: now_ms(),
-                body,
-            };
+            let ts_ms = now_ms();
+            let event = Event { seq, ts_ms, body };
             let line = notification(EVENT, &event).into();
             ring.events.push_back(Arc::new(Stored {
                 seq,
+                ts_ms,
                 kind,
                 output_of,
                 line,
@@ -200,6 +199,27 @@ impl Events {
         let mut subscribers = lock(&self.inner.subscribers);
         subscribers.retain(|s| s.strong_count() > 0);
         subscribers.len()
+    }
+
+    /// The output lines of `item` the ring still holds, from `from_seq` on (#74), with the head
+    /// they reach and the time of the oldest event held. Every output line of the item from
+    /// the first returned up to the head is among them: the ring drops only its oldest.
+    pub(crate) fn output_of(&self, item: &str, from_seq: Option<u64>) -> Held {
+        let ring = lock(&self.inner.ring);
+        let from = from_seq.unwrap_or(0);
+        let lines = ring
+            .events
+            .iter()
+            .filter(|e| e.seq >= from && e.output_of.as_deref() == Some(item))
+            .filter_map(|e| event_of(&e.line))
+            .collect();
+        Held {
+            head: ring.next - 1,
+            dropped: ring.first() > 1,
+            gap: from_seq.is_some_and(|f| f < ring.first()),
+            oldest_ms: ring.events.front().map(|e| e.ts_ms),
+            lines,
+        }
     }
 
     /// Subscribes from `from_seq` of `epoch`, or from now. The answer says where the stream
@@ -247,6 +267,29 @@ impl Events {
         };
         (result, subscriber)
     }
+}
+
+/// What [`Events::output_of`] found.
+#[derive(Debug)]
+pub(crate) struct Held {
+    /// The sequence of the last event published.
+    pub(crate) head: u64,
+    /// The ring has dropped events: it no longer holds everything since the daemon started.
+    pub(crate) dropped: bool,
+    /// The ring no longer holds the `from_seq` asked for.
+    pub(crate) gap: bool,
+    /// The time of the oldest event the ring holds; `None` when it is empty.
+    pub(crate) oldest_ms: Option<i64>,
+    pub(crate) lines: Vec<Event>,
+}
+
+/// The event of a stored notification line.
+fn event_of(line: &[u8]) -> Option<Event> {
+    #[derive(serde::Deserialize)]
+    struct Line {
+        params: Event,
+    }
+    serde_json::from_slice::<Line>(line).ok().map(|l| l.params)
 }
 
 /// What a subscriber reads next.
@@ -458,6 +501,7 @@ mod tests {
             spawn: 1,
             stream: OutputStream::Stdout,
             line: "hello".to_owned(),
+            tool: None,
         }
     }
 
@@ -501,6 +545,31 @@ mod tests {
         assert_eq!((live.0.head, live.0.resync), (5, None));
         let mut live = live.1;
         assert_eq!(seqs(live.take(10)), Vec::<u64>::new());
+    }
+
+    /// #74: the output lines of an item the ring holds come back in order, and a `from_seq`
+    /// the ring has moved past is a gap.
+    #[test]
+    fn the_held_output_of_an_item_is_contiguous_or_a_gap() {
+        let events = events(4);
+        let none = events.output_of("a", None);
+        assert_eq!((none.head, none.dropped, none.gap), (0, false, false));
+        assert!(none.lines.is_empty() && none.oldest_ms.is_none());
+        for _ in 0..3 {
+            events.publish(output("a"));
+        }
+        events.publish(output("b"));
+        let held = events.output_of("a", Some(2));
+        let seqs: Vec<u64> = held.lines.iter().map(|e| e.seq).collect();
+        assert_eq!((seqs, held.head, held.gap), (vec![2, 3], 4, false));
+        for _ in 0..2 {
+            events.publish(output("a"));
+        }
+        // The ring holds 3..=6 now: from 2 is a gap, and every line still held comes back.
+        let held = events.output_of("a", Some(2));
+        let seqs: Vec<u64> = held.lines.iter().map(|e| e.seq).collect();
+        assert_eq!((seqs, held.dropped, held.gap), (vec![3, 5, 6], true, true));
+        assert!(!events.output_of("a", Some(3)).gap);
     }
 
     #[test]

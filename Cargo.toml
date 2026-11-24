@@ -38,6 +38,9 @@ notify = "9.0.0"
 # I/O; the allowlist re-emitter is ours.
 pulldown-cmark = { version = "0.13.6", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+# The terminal client (#73): widgets, layout and the crossterm backend; no default features, so
+# only what the crossterm backend needs is built.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 regex = "1.13.1"
 # The JSON Schema of the local API (#12, #24), generated from `bosun-api` by `cargo xtask gen-api`.
 schemars = { version = "1.2.3", default-features = false, features = ["derive", "std"] }
@@ -206,6 +209,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_outbox_stop_on_outage)",
   # #75: the leftover-hook check of doctor.
   "cfg(mutant_doctor_skip_stop_hook)",
+  # #73: the TUI's confirmations and reconnect.
+  "cfg(mutant_tui_no_confirm)",
+  "cfg(mutant_tui_no_reconnect)",
 ] }
 
 [workspace.lints.clippy]

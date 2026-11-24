@@ -30,6 +30,10 @@ const CLIENTS: &[&str] = &["bosun-cli", "bosun-tui", "bosun-mcp"];
 const CLIENTS: &[&str] = &["bosun-cli", "bosun-tui"];
 const CLIENT_ALLOWED: &[&str] = &["bosun-client", "bosun-api", "bosun-config"];
 
+/// The one edge between clients: `bosun tui` is a subcommand of `bosun` (#73). `bosun-tui` is
+/// itself a client, so what it may not reach `bosun-cli` may not reach through it either.
+const CLIENT_EDGES: &[(&str, &str)] = &[("bosun-cli", "bosun-tui")];
+
 /// Crates a client may not reach even transitively: a client that can open the database is not
 /// a client.
 const CLIENT_FORBIDDEN: &[&str] = &["bosun-store", "bosun-queue", "bosun-runner", "bosund"];
@@ -121,7 +125,7 @@ pub(crate) fn violations(graph: &Graph) -> Vec<String> {
         .filter(|c| graph.members.contains(*c))
     {
         for dep in graph.direct_members(client) {
-            if !CLIENT_ALLOWED.contains(&dep) {
+            if !CLIENT_ALLOWED.contains(&dep) && !CLIENT_EDGES.contains(&(client, dep)) {
                 out.push(format!(
                     "{client} depends on workspace crate {dep}; a client may depend on {} only",
                     CLIENT_ALLOWED.join(", ")
@@ -420,6 +424,52 @@ mod tests {
         assert_eq!(found.len(), 2, "{found:?}");
         assert!(found[0].starts_with("bosun-mcp depends on workspace crate bosun-store"));
         assert!(found[1].starts_with("bosun-mcp reaches bosun-store"));
+    }
+
+    #[test]
+    fn the_cli_may_link_the_tui_and_no_other_client_may() {
+        let members = [
+            "bosun-cli",
+            "bosun-tui",
+            "bosun-mcp",
+            "bosun-client",
+            "bosun-api",
+            "bosun-store",
+        ];
+        let clean = graph(
+            &members,
+            &[
+                ("bosun-cli", "bosun-tui"),
+                ("bosun-cli", "bosun-client"),
+                ("bosun-tui", "bosun-client"),
+                ("bosun-tui", "bosun-api"),
+            ],
+        );
+        assert_eq!(violations(&clean), Vec::<String>::new());
+
+        // The edge is one way, and the CLI's only one.
+        for (from, to) in [
+            ("bosun-tui", "bosun-cli"),
+            ("bosun-mcp", "bosun-tui"),
+            ("bosun-cli", "bosun-mcp"),
+        ] {
+            let found = violations(&graph(&members, &[(from, to)]));
+            assert_eq!(found.len(), 1, "{from} -> {to}: {found:?}");
+            assert!(
+                found[0].starts_with(&format!("{from} depends on workspace crate {to}")),
+                "{found:?}"
+            );
+        }
+
+        // What the TUI may not reach, the CLI may not reach through it.
+        let found = violations(&graph(
+            &members,
+            &[("bosun-cli", "bosun-tui"), ("bosun-tui", "bosun-store")],
+        ));
+        for client in ["bosun-cli", "bosun-tui"] {
+            let want = format!("{client} reaches bosun-store; a client never links it");
+            assert!(found.contains(&want), "{found:?}");
+        }
     }
 
     const SIDE_EFFECT: [&str; 5] = [

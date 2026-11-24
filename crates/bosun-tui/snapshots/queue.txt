@@ -1,0 +1,24 @@
+ bosun   1 Overview   [2 Queue]                                    bosund 0.0.0
+alpha (personal)  local_file  board 4be1d0c9  [1/2]
+Backlog (1)
+  #9    Someday: a second backend          -          -
+Ready (2)
+  #5    Retry the upload                   -          -        lint 1e1w
+  #6    Name the cache files               ready      -
+In progress (1)
+  #3    Parse the frame header             running    9f2c4e1a EDIT
+Verify (0)
+Done (1)
+  #1    Read the config                    done       -
+Needs you (0)
+
+
+
+
+ card ──────────────────────────────────────────────────────────────────────────
+alpha#5 in Ready: Retry the upload
+error: no contract block
+warning: no labels
+
+
+ 1/2 tab  hjkl move  p pause  r resume  K kill switch  R restart item  q quit

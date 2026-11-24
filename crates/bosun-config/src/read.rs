@@ -962,8 +962,13 @@ mod tests {
 
     #[test]
     fn sizes() {
+        // GB is 10^9 and GiB is 1024^3 (decided on #124).
+        assert_eq!(parse_size("1GB"), Some(1_000_000_000));
+        assert_eq!(parse_size("1GiB"), Some(1_073_741_824));
         assert_eq!(parse_size("20GB"), Some(20_000_000_000));
         assert_eq!(parse_size("512MiB"), Some(512 << 20));
+        assert_eq!(parse_size("2TB"), Some(2_000_000_000_000));
+        assert_eq!(parse_size("2TiB"), Some(2 << 40));
         assert_eq!(parse_size("1B"), Some(1));
         for bad in [
             "",

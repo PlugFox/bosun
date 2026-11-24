@@ -507,6 +507,25 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_git_worktree_skip_disk_floor",
+        issue: 8,
+        breaks: "the worktree is created below the disk floor",
+        package: "bosun-git",
+        check: Check::Test("worktree::tests::no_worktree_is_created_below_the_disk_floor"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_worktree_unremoved_is_removed",
+        issue: 8,
+        breaks: "a worktree that failed to be removed is reported as removed",
+        package: "bosun-git",
+        check: Check::Test(
+            "worktree::tests::a_worktree_with_a_file_held_open_is_quarantined_and_reported",
+        ),
+        // Only a file held open without sharing blocks a removal here, which is a Windows matter.
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
         name: "mutant_proc_kill_parent_only",
         issue: 50,
         breaks: "kill_tree kills the direct child only, not its container",

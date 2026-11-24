@@ -128,6 +128,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_git_skip_ref_check)",
   "cfg(mutant_git_skip_message_check)",
   "cfg(mutant_git_repo_hooks)",
+  "cfg(mutant_git_worktree_skip_disk_floor)",
+  "cfg(mutant_git_worktree_unremoved_is_removed)",
   "cfg(mutant_proc_kill_parent_only)",
   "cfg(mutant_proc_skip_start_time)",
   "cfg(mutant_proc_no_kill_on_close)",

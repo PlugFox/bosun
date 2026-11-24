@@ -340,6 +340,8 @@ async fn an_item_over_its_eqv_or_wall_clock_cap_is_killed_and_needs_you() {
     }
     std::fs::write(scene.path("release2"), "").unwrap();
     let two = ended(&scene, 2, Duration::from_secs(60)).await;
+    // The board gets every row before the loop (and its drainer) stops.
+    drained(&scene).await;
     task.abort();
     watcher.abort();
 
@@ -357,7 +359,6 @@ async fn an_item_over_its_eqv_or_wall_clock_cap_is_killed_and_needs_you() {
     assert!(used >= 2 * 3_600_000, "{figures:?}");
 
     // #111: the Needs-you comment and the sticky report show the figure that tripped.
-    drained(&scene).await;
     for (n, figure) in [
         (1, "1,500,000 eqv of its 1,000,000 eqv cap"),
         (2, "active wall clock 121 min of its 120 min cap"),

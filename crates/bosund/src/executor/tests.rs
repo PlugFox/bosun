@@ -1247,18 +1247,25 @@ async fn agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_
     watcher.abort();
 }
 
-/// Waits for item `card` to end; at most `limit`.
-/// Waits until the outbox of the scene's repository is empty.
+/// Waits until the outbox of the scene's repository is empty; names the rows left when it
+/// times out.
 async fn drained(scene: &Scene) {
-    wait_for("the outbox to drain", Duration::from_secs(60), async || {
-        outbox::pending(scene.store.reader(), "demo")
-            .await
-            .unwrap()
-            .is_empty()
-    })
-    .await;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let rows = outbox::pending(scene.store.reader(), "demo").await.unwrap();
+        if rows.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the outbox to drain; at {} ms: {rows:#?}",
+            scene.clock.wall_ms()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
+/// Waits for item `card` to end; at most `limit`.
 async fn ended(scene: &Scene, card: u64, limit: Duration) -> State {
     let mut state = None;
     wait_for(&format!("item {card} to end"), limit, async || {

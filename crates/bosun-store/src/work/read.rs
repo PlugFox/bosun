@@ -251,7 +251,7 @@ impl Reader {
         let rows = sqlx::query!(
             r#"SELECT i.item_key, r.path AS repo, i.card_key, i.state, i.park_reason,
                       i.park_until_ms, i.park_next, i.outcome, i.reason, i.seq, i.attempts,
-                      i.spawns, i.runs, i.failed, i.uncounted, i.boot, i.created_ms,
+                      i.spawns, i.runs, i.failed, i.uncounted, i.conflicts, i.boot, i.created_ms,
                       i.updated_ms, s.hash AS "snapshot_hash?: String",
                       a.number AS "a_number?: i64", a.spawn AS "a_spawn?: i64",
                       a.run AS "a_run?: i64", a.state AS "a_state?: String",
@@ -306,6 +306,7 @@ impl Reader {
                     runs: number(row.runs, "verdict run count")?,
                     failed: number(row.failed, "failed attempts")?,
                     uncounted: number(row.uncounted, "uncounted parks")?,
+                    conflicts: number(row.conflicts, "conflict sessions")?,
                     boot: number(row.boot, "boot")?,
                 },
                 repo: row.repo,

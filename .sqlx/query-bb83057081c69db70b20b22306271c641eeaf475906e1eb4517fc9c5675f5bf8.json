@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT i.item_key, r.path AS repo, i.card_key, i.state, i.park_reason,\n                      i.park_until_ms, i.park_next, i.outcome, i.reason, i.seq, i.attempts,\n                      i.spawns, i.runs, i.failed, i.uncounted, i.boot, i.created_ms,\n                      i.updated_ms, s.hash AS \"snapshot_hash?: String\",\n                      a.number AS \"a_number?: i64\", a.spawn AS \"a_spawn?: i64\",\n                      a.run AS \"a_run?: i64\", a.state AS \"a_state?: String\",\n                      a.first_run AS \"a_first_run?: String\",\n                      a.crash_retries AS \"a_crash_retries?: i64\"\n               FROM item i\n               JOIN repo r ON r.id = i.repo_id\n               LEFT JOIN snapshot s ON s.id = i.snapshot_id\n               LEFT JOIN attempt a ON a.item_id = i.id AND a.number = i.attempt_number\n               WHERE (?1 IS NULL OR i.item_key = ?1)\n               ORDER BY i.item_key",
+  "query": "SELECT i.item_key, r.path AS repo, i.card_key, i.state, i.park_reason,\n                      i.park_until_ms, i.park_next, i.outcome, i.reason, i.seq, i.attempts,\n                      i.spawns, i.runs, i.failed, i.uncounted, i.conflicts, i.boot, i.created_ms,\n                      i.updated_ms, s.hash AS \"snapshot_hash?: String\",\n                      a.number AS \"a_number?: i64\", a.spawn AS \"a_spawn?: i64\",\n                      a.run AS \"a_run?: i64\", a.state AS \"a_state?: String\",\n                      a.first_run AS \"a_first_run?: String\",\n                      a.crash_retries AS \"a_crash_retries?: i64\"\n               FROM item i\n               JOIN repo r ON r.id = i.repo_id\n               LEFT JOIN snapshot s ON s.id = i.snapshot_id\n               LEFT JOIN attempt a ON a.item_id = i.id AND a.number = i.attempt_number\n               WHERE (?1 IS NULL OR i.item_key = ?1)\n               ORDER BY i.item_key",
   "describe": {
     "columns": [
       {
@@ -169,8 +169,19 @@
         }
       },
       {
-        "name": "boot",
+        "name": "conflicts",
         "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "conflicts"
+          }
+        }
+      },
+      {
+        "name": "boot",
+        "ordinal": 16,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -181,7 +192,7 @@
       },
       {
         "name": "created_ms",
-        "ordinal": 16,
+        "ordinal": 17,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -192,7 +203,7 @@
       },
       {
         "name": "updated_ms",
-        "ordinal": 17,
+        "ordinal": 18,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -203,7 +214,7 @@
       },
       {
         "name": "snapshot_hash?: String",
-        "ordinal": 18,
+        "ordinal": 19,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -214,7 +225,7 @@
       },
       {
         "name": "a_number?: i64",
-        "ordinal": 19,
+        "ordinal": 20,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -225,7 +236,7 @@
       },
       {
         "name": "a_spawn?: i64",
-        "ordinal": 20,
+        "ordinal": 21,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -236,7 +247,7 @@
       },
       {
         "name": "a_run?: i64",
-        "ordinal": 21,
+        "ordinal": 22,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -247,7 +258,7 @@
       },
       {
         "name": "a_state?: String",
-        "ordinal": 22,
+        "ordinal": 23,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -258,7 +269,7 @@
       },
       {
         "name": "a_first_run?: String",
-        "ordinal": 23,
+        "ordinal": 24,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -269,7 +280,7 @@
       },
       {
         "name": "a_crash_retries?: i64",
-        "ordinal": 24,
+        "ordinal": 25,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -301,6 +312,7 @@
       false,
       false,
       false,
+      false,
       true,
       true,
       true,
@@ -310,5 +322,5 @@
       true
     ]
   },
-  "hash": "f437e01a439889a3bc4e1f7bccde0eb9c2778f7ab18821ac9614b3f5499218cf"
+  "hash": "bb83057081c69db70b20b22306271c641eeaf475906e1eb4517fc9c5675f5bf8"
 }

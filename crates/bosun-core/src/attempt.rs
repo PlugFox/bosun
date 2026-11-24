@@ -96,6 +96,9 @@ pub enum AttemptEvent {
     VerdictFinished(RunResult),
     /// The attempt failed without a verdict: a precondition failed, a crash exceeded its retry.
     Failed,
+    /// The landing step rebased the attempt's commits: its verdict runs again on the rebased
+    /// commit (#8). The first run's result is kept.
+    Reverify,
 }
 
 /// One attempt of an item.
@@ -155,6 +158,7 @@ impl Attempt {
             (S::Exited | S::Limited | S::Killed | S::VerdictPending, AttemptEvent::Failed) => {
                 S::Fail
             }
+            (S::Pass | S::Flaky, AttemptEvent::Reverify) => S::VerdictRunning,
             _ => return None,
         };
         Some(next)

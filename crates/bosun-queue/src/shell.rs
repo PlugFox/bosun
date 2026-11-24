@@ -1,9 +1,15 @@
 //! Just enough of the POSIX shell grammar to lint a verdict: the programs it runs and the shape
 //! of its last pipeline. Never used to run anything; the verdict shell does that.
 //!
-//! Constructs this reader does not follow (`case`, here-documents, function definitions) make
-//! the analysis [`Analysis::opaque`]: the program list is then incomplete and lint checks only
-//! what it found before them.
+//! A function the script defines (`name() ...`, `function name ...`) is not a program: calls to
+//! it after its definition are left out of [`Analysis::programs`]; a call before it is still a
+//! program, as the shell runs top to bottom.
+//!
+//! Constructs this reader does not follow (`case`, here-documents) make the analysis
+//! [`Analysis::opaque`]: the program list is then incomplete and lint checks only what it found
+//! before them.
+
+use std::collections::BTreeSet;
 
 /// A word after quote removal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +284,15 @@ fn end_pipeline(step: &mut Step, pipeline: &mut Vec<Step>, pipelines: &mut Vec<V
     }
 }
 
+/// Records `name` as a function the script defines.
+fn define(functions: &mut BTreeSet<String>, name: String) {
+    if cfg!(mutant_queue_lint_functions_are_programs) {
+        // Mutant (#7): a function the verdict defines is still resolved as a program.
+        return;
+    }
+    functions.insert(name);
+}
+
 /// Reads `command` as the verdict shell would parse it, as far as this module follows.
 pub(crate) fn analyse(command: &str) -> Analysis {
     let (tokens, mut opaque) = lex(command);
@@ -288,6 +303,10 @@ pub(crate) fn analyse(command: &str) -> Analysis {
     let mut command_position = true;
     // Inside `for x in ...` up to its `do`.
     let mut in_for = false;
+    // Right after the `function` keyword: the next word is the name it defines.
+    let mut function_keyword = false;
+    // The functions defined so far: calls to them are not programs.
+    let mut functions: BTreeSet<String> = BTreeSet::new();
     let mut tokens = tokens.into_iter().peekable();
 
     while let Some(token) = tokens.next() {
@@ -297,9 +316,24 @@ pub(crate) fn analyse(command: &str) -> Analysis {
                 command_position = true;
             }
             Token::Op("(") if !step.words.is_empty() => {
-                // `name() { ... }`: a function definition.
-                opaque = true;
-                break;
+                // `name() { ... }`: a function definition. The name is not a program, and from
+                // here on calls to it are not either; its body follows as a command.
+                let defines = step.words.len() == 1
+                    && step.redirects.is_empty()
+                    && matches!(tokens.peek(), Some(Token::Op(")")));
+                if !defines {
+                    opaque = true;
+                    break;
+                }
+                tokens.next();
+                if let Some(name) = step.words.pop() {
+                    if name.literal && !functions.contains(&name.text) {
+                        // It was recorded as a program when it was read.
+                        analysis.programs.pop();
+                    }
+                    define(&mut functions, name.text);
+                }
+                command_position = true;
             }
             Token::Op(_) => {
                 end_pipeline(&mut step, &mut pipeline, &mut pipelines);
@@ -323,20 +357,34 @@ pub(crate) fn analyse(command: &str) -> Analysis {
                     }
                     continue;
                 }
+                if function_keyword {
+                    // `function name { ... }` or `function name() { ... }`.
+                    function_keyword = false;
+                    if matches!(tokens.peek(), Some(Token::Op("("))) {
+                        tokens.next();
+                        if !matches!(tokens.next(), Some(Token::Op(")"))) {
+                            opaque = true;
+                            break;
+                        }
+                    }
+                    define(&mut functions, word.text);
+                    continue;
+                }
                 if !command_position {
                     step.words.push(word);
                     continue;
                 }
                 match word.text.as_str() {
                     "for" | "select" => in_for = true,
-                    "case" | "function" => {
+                    "function" => function_keyword = true,
+                    "case" => {
                         opaque = true;
                         break;
                     }
                     keyword if KEYWORDS.contains(&keyword) => {}
                     _ if is_assignment(&word) => {}
                     _ => {
-                        if word.literal {
+                        if word.literal && !functions.contains(&word.text) {
                             analysis.programs.push(word.text.clone());
                         }
                         step.words.push(word);
@@ -392,8 +440,19 @@ mod tests {
     fn unfollowed_syntax_is_opaque() {
         assert!(analyse("case $x in a) foo;; esac").opaque);
         assert!(analyse("cat <<EOF\nx\nEOF").opaque);
-        assert!(analyse("f() { true; }; f").opaque);
         assert!(!analyse("cargo test").opaque);
+    }
+
+    #[test]
+    fn functions_the_script_defines_are_not_programs() {
+        let analysis = analyse("f; f() { g | wc -l; }; f && f; h");
+        assert!(!analysis.opaque);
+        assert_eq!(analysis.programs, ["f", "g", "wc", "h"]);
+        assert_eq!(
+            programs("function a { b; }; function c() ( d ); a; c; e"),
+            ["b", "d", "e"]
+        );
+        assert_eq!(programs("f(){ true; };f"), ["true"]);
     }
 
     #[test]

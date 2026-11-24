@@ -601,3 +601,114 @@ fn the_default_location_follows_the_platform() {
 
     assert_eq!(default_path_in(&|_| None), None);
 }
+
+#[test]
+fn a_resource_needs_a_positive_capacity_and_a_known_scope() {
+    let found = problems(
+        "[resource.target]\n\
+         kind = 'build-dir'\n\
+         capacity = 0\n\
+         [resource.gpu]\n\
+         kind = 'gpu'\n\
+         scope = 'planet'\n\
+         [resource.device]\n\
+         capacity = 2\n\
+         sharing = 'all'\n",
+    );
+    let expected = [
+        "line 3, column 12: `resource.target.capacity` must be a positive whole number",
+        "line 6, column 9: `resource.gpu.scope` is \"planet\"; it is \"machine\", \"identity\" \
+         or \"repository\"",
+        "line 7, column 11: `resource.device` has no `kind`",
+        "line 9, column 1: unknown key `resource.device.sharing`",
+    ];
+    assert_eq!(found.len(), expected.len(), "{found:#?}");
+    for (found, expected) in found.iter().zip(expected) {
+        assert!(found.starts_with(expected), "{found:?} is not {expected:?}");
+    }
+
+    let config = parse(
+        "[resource.target]\n\
+         kind = 'build-dir'\n\
+         [resource.gpu]\n\
+         kind = 'gpu'\n\
+         capacity = 2\n\
+         scope = 'identity'\n",
+        &Local,
+    )
+    .unwrap();
+    assert_eq!(config.notices, []);
+    let target = &config.resources["target"];
+    assert_eq!(target.kind, "build-dir");
+    assert_eq!(target.capacity, 1);
+    assert_eq!(target.scope, Scope::Machine);
+    let gpu = &config.resources["gpu"];
+    assert_eq!((gpu.capacity, gpu.scope), (2, Scope::Identity));
+    assert!(parse("", &Local).unwrap().resources.is_empty());
+}
+
+#[test]
+fn a_worktree_root_inside_the_repository_is_refused() {
+    // The repository is `git/bosun`; on Windows the root is matched whatever its case.
+    let inside = if cfg!(windows) {
+        "GIT/Bosun/.worktrees/"
+    } else {
+        "git/bosun/.worktrees/"
+    };
+    for root in [inside, "git/bosun"] {
+        let found = problems(&with_repo(&format!(
+            "worktree = {{ root = '{}' }}\n",
+            abs(root)
+        )));
+        assert_eq!(found.len(), 1, "{root}: {found:?}");
+        assert!(
+            found[0].starts_with("line 7, column 21: `repo.bosun.worktree.root`")
+                && found[0].contains("is inside the repository's path"),
+            "{found:?}"
+        );
+    }
+
+    // A sibling directory, even one whose name starts with the repository's, is outside.
+    for root in ["git/bosun-worktrees", "wt/bosun"] {
+        let text = with_repo(&format!(
+            "worktree = {{ root = '{}', setup = 'cargo fetch', teardown = 'cargo clean', \
+             disk_floor = '20GB' }}\n",
+            abs(root)
+        ));
+        let config = parse(&text, &Local).unwrap();
+        assert_eq!(config.notices, []);
+        assert_eq!(
+            config.repos["bosun"].worktree,
+            Some(Worktree {
+                root: PathBuf::from(abs(root)),
+                setup: Some("cargo fetch".to_owned()),
+                teardown: Some("cargo clean".to_owned()),
+                disk_floor: Some(20_000_000_000),
+            })
+        );
+    }
+    assert_eq!(
+        parse(&with_repo(""), &Local).unwrap().repos["bosun"].worktree,
+        None
+    );
+
+    // The worktree's other keys are checked too, each named.
+    let found = problems(&with_repo(&format!(
+        "worktree = {{ root = '{}', disk_floor = '20', rot = 'x' }}\n",
+        abs("wt/bosun")
+    )));
+    let expected = [
+        "`repo.bosun.worktree.disk_floor` is \"20\"",
+        "unknown key `repo.bosun.worktree.rot`",
+    ];
+    assert_eq!(found.len(), expected.len(), "{found:#?}");
+    for (found, expected) in found.iter().zip(expected) {
+        assert!(found.contains(expected), "{found:?} lacks {expected:?}");
+    }
+    let found = problems(&with_repo("worktree = { setup = 'x' }\n"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("`repo.bosun.worktree` has no `root`"),
+        "{found:?}"
+    );
+}

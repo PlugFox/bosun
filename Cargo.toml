@@ -136,6 +136,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_ingest_exec_is_read)",
   "cfg(mutant_ingest_unknown_is_read)",
   "cfg(mutant_queue_lint_off)",
+  "cfg(mutant_queue_lint_functions_are_programs)",
   "cfg(mutant_queue_local_no_key)",
   "cfg(mutant_queue_stale_poll)",
   "cfg(mutant_identity_inherit_env)",
@@ -203,6 +204,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_budget_ignore_item_cap)",
   "cfg(mutant_control_autopause_own_sessions)",
   "cfg(mutant_control_no_operator_token)",
+  "cfg(mutant_control_keep_operator_token)",
   # #99: the git guards and the Projects v2 backend in the loop.
   "cfg(mutant_loop_skip_guards)",
   # #70: the stage-1 read methods and CLI commands.
@@ -239,6 +241,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_lease_one_by_one)",
   "cfg(mutant_lease_keep_dead_holder)",
   "cfg(mutant_lease_hold_and_wait)",
+  # #123: resources and worktrees in the configuration.
+  "cfg(mutant_config_resource_any_capacity)",
+  "cfg(mutant_config_worktree_root_inside_repo)",
 ] }
 
 [workspace.lints.clippy]

@@ -1,4 +1,4 @@
-//! Parsing and validation of the bosun configuration file (#4, #18, #55).
+//! Parsing and validation of the bosun configuration file (#4, #18, #55, #123).
 //!
 //! The file is TOML and is the registry of identities and repositories: there is no global
 //! database (#3). The daemon reads it at start and again on change ([`reload`]); the CLI reads
@@ -55,6 +55,7 @@
 //! model = "opus"                # the sessions' default model; required with a queue (#133)
 //! verdict = { timeout = "30m" } # and `shell`, default `sh` (from Git on Windows)
 //! landing = { mode = "local" }  # the only mode of this version; merge and pr are #8
+//! worktree = { root = 'C:\wt\bosun', setup = "cargo fetch", disk_floor = "20GB" }  # #8
 //!
 //! [repo.bosun.policy]
 //! protected = ["tests/harness", "xtask/src/lint.rs"]  # `.gitignore` is always added
@@ -73,6 +74,11 @@
 //!
 //! [retention]
 //! reingest_window = "30d"       # whole hours, days or weeks: "12h", "30d", "6w"; default 30d
+//!
+//! [resource.target]             # a leasable resource (#8); read, not yet leased
+//! kind = "build-dir"            # free text: "build-dir", "gpu", "device", ...
+//! capacity = 1                  # holders at once, at least 1; default 1 (exclusive)
+//! scope = "machine"             # "machine", "identity" or "repository"; default "machine"
 //! ```
 //!
 //! - Paths are absolute; TOML literal strings (`'...'`) keep Windows backslashes as written.
@@ -81,7 +87,16 @@
 //! - Durations are a positive whole number and one of `s`, `m`, `h`, `d`, `w`.
 //! - Identity, repository and MCP server names are ASCII letters, digits, `-` and `_`.
 //! - `landing.mode` other than `local` is refused. An unknown key of a `policy` is refused, so
-//!   that a misspelt `protected` cannot leave paths unprotected.
+//!   that a misspelt `protected` cannot leave paths unprotected; so is an unknown key of a
+//!   `resource` or of a `worktree`.
+//! - `repo.<name>.worktree` (#8): where the repository's item worktrees go. `root` is required
+//!   and lies outside the repository's `path`; `setup` and `teardown` are shell commands run in a
+//!   new worktree and before one is removed; `disk_floor` is the free space below which no new
+//!   worktree is made. Sizes are a positive whole number and one of `B`, `KB`, `MB`, `GB`, `TB`
+//!   (powers of 1000) or `KiB`, `MiB`, `GiB`, `TiB` (powers of 1024). Nothing acts on these keys
+//!   yet: items still run in the main checkout.
+//! - `[resource.<name>]` (#8): a resource items may name in `needs`. `kind` is required. Nothing
+//!   leases them yet: a card that needs one keeps being refused until the lease manager exists.
 //! - `notify`, and every other key of #4 that a later stage reads (`repo.<name>.report`,
 //!   `landing.target`, `daemon.http_port`, ...), is accepted and ignored with a [`Notice`]. Any
 //!   other section is an error.
@@ -94,6 +109,7 @@
 //!   configuration directory, a git configuration file, an SSH key or a Codex home (#2). Paths
 //!   are compared by their canonical key ([`bosun_core::canonical_path`]), so on Windows case
 //!   and separators do not matter. Links and junctions are not resolved for this comparison.
+//! - A repository's `worktree.root` is neither its `path` nor under it, compared the same way.
 //! - The directory of each database is on a local disk, as a [`DiskProbe`] sees it.
 //! - `budget.reserve_eqv` is less than `budget.daily_eqv` when both are set.
 //!
@@ -126,6 +142,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub use bosun_core::Scope;
 pub use disk::{Disk, DiskProbe, SystemProbe};
 pub use error::{Error, Location, Notice, Problem};
 pub use policy::{ALWAYS_PROTECTED, Policy};
@@ -150,6 +167,8 @@ pub struct Config {
     pub budget: Budget,
     /// `[daemon]`.
     pub daemon: Daemon,
+    /// `[resource.<name>]`: leasable resources by name (#8).
+    pub resources: BTreeMap<String, Resource>,
     /// What the file holds that this version does not read, in file order.
     pub notices: Vec<Notice>,
 }
@@ -211,6 +230,36 @@ pub struct Repo {
     pub landing: Landing,
     /// `mcp_servers.<name>`: servers merged into the per-session MCP configuration (#7).
     pub mcp_servers: BTreeMap<String, McpServer>,
+    /// `worktree`: where the repository's item worktrees go (#8). Default `None`.
+    pub worktree: Option<Worktree>,
+}
+
+/// `repo.<name>.worktree` (#8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Worktree {
+    /// `root`: the directory item worktrees are made in; never the repository's path or under
+    /// it.
+    pub root: PathBuf,
+    /// `setup`: a shell command run in a new worktree. Default `None`.
+    pub setup: Option<String>,
+    /// `teardown`: a shell command run in a worktree before it is removed. Default `None`.
+    pub teardown: Option<String>,
+    /// `disk_floor`: in bytes, the free space below which no new worktree is made. Default
+    /// `None`: no floor.
+    pub disk_floor: Option<u64>,
+}
+
+/// `[resource.<name>]`: a resource items lease (#8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Resource {
+    /// `kind`: free text naming what it is (`build-dir`, `gpu`, `device`, ...).
+    pub kind: String,
+    /// `capacity`: how many holders may hold it at once, at least 1. Default 1: exclusive.
+    pub capacity: u32,
+    /// `scope`: what it is shared within. Default [`Scope::Machine`].
+    pub scope: Scope,
 }
 
 /// `repo.<name>.queue`: where the repository's items come from (#5).
@@ -407,6 +456,14 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
                     build_dirs: r.build_dirs,
                     landing: r.landing,
                     mcp_servers: r.mcp_servers,
+                    worktree: r.worktree.and_then(|w| {
+                        Some(Worktree {
+                            root: w.root?.path,
+                            setup: w.setup,
+                            teardown: w.teardown,
+                            disk_floor: w.disk_floor,
+                        })
+                    }),
                 },
             ))
         })
@@ -419,6 +476,7 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
         },
         budget: draft.budget,
         daemon: draft.daemon,
+        resources: draft.resources,
         notices: draft.notices,
     })
 }
@@ -469,6 +527,7 @@ pub fn reload(previous: Config, text: &str, probe: &dyn DiskProbe) -> Reload {
                     },
                     budget: Budget::default(),
                     daemon: Daemon::default(),
+                    resources: BTreeMap::new(),
                     notices: Vec::new(),
                 }
             } else {

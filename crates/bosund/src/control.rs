@@ -20,7 +20,8 @@
 //! so the switches take a credential it does not have: a token from the OS's random source,
 //! written at every start to the file `bosun_client::operator::path` names (outside every
 //! working tree; the daemon refuses to start when it is inside one), and held here as its
-//! SHA-256 digest only. The agent's environment never names the file (it is denied by name in
+//! SHA-256 digest only; a clean stop removes the file if it still holds this daemon's token
+//! ([`Control::withdraw`]). The agent's environment never names the file (it is denied by name in
 //! `bosun-identity`), and the agent CLI is told not to read or edit it ([`Control::deny_rules`]).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -302,6 +303,26 @@ impl Control {
             .map(|tool| format!("{tool}({rule_path})"))
             .collect()
     }
+
+    /// Removes the operator token's file at a clean stop, when it still holds this daemon's
+    /// token: a token another daemon has since written there is left alone. Best effort.
+    pub(crate) fn withdraw(&self) {
+        if cfg!(mutant_control_keep_operator_token) {
+            // Mutant: the token is left behind.
+            return;
+        }
+        let Some(file) = &self.inner.operator_file else {
+            return;
+        };
+        let ours = std::fs::read_to_string(file)
+            .is_ok_and(|text| digest(text.trim()) == self.inner.operator);
+        if ours && let Err(e) = std::fs::remove_file(file) {
+            eprintln!(
+                "bosund: cannot remove the operator token {}: {e}",
+                file.display()
+            );
+        }
+    }
 }
 
 fn now_ms() -> i64 {
@@ -525,5 +546,23 @@ mod tests {
         assert_ne!(issue(&file, &[]).unwrap(), token);
         let checkout = dir.path().join("run");
         assert!(issue(&file, &[&checkout]).is_err());
+    }
+
+    #[test]
+    fn a_clean_stop_removes_only_its_own_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bosund.operator");
+        let token = issue(&file, &[]).unwrap();
+        let control = Control::with_token(&token, Some(file.clone()));
+        control.withdraw();
+        assert!(!file.exists(), "the daemon's own token is left behind");
+        // Withdrawing again, with the file gone, does nothing.
+        control.withdraw();
+
+        // Another daemon wrote its token there since: it stays.
+        let mine = issue(&file, &[]).unwrap();
+        let theirs = issue(&file, &[]).unwrap();
+        Control::with_token(&mine, Some(file.clone())).withdraw();
+        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), theirs);
     }
 }

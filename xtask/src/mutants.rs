@@ -590,6 +590,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_queue_lint_functions_are_programs",
+        issue: 120,
+        breaks: "a function the verdict defines is taken for a program, so the verdict is refused",
+        package: "bosun-queue",
+        check: Check::Test("lint::tests::a_function_the_verdict_defines_is_not_a_missing_program"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_queue_local_no_key",
         issue: 51,
         breaks: "the local-file backend does not look comments up by key before posting",
@@ -1124,6 +1132,14 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_control_keep_operator_token",
+        issue: 117,
+        breaks: "a daemon stopped cleanly leaves its operator token file behind",
+        package: "bosund",
+        check: Check::Test("control::tests::a_clean_stop_removes_only_its_own_token"),
+        platform: None,
+    },
     // #99: the guards of #59 in the loop; the "reaches Done" forms of #59's mutants.
     Mutant {
         name: "mutant_loop_skip_guards",
@@ -1429,6 +1445,22 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test(
             "publish::report::tests::a_secret_split_by_an_invisible_character_is_redacted",
         ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_resource_any_capacity",
+        issue: 123,
+        breaks: "a resource with a capacity of 0, which no one can ever hold, is accepted",
+        package: "bosun-config",
+        check: Check::Test("tests::a_resource_needs_a_positive_capacity_and_a_known_scope"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_worktree_root_inside_repo",
+        issue: 123,
+        breaks: "a worktree root inside the repository's own checkout is accepted",
+        package: "bosun-config",
+        check: Check::Test("tests::a_worktree_root_inside_the_repository_is_refused"),
         platform: None,
     },
 ];

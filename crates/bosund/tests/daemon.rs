@@ -375,6 +375,10 @@ async fn sigterm_stops_cleanly() {
         .expect("the daemon did not stop");
     assert_eq!(status.code(), Some(0), "{}", stderr(&mut daemon.child));
     assert!(!home.endpoint.path().exists(), "the socket file is left");
+    assert!(
+        !home.dir.path().join("operator.token").exists(),
+        "the operator token is left"
+    );
     let wal = PathBuf::from(format!("{}-wal", home.database("personal").display()));
     let wal_size = std::fs::metadata(&wal).map_or(0, |m| m.len());
     assert_eq!(wal_size, 0, "the WAL was not checkpointed and truncated");

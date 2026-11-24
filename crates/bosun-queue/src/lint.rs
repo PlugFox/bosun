@@ -442,6 +442,22 @@ mod tests {
     }
 
     #[test]
+    fn a_function_the_verdict_defines_is_not_a_missing_program() {
+        // Defined, then called: the shell runs the function, not a program on its PATH.
+        let defined = r#"n() { grep -c x "$d"; }; b=$(n); n && echo "$b""#;
+        let lint = run(&card(1, Some(defined), ""));
+        assert_eq!(lint.findings, [], "{defined}");
+        assert!(lint.claimable());
+        // Called before its definition, or never defined: a missing program.
+        let undefined = r#"m; n() { grep -c x "$d"; }; n && m"#;
+        let lint = run(&card(1, Some(undefined), ""));
+        assert_eq!(codes(&lint), [&Code::ProgramMissing("m".into())]);
+        assert!(!lint.claimable());
+        let lint = run(&card(1, Some("n() { echo; }; m"), ""));
+        assert_eq!(codes(&lint), [&Code::ProgramMissing("m".into())]);
+    }
+
+    #[test]
     fn a_clean_card_is_claimable() {
         let lint = run(&card(
             2,

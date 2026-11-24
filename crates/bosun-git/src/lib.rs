@@ -87,5 +87,6 @@ pub use protect::protected;
 pub use refusal::Refusal;
 pub use snapshot::{GitConfig, Ignored, config, ignored};
 pub use trailer::{
-    HOOK_NAMES, Hooks, ITEM_VAR, MARKER_VAR, Missing, RUN_VAR, SESSION_VAR, Trailers, missing,
+    CHECKOUT_VAR, HOOK_NAMES, Hooks, ITEM_VAR, MARKER_VAR, Missing, RUN_VAR, SESSION_VAR, Trailers,
+    missing,
 };

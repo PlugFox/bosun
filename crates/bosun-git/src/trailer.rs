@@ -13,8 +13,11 @@
 //! `.git/hooks`, so the user's own commits never see it.
 //!
 //! - `prepare-commit-msg` adds the three trailers from [`ITEM_VAR`], [`RUN_VAR`] and
-//!   [`SESSION_VAR`], only when [`MARKER_VAR`] is set, with `git interpret-trailers --if-exists
-//!   replace`, so `--amend` leaves one of each. Git runs it under `--no-verify` too.
+//!   [`SESSION_VAR`], only when [`MARKER_VAR`] is set and the commit is made in the item's own
+//!   checkout (`git rev-parse --show-toplevel` equals [`CHECKOUT_VAR`]; unset or empty matches
+//!   nothing), with `git interpret-trailers --if-exists replace`, so `--amend` leaves one of each.
+//!   Git runs it under `--no-verify` too. A commit the agent makes in another repository (a test's
+//!   throwaway one, say) inherits the environment but gets no trailer (#134).
 //! - Every hook, `prepare-commit-msg` included, then runs the repository's own hook of the same
 //!   name, from the `core.hooksPath` the repository's configuration sets (any scope but the
 //!   command scope the injection itself is in), or from `.git/hooks`: the user's hooks keep
@@ -45,6 +48,9 @@ pub const ITEM_VAR: &str = "BOSUN_ITEM";
 pub const RUN_VAR: &str = "BOSUN_RUN";
 /// The variable holding the `Session:` value.
 pub const SESSION_VAR: &str = "BOSUN_SESSION";
+/// The variable holding the item's checkout as `git rev-parse --show-toplevel` spells it
+/// ([`Hooks::checkout`]): only a commit there gets the trailers.
+pub const CHECKOUT_VAR: &str = "BOSUN_CHECKOUT";
 
 /// Every hook name git runs from `core.hooksPath`; each one is installed, so each chains.
 pub const HOOK_NAMES: &[&str] = &[
@@ -134,11 +140,28 @@ impl Hooks {
         )]
     }
 
-    /// The variables the hook reads: the marker and the three values.
+    /// The item's checkout as the hook compares it: `git rev-parse --show-toplevel` in `git`'s
+    /// repository, so both sides have git's own spelling (`D:/...` on Windows).
+    ///
+    /// # Errors
+    ///
+    /// The git command fails or prints nothing.
+    pub fn checkout(git: &Git) -> Result<String, Error> {
+        let top = git.run(&["rev-parse", "--show-toplevel"], None)?;
+        let top = top.trim_end_matches(['\r', '\n']);
+        if top.is_empty() {
+            return Err(git.unexpected("an empty top level".to_owned()));
+        }
+        Ok(top.to_owned())
+    }
+
+    /// The variables the hook reads: the marker, the three values and the item's `checkout`
+    /// (as [`Hooks::checkout`] returns it).
     #[must_use]
-    pub fn env(trailers: &Trailers) -> Vec<(String, String)> {
+    pub fn env(trailers: &Trailers, checkout: &str) -> Vec<(String, String)> {
         vec![
             (MARKER_VAR.to_owned(), "1".to_owned()),
+            (CHECKOUT_VAR.to_owned(), checkout.to_owned()),
             (ITEM_VAR.to_owned(), trailers.item.clone()),
             (RUN_VAR.to_owned(), trailers.run.clone()),
             (SESSION_VAR.to_owned(), trailers.session.clone()),
@@ -154,17 +177,26 @@ fn script(name: &str) -> String {
     } else {
         format!("[ -n \"${{{MARKER_VAR}:-}}\" ]")
     };
+    let checkout = if cfg!(mutant_git_trailers_everywhere) {
+        // Mutant (`mutant_git_trailers_everywhere`): every repository is the item's checkout.
+        "true".to_owned()
+    } else {
+        format!(
+            "[ -n \"${{{CHECKOUT_VAR}:-}}\" ] && \
+             [ \"$(git rev-parse --show-toplevel 2>/dev/null)\" = \"${CHECKOUT_VAR}\" ]"
+        )
+    };
     let trailers = if name == "prepare-commit-msg" {
         format!(
             r#"
-# The trailers (D6 of #7): only in an agent session, replacing a previous value so that
-# `--amend` keeps one of each.
+# The trailers (D6 of #7): only in an agent session and in the item's own checkout (#134),
+# replacing a previous value so that `--amend` keeps one of each.
 add() {{
     [ -n "$2" ] || return 0
     git -c trailer.separators=: interpret-trailers --in-place --where end \
         --if-exists replace --if-missing add --trailer "$1: $2" "$msg" || exit 1
 }}
-if {marker} && [ -n "${{1:-}}" ]; then
+if {marker} && [ -n "${{1:-}}" ] && {checkout}; then
     msg=$1
     add Item "${{{ITEM_VAR}:-}}"
     add Run "${{{RUN_VAR}:-}}"

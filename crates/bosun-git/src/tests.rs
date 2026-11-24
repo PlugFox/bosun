@@ -2,6 +2,7 @@
 //! in temporary directories (#53).
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -16,9 +17,35 @@ fn agent(dir: &Path, args: &[&str]) -> String {
     agent_with(dir, &[], args)
 }
 
+/// Removes from `command` every variable it would inherit from a bosun session (#134), and any
+/// such variable already set on it: each `BOSUN_*` and the command-scope configuration
+/// (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*`) that points git at the
+/// session's hooks. A test's git then behaves the same inside a session and outside one; what a
+/// test sets after the call still applies.
+pub(crate) fn without_session(command: &mut Command) -> &mut Command {
+    let names: Vec<OsString> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .chain(command.get_envs().map(|(name, _)| name.to_owned()))
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("BOSUN_")
+                || name == "GIT_CONFIG_COUNT"
+                || name.starts_with("GIT_CONFIG_KEY_")
+                || name.starts_with("GIT_CONFIG_VALUE_")
+        })
+        .collect();
+    // Mutant (`mutant_git_test_env_inherited`): the session's variables reach the test's git.
+    if !cfg!(mutant_git_test_env_inherited) {
+        for name in names {
+            command.env_remove(name);
+        }
+    }
+    command
+}
+
 /// [`agent`] with the variables `env` added.
 fn agent_with(dir: &Path, env: &[(String, String)], args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = without_session(&mut Command::new("git"))
         .arg("-C")
         .arg(dir)
         .args(["-c", "commit.gpgSign=false"])
@@ -379,8 +406,8 @@ fn planted_hooks_never_run_under_the_invoker() {
 
 /// The environment of an agent session's git as `bosun-identity` builds it, reduced to what
 /// the trailers need: its `credential.helper` reset at entry 0, the injected hooks after it,
-/// and the trailer variables when `trailers` is given.
-fn session(hooks: &Hooks, trailers: Option<&Trailers>) -> Vec<(String, String)> {
+/// and the trailer variables, with `checkout` as the item's checkout, when `trailers` is given.
+fn session(hooks: &Hooks, checkout: &Path, trailers: Option<&Trailers>) -> Vec<(String, String)> {
     let mut entries = vec![("credential.helper".to_owned(), String::new())];
     entries.extend(hooks.git_config());
     let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), entries.len().to_string())];
@@ -389,9 +416,14 @@ fn session(hooks: &Hooks, trailers: Option<&Trailers>) -> Vec<(String, String)> 
         env.push((format!("GIT_CONFIG_VALUE_{i}"), value));
     }
     if let Some(trailers) = trailers {
-        env.extend(Hooks::env(trailers));
+        env.extend(Hooks::env(trailers, &toplevel(checkout)));
     }
     env
+}
+
+/// The top level of the repository at `dir` as the daemon passes it ([`Hooks::checkout`]).
+fn toplevel(dir: &Path) -> String {
+    Hooks::checkout(&Git::new(dir)).unwrap()
 }
 
 fn trailers(session: &str) -> Trailers {
@@ -708,7 +740,7 @@ fn an_agent_commit_carries_the_three_trailers_once_also_after_amend() {
     let own = with_own_hooks(dir, outside.path(), false);
     let hooks = Hooks::install(outside.path().join("bosun-hooks")).unwrap();
     let values = trailers("session-1");
-    let env = session(&hooks, Some(&values));
+    let env = session(&hooks, dir, Some(&values));
     let base = Base::capture(&git).unwrap();
 
     std::fs::write(dir.join("a.txt"), "changed").unwrap();
@@ -780,9 +812,9 @@ fn a_commit_without_the_injection_carries_none_and_its_hooks_run_as_before() {
 
         // The injected hooks without the marker (the values left over in a shell, say): they
         // only chain.
-        let mut env = session(&hooks, None);
+        let mut env = session(&hooks, dir, None);
         env.extend(
-            Hooks::env(&trailers("session-1"))
+            Hooks::env(&trailers("session-1"), &toplevel(dir))
                 .into_iter()
                 .filter(|(k, _)| k != MARKER_VAR),
         );
@@ -812,7 +844,7 @@ fn a_commit_with_a_wrong_session_is_refused_as_forged() {
     let outside = tempfile::tempdir().unwrap();
     let hooks = Hooks::install(outside.path().join("bosun-hooks")).unwrap();
     let base = Base::capture(&git).unwrap();
-    let env = session(&hooks, Some(&trailers("someone-elses-session")));
+    let env = session(&hooks, dir, Some(&trailers("someone-elses-session")));
     agent_with(
         dir,
         &env,
@@ -835,5 +867,91 @@ fn a_commit_with_a_wrong_session_is_refused_as_forged() {
             sha,
             keys: vec!["Session"]
         }]
+    );
+}
+
+#[test]
+fn a_commit_in_another_repository_carries_no_trailer() {
+    let a = repository();
+    let b = repository();
+    let outside = tempfile::tempdir().unwrap();
+    let hooks = Hooks::install(outside.path().join("bosun-hooks")).unwrap();
+    // The environment a session gets, with repository A as the item's checkout.
+    let env = session(&hooks, a.path(), Some(&trailers("session-1")));
+    assert!(
+        env.iter()
+            .any(|(k, v)| k == CHECKOUT_VAR && *v == toplevel(a.path())),
+        "{env:?}"
+    );
+
+    agent_with(
+        a.path(),
+        &env,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "In the checkout",
+        ],
+    );
+    assert_eq!(trailer_counts(a.path()), [1, 1, 1]);
+    agent_with(
+        b.path(),
+        &env,
+        &["commit", "--quiet", "--allow-empty", "-m", "Elsewhere"],
+    );
+    assert_eq!(trailer_counts(b.path()), [0, 0, 0]);
+
+    // An empty checkout matches nothing, A included.
+    let mut empty = env.clone();
+    for (k, v) in &mut empty {
+        if k == CHECKOUT_VAR {
+            v.clear();
+        }
+    }
+    agent_with(
+        a.path(),
+        &empty,
+        &["commit", "--quiet", "--allow-empty", "-m", "No checkout"],
+    );
+    assert_eq!(trailer_counts(a.path()), [0, 0, 0]);
+}
+
+#[test]
+fn the_test_git_drops_the_session_variables() {
+    let session = [
+        "BOSUN_ITEM",
+        "BOSUN_TRAILERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+    ];
+    let mut command = Command::new("git");
+    for name in session {
+        command.env(name, "1");
+    }
+    command.env("UNRELATED_TO_THE_SESSION", "kept");
+
+    without_session(&mut command);
+    let envs: Vec<(String, Option<String>)> = command
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    for name in session {
+        assert!(
+            envs.iter().any(|(k, v)| k == name && v.is_none()),
+            "{name} is not removed: {envs:?}"
+        );
+    }
+    assert!(
+        envs.iter()
+            .any(|(k, v)| k == "UNRELATED_TO_THE_SESSION" && v.as_deref() == Some("kept")),
+        "{envs:?}"
     );
 }

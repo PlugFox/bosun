@@ -515,7 +515,19 @@ pub(crate) async fn session(
         run: git::run_label(run.attempt, run.spawn),
         session: session_id.to_string(),
     };
-    for (name, value) in Hooks::env(&trailers) {
+    // The checkout as git spells its top level, which the hook compares with its own: a
+    // commit the agent makes in another repository gets no trailer (#134).
+    let checkout = {
+        let git_repo = git_repo.clone();
+        match blocking(move || Hooks::checkout(&git_repo)).await {
+            Ok(checkout) => checkout,
+            Err(e) => {
+                shared.trouble(format!("{}: the checkout's top level: {e}", run.item));
+                return crash;
+            }
+        }
+    };
+    for (name, value) in Hooks::env(&trailers, &checkout) {
         env.add_session_var(&name, value);
     }
     let mut vars: Vec<(OsString, OsString)> =

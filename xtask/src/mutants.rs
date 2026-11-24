@@ -1612,6 +1612,23 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #134: the trailer hook acts only in the item's checkout; tests' git drops the session.
+    Mutant {
+        name: "mutant_git_trailers_everywhere",
+        issue: 134,
+        breaks: "a commit in another repository made from a session's environment gets the trailers",
+        package: "bosun-git",
+        check: Check::Test("tests::a_commit_in_another_repository_carries_no_trailer"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_test_env_inherited",
+        issue: 134,
+        breaks: "a test's git inherits the session's BOSUN_* and GIT_CONFIG_* variables",
+        package: "bosun-git",
+        check: Check::Test("tests::the_test_git_drops_the_session_variables"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

@@ -15,7 +15,10 @@
 //! - Nothing is deleted that is not an item worktree: [`remove`] deletes only a directory that
 //!   git itself lists as a worktree (`git worktree list --porcelain`), other than the
 //!   repository's own checkout, strictly under the worktree root once links are resolved, and
-//!   not a link itself; anything else is refused ([`Error::Refused`]) before git runs.
+//!   not a link itself; anything else is refused ([`Error::Refused`]) before git runs. Nor is
+//!   a branch deleted that is not an item's: a record whose branch does not start with
+//!   [`BRANCH_PREFIX`] is refused the same way, and neither its directory nor its branch is
+//!   touched.
 //!
 //! Every git command goes through [`Git::command`], so no repository hook runs.
 
@@ -248,9 +251,18 @@ pub fn create(
 /// # Errors
 ///
 /// [`Error::Refused`] (nothing touched) when the path is not an item worktree git lists under
-/// `root`; otherwise the worktree is gone but its branch cannot be deleted, or the quarantine
+/// `root`, or the branch does not start with [`BRANCH_PREFIX`]; otherwise the worktree is gone but its branch cannot be deleted, or the quarantine
 /// marker cannot be written.
 pub fn remove(repo: &Git, root: &Path, worktree: &Worktree) -> Result<Removal, Error> {
+    // The record may come from a wrong row: a branch that is not an item's is never deleted,
+    // and then nothing else is touched either.
+    // Mutant (`mutant_git_worktree_remove_any_branch`): the branch's prefix is not checked.
+    if !worktree.branch.starts_with(BRANCH_PREFIX) && !cfg!(mutant_git_worktree_remove_any_branch) {
+        return Err(Error::Refused {
+            path: worktree.path.clone(),
+            reason: "its branch is not an item's branch (outside bosun/), so it is not deleted",
+        });
+    }
     // Checked once, before git drops its entry: after that the path is no longer listed.
     let present = guard(repo, root, &worktree.path)?;
     let target = worktree.path.to_string_lossy();
@@ -742,6 +754,39 @@ mod tests {
             .unwrap();
         assert_eq!(remove(&git_repo, &root, &made).unwrap(), Removal::Removed);
         assert!(stray.join("keep.txt").is_file());
+    }
+
+    #[test]
+    fn a_branch_outside_the_prefix_is_never_deleted() {
+        let (_dir, repo, root) = setup();
+        git(&repo, &["branch", "feature/x"]);
+        let git_repo = Git::new(&repo);
+        let made = create(&git_repo, &root, "repo#3", "main", floor(&PLENTY, 1)).unwrap();
+        let branches = || git(&repo, &["branch", "--list", "--format=%(refname:short)"]);
+        let before = branches();
+        assert_eq!(before, "bosun/repo-3\nfeature/x\nmain");
+
+        // A wrong record: the repository's main branch, and a person's branch.
+        for branch in ["main", "feature/x"] {
+            let wrong = Worktree {
+                branch: branch.to_owned(),
+                ..made.clone()
+            };
+            let error = remove(&git_repo, &root, &wrong).unwrap_err();
+            assert!(
+                matches!(error, Error::Refused { .. }),
+                "{branch}: {error:?}"
+            );
+            assert!(error.to_string().contains("bosun/"), "{error}");
+            assert!(made.path.join("a.txt").is_file(), "{branch}");
+            assert_eq!(worktrees(&repo), 2, "{branch}");
+            assert_eq!(branches(), before, "{branch}");
+        }
+
+        // The true record is removed.
+        assert_eq!(remove(&git_repo, &root, &made).unwrap(), Removal::Removed);
+        assert!(!made.path.exists());
+        assert_eq!(branches(), "feature/x\nmain");
     }
 
     #[test]

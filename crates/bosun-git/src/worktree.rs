@@ -12,6 +12,10 @@
 //!   it, its path is never used again, git's entry for it is pruned when possible, and the
 //!   caller gets a [`Quarantine`] report naming the file that blocked. A worktree is never left
 //!   behind silently.
+//! - Nothing is deleted that is not an item worktree: [`remove`] deletes only a directory that
+//!   git itself lists as a worktree (`git worktree list --porcelain`), other than the
+//!   repository's own checkout, strictly under the worktree root once links are resolved, and
+//!   not a link itself; anything else is refused ([`Error::Refused`]) before git runs.
 //!
 //! Every git command goes through [`Git::command`], so no repository hook runs.
 
@@ -113,6 +117,14 @@ pub enum Error {
         /// What failed.
         source: std::io::Error,
     },
+    /// The path is not one [`remove`] may delete: it is not an item worktree git lists under
+    /// the root. Nothing was touched.
+    Refused {
+        /// The path.
+        path: PathBuf,
+        /// Why it is not an item worktree.
+        reason: &'static str,
+    },
     /// A git command failed.
     Git(crate::Error),
 }
@@ -126,6 +138,9 @@ impl fmt::Display for Error {
                 root.display()
             ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::Refused { path, reason } => {
+                write!(f, "{}: not removed: {reason}", path.display())
+            }
             Self::Git(error) => error.fmt(f),
         }
     }
@@ -134,7 +149,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::BelowFloor { .. } => None,
+            Self::BelowFloor { .. } | Self::Refused { .. } => None,
             Self::Io { source, .. } => Some(source),
             Self::Git(error) => Some(error),
         }
@@ -187,6 +202,7 @@ pub fn create(
                 "rev-parse",
                 "--verify",
                 "--quiet",
+                "--end-of-options",
                 &format!("{base_ref}^{{commit}}"),
             ],
             None,
@@ -226,14 +242,17 @@ pub fn create(
     Ok(Worktree { path, branch, base })
 }
 
-/// Removes `worktree` of `repo` and its branch, or quarantines it (see the module
-/// documentation).
+/// Removes `worktree` of `repo`, made under `root`, and its branch, or quarantines it (see the
+/// module documentation).
 ///
 /// # Errors
 ///
-/// The worktree is gone but its branch cannot be deleted, or the quarantine marker cannot be
-/// written.
-pub fn remove(repo: &Git, worktree: &Worktree) -> Result<Removal, Error> {
+/// [`Error::Refused`] (nothing touched) when the path is not an item worktree git lists under
+/// `root`; otherwise the worktree is gone but its branch cannot be deleted, or the quarantine
+/// marker cannot be written.
+pub fn remove(repo: &Git, root: &Path, worktree: &Worktree) -> Result<Removal, Error> {
+    // Checked once, before git drops its entry: after that the path is no longer listed.
+    let present = guard(repo, root, &worktree.path)?;
     let target = worktree.path.to_string_lossy();
     let mut failure = None;
     let mut pause = FIRST_PAUSE;
@@ -242,13 +261,22 @@ pub fn remove(repo: &Git, worktree: &Worktree) -> Result<Removal, Error> {
             std::thread::sleep(pause);
             pause *= 2;
         }
-        let Err(git) = repo.run(&["worktree", "remove", "--force", &target], None) else {
+        let Err(git) = repo.run(
+            &["worktree", "remove", "--force", "--end-of-options", &target],
+            None,
+        ) else {
             failure = None;
             break;
         };
         // Git drops its own entry even when files are left behind; the rest is deleted here,
-        // which also finds the file that blocks.
-        match clear(&worktree.path) {
+        // which also finds the file that blocks. A path that was not there has nothing to
+        // delete.
+        let cleared = if present {
+            clear(&worktree.path)
+        } else {
+            Ok(())
+        };
+        match cleared {
             Ok(()) => {
                 failure = None;
                 break;
@@ -261,7 +289,16 @@ pub fn remove(repo: &Git, worktree: &Worktree) -> Result<Removal, Error> {
     let _ = repo.run(&["worktree", "prune"], None);
 
     let Some((git, file, error)) = failure else {
-        repo.run(&["branch", "--quiet", "-D", &worktree.branch], None)?;
+        repo.run(
+            &[
+                "branch",
+                "--quiet",
+                "-D",
+                "--end-of-options",
+                &worktree.branch,
+            ],
+            None,
+        )?;
         return Ok(Removal::Removed);
     };
     // Mutant (`mutant_git_worktree_unremoved_is_removed`): a failed removal is reported as
@@ -271,7 +308,16 @@ pub fn remove(repo: &Git, worktree: &Worktree) -> Result<Removal, Error> {
     }
     // The branch goes when git no longer counts it as checked out; otherwise it stays, and
     // its name, like the path, is never used again.
-    let _ = repo.run(&["branch", "--quiet", "-D", &worktree.branch], None);
+    let _ = repo.run(
+        &[
+            "branch",
+            "--quiet",
+            "-D",
+            "--end-of-options",
+            &worktree.branch,
+        ],
+        None,
+    );
     let error = format!("{}: {error} ({git})", file.display());
     let marker = marker(&worktree.path);
     let text = format!(
@@ -291,6 +337,90 @@ pub fn remove(repo: &Git, worktree: &Worktree) -> Result<Removal, Error> {
         blocking: Some(file).filter(|f| f != &worktree.path),
         error,
     }))
+}
+
+/// Whether `path` may be deleted as an item worktree of `repo` under `root`: `Ok(true)` when
+/// it is a directory, not a link, strictly under `root` once links are resolved, listed by git
+/// as a worktree other than the repository's own checkout, and holding neither that checkout
+/// nor another worktree nor the git directory; `Ok(false)` when there is nothing at `path`.
+///
+/// # Errors
+///
+/// [`Error::Refused`] for anything else, or the paths or git's list cannot be read.
+fn guard(repo: &Git, root: &Path, path: &Path) -> Result<bool, Error> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    // Mutant (`mutant_git_worktree_clear_unlisted`): any directory is deleted.
+    if cfg!(mutant_git_worktree_clear_unlisted) {
+        return Ok(true);
+    }
+    let refuse = |reason| {
+        Err(Error::Refused {
+            path: path.to_owned(),
+            reason,
+        })
+    };
+    // A symbolic link or a junction (the standard library counts a junction as a link) points
+    // somewhere else.
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return refuse("it is a link or a file, not a worktree directory");
+    }
+    let real = canonical(path)?;
+    let root = canonical(root)?;
+    if real == root || !real.starts_with(&root) {
+        return refuse("it is not inside the worktree root");
+    }
+    let common = repo
+        .run(
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            None,
+        )?
+        .trim()
+        .to_owned();
+    if canonical(Path::new(&common))?.starts_with(&real) {
+        return refuse("it holds the repository's git directory");
+    }
+    let list = repo.run(&["worktree", "list", "--porcelain"], None)?;
+    let mut listed = false;
+    // The first entry is the repository's own checkout (or the bare repository).
+    for (i, entry) in list
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .enumerate()
+    {
+        // An entry whose directory is gone can be neither the directory at `path` nor in it.
+        let Ok(entry) = std::fs::canonicalize(entry) else {
+            continue;
+        };
+        if i == 0 && entry.starts_with(&real) {
+            return refuse("it is or holds the repository's own checkout");
+        }
+        if entry == real {
+            listed = true;
+        } else if entry.starts_with(&real) {
+            return refuse("it holds another worktree");
+        }
+    }
+    if !listed {
+        return refuse("git does not list it as a worktree");
+    }
+    Ok(true)
+}
+
+/// `path` with every link resolved.
+fn canonical(path: &Path) -> Result<PathBuf, Error> {
+    std::fs::canonicalize(path).map_err(|source| Error::Io {
+        path: path.to_owned(),
+        source,
+    })
 }
 
 /// The quarantine marker of the worktree at `path`.
@@ -330,6 +460,13 @@ fn clear(path: &Path) -> Result<(), (PathBuf, std::io::Error)> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err((path.to_owned(), e)),
     };
+    if meta.file_type().is_symlink() {
+        // The link goes, never what it points at; on Windows a link to a directory is removed
+        // as a directory.
+        return std::fs::remove_file(path)
+            .or_else(|_| std::fs::remove_dir(path))
+            .map_err(|e| (path.to_owned(), e));
+    }
     if meta.is_dir() {
         let entries = std::fs::read_dir(path).map_err(|e| (path.to_owned(), e))?;
         let mut first = None;
@@ -499,7 +636,7 @@ mod tests {
         assert!(!made.path.join("c.txt").exists());
         assert_eq!(worktrees(&repo), 2);
 
-        assert_eq!(remove(&git_repo, &made).unwrap(), Removal::Removed);
+        assert_eq!(remove(&git_repo, &root, &made).unwrap(), Removal::Removed);
         assert!(!made.path.exists());
         assert!(!marker(&made.path).exists());
         assert_eq!(worktrees(&repo), 1);
@@ -522,6 +659,89 @@ mod tests {
         let made = create(&Git::new(&repo), &root, "a/1", "main", floor(&PLENTY, 1)).unwrap();
         assert_eq!(made.path, root.join("a-1-3"));
         assert_eq!(made.branch, "bosun/a-1-3");
+    }
+
+    /// Makes `link` a link to the directory `to`: a junction on Windows (which needs no
+    /// privilege), a symbolic link elsewhere.
+    fn link_dir(to: &Path, link: &Path) {
+        #[cfg(windows)]
+        {
+            let out = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(to)
+                .output()
+                .expect("cmd runs");
+            assert!(
+                out.status.success(),
+                "mklink: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(to, link).unwrap();
+    }
+
+    #[test]
+    fn only_a_worktree_git_lists_under_the_root_is_deleted() {
+        let (dir, repo, root) = setup();
+        let git_repo = Git::new(&repo);
+        let made = create(&git_repo, &root, "repo#1", "main", floor(&PLENTY, 1)).unwrap();
+        let as_worktree = |path: &Path| Worktree {
+            path: path.to_owned(),
+            branch: made.branch.clone(),
+            base: made.base.clone(),
+        };
+        let refused = |root: &Path, path: &Path| {
+            let error = remove(&git_repo, root, &as_worktree(path)).unwrap_err();
+            assert!(
+                matches!(error, Error::Refused { .. }),
+                "{path:?}: {error:?}"
+            );
+        };
+
+        // A directory under the root that git does not list.
+        let stray = root.join("stray");
+        std::fs::create_dir(&stray).unwrap();
+        std::fs::write(stray.join("keep.txt"), "mine").unwrap();
+        refused(&root, &stray);
+        assert!(stray.join("keep.txt").is_file());
+
+        // The repository's own checkout, and a parent of it, with the root above them.
+        refused(dir.path(), &repo);
+        refused(dir.path().parent().unwrap(), dir.path());
+        assert!(repo.join("a.txt").is_file());
+
+        // The root itself, which holds the worktree.
+        refused(&root, &root);
+
+        // A link under the root to a listed worktree: deleting through it would reach the
+        // worktree, which is not what the caller named.
+        let link = root.join("link");
+        link_dir(&made.path, &link);
+        refused(&root, &link);
+        assert!(made.path.join("a.txt").is_file());
+
+        // The worktree, from a root it is not under.
+        refused(&stray, &made.path);
+        assert!(made.path.join("a.txt").is_file());
+
+        // Nothing above touched the worktree or its branch.
+        assert_eq!(worktrees(&repo), 2);
+        assert_eq!(
+            git(
+                &repo,
+                &["branch", "--list", "--format=%(refname:short)", "bosun/*"]
+            ),
+            "bosun/repo-1"
+        );
+        std::fs::remove_dir(&link)
+            .or_else(|_| std::fs::remove_file(&link))
+            .unwrap();
+        assert_eq!(remove(&git_repo, &root, &made).unwrap(), Removal::Removed);
+        assert!(stray.join("keep.txt").is_file());
     }
 
     #[test]
@@ -547,7 +767,7 @@ mod tests {
             .open(&held)
             .unwrap();
 
-        let removal = remove(&git_repo, &made).unwrap();
+        let removal = remove(&git_repo, &root, &made).unwrap();
         let Removal::Quarantined(report) = removal else {
             panic!("a worktree with a file held open was reported {removal:?}");
         };
@@ -564,7 +784,7 @@ mod tests {
         assert_ne!(again.path, made.path);
 
         drop(handle);
-        assert_eq!(remove(&git_repo, &next).unwrap(), Removal::Removed);
-        assert_eq!(remove(&git_repo, &again).unwrap(), Removal::Removed);
+        assert_eq!(remove(&git_repo, &root, &next).unwrap(), Removal::Removed);
+        assert_eq!(remove(&git_repo, &root, &again).unwrap(), Removal::Removed);
     }
 }

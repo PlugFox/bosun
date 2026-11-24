@@ -1539,6 +1539,14 @@ const MUTANTS: &[Mutant] = &[
         // Only Windows refuses to delete a file held open.
         platform: Some(Platform::Windows),
     },
+    Mutant {
+        name: "mutant_git_worktree_clear_unlisted",
+        issue: 124,
+        breaks: "removal deletes a directory that is not a worktree git lists under the root",
+        package: "bosun-git",
+        check: Check::Test("worktree::tests::only_a_worktree_git_lists_under_the_root_is_deleted"),
+        platform: None,
+    },
     // #125: landing.
     Mutant {
         name: "mutant_git_rebase_keep_conflict",

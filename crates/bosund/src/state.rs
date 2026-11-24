@@ -45,6 +45,9 @@ pub(crate) struct Served {
     pub(crate) transcripts: PathBuf,
     /// The repositories bound to this identity, by name.
     pub(crate) repos: Vec<(String, Repo)>,
+    /// The logins whose card text the snapshot inlines (`author_allowlist`), lowercased: what
+    /// `queue.get` needs to tell an edit waiting for the next claim (#70).
+    pub(crate) author_allowlist: Vec<String>,
     pub(crate) store: Store,
     pub(crate) ingest: Handle,
     /// The commit reader of the repositories.
@@ -240,6 +243,15 @@ pub(crate) async fn open(
             repos.clone(),
         );
         let commit_task = commits.spawn();
+        let author_allowlist = config
+            .identities
+            .get(&plan.identity)
+            .map_or_else(Vec::new, |i| {
+                i.author_allowlist
+                    .iter()
+                    .map(|a| a.to_ascii_lowercase())
+                    .collect()
+            });
         identities.insert(
             plan.identity.clone(),
             Served {
@@ -247,6 +259,7 @@ pub(crate) async fn open(
                 database: plan.database,
                 transcripts: plan.claude_projects,
                 repos,
+                author_allowlist,
                 store,
                 ingest: bosun_ingest::spawn(ingest),
                 commits,

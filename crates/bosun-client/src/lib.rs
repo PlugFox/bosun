@@ -7,7 +7,11 @@
 //!
 //! [`Subscription`] follows an identity's event stream and reconnects by itself from the last
 //! sequence it delivered.
+//!
+//! [`actions`] is the table of operator actions (pause, resume, the kill switch, restart-item)
+//! the CLI and the TUI both act from.
 
+pub mod actions;
 pub mod endpoint;
 pub mod framing;
 pub mod operator;

@@ -1,19 +1,25 @@
-//! `bosun pause`, `bosun resume` and `bosun kill` (#4, #67): the control switches.
+//! The operator actions (#4, #67, #70): `bosun pause`, `resume`, `kill` and `restart-item`,
+//! performed from the table the TUI shares (`bosun_client::actions`).
 //!
-//! Each reads the daemon's operator token (`bosun_client::operator`, written by the daemon at
-//! start, readable by this OS user only) and sends it with the request; without it the daemon
-//! refuses. `pause` and `resume` act on one repository with `--repo` (and ask the identity that
-//! owns it), else on every repository of each identity; each identity's control state is a
-//! section of the output, as `control.pause` returns it. `kill` throws the daemon-wide kill
-//! switch, `kill --release` releases it.
+//! Each connects first (so a daemon that is down is exit code 4), then reads the daemon's
+//! operator token (`bosun_client::operator`, written by the daemon at start, readable by this
+//! OS user only) and sends it with the request; without it the daemon refuses. `pause` and
+//! `resume` act on one repository with `--repo` (and ask the identity that owns it), else on
+//! every repository of each identity; each identity's control state is a section of the
+//! output, as `control.pause` returns it. `kill` throws the daemon-wide kill switch, `kill
+//! --release` releases it. `restart-item <item>` puts the `restart` label on the card of an
+//! item in flight (`item.restart`): the loop kills its session, takes a new snapshot and starts
+//! again.
 
 use std::fmt::Write as _;
 
-use bosun_api::{ControlStatus, KillParams, KillResult, PauseParams, method};
-use bosun_client::Endpoint;
+use bosun_api::ControlStatus;
+use bosun_client::actions::{self, Action, Outcome, Target};
+use bosun_client::{Client, Endpoint};
 use clap::Args;
 
-use crate::{Failure, Global, Section, connect, exit, identities, output};
+use crate::work::split_item;
+use crate::{Failure, Format, Global, Section, connect, exit, identities, output};
 
 #[derive(Debug, Args)]
 pub(crate) struct PauseArgs {
@@ -29,15 +35,27 @@ pub(crate) struct KillArgs {
     release: bool,
 }
 
-fn endpoint(global: &Global) -> Result<Endpoint, Failure> {
+#[derive(Debug, Args)]
+pub(crate) struct RestartArgs {
+    /// The item in flight: `<repo>#<card>`.
+    #[arg(value_name = "ITEM")]
+    item: String,
+}
+
+pub(crate) fn endpoint(global: &Global) -> Result<Endpoint, Failure> {
     match &global.endpoint {
         Some(name) => Ok(Endpoint::new(name)),
         None => Endpoint::resolve().map_err(|e| Failure::new(exit::FAILED, e)),
     }
 }
 
-fn token(global: &Global) -> Result<String, Failure> {
-    bosun_client::operator::read(&endpoint(global)?).map_err(|e| Failure::new(exit::FAILED, e))
+/// Connects, then reads the operator token: a daemon that is down is exit code 4, whatever
+/// token file an earlier run left.
+async fn connect_operator(global: &Global) -> Result<(Client, String), Failure> {
+    let client = connect(global).await?;
+    let token = bosun_client::operator::read(&endpoint(global)?)
+        .map_err(|e| Failure::new(exit::FAILED, e))?;
+    Ok((client, token))
 }
 
 /// `pause` (`resume` with `pause` false).
@@ -47,19 +65,19 @@ pub(crate) async fn pause(
     pause: bool,
 ) -> Result<String, Failure> {
     let names = identities(global, args.repo.as_deref())?;
-    let operator = token(global)?;
-    let mut client = connect(global).await?;
+    let (mut client, operator) = connect_operator(global).await?;
+    let action = if pause { Action::Pause } else { Action::Resume };
     let mut sections = Vec::new();
     for name in &names {
-        let ask = PauseParams {
-            operator: operator.clone(),
+        let target = Target {
             identity: name.clone(),
             repo: args.repo.clone(),
+            ..Target::default()
         };
-        let status = if pause {
-            client.call::<method::ControlPause>(&ask).await?
-        } else {
-            client.call::<method::ControlResume>(&ask).await?
+        let Outcome::Control(status) =
+            actions::perform(&mut client, action, &operator, &target).await?
+        else {
+            return Err(Failure::new(exit::FAILED, "an unexpected answer"));
         };
         sections.push(Section::of(&status.identity.clone(), &status, render)?);
     }
@@ -68,15 +86,18 @@ pub(crate) async fn pause(
 
 /// `kill [--release]`.
 pub(crate) async fn kill(global: &Global, args: &KillArgs) -> Result<String, Failure> {
-    let operator = token(global)?;
-    let mut client = connect(global).await?;
-    let ask = KillParams {
-        operator,
+    let (mut client, operator) = connect_operator(global).await?;
+    let target = Target {
         release: args.release,
+        ..Target::default()
     };
-    let result: KillResult = client.call::<method::ControlKill>(&ask).await?;
+    let Outcome::Kill(result) =
+        actions::perform(&mut client, Action::Kill, &operator, &target).await?
+    else {
+        return Err(Failure::new(exit::FAILED, "an unexpected answer"));
+    };
     Ok(match global.format {
-        crate::Format::Json => {
+        Format::Json => {
             let mut text = serde_json::to_string_pretty(&result).unwrap_or_default();
             text.push('\n');
             text
@@ -85,6 +106,42 @@ pub(crate) async fn kill(global: &Global, args: &KillArgs) -> Result<String, Fai
                                parks, nothing is written to any board\n"
             .to_owned(),
         _ => "the kill switch is released: parked items resume\n".to_owned(),
+    })
+}
+
+/// `restart-item <item>`: one document, of the identity that owns the item.
+pub(crate) async fn restart_item(global: &Global, args: &RestartArgs) -> Result<String, Failure> {
+    let (repo, _) = split_item(&args.item).ok_or_else(|| {
+        Failure::new(
+            exit::USAGE,
+            format!("{:?} is not an item: an item is `<repo>#<card>`", args.item),
+        )
+    })?;
+    let identity = identities(global, Some(repo))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Failure::new(exit::CONFIG, "the configuration names no identity"))?;
+    let (mut client, operator) = connect_operator(global).await?;
+    let target = Target {
+        identity,
+        item: Some(args.item.clone()),
+        ..Target::default()
+    };
+    let Outcome::Restart(result) =
+        actions::perform(&mut client, Action::RestartItem, &operator, &target).await?
+    else {
+        return Err(Failure::new(exit::FAILED, "an unexpected answer"));
+    };
+    Ok(match global.format {
+        Format::Json => {
+            let mut text = serde_json::to_string_pretty(&result).unwrap_or_default();
+            text.push('\n');
+            text
+        }
+        _ => format!(
+            "{}: the `{}` label is on its card; the loop restarts it\n",
+            result.item, result.label
+        ),
     })
 }
 

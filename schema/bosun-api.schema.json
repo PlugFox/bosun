@@ -49,6 +49,39 @@
       ],
       "type": "object"
     },
+    "AgentCallView": {
+      "description": "One call of an item's agent.",
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "body": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`question`, `blocking_question`, `summary` or `note`.",
+          "type": "string"
+        },
+        "refused": {
+          "description": "The call was over its tool's cap and refused.",
+          "type": "boolean"
+        },
+        "ts_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "attempt",
+        "kind",
+        "body",
+        "refused",
+        "ts_ms"
+      ],
+      "type": "object"
+    },
     "AgentHelloParams": {
       "description": "Params of `agent.hello`: the handshake `bosun-mcp` makes after it starts.",
       "properties": {
@@ -267,6 +300,60 @@
       ],
       "type": "object"
     },
+    "AttemptView": {
+      "description": "One attempt of an item.",
+      "properties": {
+        "ended_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "number": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessions": {
+          "description": "Its sessions, in order.",
+          "items": {
+            "$ref": "#/$defs/SessionInfo"
+          },
+          "type": "array"
+        },
+        "snapshot_hash": {
+          "description": "The hash of the snapshot it ran from.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "description": "`spawned`, `exited`, `verdict_running`, `pass`, `fail`, ...",
+          "type": "string"
+        },
+        "verdicts": {
+          "description": "Its verdict runs, in order.",
+          "items": {
+            "$ref": "#/$defs/VerdictView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "number",
+        "state",
+        "started_ms",
+        "sessions",
+        "verdicts"
+      ],
+      "type": "object"
+    },
     "ByFile": {
       "description": "Cost by file: the results of the calls that touched each file.",
       "properties": {
@@ -319,6 +406,68 @@
         "formula",
         "total",
         "rows"
+      ],
+      "type": "object"
+    },
+    "CardView": {
+      "description": "One card.",
+      "properties": {
+        "card": {
+          "description": "The card's number on the board (the issue's, or the local file's `id`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "edit_pending": {
+          "description": "The card was edited since its snapshot was taken: the edit applies at the item's next\nclaim (a requeue or a restart), not to the attempt in flight.",
+          "type": "boolean"
+        },
+        "item": {
+          "description": "The item id the daemon gives it: `<repo>#<card>`.",
+          "type": "string"
+        },
+        "labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "lint": {
+          "description": "The static lint of a card in Ready (empty elsewhere): errors keep it from being\nclaimed, warnings do not.",
+          "items": {
+            "$ref": "#/$defs/LintFinding"
+          },
+          "type": "array"
+        },
+        "snapshot_hash": {
+          "description": "The hash of the snapshot the item runs from, once claimed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "The item's state in the store (`ready`, `running`, `needs_you`, ...); absent when the\ndaemon has never recorded it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "card",
+        "item",
+        "title",
+        "labels",
+        "draft",
+        "edit_pending",
+        "lint"
       ],
       "type": "object"
     },
@@ -389,6 +538,27 @@
         "cache_read",
         "output",
         "total"
+      ],
+      "type": "object"
+    },
+    "ColumnView": {
+      "description": "One column of a board.",
+      "properties": {
+        "cards": {
+          "description": "Top to bottom.",
+          "items": {
+            "$ref": "#/$defs/CardView"
+          },
+          "type": "array"
+        },
+        "column": {
+          "description": "The column's name on the board.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "column",
+        "cards"
       ],
       "type": "object"
     },
@@ -570,6 +740,43 @@
         "killed",
         "paused",
         "repos"
+      ],
+      "type": "object"
+    },
+    "CurrentItem": {
+      "description": "The item a repository is working on.",
+      "properties": {
+        "attempt": {
+          "description": "The current attempt; 0 before the first.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "detail": {
+          "description": "The park reason, for `parked`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "item": {
+          "type": "string"
+        },
+        "since_ms": {
+          "description": "When it entered its state: the time in state is `now_ms - since_ms`.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "description": "Its state (`claimed`, `running`, `parked`, `verifying`, `landing`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "state",
+        "attempt",
+        "since_ms"
       ],
       "type": "object"
     },
@@ -1710,6 +1917,115 @@
       ],
       "type": "object"
     },
+    "ItemDetail": {
+      "description": "Result of `item.get`: everything the store holds of one item.",
+      "properties": {
+        "attempt": {
+          "description": "The current attempt; 0 before the first.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "attempts": {
+          "description": "Its attempts, by number.",
+          "items": {
+            "$ref": "#/$defs/AttemptView"
+          },
+          "type": "array"
+        },
+        "calls": {
+          "description": "What its agents said through `bosun-mcp` (questions, summaries, notes), in order.",
+          "items": {
+            "$ref": "#/$defs/AgentCallView"
+          },
+          "type": "array"
+        },
+        "created_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "detail": {
+          "description": "The park reason, outcome or needs-you reason of the state.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed": {
+          "description": "Attempts that failed and counted.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "item": {
+          "type": "string"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoRef"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SnapshotView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The snapshot its next attempt runs from, once claimed."
+        },
+        "state": {
+          "description": "Its state now (`ready`, `claimed`, `running`, `parked`, `verifying`, `landing`, `done`,\n`needs_you`, `cancelled`).",
+          "type": "string"
+        },
+        "transitions": {
+          "description": "Every arrow it took, in order.",
+          "items": {
+            "$ref": "#/$defs/TransitionView"
+          },
+          "type": "array"
+        },
+        "updated_ms": {
+          "description": "When it entered its state.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "identity",
+        "item",
+        "repo",
+        "state",
+        "attempt",
+        "failed",
+        "created_ms",
+        "updated_ms",
+        "transitions",
+        "attempts",
+        "calls"
+      ],
+      "type": "object"
+    },
+    "ItemParams": {
+      "description": "Params of `item.get`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "item": {
+          "description": "The item id, `<repo>#<card>`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "item"
+      ],
+      "type": "object"
+    },
     "ItemRow": {
       "description": "One item.",
       "properties": {
@@ -1954,6 +2270,117 @@
         }
       ]
     },
+    "LastVerdict": {
+      "description": "A verdict run that finished.",
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ended_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "item": {
+          "type": "string"
+        },
+        "result": {
+          "description": "`pass`, `fail` or `timeout`.",
+          "type": "string"
+        },
+        "run": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "item",
+        "attempt",
+        "run",
+        "result",
+        "ended_ms"
+      ],
+      "type": "object"
+    },
+    "LintFinding": {
+      "description": "One lint finding.",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "severity": {
+          "description": "`error` or `warning`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "message"
+      ],
+      "type": "object"
+    },
+    "LintParams": {
+      "description": "Params of `queue.lint`.",
+      "properties": {
+        "card": {
+          "description": "The card's number on the board.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "repo": {
+          "description": "The repository of the identity, by its name in the configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "repo",
+        "card"
+      ],
+      "type": "object"
+    },
+    "LintResult": {
+      "description": "Result of `queue.lint`: the static lint of one card, read fresh from the board.",
+      "properties": {
+        "card": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "claimable": {
+          "description": "No finding is an error: the card may be claimed.",
+          "type": "boolean"
+        },
+        "findings": {
+          "description": "Every finding, errors and warnings, in check order.",
+          "items": {
+            "$ref": "#/$defs/LintFinding"
+          },
+          "type": "array"
+        },
+        "item": {
+          "description": "`<repo>#<card>`.",
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "card",
+        "item",
+        "claimable",
+        "findings"
+      ],
+      "type": "object"
+    },
     "ModelRow": {
       "description": "One model of `tokens.by_model`.",
       "properties": {
@@ -2039,6 +2466,65 @@
           "type": "object"
         }
       ]
+    },
+    "Overview": {
+      "description": "Result of `status.overview`.",
+      "properties": {
+        "daemon_version": {
+          "type": "string"
+        },
+        "daily_cap_until_ms": {
+          "description": "The daily cap parks the identity's queue until this time (local midnight).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "events": {
+          "$ref": "#/$defs/StreamStatus",
+          "description": "The identity's event stream: a client that subscribes with this epoch and\n`from_seq = head + 1` misses nothing published after this answer."
+        },
+        "identity": {
+          "type": "string"
+        },
+        "killed": {
+          "description": "The kill switch is thrown (daemon-wide).",
+          "type": "boolean"
+        },
+        "now_ms": {
+          "description": "The daemon's clock when it answered: the `since_ms` of each item is against it.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "paused": {
+          "description": "Every repository of the identity is paused by hand.",
+          "type": "boolean"
+        },
+        "repos": {
+          "description": "Each repository of the identity, by name.",
+          "items": {
+            "$ref": "#/$defs/RepoOverview"
+          },
+          "type": "array"
+        },
+        "started_ms": {
+          "description": "When the daemon started.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "identity",
+        "daemon_version",
+        "started_ms",
+        "now_ms",
+        "killed",
+        "paused",
+        "events",
+        "repos"
+      ],
+      "type": "object"
     },
     "ParkedTime": {
       "description": "Time parked for one reason.",
@@ -2176,6 +2662,45 @@
       "description": "An exact amount of money in picodollars (10^-12 USD), as a decimal string.",
       "pattern": "^(0|[1-9][0-9]*)$",
       "type": "string"
+    },
+    "QueueParams": {
+      "description": "Params of `queue.get`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "repo": {
+          "description": "One repository of the identity, by its name in the configuration; every repository of\nthe identity when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity"
+      ],
+      "type": "object"
+    },
+    "QueueView": {
+      "description": "Result of `queue.get`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "repos": {
+          "description": "The repositories asked for, by name.",
+          "items": {
+            "$ref": "#/$defs/RepoQueue"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "repos"
+      ],
+      "type": "object"
     },
     "RefusedEdit": {
       "description": "An attempt refused because its commits touched a protected path.",
@@ -2327,6 +2852,103 @@
       "required": [
         "repo",
         "paused"
+      ],
+      "type": "object"
+    },
+    "RepoOverview": {
+      "description": "One repository of the Overview.",
+      "properties": {
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CurrentItem"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The item in flight (claimed, running, parked, verifying or landing), if any."
+        },
+        "hold": {
+          "description": "The hold in force on the repository, strongest first: `kill`, `pause`, `daily_cap`;\nabsent when none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LastVerdict"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last verdict run that finished in the repository: of the item in flight, else of\nthe item updated last."
+        },
+        "path": {
+          "description": "Its checkout as configured.",
+          "type": "string"
+        },
+        "queue": {
+          "description": "Its queue's kind: `local_file`, `projects_v2`, or `none` when it has no queue.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "Its name in the configuration.",
+          "type": "string"
+        },
+        "state": {
+          "description": "`working` while an item of the repository is in flight, else `idle`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "path",
+        "queue",
+        "state"
+      ],
+      "type": "object"
+    },
+    "RepoQueue": {
+      "description": "The board of one repository.",
+      "properties": {
+        "columns": {
+          "description": "Every column in board order (`Backlog`, `Ready`, `In progress`, `Verify`, `Done`,\n`Needs you`), empty ones included.",
+          "items": {
+            "$ref": "#/$defs/ColumnView"
+          },
+          "type": "array"
+        },
+        "error": {
+          "description": "Why the board could not be read; `columns` is empty then.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hash": {
+          "description": "The hash of the board as read: the `hash` of the `queue_changed` event that announced\nit. Absent when the board could not be read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "queue": {
+          "description": "The queue's kind: `local_file`, `projects_v2`, or `none`.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "Its name in the configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "queue",
+        "columns"
       ],
       "type": "object"
     },
@@ -2511,6 +3133,45 @@
         "identity",
         "from_ms",
         "to_ms"
+      ],
+      "type": "object"
+    },
+    "RestartParams": {
+      "description": "Params of `item.restart`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "item": {
+          "description": "The item id, `<repo>#<card>`; it must be in flight.",
+          "type": "string"
+        },
+        "operator": {
+          "default": "",
+          "description": "The operator token the daemon wrote at start (see [`crate::control`]). Missing, it is\nrefused like a wrong one.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "item"
+      ],
+      "type": "object"
+    },
+    "RestartResult": {
+      "description": "Result of `item.restart`.",
+      "properties": {
+        "item": {
+          "type": "string"
+        },
+        "label": {
+          "description": "The label put on the card: the loop kills the session, takes a new snapshot and\nstarts again, then removes it (#5).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "label"
       ],
       "type": "object"
     },
@@ -2858,6 +3519,95 @@
       ],
       "type": "object"
     },
+    "SessionInfo": {
+      "description": "One session bosun spawned: in [`AttemptView::sessions`], and the result of `session.get`.",
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ended_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exit": {
+          "description": "`ok`, `limit`, `auth` or `crash`; absent while it runs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "item": {
+          "type": "string"
+        },
+        "mode": {
+          "description": "`fresh`, `resume` or `reset`.",
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "running": {
+          "description": "It has not ended.",
+          "type": "boolean"
+        },
+        "session": {
+          "description": "The provider session id bosun assigned (a resume keeps it).",
+          "type": "string"
+        },
+        "spawn": {
+          "description": "The session's number within the item: the `spawn` of its events.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "item",
+        "attempt",
+        "spawn",
+        "session",
+        "provider",
+        "mode",
+        "started_ms",
+        "running"
+      ],
+      "type": "object"
+    },
+    "SessionParams": {
+      "description": "Params of `session.get`: exactly one of `session` and `item`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "item": {
+          "description": "An item id: its latest session.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session": {
+          "description": "A provider session id; with a resume, its latest spawn.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity"
+      ],
+      "type": "object"
+    },
     "SessionRow": {
       "description": "One context window of `tokens.by_session`. A message counts in the window where it was\nfirst seen. These fields are what `recount --compare` reads (shape version 1, #16).",
       "properties": {
@@ -2879,6 +3629,69 @@
       "required": [
         "session",
         "sums"
+      ],
+      "type": "object"
+    },
+    "SnapshotView": {
+      "description": "The snapshot of an item (#5).",
+      "properties": {
+        "base_sha": {
+          "description": "The commit the item started from.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "body": {
+          "description": "The normalised body the agent and the verdict were given.",
+          "type": "string"
+        },
+        "branch": {
+          "description": "The branch HEAD was on at claim.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hash": {
+          "type": "string"
+        },
+        "taken_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hash",
+        "taken_ms",
+        "body"
+      ],
+      "type": "object"
+    },
+    "StreamStatus": {
+      "description": "Where an identity's event stream stands.",
+      "properties": {
+        "epoch": {
+          "description": "The daemon's epoch (#69).",
+          "type": "string"
+        },
+        "head": {
+          "description": "The sequence of the last event published; 0 before the first.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subscribers": {
+          "description": "Subscribers connected now.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "epoch",
+        "head",
+        "subscribers"
       ],
       "type": "object"
     },
@@ -3268,6 +4081,64 @@
       ],
       "type": "object"
     },
+    "TransitionView": {
+      "description": "One arrow of an item.",
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "attempt_from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attempt_to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cause": {
+          "description": "The event that caused it.",
+          "type": "string"
+        },
+        "detail": {
+          "description": "The park reason, outcome or reason of `to`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "type": "string"
+        },
+        "seq": {
+          "description": "From 1 within the item.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "to": {
+          "type": "string"
+        },
+        "ts_ms": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "attempt",
+        "from",
+        "to",
+        "cause",
+        "ts_ms"
+      ],
+      "type": "object"
+    },
     "Trend": {
       "description": "A period and the previous one.",
       "properties": {
@@ -3328,6 +4199,58 @@
       "required": [
         "model",
         "messages"
+      ],
+      "type": "object"
+    },
+    "VerdictView": {
+      "description": "One verdict run.",
+      "properties": {
+        "command": {
+          "description": "The command that ran: the snapshot's verdict.",
+          "type": "string"
+        },
+        "ended_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exit_code": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "result": {
+          "description": "`pass`, `fail` or `timeout`; absent while it runs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "verdict_line": {
+          "description": "The line of the verdict's output that says what it found, if one did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "run",
+        "command",
+        "started_ms"
       ],
       "type": "object"
     },
@@ -3535,6 +4458,42 @@
         "$ref": "#/$defs/IngestStatus"
       }
     },
+    "item.get": {
+      "description": "One item of the identity: its state, snapshot, transitions, attempts with their      sessions and verdict runs, and its agents' calls.",
+      "params": {
+        "$ref": "#/$defs/ItemParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ItemDetail"
+      }
+    },
+    "item.restart": {
+      "description": "Restarts an item in flight: puts the `restart` label on its card, so the loop kills      its session, takes a new snapshot and starts again. Refused while the kill switch is      thrown. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/RestartParams"
+      },
+      "result": {
+        "$ref": "#/$defs/RestartResult"
+      }
+    },
+    "queue.get": {
+      "description": "The board of one repository of the identity, or of each: its columns in board order,      its hash, each card's state and snapshot hash, whether an edit waits for the next claim,      and the lint findings of the cards in Ready.",
+      "params": {
+        "$ref": "#/$defs/QueueParams"
+      },
+      "result": {
+        "$ref": "#/$defs/QueueView"
+      }
+    },
+    "queue.lint": {
+      "description": "The static lint of one card of a repository of the identity, read fresh from its board.",
+      "params": {
+        "$ref": "#/$defs/LintParams"
+      },
+      "result": {
+        "$ref": "#/$defs/LintResult"
+      }
+    },
     "report.estimates": {
       "description": "The estimate sections of the report over the range: the cost of tool results by tool and by file with cache carry, repeated reads of a file, and the cost of finding before a session's first write. Every number is an estimate and is never part of an exact total.",
       "params": {
@@ -3553,6 +4512,15 @@
         "$ref": "#/$defs/Report"
       }
     },
+    "session.get": {
+      "description": "One session bosun spawned, by provider session id or by item (its latest), and      whether it still runs: what `session tail` follows.",
+      "params": {
+        "$ref": "#/$defs/SessionParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SessionInfo"
+      }
+    },
     "status.daemon": {
       "description": "The daemon's version, process and start time, and whether it serves the identity.",
       "params": {
@@ -3560,6 +4528,15 @@
       },
       "result": {
         "$ref": "#/$defs/DaemonStatus"
+      }
+    },
+    "status.overview": {
+      "description": "The Overview of the identity: per repository its state, the item in flight with its      attempt and time in state, the last verdict, and the control state.",
+      "params": {
+        "$ref": "#/$defs/IdentityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Overview"
       }
     },
     "tokens.by_model": {

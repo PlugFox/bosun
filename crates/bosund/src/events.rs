@@ -191,19 +191,11 @@ impl Events {
     }
 
     /// The sequence of the last event published; 0 before the first.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the status methods (#70) report it")
-    )]
     pub(crate) fn head(&self) -> u64 {
         *self.inner.head.borrow()
     }
 
     /// Live subscribers.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the status methods (#70) report it")
-    )]
     pub(crate) fn subscribers(&self) -> usize {
         let mut subscribers = lock(&self.inner.subscribers);
         subscribers.retain(|s| s.strong_count() > 0);
@@ -382,7 +374,7 @@ pub(crate) fn transition(item: &ItemId, t: &Transition) -> Vec<EventBody> {
 }
 
 /// Why an item is in `state`, for the states that have a reason.
-fn reason_of(state: State) -> Option<String> {
+pub(crate) fn reason_of(state: State) -> Option<String> {
     let name = match state {
         State::Parked(park) => match park.reason {
             ParkReason::Limit => "limit",

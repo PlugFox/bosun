@@ -1165,6 +1165,22 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test(SCENARIO_99),
         platform: None,
     },
+    Mutant {
+        name: "mutant_cli_action_without_command",
+        issue: 70,
+        breaks: "an operator action of the shared table (restart-item) has no CLI command",
+        package: "bosun-cli",
+        check: Check::Test("tests::every_action_has_a_command"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_queue_other_identity",
+        issue: 70,
+        breaks: "queue.get and queue.lint read the repositories of every identity, not only the one asked for",
+        package: "bosund",
+        check: Check::Test("view_tests::a_queue_holds_only_the_identitys_repositories"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

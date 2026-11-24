@@ -41,18 +41,27 @@
 //! | `control.pause` | [`PauseParams`] | [`ControlStatus`] |
 //! | `control.resume` | [`PauseParams`] | [`ControlStatus`] |
 //! | `control.kill` | [`KillParams`] | [`KillResult`] |
+//! | `status.overview` | [`IdentityParams`] | [`Overview`] |
+//! | `queue.get` | [`QueueParams`] | [`QueueView`] |
+//! | `queue.lint` | [`LintParams`] | [`LintResult`] |
+//! | `item.get` | [`ItemParams`] | [`ItemDetail`] |
+//! | `item.restart` | [`RestartParams`] | [`RestartResult`] |
+//! | `session.get` | [`SessionParams`] | [`SessionInfo`] |
 //!
 //! The `agent.*` methods name no identity: their credential does ([`agent`]). `control.kill`
 //! names none either: the kill switch is daemon-wide. The `control.*` methods that change
-//! anything take the operator token ([`control`]).
+//! anything take the operator token ([`control`]), and so does `item.restart`.
 
 pub mod agent;
 pub mod control;
 mod estimates;
 pub mod event;
+pub mod item;
 mod items;
+pub mod queue;
 mod report;
 pub mod rpc;
+pub mod status;
 mod wire;
 
 use schemars::generate::SchemaSettings;
@@ -74,15 +83,23 @@ pub use event::{
     Event, EventBody, EventFilter, OutputStream, Resync, ResyncReason, SubscribeParams,
     SubscribeResult, Tail,
 };
+pub use item::{
+    AgentCallView, AttemptView, ItemDetail, ItemParams, RestartParams, RestartResult, SessionInfo,
+    SessionParams, SnapshotView, TransitionView, VerdictView,
+};
 pub use items::{
     AttemptReport, Evidence, FlakyVerdict, InferredItem, InferredItems, InferredSession, ItemRow,
     Items, ParkedTime, RefusedEdit, RetriedItem, RunCommit, RunSession, TrailerMissing, Trailers,
+};
+pub use queue::{
+    CardView, ColumnView, LintFinding, LintParams, LintResult, QueueParams, QueueView, RepoQueue,
 };
 pub use report::{
     AbsentModel, Agreement, CategoryRow, CheckTokens, CommitPeriod, CommitRow, CommitScan,
     Comparison, ContextCurve, Health, KindRow, OldMethod, PerCommit, Report, ReportParams,
     ScanState, SessionAgreement, Trend, Undercount, VersionRow, WindowCurve,
 };
+pub use status::{CurrentItem, LastVerdict, Overview, RepoOverview, StreamStatus};
 pub use wire::{Picodollars, Wide};
 
 /// The version of this API. A client refuses a daemon that answers [`method::Hello`] with a version it
@@ -256,6 +273,48 @@ pub mod method {
         crate::KillResult,
         "The kill switch: every child is killed now, every item parks, and no further board      write is made until it is released (`release`). Daemon-wide. Takes the operator token."
     );
+    method!(
+        StatusOverview,
+        "status.overview",
+        crate::IdentityParams,
+        crate::Overview,
+        "The Overview of the identity: per repository its state, the item in flight with its      attempt and time in state, the last verdict, and the control state."
+    );
+    method!(
+        QueueGet,
+        "queue.get",
+        crate::QueueParams,
+        crate::QueueView,
+        "The board of one repository of the identity, or of each: its columns in board order,      its hash, each card's state and snapshot hash, whether an edit waits for the next claim,      and the lint findings of the cards in Ready."
+    );
+    method!(
+        QueueLint,
+        "queue.lint",
+        crate::LintParams,
+        crate::LintResult,
+        "The static lint of one card of a repository of the identity, read fresh from its board."
+    );
+    method!(
+        ItemGet,
+        "item.get",
+        crate::ItemParams,
+        crate::ItemDetail,
+        "One item of the identity: its state, snapshot, transitions, attempts with their      sessions and verdict runs, and its agents' calls."
+    );
+    method!(
+        ItemRestart,
+        "item.restart",
+        crate::RestartParams,
+        crate::RestartResult,
+        "Restarts an item in flight: puts the `restart` label on its card, so the loop kills      its session, takes a new snapshot and starts again. Refused while the kill switch is      thrown. Takes the operator token."
+    );
+    method!(
+        SessionGet,
+        "session.get",
+        crate::SessionParams,
+        crate::SessionInfo,
+        "One session bosun spawned, by provider session id or by item (its latest), and      whether it still runs: what `session tail` follows."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -278,6 +337,12 @@ pub const METHODS: &[&str] = &[
     method::ControlPause::NAME,
     method::ControlResume::NAME,
     method::ControlKill::NAME,
+    method::StatusOverview::NAME,
+    method::QueueGet::NAME,
+    method::QueueLint::NAME,
+    method::ItemGet::NAME,
+    method::ItemRestart::NAME,
+    method::SessionGet::NAME,
 ];
 
 /// The prefix of the `agent.*` group: the only methods an agent credential admits.
@@ -531,6 +596,12 @@ pub fn schema() -> Value {
     add_method::<method::ControlPause>(&mut generator, &mut methods);
     add_method::<method::ControlResume>(&mut generator, &mut methods);
     add_method::<method::ControlKill>(&mut generator, &mut methods);
+    add_method::<method::StatusOverview>(&mut generator, &mut methods);
+    add_method::<method::QueueGet>(&mut generator, &mut methods);
+    add_method::<method::QueueLint>(&mut generator, &mut methods);
+    add_method::<method::ItemGet>(&mut generator, &mut methods);
+    add_method::<method::ItemRestart>(&mut generator, &mut methods);
+    add_method::<method::SessionGet>(&mut generator, &mut methods);
     let notifications = json!({
         event::EVENT: {
             "description": "One event of the subscribed identity, in sequence order.",

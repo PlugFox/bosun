@@ -11,6 +11,12 @@
 //! bosun pause [--repo <name>] [--identity <name>]
 //! bosun resume [--repo <name>] [--identity <name>]
 //! bosun kill [--release]
+//! bosun restart-item <repo>#<card>
+//! bosun status [--identity <name>]
+//! bosun queue [--repo <name>] [--identity <name>]
+//! bosun item <repo>#<card>
+//! bosun lint <repo>#<card> | bosun lint --repo <name> <card>
+//! bosun session tail <repo>#<card> | <session id>
 //! ```
 //!
 //! Every command also takes `--format text|json` (default `text`; `report` also takes `md`,
@@ -62,7 +68,18 @@
 //!   identity, and lift it (`control.pause`, `control.resume`); the attempt in flight finishes
 //!   and no new session starts. `kill` throws the daemon-wide kill switch (`control.kill`):
 //!   every child is killed, every item parks, no board is written; `kill --release` releases
-//!   it. All three send the daemon's operator token, read from its file (`control.rs`).
+//!   it. `restart-item` puts the `restart` label on the card of an item in flight
+//!   (`item.restart`): the loop kills its session, takes a new snapshot and starts again. All
+//!   four send the daemon's operator token, read from its file, and are the rows of the action
+//!   table the TUI shares (`bosun_client::actions`, `control.rs`).
+//! - `status`: per repository, its state, the item in flight with its attempt and time in
+//!   state, the last verdict and the hold (`status.overview`). `queue`: each board's columns
+//!   with each card's state, snapshot hash, a pending edit and the lint findings of Ready
+//!   cards (`queue.get`). `item`: one item's state, snapshot, attempts, sessions, verdict runs,
+//!   agent calls and transitions (`item.get`). `lint`: the static lint of one card, through
+//!   the daemon (`queue.lint`); a card that is not claimable exits 1 with its findings on
+//!   stdout. `session tail`: follows a session's output lines until it ends (`session.get`,
+//!   then the event stream's live tail). See `work.rs`.
 //!
 //! `--name` names the registration (default `bosun`): a second daemon, or a test.
 //!
@@ -78,10 +95,23 @@
 //! | `tokens --by repo` | the result of `tokens.by_repo` |
 //! | `tokens --by model` | the result of `tokens.by_model` |
 //! | `report` | `{"exact": <the result of report.exact>, "estimates": <the result of report.estimates>}` |
+//! | `status` | the result of `status.overview` |
+//! | `queue` | the result of `queue.get` |
+//! | `pause`, `resume` | the result of `control.pause`, `control.resume` |
 //!
 //! The results are those of `schema/bosun-api.schema.json`. Without `--identity`, the output
 //! is an object keyed by identity name whose values are those documents:
 //! `{"personal": {...}, "work": {...}}`.
+//!
+//! These name one item, card or the daemon, and print one document whatever `--identity`:
+//!
+//! | Command | Document |
+//! | --- | --- |
+//! | `item` | the result of `item.get` |
+//! | `lint` | the result of `queue.lint` |
+//! | `restart-item` | the result of `item.restart` |
+//! | `kill` | the result of `control.kill` |
+//! | `session tail` | one `Event` (the params of `events.event`) per line, as they come |
 //!
 //! # Exit codes
 //!
@@ -99,8 +129,9 @@
 //! | 6 | the daemon speaks an API version this `bosun` does not know |
 //! | 7 | `doctor`: a check did not pass |
 //!
-//! Errors go to stderr, prefixed `bosun: `; nothing is printed on stdout then. `doctor`
-//! prints its checks with 0 and with 7 alike.
+//! Errors go to stderr, prefixed `bosun: `; nothing is printed on stdout then, except by
+//! `doctor`, which prints its checks with 0 and with 7 alike, and `lint`, which prints the
+//! findings of a card that is not claimable with 1.
 
 mod admin;
 mod artefact;
@@ -111,6 +142,7 @@ mod markdown;
 mod render;
 mod shape;
 mod time;
+mod work;
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -223,6 +255,25 @@ enum Command {
     /// The kill switch: kills every child, parks every item, stops every board write.
     #[command(after_help = EXIT_CODES)]
     Kill(control::KillArgs),
+    /// Restarts an item in flight: kills its session, takes a new snapshot, starts again.
+    #[cfg(not(mutant_cli_action_without_command))]
+    #[command(after_help = EXIT_CODES)]
+    RestartItem(control::RestartArgs),
+    /// Per repository: its state, the item in flight, the last verdict and the hold.
+    #[command(after_help = EXIT_CODES)]
+    Status,
+    /// Each board's columns, with each card's state, pending edit and lint findings.
+    #[command(after_help = EXIT_CODES)]
+    Queue(work::QueueArgs),
+    /// One item: its state, snapshot, attempts, sessions, verdict runs and transitions.
+    #[command(after_help = EXIT_CODES)]
+    Item(work::ItemArgs),
+    /// The static lint of one card, through the daemon; exits 1 when it is not claimable.
+    #[command(after_help = EXIT_CODES)]
+    Lint(work::LintArgs),
+    /// The sessions bosun spawned.
+    #[command(subcommand, after_help = EXIT_CODES)]
+    Session(work::SessionCommand),
 }
 
 #[derive(Debug, Args)]
@@ -304,6 +355,8 @@ enum By {
 struct Failure {
     code: u8,
     message: String,
+    /// What to print on stdout all the same: the findings of `lint`.
+    stdout: String,
 }
 
 impl Failure {
@@ -311,7 +364,13 @@ impl Failure {
         Self {
             code,
             message: message.into(),
+            stdout: String::new(),
         }
+    }
+
+    fn with_stdout(mut self, stdout: String) -> Self {
+        self.stdout = stdout;
+        self
     }
 }
 
@@ -556,6 +615,26 @@ async fn report(
     )
 }
 
+/// Runs the commands that resolve their identities themselves; `None` for the others.
+async fn own_terms(global: &Global, command: &Command) -> Option<Result<String, Failure>> {
+    Some(match command {
+        Command::Install(args) => admin::install(global, args).await,
+        Command::Uninstall(args) => admin::uninstall(global, args).await,
+        Command::Doctor(args) => admin::doctor(global, args).await,
+        Command::Pause(args) => control::pause(global, args, true).await,
+        Command::Resume(args) => control::pause(global, args, false).await,
+        Command::Kill(args) => control::kill(global, args).await,
+        #[cfg(not(mutant_cli_action_without_command))]
+        Command::RestartItem(args) => control::restart_item(global, args).await,
+        Command::Status => work::status(global).await,
+        Command::Queue(args) => work::queue(global, args).await,
+        Command::Item(args) => work::item(global, args).await,
+        Command::Lint(args) => work::lint(global, args).await,
+        Command::Session(work::SessionCommand::Tail(args)) => work::tail(global, args).await,
+        _ => return None,
+    })
+}
+
 /// Runs the command; the text to print on stdout.
 async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
     let global = &cli.global;
@@ -573,14 +652,8 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
     }
     // Refuses `--format md` outside `report` before any command runs.
     check_report_args(&cli, now_ms)?;
-    match &cli.command {
-        Command::Install(args) => return admin::install(global, args).await,
-        Command::Uninstall(args) => return admin::uninstall(global, args).await,
-        Command::Doctor(args) => return admin::doctor(global, args).await,
-        Command::Pause(args) => return control::pause(global, args, true).await,
-        Command::Resume(args) => return control::pause(global, args, false).await,
-        Command::Kill(args) => return control::kill(global, args).await,
-        _ => {}
+    if let Some(done) = own_terms(global, &cli.command).await {
+        return done;
     }
     let repo = match &cli.command {
         Command::Report(args) => args.repo.as_deref(),
@@ -721,6 +794,10 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(failure) => {
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(failure.stdout.as_bytes());
+            let _ = stdout.flush();
+            drop(stdout);
             eprintln!("bosun: {}", failure.message);
             ExitCode::from(failure.code)
         }
@@ -785,6 +862,38 @@ mod tests {
             &["ingest"],
             &[],
         ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// Every operator action of the table the TUI shares has its CLI command (#70); with
+    /// `mutant_cli_action_without_command`, restart-item has none.
+    #[test]
+    fn every_action_has_a_command() {
+        let cli = Cli::command();
+        for spec in bosun_client::actions::ACTIONS {
+            assert!(
+                cli.find_subcommand(spec.command).is_some(),
+                "the action {:?} has no command `bosun {}`",
+                spec.action,
+                spec.command
+            );
+        }
+    }
+
+    #[test]
+    fn the_loop_commands_are_parsed() {
+        let cli = parse(&["session", "tail", "demo#3", "--format", "json"]).unwrap();
+        assert!(matches!(cli.command, Command::Session(_)));
+        assert!(matches!(
+            parse(&["lint", "4", "--repo", "demo"]).unwrap().command,
+            Command::Lint(_)
+        ));
+        assert!(matches!(
+            parse(&["status"]).unwrap().command,
+            Command::Status
+        ));
+        for bad in [&["item"][..], &["session"], &["lint"]] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
     }

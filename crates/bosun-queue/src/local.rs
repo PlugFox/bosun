@@ -126,6 +126,29 @@ impl LocalFile {
         &self.path
     }
 
+    /// Puts `label` on the card of `item`, as the user would: `bosun restart-item` puts the
+    /// `restart` label (#5, #70), which the loop acts on and removes. A label the card already
+    /// carries is left as it is, so a replay writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`QueueError::NotFound`] when the item has no card; otherwise the write failed.
+    pub fn add_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
+        self.edit(item, |card| {
+            if !card.contains_key("labels") {
+                card.insert("labels", Item::Value(Value::Array(toml_edit::Array::new())));
+            }
+            let Some(labels) = card.get_mut("labels").and_then(Item::as_array_mut) else {
+                return false;
+            };
+            if labels.iter().any(|l| l.as_str() == Some(label)) {
+                return false;
+            }
+            labels.push(label);
+            true
+        })
+    }
+
     /// A whole file holding `cards` in this order, comments included: how a new board is
     /// written, and how tests stand in for the user.
     #[must_use]
@@ -818,6 +841,25 @@ mod tests {
         assert!(matches!(error, QueueError::Conflict(_)), "{error}");
         assert!(error.is_transient());
         assert!(!fs::read_to_string(queue.path()).unwrap().contains("ours"));
+    }
+
+    #[test]
+    fn a_label_is_added_once_and_the_rest_is_kept() {
+        let (_dir, queue) = board(FILE);
+        queue.add_label(ItemId(1), "restart").unwrap();
+        let once = fs::read_to_string(queue.path()).unwrap();
+        assert!(once.contains("column = \"ready\"  # mine"), "{once}");
+        assert_eq!(queue.lint_target(ItemId(1)).unwrap().labels, ["restart"]);
+        queue.add_label(ItemId(1), "restart").unwrap();
+        assert_eq!(
+            fs::read_to_string(queue.path()).unwrap(),
+            once,
+            "a replay writes nothing"
+        );
+        assert!(matches!(
+            queue.add_label(ItemId(9), "restart"),
+            Err(QueueError::NotFound(_))
+        ));
     }
 
     #[test]

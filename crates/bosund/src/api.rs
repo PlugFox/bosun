@@ -145,12 +145,12 @@ fn params<M: Method>(params: Value) -> Result<M::Params, ErrorObject> {
         .map_err(|e| ErrorObject::new(code::INVALID_PARAMS, format!("params of {}: {e}", M::NAME)))
 }
 
-fn result<T: Serialize>(value: &T) -> Result<Value, ErrorObject> {
+pub(crate) fn result<T: Serialize>(value: &T) -> Result<Value, ErrorObject> {
     serde_json::to_value(value)
         .map_err(|e| ErrorObject::new(code::INTERNAL_ERROR, format!("result: {e}")))
 }
 
-fn failed(e: impl std::fmt::Display) -> ErrorObject {
+pub(crate) fn failed(e: impl std::fmt::Display) -> ErrorObject {
     ErrorObject::new(code::FAILED, e.to_string())
 }
 
@@ -249,6 +249,11 @@ async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObj
             .await
         }
         name if name.starts_with("control.") => crate::control::dispatch(state, name, p).await,
+        name if name.starts_with("status.") => crate::overview::dispatch(state, name, p).await,
+        name if name.starts_with("queue.") => crate::board::dispatch(state, name, p).await,
+        name if name.starts_with("item.") || name.starts_with("session.") => {
+            crate::item::dispatch(state, name, p).await
+        }
         _ => Err(ErrorObject::new(
             code::METHOD_NOT_FOUND,
             format!("no method {name}"),
@@ -485,7 +490,7 @@ fn sums(bill: &Bill) -> TokenSums {
 impl Served {
     /// The configured repository with store key `key`, or the key itself when the
     /// configuration no longer names it.
-    fn repo(&self, key: &str) -> RepoRef {
+    pub(crate) fn repo(&self, key: &str) -> RepoRef {
         self.repos
             .iter()
             .find(|(_, repo)| repo.key == key)

@@ -10,7 +10,10 @@
 //! spawned the session for) with every character but ASCII letters, digits, `-` and `_` turned
 //! into `_`: one fake agent can play a different part for each item of a run. Every other
 //! argument is ignored, so a runner's real argv (the `claude` flags) can be passed unchanged.
-//! The working directory is the one the spawner gives.
+//! With none of these, the script is the file next to the executable named like it with the
+//! extension `script` (`gh.exe` reads `gh.script`): a copy of `fake-agent` stands in for a
+//! tool whose argv and environment the test does not control (`gh` under the daemon's
+//! identity environment, #70). The working directory is the one the spawner gives.
 //!
 //! With `--mcp-config <file>`, as the agent CLI does, every MCP server the file lists is
 //! started and initialized before the script runs; one that fails is reported on standard
@@ -93,9 +96,17 @@ fn script_path(args: &[String]) -> Result<PathBuf, String> {
             .map(PathBuf::from)
             .ok_or_else(|| "--fake-script needs a path".to_owned());
     }
-    std::env::var_os("FAKE_AGENT_SCRIPT")
-        .map(PathBuf::from)
-        .ok_or_else(|| "no script: pass --fake-script <path> or set FAKE_AGENT_SCRIPT".to_owned())
+    if let Some(script) = std::env::var_os("FAKE_AGENT_SCRIPT") {
+        return Ok(PathBuf::from(script));
+    }
+    std::env::current_exe()
+        .ok()
+        .map(|exe| exe.with_extension("script"))
+        .filter(|script| script.is_file())
+        .ok_or_else(|| {
+            "no script: pass --fake-script <path>, set FAKE_AGENT_SCRIPT, or put one next to the              executable"
+                .to_owned()
+        })
 }
 
 fn run() -> Result<u8, String> {

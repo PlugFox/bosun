@@ -1121,3 +1121,266 @@ async fn an_attempt_dropped_after_two_failed_runs_is_stored_as_failed() {
     assert_eq!(states, [(1, "fail"), (2, "spawned")]);
     assert!(attempts[0].ended_ms.is_some());
 }
+
+/// Writes `batch` twice, as a replay after a crash would.
+async fn twice(store: &Store, batch: Vec<Write>) {
+    store.writer().write(batch.clone()).await.unwrap();
+    store.writer().write(batch).await.unwrap();
+}
+
+/// #150: the stage-2 rows of one item (its worktree, its session shim and its landing) are
+/// written idempotently and read back; output offsets only grow, a quarantined worktree is no
+/// longer open, and a landing update keeps what it does not give.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_worktree_its_process_and_its_landing_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    store.writer().write(vec![register()]).await.unwrap();
+    let reader = store.reader();
+
+    let worktree = NewWorktree {
+        item: id(),
+        path: "/work/trees/demo-1".to_owned(),
+        branch: "bosun/demo-1".to_owned(),
+        base_sha: "a".repeat(40),
+        kind: WorktreeKind::Item,
+        user_base_json: Some("{\"branch\":\"master\"}".to_owned()),
+        created_ms: T0,
+    };
+    twice(&store, vec![Write::Worktree(worktree.clone())]).await;
+    twice(
+        &store,
+        vec![Write::WorktreeBytes {
+            path: worktree.path.clone(),
+            bytes: 4096,
+        }],
+    )
+    .await;
+    let created = WorktreeRow {
+        item: id(),
+        path: worktree.path.clone(),
+        branch: worktree.branch.clone(),
+        base_sha: worktree.base_sha.clone(),
+        kind: WorktreeKind::Item,
+        state: WorktreeState::Created,
+        blocking: None,
+        error: None,
+        bytes: Some(4096),
+        user_base_json: worktree.user_base_json.clone(),
+        created_ms: T0,
+        ended_ms: None,
+    };
+    assert_eq!(
+        reader.worktrees(&id()).await.unwrap(),
+        std::slice::from_ref(&created)
+    );
+    assert_eq!(
+        reader.open_worktrees().await.unwrap(),
+        std::slice::from_ref(&created)
+    );
+    assert_eq!(reader.quarantined_worktrees().await.unwrap(), []);
+
+    let process = NewProcess {
+        item: id(),
+        attempt: 1,
+        spawn: 1,
+        session_key: "session-1".to_owned(),
+        pid: 4242,
+        pid_started_ms: T0 + 1,
+        record_path: "/state/shims/1.json".to_owned(),
+        credential_digest: Some(vec![0xab; 32]),
+        started_ms: T0 + 2,
+    };
+    twice(&store, vec![Write::Process(process.clone())]).await;
+    let offsets = |stdout, stderr| Write::ProcessOffsets {
+        record_path: process.record_path.clone(),
+        stdout,
+        stderr,
+    };
+    twice(&store, vec![offsets(10, 5)]).await;
+    twice(&store, vec![offsets(4, 9)]).await;
+    let running = ProcessRow {
+        item: id(),
+        attempt: 1,
+        spawn: 1,
+        session_key: process.session_key.clone(),
+        pid: 4242,
+        pid_started_ms: T0 + 1,
+        record_path: process.record_path.clone(),
+        stdout_offset: 10,
+        stderr_offset: 9,
+        credential_digest: process.credential_digest.clone(),
+        started_ms: T0 + 2,
+        gone_ms: None,
+    };
+    assert_eq!(reader.processes().await.unwrap(), [running]);
+    twice(
+        &store,
+        vec![Write::ProcessGone {
+            record_path: process.record_path.clone(),
+            at_ms: T0 + 3,
+        }],
+    )
+    .await;
+    assert_eq!(reader.processes().await.unwrap(), []);
+    assert_eq!(count(&store, "process").await, 1);
+
+    twice(
+        &store,
+        vec![Write::WorktreeEnded {
+            path: worktree.path.clone(),
+            state: WorktreeState::Quarantined,
+            blocking: Some("target/lock".to_owned()),
+            error: Some("access denied".to_owned()),
+            bytes: None,
+            at_ms: T0 + 4,
+        }],
+    )
+    .await;
+    // A later end does not replace the first.
+    store
+        .writer()
+        .write(vec![Write::WorktreeEnded {
+            path: worktree.path.clone(),
+            state: WorktreeState::Removed,
+            blocking: None,
+            error: None,
+            bytes: None,
+            at_ms: T0 + 5,
+        }])
+        .await
+        .unwrap();
+    let quarantined = WorktreeRow {
+        state: WorktreeState::Quarantined,
+        blocking: Some("target/lock".to_owned()),
+        error: Some("access denied".to_owned()),
+        ended_ms: Some(T0 + 4),
+        ..created
+    };
+    assert_eq!(reader.open_worktrees().await.unwrap(), []);
+    assert_eq!(
+        reader.quarantined_worktrees().await.unwrap(),
+        std::slice::from_ref(&quarantined)
+    );
+    assert_eq!(reader.worktrees(&id()).await.unwrap(), [quarantined]);
+    assert_eq!(count(&store, "worktree").await, 1);
+
+    let landing = LandingRow {
+        item: id(),
+        attempt: 1,
+        target: "master".to_owned(),
+        head_sha: Some("b".repeat(40)),
+        verified_tree: Some("c".repeat(40)),
+        landed_sha: None,
+        delivered_ms: None,
+        pr_number: Some(12),
+        pr_url: Some("https://forge.invalid/pr/12".to_owned()),
+        pr_state: Some(PrState::Open),
+        updated_ms: T0 + 6,
+    };
+    twice(&store, vec![Write::Landing(landing.clone())]).await;
+    assert_eq!(reader.landing(&id()).await.unwrap(), Some(landing.clone()));
+    assert_eq!(
+        reader.open_pull_requests().await.unwrap(),
+        std::slice::from_ref(&landing)
+    );
+    let landed = LandingRow {
+        head_sha: None,
+        verified_tree: None,
+        landed_sha: Some("d".repeat(40)),
+        delivered_ms: Some(T0 + 7),
+        pr_number: None,
+        pr_url: None,
+        pr_state: Some(PrState::Merged),
+        updated_ms: T0 + 7,
+        ..landing.clone()
+    };
+    twice(&store, vec![Write::Landing(landed)]).await;
+    assert_eq!(
+        reader.landing(&id()).await.unwrap(),
+        Some(LandingRow {
+            landed_sha: Some("d".repeat(40)),
+            delivered_ms: Some(T0 + 7),
+            pr_state: Some(PrState::Merged),
+            updated_ms: T0 + 7,
+            ..landing
+        })
+    );
+    assert_eq!(reader.open_pull_requests().await.unwrap(), []);
+    assert_eq!(count(&store, "landing").await, 1);
+    store.close().await.unwrap();
+}
+
+/// #150: a lease request is filed, granted and released, each written twice: one row, with its
+/// three times. A `bosun with` command's request has no item.
+#[tokio::test]
+async fn a_lease_wait_is_filed_granted_and_released_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    store.writer().write(vec![register()]).await.unwrap();
+    let filed = |item: Option<ItemId>, holder: &str| Write::LeaseFiled {
+        item,
+        holder: holder.to_owned(),
+        resource: "gpu".to_owned(),
+        filed_ms: T0,
+    };
+    twice(&store, vec![filed(Some(id()), "local:demo#1/a1")]).await;
+    twice(
+        &store,
+        vec![Write::LeaseGranted {
+            holder: "local:demo#1/a1".to_owned(),
+            resource: "gpu".to_owned(),
+            filed_ms: T0,
+            at_ms: T0 + 10,
+        }],
+    )
+    .await;
+    twice(
+        &store,
+        vec![Write::LeaseReleased {
+            holder: "local:demo#1/a1".to_owned(),
+            at_ms: T0 + 20,
+        }],
+    )
+    .await;
+    // A later release of the holder leaves the released request as it was.
+    store
+        .writer()
+        .write(vec![Write::LeaseReleased {
+            holder: "local:demo#1/a1".to_owned(),
+            at_ms: T0 + 30,
+        }])
+        .await
+        .unwrap();
+    twice(&store, vec![filed(None, "with:cargo test")]).await;
+
+    assert_eq!(count(&store, "lease_wait").await, 2);
+    let waits = store.reader().lease_waits(T0, T0 + 1).await.unwrap();
+    assert_eq!(
+        waits,
+        [
+            LeaseWaitRow {
+                item: Some(id()),
+                holder: "local:demo#1/a1".to_owned(),
+                resource: "gpu".to_owned(),
+                filed_ms: T0,
+                granted_ms: Some(T0 + 10),
+                released_ms: Some(T0 + 20),
+            },
+            LeaseWaitRow {
+                item: None,
+                holder: "with:cargo test".to_owned(),
+                resource: "gpu".to_owned(),
+                filed_ms: T0,
+                granted_ms: None,
+                released_ms: None,
+            },
+        ]
+    );
+    assert_eq!(
+        store.reader().lease_waits(T0 + 1, T0 + 2).await.unwrap(),
+        []
+    );
+    store.close().await.unwrap();
+}

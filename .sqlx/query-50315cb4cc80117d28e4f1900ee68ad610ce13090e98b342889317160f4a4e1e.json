@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO lease_wait (item_id, holder, resource, filed_ms) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "50315cb4cc80117d28e4f1900ee68ad610ce13090e98b342889317160f4a4e1e"
+}

@@ -1,5 +1,7 @@
 //! The loop's tables (#7, #57): items, snapshots, attempts, run sessions, verdict runs, the
-//! transition log, the outbox, the agent's calls, board comments and flaky tests.
+//! transition log, the outbox, the agent's calls, board comments and flaky tests. And those of
+//! stage 2 (#8): the worktrees the daemon made, the session shims it started, the history of
+//! waits for leased resources and where each landing stands.
 //!
 //! The writer records what the item machine ([`bosun_core::step`]) decided:
 //! [`Write::Transition`](crate::Write::Transition) stores the arrow under its idempotence key
@@ -19,8 +21,8 @@ mod tests;
 pub(crate) mod write;
 
 pub use read::{
-    AgentCallRow, AttemptRow, OutboxOp, OutboxRow, RecordedChild, RunRow, StoredItem,
-    TransitionRow, VerdictRow,
+    AgentCallRow, AttemptRow, LandingRow, LeaseWaitRow, OutboxOp, OutboxRow, ProcessRow,
+    RecordedChild, RunRow, StoredItem, TransitionRow, VerdictRow, WorktreeRow,
 };
 pub use report::{ItemHistory, RunCommitRow};
 
@@ -170,4 +172,67 @@ pub struct RunCommits {
     pub head_sha: String,
     /// The shas of `base..head`, in any order.
     pub commits: Vec<String>,
+}
+
+/// What a worktree is for (#8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeKind {
+    /// The item's own checkout, where its sessions run.
+    Item,
+    /// A throwaway checkout a verdict ran in.
+    Verdict,
+}
+
+/// Where a worktree stands (#8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeState {
+    /// On disk.
+    Created,
+    /// Removed.
+    Removed,
+    /// Its removal was blocked; it is kept, with the file that blocked it and the error.
+    Quarantined,
+}
+
+/// A pull request's state, as the forge reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+/// A git worktree the daemon made for an item (#8). Keyed by its path: a path is never reused,
+/// so writing it again stores nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewWorktree {
+    pub item: ItemId,
+    pub path: String,
+    pub branch: String,
+    /// The commit it was made from.
+    pub base_sha: String,
+    pub kind: WorktreeKind,
+    /// The user's checkout as it was at claim (E4), as JSON; `None` for a verdict checkout.
+    pub user_base_json: Option<String>,
+    pub created_ms: i64,
+}
+
+/// A session shim the daemon started (#8). Keyed by the path of its record: writing it again
+/// stores nothing. Its output offsets start at zero and are the daemon's (E18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProcess {
+    pub item: ItemId,
+    pub attempt: u32,
+    /// The session's number, as in its [`RunStart`].
+    pub spawn: u32,
+    /// The provider session id the session was given.
+    pub session_key: String,
+    /// The shim's process (#50: pid and start time identify it).
+    pub pid: u32,
+    pub pid_started_ms: i64,
+    /// Where the shim's record is.
+    pub record_path: String,
+    /// The digest of the agent credential the session was issued.
+    pub credential_digest: Option<Vec<u8>>,
+    pub started_ms: i64,
 }

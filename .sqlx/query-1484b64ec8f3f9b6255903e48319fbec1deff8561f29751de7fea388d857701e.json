@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO process (item_id, attempt, spawn, session_key, pid, pid_started_ms,\n                              record_path, credential_digest, started_ms)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n         ON CONFLICT (record_path) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "1484b64ec8f3f9b6255903e48319fbec1deff8561f29751de7fea388d857701e"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE worktree SET state = ?, blocking = ?, error = ?, bytes = coalesce(?, bytes),\n                             ended_ms = ?\n         WHERE path = ? AND state = 'created'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "40f92d9e0131282583cbe2961cfd38ef607657282064863cb2bcc4ca1d4fa7dd"
+}

@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.item_key AS \"item_key?: String\", l.holder, l.resource, l.filed_ms,\n                      l.granted_ms, l.released_ms\n               FROM lease_wait l LEFT JOIN item i ON i.id = l.item_id\n               WHERE l.filed_ms >= ? AND l.filed_ms < ?\n               ORDER BY l.filed_ms, l.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "item_key?: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "item_key"
+          }
+        }
+      },
+      {
+        "name": "holder",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "lease_wait",
+            "name": "holder"
+          }
+        }
+      },
+      {
+        "name": "resource",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "lease_wait",
+            "name": "resource"
+          }
+        }
+      },
+      {
+        "name": "filed_ms",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "lease_wait",
+            "name": "filed_ms"
+          }
+        }
+      },
+      {
+        "name": "granted_ms",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "lease_wait",
+            "name": "granted_ms"
+          }
+        }
+      },
+      {
+        "name": "released_ms",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "lease_wait",
+            "name": "released_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "92229b72cc12fa6822f81469ea8e2815946da28c8ec4e9838f17001cbda44508"
+}

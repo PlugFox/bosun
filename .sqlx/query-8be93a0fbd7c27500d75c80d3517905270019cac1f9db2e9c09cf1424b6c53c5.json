@@ -1,0 +1,158 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.item_key, w.path, w.branch, w.base_sha, w.kind, w.state, w.blocking,\n                    w.error, w.bytes, w.user_base_json, w.created_ms, w.ended_ms\n             FROM worktree w JOIN item i ON i.id = w.item_id\n             WHERE (?1 IS NULL OR i.item_key = ?1) AND (?2 IS NULL OR w.state = ?2)\n             ORDER BY w.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "item_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "item_key"
+          }
+        }
+      },
+      {
+        "name": "path",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "branch",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "name": "base_sha",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "base_sha"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "blocking",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "blocking"
+          }
+        }
+      },
+      {
+        "name": "error",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "error"
+          }
+        }
+      },
+      {
+        "name": "bytes",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "bytes"
+          }
+        }
+      },
+      {
+        "name": "user_base_json",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "user_base_json"
+          }
+        }
+      },
+      {
+        "name": "created_ms",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "created_ms"
+          }
+        }
+      },
+      {
+        "name": "ended_ms",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "ended_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "8be93a0fbd7c27500d75c80d3517905270019cac1f9db2e9c09cf1424b6c53c5"
+}

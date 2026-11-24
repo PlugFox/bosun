@@ -558,6 +558,134 @@ mod tests {
         conn.close().await.unwrap();
     }
 
+    /// #150: migration 13 rebuilds `item` to add `conflicts` and the reasons `setup` and
+    /// `guard_checkout`, and adds stage 2's tables. A stage-1 database (version 12) with an
+    /// item that needs the user and a done one migrates: both read back unchanged with no
+    /// conflicts, the foreign keys hold, and the new reason is accepted, an unknown one refused.
+    #[tokio::test]
+    async fn a_stage_1_database_migrates_to_stage_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = open(&path, &Options::default(), &up_to(12)).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO repo (id, path) VALUES (1, '/fixture/repo');
+             INSERT INTO item (id, item_key, repo_id, card_key, state, reason, attempt_number,
+                               seq, attempts, spawns, runs, failed, created_ms, updated_ms)
+             VALUES (3, 'demo#1', 1, 'card-1', 'needs_you', 'identity', 1, 4, 1, 1, 0, 0, 10, 20);
+             INSERT INTO item (id, item_key, repo_id, state, outcome, attempt_number, seq,
+                               attempts, spawns, runs, boot, created_ms, updated_ms)
+             VALUES (8, 'demo#2', 1, 'done', 'flaky', 2, 9, 2, 3, 2, 1, 30, 40);
+             INSERT INTO attempt (id, item_id, number, state, spawn, started_ms)
+             VALUES (1, 3, 1, 'exited', 1, 10);
+             INSERT INTO transition (transition_key, item_id, seq, attempt, from_state, to_state,
+                                     cause, ts_ms)
+             VALUES ('demo#1/t4', 3, 4, 1, 'running', 'needs_you', 'exited', 20);
+             INSERT INTO item_note (item_id, kind, body, ts_ms) VALUES (8, 'lint', '[]', 35);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        let columns = "SELECT id, item_key, repo_id, card_key, state, park_reason, park_until_ms,
+                              park_next, outcome, reason, attempt_number, snapshot_id, seq,
+                              attempts, spawns, runs, failed, uncounted, boot, created_ms,
+                              updated_ms
+                       FROM item ORDER BY id";
+        let before = items(&mut conn, columns).await;
+        assert_eq!(before.len(), 2);
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let mut conn = store.reader().pool.acquire().await.unwrap();
+        assert_eq!(items(&mut conn, columns).await, before);
+        let conflicts: Vec<i64> = sqlx::query_scalar("SELECT conflicts FROM item ORDER BY id")
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(conflicts, [0, 0]);
+        let broken: Vec<(String, i64)> =
+            sqlx::query_as("SELECT \"table\", rowid FROM pragma_foreign_key_check")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert!(broken.is_empty(), "{broken:?}");
+        let found: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master
+             WHERE name IN ('item_repo', 'item_state', 'worktree', 'worktree_item', 'process',
+                            'process_item', 'lease_wait', 'landing')
+             ORDER BY name",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            found,
+            [
+                "item_repo",
+                "item_state",
+                "landing",
+                "lease_wait",
+                "process",
+                "process_item",
+                "worktree",
+                "worktree_item"
+            ]
+        );
+        drop(conn);
+        store.close().await.unwrap();
+
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for reason in ["setup", "guard_checkout"] {
+            sqlx::query(
+                "INSERT INTO item (item_key, repo_id, state, reason, created_ms, updated_ms)
+                 VALUES (?, 1, 'needs_you', ?, 50, 50)",
+            )
+            .bind(format!("demo#{reason}"))
+            .bind(reason)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        }
+        let refused = sqlx::query(
+            "INSERT INTO item (item_key, repo_id, state, reason, created_ms, updated_ms)
+             VALUES ('demo#x', 1, 'needs_you', 'nonsense', 50, 50)",
+        )
+        .execute(&mut conn)
+        .await;
+        assert!(refused.is_err());
+        conn.close().await.unwrap();
+    }
+
+    /// Every row of `query` as text, column by column, to compare a table before and after.
+    async fn items(conn: &mut SqliteConnection, query: &'static str) -> Vec<Vec<Option<String>>> {
+        use sqlx::Row;
+        sqlx::query(query)
+            .fetch_all(conn)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (0..row.len())
+                    .map(|i| {
+                        row.try_get::<Option<i64>, _>(i)
+                            .map(|v| v.map(|v| v.to_string()))
+                            .or_else(|_| row.try_get::<Option<String>, _>(i))
+                            .unwrap()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn a_newer_database_is_refused_untouched() {
         let dir = tempfile::tempdir().unwrap();

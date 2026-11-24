@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE process SET stdout_offset = max(stdout_offset, ?),\n                                stderr_offset = max(stderr_offset, ?)\n             WHERE record_path = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0abdc92561609005b10e83b5db558d50c06deb0da11c99f4e259e5a73d9237d5"
+}

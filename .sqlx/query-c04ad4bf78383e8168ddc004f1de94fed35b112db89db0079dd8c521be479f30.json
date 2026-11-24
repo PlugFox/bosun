@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE process SET stdout_offset = ?, stderr_offset = ? WHERE record_path = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "c04ad4bf78383e8168ddc004f1de94fed35b112db89db0079dd8c521be479f30"
+}

@@ -1,22 +1,31 @@
 //! The claim procedure (#5, #7, #62): the claim write and re-read, the snapshot, the static
 //! lint, the base, the verdict on the base commit (D7), the hashes.
+//!
+//! In worktree mode (#8, E19), after the static lint: the daemon's clone is made or checked,
+//! the target (`landing.target`, else the branch the user's checkout is on) is fetched into it
+//! (E14), the user's checkout is captured for the guard of E4/E21, and the item's worktree is
+//! opened and set up. The rest of the claim runs in the worktree. A setup that fails is
+//! [`ClaimOutcome::Setup`] (Needs you); a claim that ends any other way than confirmed after
+//! the worktree was opened closes it again.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bosun_config::{Config, Repo};
+use bosun_config::{Config, Identity, Repo};
 use bosun_core::ItemId;
 use bosun_git::{Base, Git, GitConfig};
 use bosun_queue::claim::other_claimants;
 use bosun_queue::lint::verdict_shell;
 use bosun_queue::{Card, Claim, Lint, LintContext, QueueError, ShellResolver, Snapshot};
 use bosun_runner::verdict::{Limits, Outcome, VerdictSpec};
-use bosun_store::Write;
+use bosun_store::{WorktreeKind, Write};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
-use super::{ClaimOutcome, Claimed, Shared, blocking, git, identity, lookup, now_ms};
+use super::checkout::UserCheckout;
+use super::workspace::{Unopened, Workspace};
+use super::{ClaimOutcome, Claimed, ItemWorktree, Shared, blocking, git, identity, lookup, now_ms};
 
 /// What lint says when a card's verdict already passes on the base commit.
 pub(crate) const PASSES_ON_BASE: &str =
@@ -140,7 +149,116 @@ pub(crate) async fn claim(
         return ClaimOutcome::Lint(lint.findings.iter().map(ToString::to_string).collect());
     }
 
-    let path = repo.path.clone();
+    // Worktree mode (#8, E19): the item's worktree off the daemon's clone, else the checkout.
+    let opened = match Workspace::of(repo) {
+        None => None,
+        Some(workspace) => match open_worktree(shared, identity, repo, &workspace, item).await {
+            Ok(opened) => Some(opened),
+            Err(outcome) => return outcome,
+        },
+    };
+    let close = opened
+        .as_ref()
+        .map(|o| (o.workspace.clone(), o.worktree.clone()));
+    let outcome = confirm(shared, config, repo, snapshot, item, key, &mut kill, opened).await;
+    if !matches!(outcome, ClaimOutcome::Confirmed(_))
+        && let Some((workspace, worktree)) = close
+    {
+        workspace.close(shared, identity, &worktree, None).await;
+    }
+    outcome
+}
+
+/// Worktree mode: the clone, the target, the user's checkout, the item's worktree and its
+/// setup.
+async fn open_worktree(
+    shared: &Arc<Shared>,
+    identity: &Identity,
+    repo: &Repo,
+    workspace: &Workspace,
+    item: &ItemId,
+) -> Result<ItemWorktree, ClaimOutcome> {
+    let (ws, user, target) = (
+        workspace.clone(),
+        repo.path.clone(),
+        repo.landing.target.clone(),
+    );
+    let prepared = blocking(move || -> Result<(String, UserCheckout), String> {
+        ws.ensure_clone()
+            .map_err(|e| format!("the daemon's clone: {e}"))?;
+        let target = if let Some(target) = target {
+            target
+        } else {
+            let branch = Git::new(&user)
+                .optional(&["symbolic-ref", "--quiet", "HEAD"])
+                .map_err(|e| format!("the branch of the user's checkout: {e}"))?;
+            let Some(branch) = branch else {
+                return Err(
+                    "the user's checkout is on a detached HEAD and `landing.target` is \
+                            not configured: there is no branch to start the item from"
+                        .to_owned(),
+                );
+            };
+            branch
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&branch)
+                .to_owned()
+        };
+        ws.sync_target(&target).map_err(|e| {
+            format!("the target {target} cannot be fetched into the daemon's clone: {e}")
+        })?;
+        // E4, E21: the user's checkout as it is now, compared before every verdict.
+        let checkout = UserCheckout::capture(&user)
+            .map_err(|e| format!("the user's checkout cannot be captured: {e}"))?;
+        Ok((target, checkout))
+    })
+    .await;
+    let (target, user) = prepared.map_err(ClaimOutcome::Failed)?;
+    let at = format!("refs/heads/{target}");
+    let opened = workspace
+        .open_with_setup(
+            shared,
+            identity,
+            item,
+            &item.0,
+            &at,
+            WorktreeKind::Item,
+            Some(user.to_json()),
+        )
+        .await;
+    match opened {
+        Ok(worktree) => Ok(ItemWorktree {
+            workspace: workspace.clone(),
+            worktree,
+            user,
+        }),
+        // Mutant (`mutant_loop_setup_failure_is_claim_failure`): a failing setup is a failed
+        // claim, retried later, instead of Needs you.
+        Err(Unopened::Setup(failed)) if cfg!(mutant_loop_setup_failure_is_claim_failure) => {
+            Err(ClaimOutcome::Failed(failed.to_string()))
+        }
+        Err(Unopened::Setup(failed)) => Err(ClaimOutcome::Setup(failed.to_string())),
+        Err(Unopened::Error(e)) => Err(ClaimOutcome::Failed(format!("the item's worktree: {e}"))),
+    }
+}
+
+/// The rest of the claim, in `opened`'s worktree or else in the checkout: the base, the
+/// verdict on the base commit, git's configuration, the hashes and the snapshot row.
+#[allow(clippy::too_many_arguments)]
+async fn confirm(
+    shared: &Arc<Shared>,
+    config: &Config,
+    repo: &Repo,
+    snapshot: Snapshot,
+    item: &ItemId,
+    key: &str,
+    kill: &mut watch::Receiver<bool>,
+    opened: Option<ItemWorktree>,
+) -> ClaimOutcome {
+    let workdir: PathBuf = opened
+        .as_ref()
+        .map_or_else(|| repo.path.clone(), |o| o.worktree.path.clone());
+    let path = workdir.clone();
     let base = match blocking(move || Base::capture(&Git::new(path))).await {
         Ok(base) => base,
         Err(e) => return ClaimOutcome::Failed(format!("the base cannot be captured: {e}")),
@@ -148,8 +266,8 @@ pub(crate) async fn claim(
 
     // D7: a verdict that already passes on the base commit is wrongly specified.
     if !cfg!(mutant_loop_skip_base_verdict) {
-        let passes = base_verdict(shared, config, repo, &snapshot, &mut kill).await;
-        let (path, at) = (repo.path.clone(), base.clone());
+        let passes = base_verdict(shared, config, repo, &workdir, &snapshot, kill).await;
+        let (path, at) = (workdir.clone(), base.clone());
         if let Err(e) = blocking(move || git::restore_if_dirty(&path, &at)).await {
             return ClaimOutcome::Failed(format!("the checkout after the base verdict: {e}"));
         }
@@ -162,7 +280,7 @@ pub(crate) async fn claim(
 
     // Git's own configuration (#59), after the verdict on the base commit: what the guards
     // compare with before every verdict of the item.
-    let path = repo.path.clone();
+    let path = workdir.clone();
     let git_config = match blocking(move || GitConfig::capture(&Git::new(path))).await {
         Ok(git_config) => git_config,
         Err(e) => {
@@ -175,6 +293,8 @@ pub(crate) async fn claim(
     };
     let claimed = Claimed {
         snapshot,
+        workdir,
+        worktree: opened,
         base,
         git_config,
         repo_hash,
@@ -230,6 +350,7 @@ async fn base_verdict(
     shared: &Arc<Shared>,
     config: &Config,
     repo: &Repo,
+    workdir: &Path,
     snapshot: &Snapshot,
     kill: &mut watch::Receiver<bool>,
 ) -> Result<bool, String> {
@@ -246,7 +367,7 @@ async fn base_verdict(
         shell,
         command: snapshot.contract.verdict.clone(),
         env: env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect(),
-        cwd: repo.path.clone(),
+        cwd: workdir.to_owned(),
         timeout: snapshot
             .contract
             .verdict_timeout

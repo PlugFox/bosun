@@ -25,7 +25,8 @@
 //! captured at claim (its refs and stash entries too), git's configuration recorded at claim
 //! and the attempt's ignored files (#59, #99), the configuration and policy hashes. An item
 //! whose base was not recorded (a snapshot from before #68) cannot be resumed: it goes to Needs
-//! you.
+//! you. In worktree mode (#8) the item's worktree and the user's checkout at claim come from its
+//! worktree row; an item whose row or directory is missing goes to Needs you the same way.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -512,9 +513,12 @@ impl Loop {
         let (Some(repo_hash), Some(policy_hash)) = (row.config_hash, row.policy_hash) else {
             return Err("its hashes were not recorded".to_owned());
         };
-        let git_config = self.git_config_from_store(item).await?;
+        let (workdir, worktree) = self.worktree_from_store(&item.id).await?;
+        let git_config = self.git_config_from_store(item, &workdir).await?;
         Ok(Arc::new(Claimed {
             snapshot,
+            workdir,
+            worktree,
             base,
             git_config,
             repo_hash,
@@ -522,11 +526,66 @@ impl Loop {
         }))
     }
 
+    /// The working directory of `item` and, in worktree mode, its worktree: from its `created`
+    /// row of kind `item`, with the user's checkout at claim. Without `repo.<name>.worktree`,
+    /// the repository's checkout.
+    async fn worktree_from_store(
+        &self,
+        item: &ItemId,
+    ) -> Result<(PathBuf, Option<super::ItemWorktree>), String> {
+        let config = self.config();
+        let (repo, _) =
+            lookup(&config, &self.shared.options.repo).ok_or("the repository is gone")?;
+        let Some(workspace) = super::workspace::Workspace::of(repo) else {
+            return Ok((repo.path.clone(), None));
+        };
+        let rows = self
+            .shared
+            .deps
+            .reader
+            .worktrees(item)
+            .await
+            .map_err(|e| e.to_string())?;
+        let row = rows
+            .into_iter()
+            .rev()
+            .find(|r| {
+                r.kind == bosun_store::WorktreeKind::Item
+                    && r.state == bosun_store::WorktreeState::Created
+            })
+            .ok_or("its worktree was not recorded")?;
+        let path = PathBuf::from(&row.path);
+        if !path.is_dir() {
+            return Err(format!("its worktree {} is gone", path.display()));
+        }
+        let user = row
+            .user_base_json
+            .as_deref()
+            .ok_or("the user's checkout at claim was not recorded")
+            .map_err(str::to_owned)
+            .and_then(super::checkout::UserCheckout::from_json)?;
+        let worktree = bosun_git::worktree::Worktree {
+            path: path.clone(),
+            branch: row.branch,
+            base: row.base_sha,
+        };
+        Ok((
+            path,
+            Some(super::ItemWorktree {
+                workspace,
+                worktree,
+                user,
+            }),
+        ))
+    }
+
     /// Git's configuration at claim: the copy on the latest attempt that has one. With none,
-    /// no session of the item has run since the claim, so the configuration now is the claim's.
+    /// no session of the item has run since the claim, so the configuration now (in
+    /// `workdir`) is the claim's.
     async fn git_config_from_store(
         &self,
         item: &bosun_core::Item,
+        workdir: &std::path::Path,
     ) -> Result<bosun_git::GitConfig, String> {
         let newest = item.attempt.as_ref().map_or(0, |a| a.number);
         for number in (1..=newest).rev() {
@@ -548,10 +607,7 @@ impl Loop {
                 });
             }
         }
-        let config = self.config();
-        let (repo, _) =
-            lookup(&config, &self.shared.options.repo).ok_or("the repository is gone")?;
-        let path = repo.path.clone();
+        let path = workdir.to_owned();
         blocking(move || bosun_git::GitConfig::capture(&bosun_git::Git::new(path)))
             .await
             .map_err(|e| format!("git's configuration: {e}"))

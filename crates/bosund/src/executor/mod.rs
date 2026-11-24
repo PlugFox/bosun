@@ -37,6 +37,13 @@
 //! `refs/bosun/items/<item>` (uncommitted changes as one extra commit) and the checkout is
 //! reset to the item's base, so the next item starts from a clean tree on the claim branch.
 //!
+//! With `repo.<name>.worktree` (#8, E19), and only then, the item runs in its own worktree off
+//! the daemon's clone instead ([`workspace`], opened at claim): the session, the guards, the
+//! preconditions and the verdict run there ([`Claimed::workdir`]), while the identity checks
+//! still look at the user's repository. The user's checkout is captured at claim and compared
+//! before every verdict ([`checkout`], E4 as amended by E21). Every item, Done or not, ends
+//! with its worktree closed and its work kept in the clone under `refs/bosun/items/<item>`.
+//!
 //! # Guards and trailers (#59, #99)
 //!
 //! Git's own configuration is recorded at claim, the ignored files before each attempt's first
@@ -87,6 +94,7 @@
 //! machine (resumed, verified again or landed again, uncounted).
 
 pub(crate) mod board;
+mod checkout;
 mod claim;
 mod commands;
 mod git;
@@ -99,8 +107,6 @@ mod session;
 #[cfg(test)]
 mod tests;
 mod verdict;
-// The loop does not call the workspace yet: the next card of #8 does, and removes this.
-#[allow(dead_code)]
 mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -286,7 +292,13 @@ pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + '
 pub(crate) struct Claimed {
     /// The snapshot the item runs from: its verdict, prose and inlined comments.
     pub(crate) snapshot: bosun_queue::Snapshot,
-    /// The repository at claim, for the preconditions.
+    /// Where the item's files are: its worktree in worktree mode, else the repository's
+    /// checkout (`repo.path`). The session, the guards, the preconditions and the verdict run
+    /// here; the identity checks look at `repo.path` (#2).
+    pub(crate) workdir: PathBuf,
+    /// Worktree mode (#8, E19): the item's worktree and the user's checkout at claim.
+    pub(crate) worktree: Option<ItemWorktree>,
+    /// The working directory at claim, for the preconditions.
     pub(crate) base: bosun_git::Base,
     /// Git's own configuration at claim, for the guards (#59).
     pub(crate) git_config: bosun_git::GitConfig,
@@ -294,6 +306,18 @@ pub(crate) struct Claimed {
     pub(crate) repo_hash: String,
     /// The repository's policy hash at claim.
     pub(crate) policy_hash: String,
+}
+
+/// An item's worktree off the daemon's clone (#8), with the user's checkout as captured at
+/// claim (E4, E21).
+#[derive(Debug)]
+pub(crate) struct ItemWorktree {
+    /// The repository's workspace at claim: what closes the worktree.
+    pub(crate) workspace: workspace::Workspace,
+    /// The worktree: its directory is [`Claimed::workdir`].
+    pub(crate) worktree: bosun_git::worktree::Worktree,
+    /// The user's checkout at claim, compared before every verdict.
+    pub(crate) user: checkout::UserCheckout,
 }
 
 /// How a claim task ended.
@@ -307,6 +331,8 @@ pub(crate) enum ClaimOutcome {
     Lint(Vec<String>),
     /// The claim could not be carried out; the item goes back to Ready.
     Failed(String),
+    /// The worktree's `setup` command failed (#8): Needs you, not a failed attempt.
+    Setup(String),
     /// The board refused the claim ([`Loop::board_error`] says what follows).
     Board(bosun_queue::QueueError),
 }
@@ -792,11 +818,7 @@ impl Loop {
     /// with git's configuration at claim on the attempt's row, for crash recovery (#68). A
     /// snapshot that cannot be taken leaves none, and the attempt fails its preconditions.
     async fn record_guards(&mut self, attempt: u32, claimed: &Claimed) {
-        let config = self.config();
-        let Some((repo, _)) = lookup(&config, &self.shared.options.repo) else {
-            return;
-        };
-        let path = repo.path.clone();
+        let path = claimed.workdir.clone();
         let ignored =
             match blocking(move || bosun_git::Ignored::capture(&bosun_git::Git::new(path))).await {
                 Ok(ignored) => Arc::new(ignored),
@@ -911,6 +933,11 @@ impl Loop {
         };
         let item = cur.item.id.clone();
 
+        // Worktree mode: the user's checkout first (E4, E21), before anything else is looked at.
+        if let Some(event) = self.checkout_guard(&item, attempt, &claimed, repo).await {
+            return event;
+        }
+
         // The guards first: a refusal is Needs you, whatever the preconditions say.
         let (guard_repo, guard_claimed) = (repo.clone(), claimed.clone());
         let refused = blocking(move || guards(&guard_repo, &guard_claimed, &ignored)).await;
@@ -934,7 +961,7 @@ impl Loop {
             }
         }
 
-        let path = repo.path.clone();
+        let path = claimed.workdir.clone();
         let runs = self
             .shared
             .deps
@@ -970,6 +997,57 @@ impl Loop {
                 self.unchecked(&item, attempt, why).await
             }
         }
+    }
+
+    /// Worktree mode (E4, E21): the user's checkout compared with its capture at claim. A
+    /// refusal is `Refused` with `guard_checkout`; changed status lines are only reported;
+    /// `None` when the attempt goes on to the other guards.
+    async fn checkout_guard(
+        &self,
+        item: &ItemId,
+        attempt: u32,
+        claimed: &Claimed,
+        repo: &Repo,
+    ) -> Option<Event> {
+        let wt = claimed.worktree.as_ref()?;
+        if cfg!(mutant_loop_skip_checkout_guard) {
+            // Mutant (`mutant_loop_skip_checkout_guard`): the user's checkout is not compared.
+            return None;
+        }
+        let (user, before) = (repo.path.clone(), wt.user.clone());
+        let diff = match blocking(move || checkout::check(&user, &before)).await {
+            Ok(diff) => diff,
+            Err(e) => {
+                let why = format!("the user's checkout could not be compared: {e}");
+                self.shared.trouble(why.clone());
+                return Some(self.unchecked(item, attempt, why).await);
+            }
+        };
+        if !diff.warnings.is_empty() {
+            self.shared.trouble(format!(
+                "{item}: the user's checkout changed during attempt {attempt} (a warning, the \
+                 item goes on): {}",
+                diff.warnings.join("; ")
+            ));
+        }
+        if diff.refusals.is_empty() {
+            return None;
+        }
+        self.shared.trouble(format!(
+            "{item}: attempt {attempt} is refused before its verdict: the user's checkout \
+             changed: {}",
+            diff.refusals.join("; ")
+        ));
+        let text = diff
+            .refusals
+            .iter()
+            .map(|r| format!("the user's checkout changed: {r}"))
+            .collect();
+        self.refused(item, attempt, text).await;
+        Some(Event::Refused {
+            attempt,
+            guard: bosun_core::Guard::Checkout,
+        })
     }
 
     /// Stores why `attempt` was refused before its verdict (#137), in the daemon's words, before
@@ -1019,7 +1097,15 @@ impl Loop {
             }
         }
         let done = matches!(cur.item.state, State::Done(_));
-        if !done && let Some(claimed) = &cur.claimed {
+        if let Some(claimed) = &cur.claimed
+            && let Some(wt) = &claimed.worktree
+        {
+            // Worktree mode: the item's work is kept in the clone under its aside ref, and the
+            // worktree and its branch go. This applies to a Done item too: until landing moves
+            // the target (the landing card of #8), the aside ref is where a Done item's work is
+            // found.
+            self.close_worktree(wt, Some(&cur.item.id)).await;
+        } else if !done && let Some(claimed) = &cur.claimed {
             let config = self.config();
             if let Some((repo, _)) = lookup(&config, &self.shared.options.repo) {
                 let path = repo.path.clone();
@@ -1032,6 +1118,22 @@ impl Loop {
             }
         }
         drop(cur.power.take());
+    }
+
+    /// Closes the worktree of the item in flight (#8); `aside`: its work is kept first. What
+    /// cannot be removed is quarantined and reported by the workspace; the loop goes on.
+    async fn close_worktree(&self, wt: &ItemWorktree, aside: Option<&ItemId>) {
+        let config = self.config();
+        let Some((_, identity)) = lookup(&config, &self.shared.options.repo) else {
+            self.shared.trouble(format!(
+                "the worktree {} is not closed: the repository is no longer configured",
+                wt.worktree.path.display()
+            ));
+            return;
+        };
+        wt.workspace
+            .close(&self.shared, identity, &wt.worktree, aside)
+            .await;
     }
 
     async fn on_done(&mut self, done: Done) {
@@ -1065,6 +1167,11 @@ impl Loop {
                             findings,
                         });
                         Event::LintFailed
+                    }
+                    ClaimOutcome::Setup(e) => {
+                        self.shared
+                            .trouble(format!("the worktree's setup for {item} failed: {e}"));
+                        Event::SetupFailed
                     }
                     ClaimOutcome::Failed(e) => {
                         self.shared.trouble(format!("claiming {item} failed: {e}"));
@@ -1391,14 +1498,20 @@ impl Loop {
         if self.shared.options.agent.is_none() {
             return Err("the agent CLI `claude` was not found on PATH".to_owned());
         }
-        let path = repo.path.clone();
-        let dirty = blocking(move || bosun_git::clean_tree(&bosun_git::Git::new(path))).await;
-        match dirty {
-            Ok(reasons) if reasons.is_empty() => {}
-            Ok(_) => {
-                return Err("the checkout has uncommitted changes; no item is claimed".to_owned());
+        // Worktree mode: the item runs off the daemon's clone, and the user may be working in
+        // the checkout (E21); only stage 1 needs it clean.
+        if repo.worktree.is_none() {
+            let path = repo.path.clone();
+            let dirty = blocking(move || bosun_git::clean_tree(&bosun_git::Git::new(path))).await;
+            match dirty {
+                Ok(reasons) if reasons.is_empty() => {}
+                Ok(_) => {
+                    return Err(
+                        "the checkout has uncommitted changes; no item is claimed".to_owned()
+                    );
+                }
+                Err(e) => return Err(format!("the checkout cannot be read: {e}")),
             }
-            Err(e) => return Err(format!("the checkout cannot be read: {e}")),
         }
         if let Some((at, result)) = &self.checked
             && at.elapsed() < self.shared.options.recheck
@@ -1435,7 +1548,7 @@ fn guards(
         // Mutant: the loop skips the guards of #59 and goes on to the preconditions.
         return Ok(Vec::new());
     }
-    let git = bosun_git::Git::new(&repo.path);
+    let git = bosun_git::Git::new(&claimed.workdir);
     let mut refusals = bosun_git::protected(
         &git,
         &claimed.base,

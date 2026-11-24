@@ -1769,6 +1769,47 @@ const MUTANTS: &[Mutant] = &[
         // Only Windows refuses to delete a file held open.
         platform: Some(Platform::Windows),
     },
+    // #153: the loop runs an item in its worktree; the guard on the user's checkout.
+    Mutant {
+        name: "mutant_loop_session_in_user_checkout",
+        issue: 153,
+        breaks: "in worktree mode the session runs in the user's checkout",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::an_item_runs_in_its_worktree_and_the_users_checkout_is_untouched",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_skip_checkout_guard",
+        issue: 153,
+        breaks: "the user's checkout is not compared before the verdict",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::a_session_that_switches_the_users_branch_needs_the_user",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_strict_checkout_guard",
+        issue: 153,
+        breaks: "any change of the user's checkout (a fast-forward, a status line) is a refusal",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::a_user_commit_and_a_dirty_file_during_the_run_do_not_stop_the_item",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_setup_failure_is_claim_failure",
+        issue: 153,
+        breaks: "a failing worktree setup is a failed claim, retried, instead of Needs you",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::a_failing_setup_needs_the_user_and_starts_no_session",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

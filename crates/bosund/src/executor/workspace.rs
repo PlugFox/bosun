@@ -196,11 +196,6 @@ impl Workspace {
         })
     }
 
-    /// The worktree root.
-    pub(crate) fn root(&self) -> &Path {
-        &self.config.root
-    }
-
     /// The path of the daemon's clone.
     pub(crate) fn clone_path(&self) -> PathBuf {
         self.config.root.join(CLONE)
@@ -348,7 +343,8 @@ impl Workspace {
     }
 
     /// Makes `item`'s worktree, named `name`, at `at` (a commit or a ref of the clone), and
-    /// records it.
+    /// records it, with `user_base`: the user's checkout at claim as JSON (E4), for an item's
+    /// worktree.
     ///
     /// # Errors
     ///
@@ -361,6 +357,7 @@ impl Workspace {
         name: &str,
         at: &str,
         kind: WorktreeKind,
+        user_base: Option<String>,
     ) -> Result<Worktree, Error> {
         let this = self.clone();
         let (name, at) = (name.to_owned(), at.to_owned());
@@ -371,7 +368,7 @@ impl Workspace {
             branch: made.branch.clone(),
             base_sha: made.base.clone(),
             kind,
-            user_base_json: None,
+            user_base_json: user_base,
             created_ms: now_ms(),
         });
         if let Err(e) = shared.deps.writer.write(vec![row]).await {
@@ -417,6 +414,7 @@ impl Workspace {
     /// # Errors
     ///
     /// It was not made, or its setup failed (and it is gone, or quarantined and reported).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open_with_setup(
         &self,
         shared: &Shared,
@@ -425,9 +423,10 @@ impl Workspace {
         name: &str,
         at: &str,
         kind: WorktreeKind,
+        user_base: Option<String>,
     ) -> Result<Worktree, Unopened> {
         let made = self
-            .open(shared, item, name, at, kind)
+            .open(shared, item, name, at, kind, user_base)
             .await
             .map_err(Unopened::Error)?;
         if let Err(failed) = self.setup(shared, identity, &made).await {
@@ -803,7 +802,7 @@ mod tests {
         let at = ws.sync_target("main").unwrap();
         assert_eq!(at, user_head);
         let made = ws
-            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item)
+            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item, None)
             .await
             .unwrap();
 
@@ -885,6 +884,7 @@ mod tests {
                 "demo-1",
                 &at,
                 WorktreeKind::Item,
+                None,
             )
             .await;
         let Err(Unopened::Setup(failed)) = result else {
@@ -910,6 +910,7 @@ mod tests {
                 "demo-1",
                 &at,
                 WorktreeKind::Item,
+                None,
             )
             .await
             .unwrap();
@@ -927,7 +928,7 @@ mod tests {
         ws.ensure_clone().unwrap();
         let at = ws.sync_target("main").unwrap();
         let made = ws
-            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item)
+            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item, None)
             .await
             .unwrap();
         std::fs::write(made.path.join("committed.txt"), "kept\n").unwrap();
@@ -965,7 +966,7 @@ mod tests {
         ws.ensure_clone().unwrap();
         let at = ws.sync_target("main").unwrap();
         let made = ws
-            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item)
+            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item, None)
             .await
             .unwrap();
         let held = made.path.join("README.md");
@@ -991,7 +992,7 @@ mod tests {
         assert!(rows[0].error.is_some());
 
         let again = ws
-            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item)
+            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item, None)
             .await
             .unwrap();
         assert_ne!(again.path, made.path);
@@ -1012,7 +1013,7 @@ mod tests {
         let at = ws.sync_target("main").unwrap();
 
         let error = ws
-            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item)
+            .open(&w.shared, &w.item, "demo-1", &at, WorktreeKind::Item, None)
             .await
             .unwrap_err();
         assert!(

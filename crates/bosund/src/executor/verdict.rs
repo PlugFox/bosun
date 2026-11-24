@@ -122,7 +122,8 @@ pub(crate) async fn verdict(
         shell,
         command: command.clone(),
         env: env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect(),
-        cwd: repo.path.clone(),
+        // The item's files: its worktree in worktree mode (#8).
+        cwd: claimed.workdir.clone(),
         timeout: claimed
             .snapshot
             .contract

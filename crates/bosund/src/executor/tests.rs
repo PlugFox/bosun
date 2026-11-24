@@ -31,6 +31,7 @@ use crate::events::{Events, Options as EventOptions};
 
 mod recovery;
 mod sticky;
+mod worktrees;
 
 /// Removes from `command` every variable it would inherit from a bosun session (#134): each
 /// `BOSUN_*` and the command-scope configuration (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
@@ -257,6 +258,10 @@ struct Scene {
     projects: Option<Arc<FakeGitHub>>,
     /// Whether [`LOGIN`] is on the identity's author allowlist (#106).
     login_listed: bool,
+    /// Worktree mode (#8): `repo.demo.worktree` with its root at `<scene>/wt`; `false`: stage 1.
+    worktrees: bool,
+    /// The worktree's `setup` command, in worktree mode.
+    setup: Option<String>,
 }
 
 impl Scene {
@@ -295,7 +300,8 @@ impl Scene {
              queue = {{ kind = 'local_file', file = '{board}' }}\n\
              model = 'opus'\n\
              verdict = {{ timeout = '60s' }}\n\
-             build_dirs = ['target']\n\n\
+             build_dirs = ['target']\n\
+             {worktree}\n\
              [repo.demo.policy]\n\
              protected = [{protected}]\n",
             claude = d.join("claude").display(),
@@ -304,6 +310,7 @@ impl Scene {
             gitconfig = self.gitconfig.display(),
             repo = self.repo.display(),
             board = self.board.display(),
+            worktree = self.worktree_line(),
             authors = self
                 .authors()
                 .iter()
@@ -313,8 +320,38 @@ impl Scene {
         )
     }
 
+    /// The `worktree` line of `[repo.demo]` in worktree mode, else nothing.
+    fn worktree_line(&self) -> String {
+        if !self.worktrees {
+            return String::new();
+        }
+        let setup = self
+            .setup
+            .as_deref()
+            .map_or_else(String::new, |s| format!(", setup = '{s}'"));
+        format!(
+            "worktree = {{ root = '{}'{setup} }}\n",
+            self.worktree_root().display()
+        )
+    }
+
+    /// The worktree root of a scene in worktree mode.
+    fn worktree_root(&self) -> PathBuf {
+        self.path("wt")
+    }
+
     async fn new() -> Self {
         Self::on(None).await
+    }
+
+    /// A scene in worktree mode (#8): the same configuration plus `repo.demo.worktree`, its
+    /// root at `<scene>/wt`, with `setup` as its setup command.
+    async fn with_worktrees(setup: Option<&str>) -> Self {
+        let mut scene = Self::new().await;
+        scene.worktrees = true;
+        scene.setup = setup.map(str::to_owned);
+        std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();
+        scene
     }
 
     /// A scene whose board is a fake Projects v2 board: one project with the six columns,
@@ -401,6 +438,8 @@ impl Scene {
             events: Events::new("test", EventOptions::default()),
             projects,
             login_listed: true,
+            worktrees: false,
+            setup: None,
             dir,
         }
     }

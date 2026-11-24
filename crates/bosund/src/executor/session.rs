@@ -417,7 +417,8 @@ pub(crate) async fn session(
         },
         SpawnMode::Fresh | SpawnMode::Reset => new_session_id(run),
     };
-    let git_repo = Git::new(&repo.path);
+    // Where the item's files are: its worktree in worktree mode (#8).
+    let git_repo = Git::new(&claimed.workdir);
     if run.mode == SpawnMode::Reset {
         let git_repo = git_repo.clone();
         let reset = blocking(move || {
@@ -481,8 +482,15 @@ pub(crate) async fn session(
         }
     };
     let runner = ClaudeRunner::new(&program);
+    // Mutant (`mutant_loop_session_in_user_checkout`): in worktree mode the session runs in the
+    // user's checkout.
+    let cwd = if cfg!(mutant_loop_session_in_user_checkout) {
+        repo.path.clone()
+    } else {
+        claimed.workdir.clone()
+    };
     let ctx = SessionContext {
-        cwd: repo.path.clone(),
+        cwd,
         session_id: session_id.clone(),
         prompt: prompt.user,
         system_prompt_file: system_file,

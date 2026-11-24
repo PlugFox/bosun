@@ -456,8 +456,10 @@ mod tests {
     }
 
     /// A temporary directory holding a repository (`repo`) on `main` with one commit, which
-    /// `a.txt` holds. The code under test reads the user's configuration, so the repository
-    /// names its own committer and turns signing off.
+    /// `a.txt` holds. The code under test reads the user's and the system's configuration, so
+    /// the repository names its own committer, turns signing off, and turns off the line-ending
+    /// conversion Git for Windows enables system-wide (the helper commits without it, so a
+    /// checkout with it would rewrite every file).
     fn setup() -> (TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
@@ -466,6 +468,7 @@ mod tests {
         git(&repo, &["config", "user.name", "Test"]);
         git(&repo, &["config", "user.email", "test@example.invalid"]);
         git(&repo, &["config", "commit.gpgSign", "false"]);
+        git(&repo, &["config", "core.autocrlf", "false"]);
         commit(&repo, "a.txt", "first\n");
         (dir, repo)
     }

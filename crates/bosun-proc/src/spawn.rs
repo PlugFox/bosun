@@ -64,7 +64,8 @@ pub trait Tree: Send + fmt::Debug {
     ///
     /// # Errors
     ///
-    /// When the operating system refuses the query.
+    /// When the operating system refuses the query, or (Windows) when the job keeps gaining
+    /// processes faster than a bounded number of reads can list them.
     fn members(&self) -> io::Result<Vec<u32>>;
 
     /// Waits for the child itself to exit. Its descendants may outlive it, still inside the

@@ -122,63 +122,94 @@ impl Container {
     }
 
     /// The pids of the processes in the job (`JobObjectBasicProcessIdList`). The list is read
-    /// into a buffer that grows until the whole of it fits.
+    /// into a buffer that grows while processes join between reads, at most [`MEMBER_READS`]
+    /// times: a job that keeps outgrowing it is an error, never a hang.
     pub(crate) fn members(&self) -> io::Result<Vec<u32>> {
-        let header = mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
-        let word = mem::size_of::<usize>();
-        let mut capacity = 16;
-        loop {
-            // A `usize` buffer, so the list and its id array are aligned.
-            let mut buffer = vec![0_usize; header / word + capacity];
-            let bytes = u32::try_from(buffer.len() * word)
-                .map_err(|_| io::Error::other("too many processes in the job"))?;
-            // SAFETY: the job handle is live and was created with all access; the pointer and
-            // length describe `buffer`, writable, aligned for the structure and at least as
-            // large as its header; the return length may be null.
-            let ok = unsafe {
-                QueryInformationJobObject(
-                    self.job.as_raw_handle(),
-                    JobObjectBasicProcessIdList,
-                    buffer.as_mut_ptr().cast(),
-                    bytes,
-                    ptr::null_mut(),
-                )
-            };
-            let mut more = false;
-            if ok == 0 {
-                let e = io::Error::last_os_error();
-                #[expect(clippy::cast_possible_wrap, reason = "Win32 error codes fit an i32")]
-                if e.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
-                    return Err(e);
-                }
-                more = true;
-            }
-            let list: *const JOBOBJECT_BASIC_PROCESS_ID_LIST = buffer.as_ptr().cast();
-            // SAFETY: `list` points to the start of `buffer`, aligned and large enough for the
-            // header, which the call filled in.
-            let (assigned, listed) = unsafe {
-                (
-                    (*list).NumberOfAssignedProcesses,
-                    (*list).NumberOfProcessIdsInList,
-                )
-            };
-            let (assigned, listed) = (assigned as usize, listed as usize);
-            if more || listed < assigned {
-                // Processes joined between the calls, or the buffer was short: grow and retry.
-                capacity = assigned.max(capacity) * 2;
-                continue;
-            }
-            // The id array is an array of `usize`, so its offset is a whole number of words.
-            let ids = buffer
-                .get(header / word..)
-                .and_then(|ids| ids.get(..listed))
-                .ok_or_else(|| io::Error::other("the job listed more ids than fit"))?;
-            return Ok(ids
-                .iter()
-                .filter_map(|&id| u32::try_from(id).ok())
-                .collect());
+        job_members(self.job.as_raw_handle())
+    }
+}
+
+/// How many times a job's id list is read before [`Container::members`] gives up. Each retry
+/// makes room for at least twice the processes the last read counted, so only a job that more
+/// than doubles between two reads, again and again, exhausts it.
+const MEMBER_READS: usize = 8;
+
+/// Calls `read` with a growing capacity until it answers `Ok(Ok(list))`, at most `reads` times.
+/// `Ok(Err(counted))` asks for another read: the capacity becomes at least twice `counted`.
+///
+/// # Errors
+///
+/// The first error of `read`, or when `reads` reads all asked for more room.
+fn read_growing<T>(
+    reads: usize,
+    mut read: impl FnMut(usize) -> io::Result<Result<T, usize>>,
+) -> io::Result<T> {
+    let mut capacity = 16;
+    for _ in 0..reads {
+        match read(capacity)? {
+            Ok(list) => return Ok(list),
+            Err(counted) => capacity = counted.max(capacity) * 2,
         }
     }
+    Err(io::Error::other(format!(
+        "the job's process list kept growing over {reads} reads"
+    )))
+}
+
+/// The pids of the processes in `job`, a live job handle with at least `JOB_OBJECT_QUERY`.
+fn job_members(job: RawHandle) -> io::Result<Vec<u32>> {
+    let header = mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+    let word = mem::size_of::<usize>();
+    read_growing(MEMBER_READS, |capacity| {
+        // A `usize` buffer, so the list and its id array are aligned.
+        let mut buffer = vec![0_usize; header / word + capacity];
+        let bytes = u32::try_from(buffer.len() * word)
+            .map_err(|_| io::Error::other("too many processes in the job"))?;
+        // SAFETY: the caller holds `job` live with `JOB_OBJECT_QUERY`; the pointer and length
+        // describe `buffer`, writable, aligned for the structure and at least as large as its
+        // header; the return length may be null.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectBasicProcessIdList,
+                buffer.as_mut_ptr().cast(),
+                bytes,
+                ptr::null_mut(),
+            )
+        };
+        let mut more = false;
+        if ok == 0 {
+            let e = io::Error::last_os_error();
+            #[expect(clippy::cast_possible_wrap, reason = "Win32 error codes fit an i32")]
+            if e.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+                return Err(e);
+            }
+            more = true;
+        }
+        let list: *const JOBOBJECT_BASIC_PROCESS_ID_LIST = buffer.as_ptr().cast();
+        // SAFETY: `list` points to the start of `buffer`, aligned and large enough for the
+        // header, which the call filled in.
+        let (assigned, listed) = unsafe {
+            (
+                (*list).NumberOfAssignedProcesses,
+                (*list).NumberOfProcessIdsInList,
+            )
+        };
+        let (assigned, listed) = (assigned as usize, listed as usize);
+        if more || listed < assigned {
+            // Processes joined between the calls, or the buffer was short: grow and retry.
+            return Ok(Err(assigned));
+        }
+        // The id array is an array of `usize`, so its offset is a whole number of words.
+        let ids = buffer
+            .get(header / word..)
+            .and_then(|ids| ids.get(..listed))
+            .ok_or_else(|| io::Error::other("the job listed more ids than fit"))?;
+        Ok(Ok(ids
+            .iter()
+            .filter_map(|&id| u32::try_from(id).ok())
+            .collect()))
+    })
 }
 
 /// Resumes every thread of the suspended process `pid`: just the main one, for a process
@@ -404,4 +435,45 @@ pub(crate) fn free_space(path: &std::path::Path) -> io::Result<u64> {
         return Err(io::Error::last_os_error());
     }
     Ok(available)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A job that outgrows every buffer is an error after the bound, not an endless loop.
+    #[test]
+    fn a_list_that_keeps_growing_is_read_a_bounded_number_of_times() {
+        let mut capacities = Vec::new();
+        let answer = read_growing::<()>(MEMBER_READS, |capacity| {
+            capacities.push(capacity);
+            // Always one more process than there was room for.
+            Ok(Err(capacity + 1))
+        });
+        assert!(answer.is_err(), "{answer:?}");
+        assert_eq!(capacities.len(), MEMBER_READS);
+        assert!(
+            capacities.windows(2).all(|w| w[1] >= w[0] * 2),
+            "{capacities:?}"
+        );
+    }
+
+    /// A list that settles on a later read is returned; an error of a read ends the reading.
+    #[test]
+    fn a_list_that_settles_is_returned_and_an_error_is_passed_on() {
+        let mut reads = 0;
+        let answer = read_growing(MEMBER_READS, |capacity| {
+            reads += 1;
+            Ok(if reads < 3 { Err(capacity) } else { Ok(reads) })
+        });
+        assert_eq!(answer.expect("settled"), 3);
+
+        let mut reads = 0;
+        let answer = read_growing::<()>(MEMBER_READS, |_| {
+            reads += 1;
+            Err(io::Error::other("refused"))
+        });
+        assert!(answer.is_err());
+        assert_eq!(reads, 1);
+    }
 }

@@ -217,7 +217,8 @@ impl App {
             Key::Char('4') => self.tab = Tab::Tokens,
             Key::Tab => self.tab = self.tab.next(false),
             Key::BackTab => self.tab = self.tab.next(true),
-            Key::Up | Key::Char('k') => self.step(false),
+            // `k` is the release of the kill switch, so up is the arrow only.
+            Key::Up => self.step(false),
             Key::Down | Key::Char('j') => self.step(true),
             Key::Left | Key::Char('h') if self.tab == Tab::Queue => {
                 self.board = self.board.saturating_sub(1);
@@ -282,13 +283,15 @@ impl App {
     }
 
     /// What `spec` acts on, from the selection, and how the question names it.
-    fn target(&self, spec: &Spec) -> Result<(Target, String), &'static str> {
+    fn target(&self, spec: &Spec) -> Result<(Target, String), String> {
         match spec.scope {
             Scope::Daemon => {
-                if self.killed() {
-                    return Err(
-                        "the kill switch is already thrown; `bosun kill --release` releases it",
-                    );
+                if spec.action == Action::Kill && self.killed() {
+                    let release = Action::ReleaseKill.spec();
+                    return Err(format!(
+                        "the kill switch is already thrown; `{}` (or `bosun {}`) releases it",
+                        release.key, release.command
+                    ));
                 }
                 Ok((Target::default(), "the daemon".to_owned()))
             }
@@ -372,7 +375,7 @@ pub(crate) mod tests {
     use super::*;
 
     /// The keys the view itself takes; none of them may be an action's key.
-    const VIEW_KEYS: &[char] = &['q', '1', '2', '3', '4', 'j', 'k', 'h', 'l', 'y'];
+    const VIEW_KEYS: &[char] = &['q', '1', '2', '3', '4', 'j', 'h', 'l', 'y'];
 
     /// A synthetic identity with two repositories: one working on an item, one idle.
     pub(crate) fn overview(identity: &str, now_ms: i64) -> Overview {
@@ -596,10 +599,7 @@ pub(crate) mod tests {
         let _ = app.on_key(Key::Down);
         assert_eq!(app.on_key(Key::Char('R')), None);
         assert!(app.pending.is_none(), "beta has no item in flight");
-        assert_eq!(
-            app.message.as_deref(),
-            Some("restart item: no item is selected")
-        );
+        assert_eq!(app.message.as_deref(), Some("restart: no item is selected"));
 
         let _ = app.on_key(Key::Char('2'));
         let _ = app.on_key(Key::Down);
@@ -634,5 +634,72 @@ pub(crate) mod tests {
         }
         assert_eq!(app.on_key(Key::Char('K')), None);
         assert!(app.pending.is_none());
+    }
+
+    /// The kill switch is released from the TUI by its own row of the shared table: `k` asks
+    /// the release question, `y` sends one `control.kill` with `release: true`, and any other
+    /// answer sends nothing.
+    #[tokio::test]
+    async fn the_kill_switch_can_be_released_from_the_tui() {
+        use bosun_api::Method as _;
+
+        use crate::feed::Feed;
+        use crate::feed::tests::{Fake, actions_of, token};
+
+        let release = ACTIONS
+            .iter()
+            .find(|s| s.key == 'k')
+            .expect("a row for `k`");
+        assert_eq!(release.action, Action::ReleaseKill);
+        assert_eq!(release.command, "kill --release");
+        assert_eq!(release.method, bosun_api::method::ControlKill::NAME);
+        assert_eq!(
+            release.confirm,
+            "Release the kill switch? Parked items resume and board writes start again."
+        );
+
+        let mut fake = Fake::new("release");
+        let mut app = App::new(["personal".to_owned()]);
+        let mut feed = Feed::new(fake.endpoint.clone()).with_operator(token);
+        feed.refresh(&mut app, 0).await;
+        assert_eq!(app.link, Link::Up);
+        // Released or not, as the last overview said, the key asks.
+        for killed in [true, false] {
+            if let Some(o) = app.identities[0].1.overview.as_mut() {
+                o.killed = killed;
+            }
+            for answer in [
+                Key::Char('n'),
+                Key::Char('k'),
+                Key::Char('Y'),
+                Key::Esc,
+                Key::Enter,
+            ] {
+                assert!(!crate::on_key(&mut app, &mut feed, Key::Char('k')).await);
+                assert_eq!(
+                    app.pending.as_ref().map(|p| p.question.as_str()),
+                    Some(release.confirmation("the daemon").as_str()),
+                    "killed: {killed}"
+                );
+                assert!(!crate::on_key(&mut app, &mut feed, answer).await);
+                assert!(app.pending.is_none(), "{answer:?}");
+                assert_eq!(
+                    app.message.as_deref(),
+                    Some("release: cancelled, nothing sent")
+                );
+            }
+        }
+        assert_eq!(actions_of(&fake.calls()), Vec::<&str>::new());
+
+        if let Some(o) = app.identities[0].1.overview.as_mut() {
+            o.killed = true;
+        }
+        assert!(!crate::on_key(&mut app, &mut feed, Key::Char('k')).await);
+        assert_eq!(actions_of(&fake.calls()), Vec::<&str>::new());
+        assert!(!crate::on_key(&mut app, &mut feed, Key::Char('y')).await);
+        assert_eq!(actions_of(&fake.calls()), vec!["control.kill"]);
+        assert_eq!(fake.kills(), vec![true]);
+        assert_eq!(app.message.as_deref(), Some("the kill switch is released"));
+        fake.stop().await;
     }
 }

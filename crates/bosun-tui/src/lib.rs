@@ -15,9 +15,9 @@
 //!
 //! # Keys
 //!
-//! `1`-`4` or Tab switch tabs, `j`/`k` (or the arrows) move, `h`/`l` switch boards in the
-//! Queue, `q` or Esc quits. The operator actions (pause, resume, the kill switch,
-//! restart-item) are the rows of the shared table `bosun_client::actions::ACTIONS`, with its
+//! `1`-`4` or Tab switch tabs, the arrows (and `j` for down) move, `h`/`l` switch boards in
+//! the Queue, `q` or Esc quits. `k` is not up: it releases the kill switch. The operator
+//! actions (pause, resume, throwing and releasing the kill switch, restart-item) are the rows of the shared table `bosun_client::actions::ACTIONS`, with its
 //! keys and its confirmation texts: each key asks its question first, and only `y` sends the
 //! action; any other key answers no and nothing is sent. Pause and resume act on the selected
 //! repository, restart-item on the selected item (the Overview row's item in flight, or the

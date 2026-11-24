@@ -22,10 +22,10 @@ use crate::app::Key;
 use crate::app::tests::{overview, queue};
 
 /// The token the fake daemon takes.
-const TOKEN: &str = "bosun-operator-test";
+pub(crate) const TOKEN: &str = "bosun-operator-test";
 
 #[expect(clippy::unnecessary_wraps, reason = "the type of `Feed::operator`")]
-fn token(_: &Endpoint) -> Result<String, String> {
+pub(crate) fn token(_: &Endpoint) -> Result<String, String> {
     Ok(TOKEN.to_owned())
 }
 
@@ -37,6 +37,8 @@ struct State {
     queue: QueueView,
     /// The methods called, in order, `hello` and `events.subscribe` excluded.
     calls: Vec<String>,
+    /// The `release` of each `control.kill`, in order.
+    kills: Vec<bool>,
     /// The output lines of the fake's ring, oldest first, and the head.
     lines: Vec<Event>,
     head: u64,
@@ -58,8 +60,8 @@ enum Push {
 }
 
 /// A fake daemon that can be stopped and started again under the same endpoint.
-struct Fake {
-    endpoint: Endpoint,
+pub(crate) struct Fake {
+    pub(crate) endpoint: Endpoint,
     state: Arc<Mutex<State>>,
     server: Option<JoinHandle<()>>,
     /// The socket's directory (Unix).
@@ -67,7 +69,7 @@ struct Fake {
 }
 
 impl Fake {
-    fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let endpoint = if cfg!(windows) {
             Endpoint::new(format!("bosun-tui-test-{}-{name}", std::process::id()))
@@ -82,6 +84,7 @@ impl Fake {
                 overview: overview("personal", now),
                 queue: queue("personal"),
                 calls: Vec::new(),
+                kills: Vec::new(),
                 lines: Vec::new(),
                 head: 0,
                 pushes: VecDeque::new(),
@@ -99,15 +102,20 @@ impl Fake {
     }
 
     /// Stops serving and closes every connection, as a daemon that exits.
-    async fn stop(&mut self) {
+    pub(crate) async fn stop(&mut self) {
         if let Some(server) = self.server.take() {
             server.abort();
             let _ = server.await;
         }
     }
 
-    fn calls(&self) -> Vec<String> {
+    pub(crate) fn calls(&self) -> Vec<String> {
         self.state.lock().unwrap().calls.clone()
+    }
+
+    /// The `release` of each `control.kill` the fake was sent.
+    pub(crate) fn kills(&self) -> Vec<bool> {
+        self.state.lock().unwrap().kills.clone()
     }
 }
 
@@ -328,7 +336,9 @@ fn answer(request: &Request, state: &Mutex<State>) -> Result<Value, String> {
                 }
                 "control.kill" => {
                     operator()?;
-                    Ok(json!({"killed": true}))
+                    let release = params["release"].as_bool().unwrap_or_default();
+                    state.kills.push(release);
+                    Ok(json!({"killed": !release}))
                 }
                 "item.restart" => {
                     operator()?;
@@ -342,7 +352,7 @@ fn answer(request: &Request, state: &Mutex<State>) -> Result<Value, String> {
 }
 
 /// The calls that change something.
-fn actions_of(calls: &[String]) -> Vec<&str> {
+pub(crate) fn actions_of(calls: &[String]) -> Vec<&str> {
     calls
         .iter()
         .map(String::as_str)

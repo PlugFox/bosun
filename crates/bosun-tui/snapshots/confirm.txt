@@ -21,4 +21,4 @@ queue local_file  state working
 alpha#3 running, attempt 2
 events: epoch 1-1 at 41, 1 subscriber(s)
 
- 1-4 tab  j/k move  p pause  r resume  K kill switch  R restart item  q quit
+ 1-4 tab  arrows  p pause  r resume  K kill switch  k release  R restart  q quit

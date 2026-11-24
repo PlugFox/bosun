@@ -25,6 +25,8 @@ pub enum Action {
     Resume,
     /// The kill switch: every child is killed, every item parks, no board is written.
     Kill,
+    /// Release the kill switch: parked items resume and board writes start again.
+    ReleaseKill,
     /// Restart an item in flight: kill its session, take a new snapshot, start again.
     RestartItem,
 }
@@ -44,7 +46,7 @@ pub enum Scope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Spec {
     pub action: Action,
-    /// The `bosun` subcommand that performs it.
+    /// The `bosun` subcommand that performs it, with its flags when it needs any.
     pub command: &'static str,
     /// The TUI's key for it.
     pub key: char,
@@ -89,10 +91,19 @@ pub const ACTIONS: &[Spec] = &[
         method: method::ControlKill::NAME,
     },
     Spec {
+        action: Action::ReleaseKill,
+        command: "kill --release",
+        key: 'k',
+        label: "release",
+        confirm: "Release the kill switch? Parked items resume and board writes start again.",
+        scope: Scope::Daemon,
+        method: method::ControlKill::NAME,
+    },
+    Spec {
         action: Action::RestartItem,
         command: "restart-item",
         key: 'R',
-        label: "restart item",
+        label: "restart",
         confirm: "Restart {target}? Its session is killed, a new snapshot is taken and it starts \
                   again.",
         scope: Scope::Item,
@@ -126,8 +137,6 @@ pub struct Target {
     pub repo: Option<String>,
     /// The item, for restart-item.
     pub item: Option<String>,
-    /// For the kill switch: release it instead of throwing it.
-    pub release: bool,
 }
 
 /// What an action answered.
@@ -162,11 +171,11 @@ pub async fn perform(
     Ok(match action {
         Action::Pause => Outcome::Control(client.call::<method::ControlPause>(&pause()).await?),
         Action::Resume => Outcome::Control(client.call::<method::ControlResume>(&pause()).await?),
-        Action::Kill => Outcome::Kill(
+        Action::Kill | Action::ReleaseKill => Outcome::Kill(
             client
                 .call::<method::ControlKill>(&KillParams {
                     operator: operator.to_owned(),
-                    release: target.release,
+                    release: action == Action::ReleaseKill,
                 })
                 .await?,
         ),
@@ -200,6 +209,7 @@ mod tests {
             Action::Pause,
             Action::Resume,
             Action::Kill,
+            Action::ReleaseKill,
             Action::RestartItem,
         ] {
             assert_eq!(action.spec().action, action);
@@ -211,6 +221,10 @@ mod tests {
         for spec in ACTIONS {
             assert!(bosun_api::METHODS.contains(&spec.method), "{spec:?}");
         }
+        assert_eq!(
+            Action::ReleaseKill.spec().method,
+            Action::Kill.spec().method
+        );
         assert_eq!(
             Action::RestartItem.spec().confirmation("demo#1"),
             "Restart demo#1? Its session is killed, a new snapshot is taken and it starts again."

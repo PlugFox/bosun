@@ -526,6 +526,22 @@ const MUTANTS: &[Mutant] = &[
         platform: Some(Platform::Windows),
     },
     Mutant {
+        name: "mutant_git_rebase_keep_conflict",
+        issue: 8,
+        breaks: "a conflicting rebase is not aborted: the worktree is left mid-rebase",
+        package: "bosun-git",
+        check: Check::Test("land::tests::a_conflicting_rebase_is_aborted_and_reported"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_ff_dirty_checkout",
+        issue: 8,
+        breaks: "the fast-forward merges into a checkout with local changes instead of deferring",
+        package: "bosun-git",
+        check: Check::Test("land::tests::a_dirty_checkout_of_the_target_defers_the_fast_forward"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_proc_kill_parent_only",
         issue: 50,
         breaks: "kill_tree kills the direct child only, not its container",

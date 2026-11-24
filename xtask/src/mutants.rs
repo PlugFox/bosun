@@ -1539,6 +1539,23 @@ const MUTANTS: &[Mutant] = &[
         // Only Windows refuses to delete a file held open.
         platform: Some(Platform::Windows),
     },
+    // #125: landing.
+    Mutant {
+        name: "mutant_git_rebase_keep_conflict",
+        issue: 125,
+        breaks: "a conflicting rebase is left in the worktree",
+        package: "bosun-git",
+        check: Check::Test("land::tests::a_conflicting_rebase_is_aborted_and_reported"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_ff_dirty_checkout",
+        issue: 125,
+        breaks: "a fast-forward moves a checkout with local changes",
+        package: "bosun-git",
+        check: Check::Test("land::tests::a_dirty_checkout_of_the_target_defers_the_fast_forward"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

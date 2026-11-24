@@ -253,6 +253,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #124: item worktrees.
   "cfg(mutant_git_worktree_skip_disk_floor)",
   "cfg(mutant_git_worktree_unremoved_is_removed)",
+  # #125: landing.
+  "cfg(mutant_git_rebase_keep_conflict)",
+  "cfg(mutant_git_ff_dirty_checkout)",
 ] }
 
 [workspace.lints.clippy]

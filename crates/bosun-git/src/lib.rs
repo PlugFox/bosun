@@ -53,10 +53,16 @@
 //! [`worktree`] makes an item's worktree on its own branch above a disk floor, and removes it
 //! or, when a held-open file blocks removal, quarantines and reports it.
 //!
+//! # Landing (#8)
+//!
+//! [`land`] rebases an item's branch onto its target (a conflict is aborted and reported) and
+//! fast-forwards the target, deferring when its checkout is dirty or mid-operation.
+//!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
 
 mod base;
 mod invoke;
+pub mod land;
 mod message;
 mod precondition;
 mod protect;

@@ -186,3 +186,63 @@ pub struct RestartResult {
     /// starts again, then removes it (#5).
     pub label: String,
 }
+
+/// Params of `session.tail` (#74): the live tail of an item's sessions, as the daemon still
+/// holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TailParams {
+    pub identity: String,
+    /// The item id, `<repo>#<card>`.
+    pub item: String,
+    /// Only the lines with this sequence or a later one: a client that has seen up to `n` asks
+    /// for `n + 1`. Absent: every line still held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_seq: Option<u64>,
+}
+
+/// Result of `session.tail`: the item's output lines still in the identity's event ring, its
+/// latest session and that session's context size.
+///
+/// The lines are contiguous: every `session_output` event of the item from the first one
+/// returned up to `head` is in [`SessionTail::lines`]. A client that refetches after a resync
+/// replaces what it showed with them and appends the events after `head`, with no gap.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionTail {
+    pub identity: String,
+    pub item: String,
+    /// The daemon's epoch: the sequences are of this run of the daemon.
+    pub epoch: String,
+    /// The sequence of the last event published when the lines were read; 0 before the first.
+    pub head: u64,
+    /// The `session_output` events of the item, oldest first.
+    pub lines: Vec<crate::Event>,
+    /// The ring no longer holds `from_seq`: lines after the client's last were dropped, and
+    /// `lines` are every line still held, as with no `from_seq`. The client replaces what it
+    /// showed with them rather than appending.
+    pub gap: bool,
+    /// Earlier lines of the latest session are no longer held: the ring moved past them.
+    pub truncated: bool,
+    /// The item's latest session; absent before its first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionInfo>,
+    /// The context size of that session's main transcript, from the ingested transcript;
+    /// absent until a message of it is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextSize>,
+}
+
+/// The prompt size of a context window at its latest message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextSize {
+    /// `input + cache read + cache write 5 min + cache write 1 h` of the latest message, as in
+    /// [`crate::ContextCurve`].
+    pub prompt: u64,
+    /// The largest prompt size of the window so far.
+    pub peak: u64,
+    /// The model of the latest message.
+    pub model: String,
+    pub ts_ms: i64,
+    /// The provider's nominal context window, when bosun knows it: the gauge's full scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<u64>,
+}

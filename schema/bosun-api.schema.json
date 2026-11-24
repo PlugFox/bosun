@@ -705,6 +705,47 @@
       ],
       "type": "object"
     },
+    "ContextSize": {
+      "description": "The prompt size of a context window at its latest message.",
+      "properties": {
+        "model": {
+          "description": "The model of the latest message.",
+          "type": "string"
+        },
+        "peak": {
+          "description": "The largest prompt size of the window so far.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prompt": {
+          "description": "`input + cache read + cache write 5 min + cache write 1 h` of the latest message, as in\n[`crate::ContextCurve`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ts_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "window": {
+          "description": "The provider's nominal context window, when bosun knows it: the gauge's full scale.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "prompt",
+        "peak",
+        "model",
+        "ts_ms"
+      ],
+      "type": "object"
+    },
     "ControlStatus": {
       "description": "The control state of one identity: result of `control.status`, `control.pause` and\n`control.resume`.",
       "properties": {
@@ -1093,6 +1134,13 @@
             },
             "stream": {
               "$ref": "#/$defs/OutputStream"
+            },
+            "tool": {
+              "description": "The tool's name, when the line is a tool call the session made: a client may\ncollapse a run of them into one row (#74).",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "type": {
               "const": "session_output",
@@ -2526,6 +2574,137 @@
       ],
       "type": "object"
     },
+    "Pace": {
+      "description": "Result of `tokens.pace`. Every eqv is of the identity's messages only (#2).",
+      "properties": {
+        "bucket_ms": {
+          "description": "The width of each of [`Pace::buckets`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "buckets": {
+          "description": "Eqv per bucket, oldest first; the last bucket ends at `now_ms`.",
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "day_start_ms": {
+          "description": "The last local midnight: where today's odometer starts.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "now_ms": {
+          "description": "The daemon's clock when it answered.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PaceReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The pace the speed is measured against; absent when none is configured."
+        },
+        "reference_model": {
+          "description": "The model every eqv is measured against.",
+          "type": "string"
+        },
+        "reset_ms": {
+          "description": "The next local midnight: when the daily cap resets.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "run_eqv": {
+          "description": "Eqv since `run_start_ms`.",
+          "format": "double",
+          "type": "number"
+        },
+        "run_start_ms": {
+          "description": "When the daemon started: where this run's odometer starts.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "today_eqv": {
+          "description": "Eqv since `day_start_ms`.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "identity",
+        "now_ms",
+        "reference_model",
+        "day_start_ms",
+        "reset_ms",
+        "today_eqv",
+        "run_start_ms",
+        "run_eqv",
+        "bucket_ms",
+        "buckets"
+      ],
+      "type": "object"
+    },
+    "PaceParams": {
+      "description": "Params of `tokens.pace`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity"
+      ],
+      "type": "object"
+    },
+    "PaceReference": {
+      "description": "Where the reference pace came from.",
+      "oneOf": [
+        {
+          "description": "From the configuration: what is left of the daily cap, spread evenly until it resets.",
+          "properties": {
+            "cap_eqv": {
+              "$ref": "#/$defs/Wide",
+              "description": "The cap: `daily_eqv - reserve_eqv`."
+            },
+            "daily_eqv": {
+              "$ref": "#/$defs/Wide",
+              "description": "`budget.daily_eqv`."
+            },
+            "eqv_per_minute": {
+              "description": "`max(cap - today, 0)` per minute until `reset_ms`.",
+              "format": "double",
+              "type": "number"
+            },
+            "reserve_eqv": {
+              "$ref": "#/$defs/Wide",
+              "description": "`budget.reserve_eqv`."
+            },
+            "type": {
+              "const": "configured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "daily_eqv",
+            "reserve_eqv",
+            "cap_eqv",
+            "eqv_per_minute"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ParkedTime": {
       "description": "Time parked for one reason.",
       "properties": {
@@ -3632,6 +3811,74 @@
       ],
       "type": "object"
     },
+    "SessionTail": {
+      "description": "Result of `session.tail`: the item's output lines still in the identity's event ring, its\nlatest session and that session's context size.\n\nThe lines are contiguous: every `session_output` event of the item from the first one\nreturned up to `head` is in [`SessionTail::lines`]. A client that refetches after a resync\nreplaces what it showed with them and appends the events after `head`, with no gap.",
+      "properties": {
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextSize"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The context size of that session's main transcript, from the ingested transcript;\nabsent until a message of it is stored."
+        },
+        "epoch": {
+          "description": "The daemon's epoch: the sequences are of this run of the daemon.",
+          "type": "string"
+        },
+        "gap": {
+          "description": "The ring no longer holds `from_seq`: lines after the client's last were dropped, and\n`lines` are every line still held, as with no `from_seq`. The client replaces what it\nshowed with them rather than appending.",
+          "type": "boolean"
+        },
+        "head": {
+          "description": "The sequence of the last event published when the lines were read; 0 before the first.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "item": {
+          "type": "string"
+        },
+        "lines": {
+          "description": "The `session_output` events of the item, oldest first.",
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "type": "array"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The item's latest session; absent before its first."
+        },
+        "truncated": {
+          "description": "Earlier lines of the latest session are no longer held: the ring moved past them.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "identity",
+        "item",
+        "epoch",
+        "head",
+        "lines",
+        "gap",
+        "truncated"
+      ],
+      "type": "object"
+    },
     "SnapshotView": {
       "description": "The snapshot of an item (#5).",
       "properties": {
@@ -3811,6 +4058,32 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "TailParams": {
+      "description": "Params of `session.tail` (#74): the live tail of an item's sessions, as the daemon still\nholds it.",
+      "properties": {
+        "from_seq": {
+          "description": "Only the lines with this sequence or a later one: a client that has seen up to `n` asks\nfor `n + 1`. Absent: every line still held.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "identity": {
+          "type": "string"
+        },
+        "item": {
+          "description": "The item id, `<repo>#<card>`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "item"
+      ],
       "type": "object"
     },
     "TokenSums": {
@@ -4521,6 +4794,15 @@
         "$ref": "#/$defs/SessionInfo"
       }
     },
+    "session.tail": {
+      "description": "The output lines of an item's sessions the daemon still holds, contiguous up to the stream's head, with the item's latest session and its context size: what a live tail      refetches after a resync.",
+      "params": {
+        "$ref": "#/$defs/TailParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SessionTail"
+      }
+    },
     "status.daemon": {
       "description": "The daemon's version, process and start time, and whether it serves the identity.",
       "params": {
@@ -4564,6 +4846,15 @@
       },
       "result": {
         "$ref": "#/$defs/TokensBySession"
+      }
+    },
+    "tokens.pace": {
+      "description": "Eqv per minute over the last hour, the odometers of today and of this run of the daemon, and the reference pace with where it came from (the configured daily budget until limit windows are measured).",
+      "params": {
+        "$ref": "#/$defs/PaceParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Pace"
       }
     }
   },

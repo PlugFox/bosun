@@ -45,6 +45,7 @@ mod executor;
 mod item;
 mod listen;
 mod overview;
+mod pace;
 mod state;
 #[cfg(test)]
 mod stream_tests;

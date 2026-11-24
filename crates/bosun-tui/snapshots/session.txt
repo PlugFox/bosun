@@ -1,0 +1,24 @@
+ bosun 1 Overview 2 Queue [3 Session] 4 Tokens                     bosund 0.0.0
+alpha#3 (personal)  attempt 2  session 1  claude fresh  running 12m44s
+context  [###########.............] 92.4k of 200.0k (46%)  peak 120.0k
+-- tail: 13 lines --------------------------------------------------------------
+-- attempt 2, session 1 --
+  started (claude-opus-5-5)
+  Reading the frame parser first.
+  > 4 tool calls: Read x3, Grep
+  The header length is read as u16; it is u32.
+  > 2 tool calls: Edit, Bash
+! warning: unused variable `len`
+  > 1 tool call: Bash
+  The flag is added and the tests pass.
+  ended
+
+
+
+
+
+
+
+
+
+ 1-4 tab  p pause  r resume  K kill switch  R restart item  q quit

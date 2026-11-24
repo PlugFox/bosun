@@ -9,24 +9,37 @@
 //! row of the table names it, and the question asked is that row's confirmation. An action is
 //! sent only after the question is answered `y`; any other key answers no and sends nothing.
 
-use bosun_api::{CardView, Overview, QueueView, RepoOverview, RepoQueue};
+use bosun_api::{CardView, Overview, Pace, QueueView, RepoOverview, RepoQueue};
 use bosun_client::actions::{ACTIONS, Action, Scope, Spec, Target};
+
+use crate::session::SessionView;
 
 /// The tabs of this stage, in the order of the tab bar (#4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
     Overview,
     Queue,
+    Session,
+    Tokens,
 }
 
 impl Tab {
-    pub(crate) const ALL: [Self; 2] = [Self::Overview, Self::Queue];
+    pub(crate) const ALL: [Self; 4] = [Self::Overview, Self::Queue, Self::Session, Self::Tokens];
 
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Queue => "Queue",
+            Self::Session => "Session",
+            Self::Tokens => "Tokens",
         }
+    }
+
+    /// The tab after this one, or before it, in the order of the tab bar.
+    fn next(self, back: bool) -> Self {
+        let at = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        let n = Self::ALL.len();
+        Self::ALL[if back { (at + n - 1) % n } else { (at + 1) % n }]
     }
 }
 
@@ -74,7 +87,7 @@ pub(crate) enum Link {
 }
 
 /// What one identity looked like at the last refresh.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct IdentityView {
     pub(crate) overview: Option<Overview>,
     pub(crate) queue: Option<QueueView>,
@@ -83,6 +96,10 @@ pub(crate) struct IdentityView {
     pub(crate) fetched_ms: i64,
     /// Why the identity's last refresh failed, when the daemon answered with an error.
     pub(crate) error: Option<String>,
+    /// The last answer of `tokens.pace`, for the Tokens tab.
+    pub(crate) pace: Option<Pace>,
+    /// Why the last `tokens.pace` failed.
+    pub(crate) pace_error: Option<String>,
 }
 
 /// The whole view.
@@ -103,6 +120,8 @@ pub(crate) struct App {
     pub(crate) link: Link,
     /// The daemon's version, from the last overview.
     pub(crate) daemon: Option<String>,
+    /// The live tail the Session tab shows: of [`App::followed`], or of the last item followed.
+    pub(crate) session: Option<SessionView>,
 }
 
 impl App {
@@ -120,7 +139,22 @@ impl App {
             message: None,
             link: Link::Connecting,
             daemon: None,
+            session: None,
         }
+    }
+
+    /// The item the Session tab follows: the item in flight of the Overview's selected
+    /// repository, else the first item in flight. `(identity, item)`.
+    pub(crate) fn followed(&self) -> Option<(String, String)> {
+        let rows = self.overview_rows();
+        let in_flight = |(identity, _, repo): &(&str, &Overview, &RepoOverview)| {
+            repo.current
+                .as_ref()
+                .map(|c| ((*identity).to_owned(), c.item.clone()))
+        };
+        rows.get(self.overview_row)
+            .and_then(in_flight)
+            .or_else(|| rows.iter().find_map(in_flight))
     }
 
     /// Every repository of the Overview, identity by identity: `(identity, repo)`.
@@ -179,12 +213,10 @@ impl App {
             Key::Char('q') | Key::Esc => return Some(Effect::Quit),
             Key::Char('1') => self.tab = Tab::Overview,
             Key::Char('2') => self.tab = Tab::Queue,
-            Key::Tab | Key::BackTab => {
-                self.tab = match self.tab {
-                    Tab::Overview => Tab::Queue,
-                    Tab::Queue => Tab::Overview,
-                };
-            }
+            Key::Char('3') => self.tab = Tab::Session,
+            Key::Char('4') => self.tab = Tab::Tokens,
+            Key::Tab => self.tab = self.tab.next(false),
+            Key::BackTab => self.tab = self.tab.next(true),
             Key::Up | Key::Char('k') => self.step(false),
             Key::Down | Key::Char('j') => self.step(true),
             Key::Left | Key::Char('h') if self.tab == Tab::Queue => {
@@ -210,6 +242,8 @@ impl App {
         let cursor = match self.tab {
             Tab::Overview => &mut self.overview_row,
             Tab::Queue => &mut self.card,
+            // The tail follows its end; the Tokens tab has nothing to select.
+            Tab::Session | Tab::Tokens => return,
         };
         *cursor = if down {
             *cursor + 1
@@ -290,10 +324,11 @@ impl App {
             .any(|(_, v)| v.overview.as_ref().is_some_and(|o| o.killed))
     }
 
-    /// The selected repository: the Overview's row, or the Queue's board.
+    /// The selected repository: the Overview's row (also under the Session and Tokens tabs),
+    /// or the Queue's board.
     fn selected_repo(&self) -> Option<(&str, &str)> {
         match self.tab {
-            Tab::Overview => self
+            Tab::Overview | Tab::Session | Tab::Tokens => self
                 .overview_rows()
                 .get(self.overview_row)
                 .map(|(identity, _, repo)| (*identity, repo.repo.as_str())),
@@ -304,10 +339,15 @@ impl App {
         }
     }
 
-    /// The selected item: the Overview row's item in flight, or the Queue's card.
+    /// The selected item: the Overview row's item in flight, the Queue's card, or the item
+    /// the Session tab follows.
     fn selected_item(&self) -> Option<(&str, &str)> {
         match self.tab {
-            Tab::Overview => {
+            Tab::Session => self
+                .session
+                .as_ref()
+                .map(|s| (s.identity.as_str(), s.item.as_str())),
+            Tab::Overview | Tab::Tokens => {
                 self.overview_rows()
                     .get(self.overview_row)
                     .and_then(|(identity, _, repo)| {
@@ -332,7 +372,7 @@ pub(crate) mod tests {
     use super::*;
 
     /// The keys the view itself takes; none of them may be an action's key.
-    const VIEW_KEYS: &[char] = &['q', '1', '2', 'j', 'k', 'h', 'l', 'y'];
+    const VIEW_KEYS: &[char] = &['q', '1', '2', '3', '4', 'j', 'k', 'h', 'l', 'y'];
 
     /// A synthetic identity with two repositories: one working on an item, one idle.
     pub(crate) fn overview(identity: &str, now_ms: i64) -> Overview {
@@ -474,6 +514,8 @@ pub(crate) mod tests {
             queue: Some(queue("personal")),
             fetched_ms: NOW,
             error: None,
+            pace: None,
+            pace_error: None,
         };
         app.link = Link::Up;
         app.daemon = Some("0.0.0".to_owned());

@@ -47,6 +47,8 @@
 //! | `item.get` | [`ItemParams`] | [`ItemDetail`] |
 //! | `item.restart` | [`RestartParams`] | [`RestartResult`] |
 //! | `session.get` | [`SessionParams`] | [`SessionInfo`] |
+//! | `session.tail` | [`TailParams`] | [`SessionTail`] |
+//! | `tokens.pace` | [`PaceParams`] | [`Pace`] |
 //!
 //! The `agent.*` methods name no identity: their credential does ([`agent`]). `control.kill`
 //! names none either: the kill switch is daemon-wide. The `control.*` methods that change
@@ -58,6 +60,7 @@ mod estimates;
 pub mod event;
 pub mod item;
 mod items;
+pub mod pace;
 pub mod queue;
 mod report;
 pub mod rpc;
@@ -84,13 +87,14 @@ pub use event::{
     SubscribeResult, Tail,
 };
 pub use item::{
-    AgentCallView, AttemptView, ItemDetail, ItemParams, RestartParams, RestartResult, SessionInfo,
-    SessionParams, SnapshotView, TransitionView, VerdictView,
+    AgentCallView, AttemptView, ContextSize, ItemDetail, ItemParams, RestartParams, RestartResult,
+    SessionInfo, SessionParams, SessionTail, SnapshotView, TailParams, TransitionView, VerdictView,
 };
 pub use items::{
     AttemptReport, Evidence, FlakyVerdict, InferredItem, InferredItems, InferredSession, ItemRow,
     Items, ParkedTime, RefusedEdit, RetriedItem, RunCommit, RunSession, TrailerMissing, Trailers,
 };
+pub use pace::{Pace, PaceParams, PaceReference};
 pub use queue::{
     CardView, ColumnView, LintFinding, LintParams, LintResult, QueueParams, QueueView, RepoQueue,
 };
@@ -315,6 +319,20 @@ pub mod method {
         crate::SessionInfo,
         "One session bosun spawned, by provider session id or by item (its latest), and      whether it still runs: what `session tail` follows."
     );
+    method!(
+        SessionTail,
+        "session.tail",
+        crate::TailParams,
+        crate::SessionTail,
+        "The output lines of an item's sessions the daemon still holds, contiguous up to the stream's head, with the item's latest session and its context size: what a live tail      refetches after a resync."
+    );
+    method!(
+        TokensPace,
+        "tokens.pace",
+        crate::PaceParams,
+        crate::Pace,
+        "Eqv per minute over the last hour, the odometers of today and of this run of the daemon, and the reference pace with where it came from (the configured daily budget until limit windows are measured)."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -343,6 +361,8 @@ pub const METHODS: &[&str] = &[
     method::ItemGet::NAME,
     method::ItemRestart::NAME,
     method::SessionGet::NAME,
+    method::SessionTail::NAME,
+    method::TokensPace::NAME,
 ];
 
 /// The prefix of the `agent.*` group: the only methods an agent credential admits.
@@ -602,6 +622,8 @@ pub fn schema() -> Value {
     add_method::<method::ItemGet>(&mut generator, &mut methods);
     add_method::<method::ItemRestart>(&mut generator, &mut methods);
     add_method::<method::SessionGet>(&mut generator, &mut methods);
+    add_method::<method::SessionTail>(&mut generator, &mut methods);
+    add_method::<method::TokensPace>(&mut generator, &mut methods);
     let notifications = json!({
         event::EVENT: {
             "description": "One event of the subscribed identity, in sequence order.",

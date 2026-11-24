@@ -8,8 +8,8 @@
 
 use bosun_api::rpc::{ErrorObject, code};
 use bosun_api::{
-    AgentCallView, AttemptView, ItemDetail, Method, RestartResult, SessionInfo, SnapshotView,
-    TransitionView, VerdictView, method,
+    AgentCallView, AttemptView, ContextSize, ItemDetail, Method, RestartResult, SessionInfo,
+    SessionTail, SnapshotView, TailParams, TransitionView, VerdictView, method,
 };
 use bosun_core::{ItemId, SpawnMode};
 use bosun_store::{AgentCallKind, RunRow, StoredItem};
@@ -56,11 +56,87 @@ pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Valu
             })
             .await
         }
+        method::SessionTail::NAME => {
+            call::<method::SessionTail, _, _>(p, |p| async move {
+                tail(state, state.identity(&p.identity)?, &p).await
+            })
+            .await
+        }
         _ => Err(ErrorObject::new(
             code::METHOD_NOT_FOUND,
             format!("no method {name}"),
         )),
     }
+}
+
+/// The provider's nominal context window: the full scale of the TUI's gauge. Unknown for a
+/// provider bosun has no figure for.
+fn nominal_window(provider: &str) -> Option<u64> {
+    match provider {
+        "claude" => Some(200_000),
+        _ => None,
+    }
+}
+
+/// `session.tail`: the item's output lines the ring still holds, its latest session and the
+/// context size of that session's main transcript.
+async fn tail(state: &State, served: &Served, p: &TailParams) -> Result<SessionTail, ErrorObject> {
+    let item = stored(served, &p.item).await?;
+    let id = item.item.id.to_string();
+    let runs = served
+        .store
+        .reader()
+        .runs(&item.item.id)
+        .await
+        .map_err(failed)?;
+    let session = runs
+        .iter()
+        .max_by_key(|r| (r.attempt, r.spawn))
+        .map(|r| session_info(&item.item.id, r));
+    // Read after the session: a line of a session that started since is still among these.
+    let held = served.events.output_of(&id, p.from_seq);
+    let truncated = session.as_ref().is_some_and(|s| {
+        s.started_ms < state.started_ms
+            || (held.dropped && held.oldest_ms.is_some_and(|t| s.started_ms < t))
+    });
+    let context = match &session {
+        Some(s) => context(served, s).await?,
+        None => None,
+    };
+    Ok(SessionTail {
+        identity: served.name.clone(),
+        item: id,
+        epoch: served.events.epoch().to_owned(),
+        head: held.head,
+        lines: held.lines,
+        gap: held.gap,
+        truncated,
+        session,
+        context,
+    })
+}
+
+/// The prompt size of the latest message of `session`'s main transcript, and its peak.
+async fn context(
+    served: &Served,
+    session: &SessionInfo,
+) -> Result<Option<ContextSize>, ErrorObject> {
+    let (_, rows) = served
+        .store
+        .reader()
+        .session_usage(&[(session.provider.clone(), session.session.clone())])
+        .await
+        .map_err(failed)?;
+    let main: Vec<_> = rows.iter().filter(|r| r.agent.is_none()).collect();
+    let prompt =
+        |t: &bosun_core::Tokens| t.input + t.cache_read + t.cache_write_5m + t.cache_write_1h;
+    Ok(main.last().map(|last| ContextSize {
+        prompt: prompt(&last.tokens),
+        peak: main.iter().map(|r| prompt(&r.tokens)).max().unwrap_or(0),
+        model: last.model.clone(),
+        ts_ms: last.ts_ms,
+        window: nominal_window(&session.provider),
+    }))
 }
 
 fn not_found(what: String) -> ErrorObject {

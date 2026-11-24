@@ -1,19 +1,20 @@
 //! The feed against a fake daemon on a real pipe (Windows) or socket (Unix): what a key sends,
-//! and a daemon restart under a running view.
+//! a daemon restart under a running view, and a resync of the Session tab's tail.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bosun_api::rpc::{ErrorObject, Request, Response, code};
 use bosun_api::{
-    ControlStatus, CurrentItem, HelloResult, Overview, QueueView, RepoControl, SubscribeParams,
-    SubscribeResult,
+    ControlStatus, CurrentItem, Event, HelloResult, Overview, QueueView, RepoControl, Resync,
+    ResyncReason, SessionTail, SubscribeParams, SubscribeResult, TailParams,
 };
 use bosun_client::Endpoint;
 use bosun_client::framing;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 
 use super::*;
@@ -36,6 +37,24 @@ struct State {
     queue: QueueView,
     /// The methods called, in order, `hello` and `events.subscribe` excluded.
     calls: Vec<String>,
+    /// The output lines of the fake's ring, oldest first, and the head.
+    lines: Vec<Event>,
+    head: u64,
+    /// What each tail subscription is sent after its answer, one batch per subscription.
+    pushes: VecDeque<Vec<Push>>,
+}
+
+/// One step of what the fake daemon does on a tail subscription.
+#[derive(Debug, Clone)]
+enum Push {
+    /// Waits until the test says so.
+    Wait(Arc<Notify>),
+    /// Publishes a line into the ring; sent to the subscriber when `deliver`.
+    Publish { event: Event, deliver: bool },
+    /// The ring drops its lines up to this sequence.
+    Drop(u64),
+    /// Sends a `lagged` resync and closes the connection, as the daemon does.
+    Resync,
 }
 
 /// A fake daemon that can be stopped and started again under the same endpoint.
@@ -63,6 +82,9 @@ impl Fake {
                 overview: overview("personal", now),
                 queue: queue("personal"),
                 calls: Vec::new(),
+                lines: Vec::new(),
+                head: 0,
+                pushes: VecDeque::new(),
             })),
             server: None,
             _dir: dir,
@@ -166,7 +188,74 @@ async fn connection<S: AsyncRead + AsyncWrite + Unpin>(stream: S, state: Arc<Mut
         if framing::write_message(&mut write, &response).await.is_err() {
             return;
         }
+        let tail =
+            request.method == "events.subscribe" && !request.params["filter"]["tail"].is_null();
+        if tail {
+            let batch = state.lock().unwrap().pushes.pop_front().unwrap_or_default();
+            if !push(batch, &state, &mut write).await {
+                return;
+            }
+        }
     }
+}
+
+/// A notification line of `method`.
+fn note(method: &str, params: &Value) -> Value {
+    json!({"jsonrpc": "2.0", "method": method, "params": params})
+}
+
+/// Plays one batch on a tail subscription; false when the connection is closed after it.
+async fn push<W: AsyncWrite + Unpin>(
+    batch: Vec<Push>,
+    state: &Mutex<State>,
+    write: &mut W,
+) -> bool {
+    for step in batch {
+        let note = match step {
+            Push::Wait(go) => {
+                go.notified().await;
+                None
+            }
+            Push::Publish { event, deliver } => {
+                let mut state = state.lock().unwrap();
+                state.head = event.seq;
+                state.lines.push(event.clone());
+                deliver.then(|| {
+                    note(
+                        bosun_api::event::EVENT,
+                        &serde_json::to_value(&event).unwrap(),
+                    )
+                })
+            }
+            Push::Drop(upto) => {
+                state.lock().unwrap().lines.retain(|e| e.seq > upto);
+                None
+            }
+            Push::Resync => {
+                let (epoch, head) = {
+                    let state = state.lock().unwrap();
+                    (state.epoch.clone(), state.head)
+                };
+                let resync = Resync {
+                    epoch,
+                    head,
+                    reason: ResyncReason::Lagged,
+                };
+                let note = note(
+                    bosun_api::event::RESYNC,
+                    &serde_json::to_value(&resync).unwrap(),
+                );
+                let _ = framing::write_message(write, &note).await;
+                return false;
+            }
+        };
+        if let Some(note) = note
+            && framing::write_message(write, &note).await.is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn answer(request: &Request, state: &Mutex<State>) -> Result<Value, String> {
@@ -191,7 +280,7 @@ fn answer(request: &Request, state: &Mutex<State>) -> Result<Value, String> {
             serde_json::to_value(SubscribeResult {
                 identity: ask.identity,
                 epoch: state.epoch.clone(),
-                head: 0,
+                head: state.head,
                 resync: restarted.then_some(bosun_api::ResyncReason::Restarted),
             })
         }
@@ -200,6 +289,27 @@ fn answer(request: &Request, state: &Mutex<State>) -> Result<Value, String> {
             match method {
                 "status.overview" => serde_json::to_value(&state.overview),
                 "queue.get" => serde_json::to_value(&state.queue),
+                "session.tail" => {
+                    let ask: TailParams = serde_json::from_value(params.clone()).unwrap();
+                    let first = state.lines.first().map_or(state.head + 1, |e| e.seq);
+                    let from = ask.from_seq.unwrap_or(0);
+                    serde_json::to_value(SessionTail {
+                        identity: ask.identity,
+                        item: ask.item,
+                        epoch: state.epoch.clone(),
+                        head: state.head,
+                        lines: state
+                            .lines
+                            .iter()
+                            .filter(|e| e.seq >= from)
+                            .cloned()
+                            .collect(),
+                        gap: ask.from_seq.is_some_and(|f| f < first),
+                        truncated: first > 1,
+                        session: None,
+                        context: None,
+                    })
+                }
                 "control.pause" | "control.resume" => {
                     operator()?;
                     let paused = method == "control.pause";
@@ -342,5 +452,102 @@ async fn the_view_survives_a_daemon_restart() {
         );
     }
     watcher.abort();
+    fake.stop().await;
+}
+
+/// The `line-N` lines of the screen, in order.
+fn lines_on(screen: &str) -> Vec<u64> {
+    screen
+        .split_whitespace()
+        .filter_map(|w| w.strip_prefix("line-"))
+        .filter_map(|n| n.parse().ok())
+        .collect()
+}
+
+/// #74: after a resync marker the Session tab refetches its tail and shows no gap.
+///
+/// The view has lines 1-3 and is delivered line 4. The fake daemon then publishes lines 5 and 6
+/// without delivering them, its ring drops everything up to line 5, and it sends a `lagged`
+/// resync. After the resync the view must show a contiguous run of lines up to line 7, which
+/// comes live after the reconnect; with `mutant_tui_ignore_resync` it shows 1-4 and 7.
+#[tokio::test]
+async fn after_a_resync_the_tail_is_refetched_with_no_gap() {
+    let line = crate::session::tests::line;
+    let go = Arc::new(Notify::new());
+    let mut fake = Fake::new("resync");
+    {
+        let mut state = fake.state.lock().unwrap();
+        state.lines = (1..=3).map(|n| line(n, &format!("line-{n}"))).collect();
+        state.head = 3;
+        let publish = |n: u64, deliver: bool| Push::Publish {
+            event: line(n, &format!("line-{n}")),
+            deliver,
+        };
+        state.pushes = VecDeque::from([
+            vec![
+                Push::Wait(Arc::clone(&go)),
+                publish(4, true),
+                publish(5, false),
+                publish(6, false),
+                Push::Drop(5),
+                Push::Resync,
+            ],
+            vec![publish(7, true)],
+        ]);
+    }
+    let mut app = App::new(["personal".to_owned()]);
+    let mut feed = Feed::new(fake.endpoint.clone()).with_operator(token);
+    feed.refresh(&mut app, 0).await;
+    let _ = app.on_key(Key::Char('3'));
+    let (tx, mut tails) = mpsc::unbounded_channel();
+    let mut tailing = Tailing::new(fake.endpoint.clone(), tx);
+    tailing.follow(&mut app, &mut feed).await;
+    assert_eq!(
+        lines_on(&crate::view::tests::screen(&app, 0)),
+        [1, 2, 3],
+        "the first fetch"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut opened = false;
+    loop {
+        let changed = tokio::time::timeout_at(deadline.into(), tails.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the tail never reached line 7:\n{}",
+                    crate::view::tests::screen(&app, 0)
+                )
+            })
+            .expect("the watcher runs");
+        let open = changed.signal == TailSignal::Opened;
+        on_tail(&mut app, &mut feed, changed).await;
+        if open && !opened {
+            // Subscribed and caught up: now the daemon publishes past the subscriber.
+            opened = true;
+            go.notify_one();
+        }
+        if app
+            .session
+            .as_ref()
+            .and_then(|s| s.lines.back())
+            .is_some_and(|e| e.seq == 7)
+        {
+            break;
+        }
+    }
+    let screen = crate::view::tests::screen(&app, 0);
+    let shown = lines_on(&screen);
+    assert_eq!(shown.last(), Some(&7), "{screen}");
+    assert!(
+        shown.windows(2).all(|w| w[1] == w[0] + 1),
+        "a gap in the tail {shown:?}:\n{screen}"
+    );
+    assert!(shown.contains(&6), "{screen}");
+    assert!(
+        screen.contains("earlier lines are no longer held"),
+        "{screen}"
+    );
+    drop(tailing);
     fake.stop().await;
 }

@@ -7,16 +7,25 @@
 //! a `restarted` resync: [`Feed`] drops the broken connection and opens a new one, so the view
 //! picks up the new daemon without a relaunch. While the daemon is away the view keeps what it
 //! had and says it is reconnecting.
+//!
+//! The Session tab has a subscription of its own ([`watch_tail`]), opted into the live tail of
+//! the item it follows ([`Tailing`]). Its lines go into the view as they come; a resync means
+//! lines were missed, and the view is then replaced by a full `session.tail`, whose lines are
+//! contiguous up to its head, so the tail shown has no gap ([`on_tail`]).
 
 use std::time::Duration;
 
-use bosun_api::{EventBody, EventFilter, IdentityParams, Method, QueueParams, method};
+use bosun_api::{
+    Event, EventBody, EventFilter, IdentityParams, Method, PaceParams, QueueParams, Tail,
+    TailParams, method,
+};
 use bosun_client::actions::{self, Action, Outcome, Target};
-use bosun_client::{Client, Endpoint, Error, Subscription};
+use bosun_client::{Client, Delivery, Endpoint, Error, Subscription};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::app::{App, Link};
+use crate::session::SessionView;
 
 /// How long one request may take before the connection counts as broken.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -151,6 +160,52 @@ impl Feed {
         app.clamp();
     }
 
+    /// Refetches every identity's `tokens.pace` into `app`, for the Tokens tab.
+    pub(crate) async fn pace(&mut self, app: &mut App) {
+        for i in 0..app.identities.len() {
+            let ask = PaceParams {
+                identity: app.identities[i].0.clone(),
+            };
+            let answer = self.call::<method::TokensPace>(&ask).await;
+            let view = &mut app.identities[i].1;
+            match answer {
+                Ok(pace) => {
+                    view.pace = Some(pace);
+                    view.pace_error = None;
+                }
+                Err(e) => {
+                    view.pace_error = Some(e.to_string());
+                    if broken(&e) {
+                        app.link = Link::Down(e.to_string());
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fetches the tail of the item the Session tab follows: in full, replacing what it shows,
+    /// or from the line after the last it has.
+    pub(crate) async fn tail(&mut self, app: &mut App, full: bool) {
+        let Some(view) = app.session.as_ref() else {
+            return;
+        };
+        let ask = TailParams {
+            identity: view.identity.clone(),
+            item: view.item.clone(),
+            from_seq: (!full && view.epoch.is_some()).then_some(view.seen + 1),
+        };
+        let answer = self.call::<method::SessionTail>(&ask).await;
+        let Some(view) = app.session.as_mut() else {
+            return;
+        };
+        match answer {
+            Ok(tail) if full => view.replace(tail),
+            Ok(tail) => view.extend(tail),
+            Err(e) => view.error = Some(e.to_string()),
+        }
+    }
+
     /// Performs an action the user confirmed; what to say about it.
     pub(crate) async fn perform(&mut self, action: Action, target: &Target) -> String {
         let label = action.spec().label;
@@ -252,6 +307,167 @@ pub(crate) fn watch(
             backoff = (backoff * 2).min(Duration::from_secs(2));
         }
     })
+}
+
+/// What the tail watcher of an item signals.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TailSignal {
+    /// The subscription is open: lines printed before it may not have been fetched.
+    Opened,
+    /// An event of the tail.
+    Event(Event),
+    /// The daemon says events were missed.
+    Resync,
+}
+
+/// A [`TailSignal`] of the watcher of `item`; a signal of an item no longer followed is
+/// dropped.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TailChanged {
+    pub(crate) identity: String,
+    pub(crate) item: String,
+    pub(crate) signal: TailSignal,
+}
+
+/// The tail subscription's filter: the item's output lines, and its sessions starting and
+/// ending.
+fn tail_filter(item: &str) -> EventFilter {
+    EventFilter {
+        kinds: Some(
+            ["session_output", "session_started", "session_ended"]
+                .map(str::to_owned)
+                .to_vec(),
+        ),
+        tail: Some(Tail {
+            item: Some(item.to_owned()),
+        }),
+    }
+}
+
+/// Follows the live tail of `item` and signals each line, session start and end, and resync on
+/// `tx`. Like [`watch`], it waits for a daemon that is not there, and its opening is a signal.
+pub(crate) fn watch_tail(
+    endpoint: Endpoint,
+    identity: String,
+    item: String,
+    tx: mpsc::UnboundedSender<TailChanged>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let send = |signal| {
+            tx.send(TailChanged {
+                identity: identity.clone(),
+                item: item.clone(),
+                signal,
+            })
+            .is_ok()
+        };
+        let mut backoff = Duration::from_millis(100);
+        loop {
+            match Subscription::open(endpoint.clone(), identity.clone(), tail_filter(&item)).await {
+                Ok(mut subscription) => {
+                    backoff = Duration::from_millis(100);
+                    if !send(TailSignal::Opened) {
+                        return;
+                    }
+                    // `next` reconnects by itself after a resync or a broken connection.
+                    while let Ok(delivery) = subscription.next().await {
+                        let signal = match delivery {
+                            Delivery::Event(event) => TailSignal::Event(event),
+                            Delivery::Resync(_) => TailSignal::Resync,
+                        };
+                        if !send(signal) {
+                            return;
+                        }
+                    }
+                }
+                Err(_) if tx.is_closed() => return,
+                Err(_) => {}
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(2));
+        }
+    })
+}
+
+/// The tail watcher of the item the Session tab follows.
+#[derive(Debug)]
+pub(crate) struct Tailing {
+    endpoint: Endpoint,
+    tx: mpsc::UnboundedSender<TailChanged>,
+    watcher: Option<JoinHandle<()>>,
+}
+
+impl Tailing {
+    pub(crate) fn new(endpoint: Endpoint, tx: mpsc::UnboundedSender<TailChanged>) -> Self {
+        Self {
+            endpoint,
+            tx,
+            watcher: None,
+        }
+    }
+
+    /// Follows the item [`App::followed`] names. When it is another item than the view's, the
+    /// view starts afresh with a watcher of its own, and the tail is fetched in full. While no
+    /// item is in flight the last one followed stays on screen.
+    pub(crate) async fn follow(&mut self, app: &mut App, feed: &mut Feed) {
+        let Some((identity, item)) = app.followed() else {
+            return;
+        };
+        let same = app
+            .session
+            .as_ref()
+            .is_some_and(|s| s.identity == identity && s.item == item);
+        if same && self.watcher.is_some() {
+            return;
+        }
+        self.stop();
+        self.watcher = Some(watch_tail(
+            self.endpoint.clone(),
+            identity.clone(),
+            item.clone(),
+            self.tx.clone(),
+        ));
+        app.session = Some(SessionView::new(identity, item));
+        feed.tail(app, true).await;
+    }
+
+    fn stop(&mut self) {
+        if let Some(watcher) = self.watcher.take() {
+            watcher.abort();
+        }
+    }
+}
+
+impl Drop for Tailing {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Takes one signal of the tail watcher: a line goes into the view; a session starting or
+/// ending, and an opening, fetch what the view lacks; a resync replaces the view with a full
+/// fetch. The mutant `mutant_tui_ignore_resync` drops the resync, which leaves a gap.
+pub(crate) async fn on_tail(app: &mut App, feed: &mut Feed, changed: TailChanged) {
+    let Some(view) = app.session.as_mut() else {
+        return;
+    };
+    if view.identity != changed.identity || view.item != changed.item {
+        return;
+    }
+    match changed.signal {
+        TailSignal::Event(event) => match event.body {
+            EventBody::SessionOutput { .. } => view.push(event),
+            _ => feed.tail(app, false).await,
+        },
+        TailSignal::Opened => feed.tail(app, false).await,
+        TailSignal::Resync => {
+            if cfg!(mutant_tui_ignore_resync) {
+                return;
+            }
+            view.resyncs += 1;
+            feed.tail(app, true).await;
+        }
+    }
 }
 
 #[cfg(test)]

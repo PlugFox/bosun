@@ -1,0 +1,24 @@
+ bosun 1 Overview 2 Queue 3 Session [4 Tokens]                     bosund 0.0.0
+personal: eqv of claude-opus-5-5
+speed    27.5k/min over 5 min  [################....|...................]
+ref    configured 34.0k/min: the rest of the cap spent by its reset in 14h48m
+cap    35.00M eqv a day: budget.daily_eqv 40.00M less budget.reserve_eqv 5.00M
+today    4.32M eqv since local midnight  12% of the cap
+run      1.23M eqv since the daemon started 2h05m ago
+the last hour, eqv per minute (peak 32.5k):
+        ▁▃▄▅        ▁▃▄▅        ▁▃▄▅        ▁▃▄▅       ▃▄▅▆█
+ ▁▂▃▄▆▇█████ ▁▂▃▄▆▇█████ ▁▂▃▄▆▇█████ ▁▂▃▄▆▇█████ ▁▂▃▄▆▇█████
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 1-4 tab  p pause  r resume  K kill switch  R restart item  q quit

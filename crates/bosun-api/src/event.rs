@@ -175,6 +175,10 @@ pub enum EventBody {
         spawn: u32,
         stream: OutputStream,
         line: String,
+        /// The tool's name, when the line is a tool call the session made: a client may
+        /// collapse a run of them into one row (#74).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
     },
     /// Usage of a session's new messages since the last delta.
     UsageDelta {
@@ -343,6 +347,7 @@ mod tests {
                 spawn: 2,
                 stream: OutputStream::Stderr,
                 line: "x".to_owned(),
+                tool: None,
             },
         };
         let value = serde_json::to_value(&event).unwrap();

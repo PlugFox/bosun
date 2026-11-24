@@ -312,6 +312,7 @@ async fn output_lines_reach_only_subscriptions_that_opted_in() {
         spawn: 1,
         stream: OutputStream::Stdout,
         line: "working".to_owned(),
+        tool: None,
     });
     events.publish(resumed(1));
     let Delivery::Event(first) = next(&mut plain).await else {

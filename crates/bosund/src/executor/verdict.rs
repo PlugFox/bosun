@@ -1,5 +1,6 @@
-//! A verdict run (#7, #58): always the snapshot's command (#5), in the checkout, under the agent
-//! environment; its child recorded, its output kept, its flaky tests written.
+//! A verdict run (#7, #58): always the snapshot's command (#5), in the checkout (in worktree
+//! mode, a throwaway checkout of the attempt's head commit, #8), under the agent environment;
+//! its child recorded, its output kept, its flaky tests written.
 
 use std::io;
 use std::path::Path;
@@ -8,13 +9,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use bosun_api::EventBody;
 use bosun_config::Config;
 use bosun_core::{Event, ItemId, RunResult};
+use bosun_git::Git;
 use bosun_proc::{ChildSpec, ProcessKey, Spawned, Spawner};
 use bosun_queue::lint::verdict_shell;
 use bosun_runner::verdict::{Libtest, Limits, Outcome, VerdictRun, VerdictSpec};
 use bosun_store::{VerdictEnd, VerdictStart, Write};
 use tokio::sync::{oneshot, watch};
 
-use super::{Claimed, Shared, identity, lookup, now_ms};
+use super::workspace::Unopened;
+use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms};
 use crate::events;
 
 /// Resolves when `kill` is raised; never when its sender is gone without raising it.
@@ -88,12 +91,93 @@ pub(crate) fn run_result(outcome: Outcome) -> RunResult {
 
 /// Runs one verdict run and records it. Returns the machine's event and, for a run that did
 /// not pass, its failing tests.
+///
+/// In worktree mode (#8, E19) the run judges the commit, not the directory: it runs in a
+/// throwaway checkout of the head of the item's worktree
+/// ([`super::workspace::Workspace::checkout`], set up as the item's worktree is), closed when
+/// the run is over however it ended. A checkout that
+/// cannot be made or set up is [`Event::SetupFailed`], not a failed run. Without worktree mode
+/// it runs in the checkout, as in stage 1.
 pub(crate) async fn verdict(
     shared: &Arc<Shared>,
     config: &Config,
     claimed: &Claimed,
     run: &Run,
+    kill: watch::Receiver<bool>,
+) -> (Event, Vec<String>) {
+    let Some(wt) = &claimed.worktree else {
+        return run_in(shared, config, claimed, run, kill, &claimed.workdir).await;
+    };
+    let fail = || {
+        (
+            Event::Verdict {
+                attempt: run.attempt,
+                run: run.number,
+                result: RunResult::Fail,
+            },
+            Vec::new(),
+        )
+    };
+    let Some((_, identity)) = lookup(config, &shared.options.repo) else {
+        return fail();
+    };
+    let dir = claimed.workdir.clone();
+    let head = match blocking(move || git::head(&Git::new(dir))).await {
+        Ok(head) => head,
+        Err(e) => {
+            shared.trouble(format!(
+                "the verdict of {}: the head of its worktree: {e}",
+                run.item
+            ));
+            return fail();
+        }
+    };
+    let name = format!("{}-v{}", run.item, run.number);
+    let checkout = match wt
+        .workspace
+        .checkout(shared, identity, &run.item, &name, &head)
+        .await
+    {
+        Ok(checkout) => checkout,
+        Err(Unopened::Setup(failed)) => {
+            shared.trouble(format!(
+                "the setup of the verdict checkout of {} failed: {failed}",
+                run.item
+            ));
+            return (Event::SetupFailed, Vec::new());
+        }
+        Err(Unopened::Error(e)) => {
+            shared.trouble(format!(
+                "the verdict checkout of {} cannot be made: {e}",
+                run.item
+            ));
+            return (Event::SetupFailed, Vec::new());
+        }
+    };
+    // Mutant (`mutant_loop_verdict_in_item_worktree`): the verdict runs among what the session
+    // left in the item's worktree.
+    let cwd = if cfg!(mutant_loop_verdict_in_item_worktree) {
+        claimed.workdir.as_path()
+    } else {
+        checkout.path()
+    };
+    let ran = run_in(shared, config, claimed, run, kill, cwd).await;
+    // Mutant (`mutant_loop_keep_verdict_checkout`): the checkout is left behind.
+    if !cfg!(mutant_loop_keep_verdict_checkout) {
+        // A quarantine is reported by the workspace; the run's result stands.
+        checkout.close(shared, identity).await;
+    }
+    ran
+}
+
+/// [`verdict`]'s run itself, in `cwd`.
+async fn run_in(
+    shared: &Arc<Shared>,
+    config: &Config,
+    claimed: &Claimed,
+    run: &Run,
     mut kill: watch::Receiver<bool>,
+    cwd: &Path,
 ) -> (Event, Vec<String>) {
     let fail = |result| Event::Verdict {
         attempt: run.attempt,
@@ -122,8 +206,8 @@ pub(crate) async fn verdict(
         shell,
         command: command.clone(),
         env: env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect(),
-        // The item's files: its worktree in worktree mode (#8).
-        cwd: claimed.workdir.clone(),
+        // The checkout in stage 1; a checkout of the commit in worktree mode (#8).
+        cwd: cwd.to_owned(),
         timeout: claimed
             .snapshot
             .contract

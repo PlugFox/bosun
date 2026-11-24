@@ -61,6 +61,10 @@ const COMMENT_CAP: usize = 8_000;
 pub(crate) const NOTE_LINT: &str = "lint";
 /// The kind of an item's note that holds the figure of the budget cap that tripped.
 pub(crate) const NOTE_BUDGET: &str = "budget";
+/// The kind of an item's note that lists, as a JSON array of at most
+/// [`super::git::UNCOMMITTED_CAP`] paths, what its last attempt left uncommitted in its
+/// worktree (#8): not part of what was verified.
+pub(crate) const NOTE_UNCOMMITTED: &str = "uncommitted";
 
 /// Stores the lint findings of `item` for its Needs-you comment (#111).
 pub(crate) async fn note_findings(

@@ -1810,6 +1810,35 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #154: the verdict runs in a throwaway checkout of the attempt's head commit.
+    Mutant {
+        name: "mutant_loop_verdict_in_item_worktree",
+        issue: 154,
+        breaks: "in worktree mode the verdict runs in the item's worktree, among uncommitted files",
+        package: "bosund",
+        check: Check::Test("executor::tests::worktrees::the_verdict_sees_only_what_was_committed"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_verdict_checkout_without_setup",
+        issue: 154,
+        breaks: "the setup command does not run in a verdict checkout",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::the_setup_command_runs_in_the_verdict_checkout",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_keep_verdict_checkout",
+        issue: 154,
+        breaks: "a verdict checkout is left behind after its run",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::the_verdict_checkout_is_removed_after_each_run",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

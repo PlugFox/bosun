@@ -165,6 +165,28 @@ pub(crate) enum Closed {
     Kept(String),
 }
 
+/// A throwaway checkout of one commit, for a verdict run ([`Workspace::checkout`]): a worktree
+/// of kind `verdict`, set up, closed by [`Checkout::close`] once the run is over.
+#[derive(Debug)]
+pub(crate) struct Checkout {
+    workspace: Workspace,
+    worktree: Worktree,
+}
+
+impl Checkout {
+    /// Its directory: the files of the commit, plus what `setup` made.
+    pub(crate) fn path(&self) -> &Path {
+        &self.worktree.path
+    }
+
+    /// Removes it with its branch, or quarantines it (reported by [`Workspace::close`]).
+    pub(crate) async fn close(self, shared: &Shared, identity: &Identity) -> Closed {
+        self.workspace
+            .close(shared, identity, &self.worktree, None)
+            .await
+    }
+}
+
 /// The volume's free space, as the system reports it.
 struct Disk;
 
@@ -434,6 +456,46 @@ impl Workspace {
             return Err(Unopened::Setup(failed));
         }
         Ok(made)
+    }
+
+    /// A checkout of `item`'s commit `at`, named `name`, for a verdict run: the verdict of an
+    /// attempt's head, or of a commit about to land. It has only what is committed at `at`,
+    /// plus what the `setup` command makes (a fresh worktree lacks ignored build outputs and
+    /// the like). Close it with [`Checkout::close`] however the run ends.
+    ///
+    /// # Errors
+    ///
+    /// It was not made, or its setup failed (and it is gone, or quarantined and reported).
+    pub(crate) async fn checkout(
+        &self,
+        shared: &Shared,
+        identity: &Identity,
+        item: &ItemId,
+        name: &str,
+        at: &str,
+    ) -> Result<Checkout, Unopened> {
+        let worktree = if cfg!(mutant_loop_verdict_checkout_without_setup) {
+            // Mutant (`mutant_loop_verdict_checkout_without_setup`): the verdict checkout is
+            // not set up.
+            self.open(shared, item, name, at, WorktreeKind::Verdict, None)
+                .await
+                .map_err(Unopened::Error)?
+        } else {
+            self.open_with_setup(
+                shared,
+                identity,
+                item,
+                name,
+                at,
+                WorktreeKind::Verdict,
+                None,
+            )
+            .await?
+        };
+        Ok(Checkout {
+            workspace: self.clone(),
+            worktree,
+        })
     }
 
     /// Closes `worktree`: keeps `aside`'s work in the clone first when given, runs `teardown`

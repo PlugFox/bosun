@@ -1674,6 +1674,25 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("land::tests::a_clean_checkout_of_the_target_moves_with_its_files"),
         platform: None,
     },
+    // #149: landing modes and shared build directories in the configuration.
+    Mutant {
+        name: "mutant_config_landing_without_worktree",
+        issue: 149,
+        breaks: "`landing.mode = \"merge\"` is accepted without a worktree",
+        package: "bosun-config",
+        check: Check::Test("tests::merge_and_pr_need_a_worktree"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_shared_build_any_resource",
+        issue: 149,
+        breaks: "a shared build directory names a missing or non-exclusive resource",
+        package: "bosun-config",
+        check: Check::Test(
+            "tests::a_shared_build_names_an_exclusive_resource_and_a_directory_outside_the_repository",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

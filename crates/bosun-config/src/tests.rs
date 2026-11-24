@@ -261,7 +261,7 @@ fn later_sections_and_keys_are_ignored_with_a_notice() {
          runners = []\n\
          [repo.bosun]\npath = '{}'\nidentity = 'personal'\n\
          report = {{ cost = true }}\n\
-         landing = {{ mode = 'local', target = 'main' }}\n\
+         landing = {{ mode = 'local', pr = {{ title = 'x' }} }}\n\
          [budget]\ndaily = 1\n\
          [notify.telegram]\nchat = 1\n",
         abs("home/.claude"),
@@ -276,7 +276,7 @@ fn later_sections_and_keys_are_ignored_with_a_notice() {
             "line 2, column 1: `daemon.http_port` is not read in this version; ignored",
             "line 6, column 1: `identity.personal.runners` is not read in this version; ignored",
             "line 10, column 1: `repo.bosun.report` is not read in this version; ignored",
-            "line 11, column 29: `repo.bosun.landing.target` is not read in this version; \
+            "line 11, column 36: `repo.bosun.landing.pr.title` is not read in this version; \
              ignored",
             "line 13, column 1: `budget.daily` is not read in this version; ignored",
             "line 14, column 2: section `notify` is not read in this version; ignored",
@@ -378,16 +378,47 @@ fn identities_never_share_a_bundle_path() {
 }
 
 #[test]
-fn a_landing_mode_other_than_local_is_refused_naming_8() {
-    for mode in ["pr", "merge", "push"] {
-        let found = problems(&with_repo(&format!("landing = {{ mode = '{mode}' }}\n")));
-        assert_eq!(found.len(), 1, "{found:?}");
+fn landing_shapes_are_checked() {
+    let found = problems(&with_repo(
+        "landing = { mode = 'push', target = 'refs/heads/main', merge = { method = 'rebase',          when = 'now' }, pr = { draft = 'yes', reviewers = [' x'], labels = [''], auto = 1 } }
+",
+    ));
+    let expected = [
+        "`repo.bosun.landing.mode` is \"push\"; it is \"local\", \"merge\" or \"pr\"",
+        "`repo.bosun.landing.target` is \"refs/heads/main\"; write the bare branch name",
+        "`repo.bosun.landing.merge.method` is \"rebase\"",
+        "unknown key `repo.bosun.landing.merge.when`",
+        "`repo.bosun.landing.pr.draft` must be true or false",
+        "`repo.bosun.landing.pr.reviewers` holds \" x\"",
+        "`repo.bosun.landing.pr.labels` holds \"\"",
+        "unknown key `repo.bosun.landing.pr.auto`",
+    ];
+    assert_eq!(found.len(), expected.len(), "{found:#?}");
+    for (found, expected) in found.iter().zip(expected) {
+        assert!(found.contains(expected), "{found:?} lacks {expected:?}");
+        assert!(found.starts_with("line 7, "), "{found:?} has no location");
+    }
+    for target in ["", "a b", "-x"] {
+        let found = problems(&with_repo(&format!(
+            "landing = {{ target = '{target}' }}
+"
+        )));
+        assert_eq!(found.len(), 1, "{target:?}: {found:?}");
         assert!(
-            found[0].starts_with("line 7, column 20: `repo.bosun.landing.mode`"),
+            found[0].contains("`repo.bosun.landing.target` is"),
             "{found:?}"
         );
-        assert!(found[0].contains("#8"), "{found:?}");
     }
+    // `merge` is read with `mode = "merge"` only.
+    let found = problems(&with_repo(
+        "landing = { mode = 'local', merge = { method = 'squash' } }
+",
+    ));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("`repo.bosun.landing.merge` is set with the mode \"local\""),
+        "{found:?}"
+    );
 }
 
 /// #133: a repository with a queue and no `model` is refused at load, the error naming the
@@ -548,7 +579,7 @@ fn a_broken_edit_keeps_the_previous_configuration() {
             "line 6, column 12:",
         ),
         (
-            with_repo("landing = { mode = 'pr' }\n"),
+            with_repo("landing = { mode = 'merge' }\n"),
             "line 7, column 20:",
         ),
     ] {
@@ -684,6 +715,7 @@ fn a_worktree_root_inside_the_repository_is_refused() {
                 setup: Some("cargo fetch".to_owned()),
                 teardown: Some("cargo clean".to_owned()),
                 disk_floor: Some(20_000_000_000),
+                shared_build: None,
             })
         );
     }
@@ -711,4 +743,250 @@ fn a_worktree_root_inside_the_repository_is_refused() {
         found[0].contains("`repo.bosun.worktree` has no `root`"),
         "{found:?}"
     );
+}
+
+/// `[resource.target]`, exclusive, for the repository's shared build directory.
+const TARGET_RESOURCE: &str = "[resource.target]\nkind = 'build-dir'\n";
+
+#[test]
+fn landing_keys_are_read() {
+    let text = with_repo(&format!(
+        "landing = {{ mode = \"merge\", target = \"main\", merge = {{ method = \"squash\", \
+         push = false }}, pr = {{ draft = false, reviewers = ['someone'], \
+         labels = ['bosun', 'needs review'] }} }}\n\
+         worktree = {{ root = '{}', setup = \"cargo fetch\", disk_floor = \"20GB\", \
+         shared_build = {{ dir = '{}', resource = \"target\", env = \"CARGO_TARGET_DIR\" }} }}\n\
+         {TARGET_RESOURCE}",
+        abs("wt/demo"),
+        abs("wt/demo-target"),
+    ));
+    let config = parse(&text, &Local).unwrap();
+    assert_eq!(config.notices, []);
+    let repo = &config.repos["bosun"];
+    assert_eq!(
+        repo.landing,
+        Landing {
+            mode: LandingMode::Merge,
+            target: Some("main".to_owned()),
+            merge: Merge {
+                method: MergeMethod::Squash,
+                push: false,
+            },
+            pr: PullRequest {
+                draft: false,
+                reviewers: vec!["someone".to_owned()],
+                labels: vec!["bosun".to_owned(), "needs review".to_owned()],
+            },
+        }
+    );
+    assert_eq!(
+        repo.worktree,
+        Some(Worktree {
+            root: PathBuf::from(abs("wt/demo")),
+            setup: Some("cargo fetch".to_owned()),
+            teardown: None,
+            disk_floor: Some(20_000_000_000),
+            shared_build: Some(SharedBuild {
+                dir: PathBuf::from(abs("wt/demo-target")),
+                resource: "target".to_owned(),
+                env: "CARGO_TARGET_DIR".to_owned(),
+            }),
+        })
+    );
+    for (method, expected) in [("ff", MergeMethod::Ff), ("no-ff", MergeMethod::NoFf)] {
+        let text = with_repo(&format!(
+            "landing = {{ mode = 'merge', merge = {{ method = '{method}' }} }}\n\
+             worktree = {{ root = '{}' }}\n",
+            abs("wt/demo")
+        ));
+        let config = parse(&text, &Local).unwrap();
+        assert_eq!(config.repos["bosun"].landing.merge.method, expected);
+    }
+
+    // The defaults, with no `landing` at all and with an empty one.
+    for rest in ["", "landing = {}\n"] {
+        let config = parse(&with_repo(rest), &Local).unwrap();
+        let landing = &config.repos["bosun"].landing;
+        assert_eq!(landing.mode, LandingMode::Local, "{rest:?}");
+        assert_eq!(landing.target, None);
+        assert_eq!(landing.merge.method, MergeMethod::Ff);
+        assert!(!landing.merge.push);
+        assert!(landing.pr.draft);
+        assert!(landing.pr.reviewers.is_empty() && landing.pr.labels.is_empty());
+        assert_eq!(*landing, Landing::default());
+    }
+    let text = with_repo(&format!(
+        "worktree = {{ root = '{}', shared_build = {{ dir = '{}', resource = 'target' }} }}\n\
+         {TARGET_RESOURCE}",
+        abs("wt/demo"),
+        abs("wt/demo-target"),
+    ));
+    let config = parse(&text, &Local).unwrap();
+    let worktree = config.repos["bosun"].worktree.as_ref().unwrap();
+    let shared = worktree.shared_build.as_ref().unwrap();
+    assert_eq!(shared.env, "CARGO_TARGET_DIR");
+    assert_eq!(shared.env, DEFAULT_SHARED_BUILD_ENV);
+}
+
+/// E19: every new landing path is gated on `repo.<name>.worktree`. `pr` and `merge.push` are
+/// read and refused until a later card. `mutant_config_landing_without_worktree` accepts
+/// `merge` without a worktree.
+#[test]
+fn merge_and_pr_need_a_worktree() {
+    let worktree = format!("worktree = {{ root = '{}' }}\n", abs("wt/bosun"));
+
+    let found = problems(&with_repo("landing = { mode = 'merge' }\n"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with("line 7, column 20: `repo.bosun.landing.mode` is \"merge\"")
+            && found[0].contains("needs `repo.bosun.worktree`"),
+        "{found:?}"
+    );
+    let config = parse(
+        &with_repo(&format!("landing = {{ mode = 'merge' }}\n{worktree}")),
+        &Local,
+    )
+    .unwrap();
+    assert_eq!(config.repos["bosun"].landing.mode, LandingMode::Merge);
+    // `local` needs none: stage 1 is unchanged.
+    parse(&with_repo("landing = { mode = 'local' }\n"), &Local).unwrap();
+
+    let found = problems(&with_repo(&format!(
+        "landing = {{ mode = 'pr' }}\n{worktree}"
+    )));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with("line 7, column 20: `repo.bosun.landing.mode` is \"pr\"")
+            && found[0].contains("not available yet"),
+        "{found:?}"
+    );
+    let found = problems(&with_repo("landing = { mode = 'pr' }\n"));
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|f| f.contains("needs `repo.bosun.worktree`")),
+        "{found:?}"
+    );
+
+    let found = problems(&with_repo(&format!(
+        "landing = {{ mode = 'merge', merge = {{ push = true }} }}\n{worktree}"
+    )));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with("line 7, column 46: `repo.bosun.landing.merge.push` is true")
+            && found[0].contains("not available yet"),
+        "{found:?}"
+    );
+}
+
+/// E1: the shared build directory is guarded by an exclusive lease and lies outside the
+/// checkout and the worktrees. `mutant_config_shared_build_any_resource` skips the resource.
+#[test]
+fn a_shared_build_names_an_exclusive_resource_and_a_directory_outside_the_repository() {
+    let text = |dir: &str, resource: &str, resources: &str| {
+        with_repo(&format!(
+            "worktree = {{ root = '{}', shared_build = {{ dir = '{}', resource = '{resource}' \
+             }} }}\n{resources}",
+            abs("wt/bosun"),
+            abs(dir),
+        ))
+    };
+    let outside = "wt/bosun-target";
+
+    let config = parse(&text(outside, "target", TARGET_RESOURCE), &Local).unwrap();
+    let worktree = config.repos["bosun"].worktree.as_ref().unwrap();
+    assert_eq!(
+        worktree.shared_build.as_ref().map(|s| s.resource.as_str()),
+        Some("target")
+    );
+
+    let found = problems(&text(outside, "missing", TARGET_RESOURCE));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains(
+            "`repo.bosun.worktree.shared_build.resource` names `resource.missing`, which is \
+             not configured"
+        ),
+        "{found:?}"
+    );
+    let found = problems(&text(
+        outside,
+        "target",
+        "[resource.target]\nkind = 'build-dir'\ncapacity = 2\n",
+    ));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("names `resource.target`, whose capacity is 2")
+            && found[0].contains("`capacity = 1`"),
+        "{found:?}"
+    );
+
+    // Under the repository (whatever the case on Windows), the repository itself, and under
+    // the worktree root.
+    let in_repo = if cfg!(windows) {
+        "GIT/Bosun/target"
+    } else {
+        "git/bosun/target"
+    };
+    for (dir, owner) in [
+        (in_repo, "inside the repository's path"),
+        ("git/bosun", "inside the repository's path"),
+        ("wt/bosun/target", "inside `worktree.root`"),
+    ] {
+        let found = problems(&text(dir, "target", TARGET_RESOURCE));
+        assert_eq!(found.len(), 1, "{dir}: {found:?}");
+        assert!(
+            found[0].contains("`repo.bosun.worktree.shared_build.dir`") && found[0].contains(owner),
+            "{dir}: {found:?}"
+        );
+    }
+
+    // Its own keys are checked too.
+    let found = problems(&with_repo(&format!(
+        "worktree = {{ root = '{}', shared_build = {{ env = '1X', dirs = 'x' }} }}\n",
+        abs("wt/bosun"),
+    )));
+    let expected = [
+        "`repo.bosun.worktree.shared_build.env` is \"1X\"",
+        "unknown key `repo.bosun.worktree.shared_build.dirs`",
+        "`repo.bosun.worktree.shared_build` has no `dir`",
+        "`repo.bosun.worktree.shared_build` has no `resource`",
+    ];
+    assert_eq!(found.len(), expected.len(), "{found:#?}");
+    for expected in expected {
+        assert!(
+            found.iter().any(|f| f.contains(expected)),
+            "{found:#?} lacks {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn the_repository_hash_covers_landing_and_the_worktree() {
+    let base = with_repo(&format!(
+        "landing = {{ mode = 'merge', merge = {{ method = 'ff' }} }}\n\
+         worktree = {{ root = '{}', shared_build = {{ dir = '{}', resource = 'target' }} }}\n\
+         {TARGET_RESOURCE}",
+        abs("wt/bosun"),
+        abs("wt/bosun-target"),
+    ));
+    let hash = |text: &str| parse(text, &Local).unwrap().repo_hash("bosun").unwrap();
+    let before = hash(&base);
+    assert_eq!(hash(&base.replace("method = 'ff'", "method='ff'")), before);
+    for edit in [
+        base.replace("method = 'ff'", "method = 'squash'"),
+        base.replace("method = 'ff'", "method = 'no-ff'"),
+        base.replace("mode = 'merge',", "mode = 'merge', target = 'main',"),
+        base.replace("mode = 'merge',", "mode = 'merge', pr = { draft = false },"),
+        base.replace(
+            "mode = 'merge',",
+            "mode = 'merge', pr = { labels = ['x'] },",
+        ),
+        base.replace("resource = 'target'", "resource = 'target', env = 'TARGET'"),
+        base.replace("bosun-target", "bosun-build"),
+        base.replace("root = '", "setup = 'cargo fetch', root = '"),
+    ] {
+        assert_ne!(hash(&edit), before, "{edit}");
+    }
 }

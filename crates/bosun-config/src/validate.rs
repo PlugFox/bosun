@@ -1,5 +1,6 @@
 //! Cross-checks of a draft: identity isolation (#2), the local-disk rule for databases, the
-//! budget's reserve and worktree roots outside their repository (#8).
+//! budget's reserve, worktree roots outside their repository, the landing modes this version
+//! carries out and shared build directories (#8).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -8,7 +9,8 @@ use bosun_core::{PathStyle, strip_root};
 
 use crate::disk::{Disk, DiskProbe};
 use crate::error::Problem;
-use crate::read::{Draft, DraftIdentity, PathValue};
+use crate::read::{Draft, DraftIdentity, DraftRepo, DraftSharedBuild, PathValue};
+use crate::{LandingMode, Resource};
 
 /// A path of an identity bundle, read from a draft identity.
 type BundlePath = fn(&DraftIdentity) -> Option<&PathValue>;
@@ -54,6 +56,17 @@ pub(crate) fn validate(draft: &Draft, probe: &dyn DiskProbe, problems: &mut Vec<
         let root = repo.worktree.as_ref().and_then(|w| w.root.as_ref());
         if let (Some(path), Some(root)) = (&repo.path, root) {
             worktree_root_outside(&repo.name, path, root, problems);
+        }
+        landing(repo, problems);
+        if let Some(shared) = repo.worktree.as_ref().and_then(|w| w.shared_build.as_ref()) {
+            shared_build(
+                &repo.name,
+                shared,
+                repo.path.as_ref(),
+                root,
+                &draft.resources,
+                problems,
+            );
         }
     }
 
@@ -138,6 +151,101 @@ fn worktree_root_outside(
                 path.path.display()
             ),
         });
+    }
+}
+
+/// Refuses a landing this version cannot carry out: `merge` and `pr` without a worktree (E19:
+/// every new path is gated on `repo.<name>.worktree`), `pr` at all, and `merge.push = true`.
+fn landing(repo: &DraftRepo, problems: &mut Vec<Problem>) {
+    let name = &repo.name;
+    let draft = &repo.landing;
+    let mode = draft.landing.mode;
+    let word = match mode {
+        LandingMode::Merge => "merge",
+        LandingMode::Pr => "pr",
+        LandingMode::Local => "local",
+    };
+    // Mutant (`mutant_config_landing_without_worktree`): `merge` is accepted without a
+    // worktree, and would land from the main checkout.
+    let unchecked = cfg!(mutant_config_landing_without_worktree) && mode == LandingMode::Merge;
+    if !unchecked && mode != LandingMode::Local && repo.worktree.is_none() {
+        problems.push(Problem {
+            location: draft.mode_at,
+            message: format!(
+                "`repo.{name}.landing.mode` is \"{word}\", which needs `repo.{name}.worktree`: \
+                 the item lands from its own worktree, e.g. `worktree = {{ root = '...' }}`"
+            ),
+        });
+    }
+    if mode == LandingMode::Pr {
+        problems.push(Problem {
+            location: draft.mode_at,
+            message: format!(
+                "`repo.{name}.landing.mode` is \"pr\", which is not available yet; use \"local\" \
+                 or \"merge\""
+            ),
+        });
+    }
+    if draft.landing.merge.push {
+        problems.push(Problem {
+            location: draft.push_at,
+            message: format!(
+                "`repo.{name}.landing.merge.push` is true, which is not available yet; the \
+                 target is not pushed"
+            ),
+        });
+    }
+}
+
+/// Refuses a shared build directory (E1) that is not guarded by an existing exclusive resource,
+/// or that lies in the repository's checkout or under its worktree root.
+fn shared_build(
+    repo: &str,
+    shared: &DraftSharedBuild,
+    path: Option<&PathValue>,
+    root: Option<&PathValue>,
+    resources: &BTreeMap<String, Resource>,
+    problems: &mut Vec<Problem>,
+) {
+    let what = format!("repo.{repo}.worktree.shared_build");
+    // Mutant (`mutant_config_shared_build_any_resource`): the resource is not checked.
+    if let Some((name, at)) = &shared.resource
+        && !cfg!(mutant_config_shared_build_any_resource)
+    {
+        let why = match resources.get(name) {
+            None => Some("which is not configured".to_owned()),
+            Some(resource) if resource.capacity != 1 => Some(format!(
+                "whose capacity is {}; the build directory takes one holder at a time, so \
+                 `capacity = 1`",
+                resource.capacity
+            )),
+            Some(_) => None,
+        };
+        if let Some(why) = why {
+            problems.push(Problem {
+                location: *at,
+                message: format!("`{what}.resource` names `resource.{name}`, {why}"),
+            });
+        }
+    }
+    let Some(dir) = &shared.dir else {
+        return;
+    };
+    for (owner, value) in [("the repository's path", path), ("`worktree.root`", root)] {
+        let Some(value) = value else {
+            continue;
+        };
+        if strip_root(&dir.key, &value.key, PathStyle::host()).is_some() {
+            problems.push(Problem {
+                location: dir.at,
+                message: format!(
+                    "`{what}.dir` {} is inside {owner} {}; the shared build directory lies \
+                     outside both",
+                    dir.path.display(),
+                    value.path.display()
+                ),
+            });
+        }
     }
 }
 

@@ -1519,6 +1519,26 @@ const MUTANTS: &[Mutant] = &[
         // Process groups are Unix; the test reads the groups from `/proc`.
         platform: Some(Platform::Linux),
     },
+    // #124: item worktrees.
+    Mutant {
+        name: "mutant_git_worktree_skip_disk_floor",
+        issue: 124,
+        breaks: "a worktree is made below the disk floor",
+        package: "bosun-git",
+        check: Check::Test("worktree::tests::no_worktree_is_created_below_the_disk_floor"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_worktree_unremoved_is_removed",
+        issue: 124,
+        breaks: "a worktree that could not be removed is reported as removed",
+        package: "bosun-git",
+        check: Check::Test(
+            "worktree::tests::a_worktree_with_a_file_held_open_is_quarantined_and_reported",
+        ),
+        // Only Windows refuses to delete a file held open.
+        platform: Some(Platform::Windows),
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

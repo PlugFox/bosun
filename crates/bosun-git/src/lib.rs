@@ -48,6 +48,11 @@
 //! data: `bosun-identity`'s `Env::add_git_config` appends it after the identity's own entries
 //! (the `credential.helper` reset is entry 0), and `Env::add_session_var` sets [`Hooks::env`].
 //!
+//! # Worktrees (#8)
+//!
+//! [`worktree`] makes an item's worktree on its own branch above a disk floor, and removes it
+//! or, when a held-open file blocks removal, quarantines and reports it.
+//!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
 
 mod base;
@@ -60,6 +65,7 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 mod trailer;
+pub mod worktree;
 
 pub use base::Base;
 pub use invoke::{Error, Git, NO_HOOKS};

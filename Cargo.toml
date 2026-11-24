@@ -250,6 +250,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #123: resources and worktrees in the configuration.
   "cfg(mutant_config_resource_any_capacity)",
   "cfg(mutant_config_worktree_root_inside_repo)",
+  # #124: item worktrees.
+  "cfg(mutant_git_worktree_skip_disk_floor)",
+  "cfg(mutant_git_worktree_unremoved_is_removed)",
 ] }
 
 [workspace.lints.clippy]

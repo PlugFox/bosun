@@ -433,15 +433,17 @@ pub(crate) fn daemon_next_to_self() -> Result<PathBuf, String> {
     Ok(exe.with_file_name(format!("bosund{}", std::env::consts::EXE_SUFFIX)))
 }
 
-/// What the logon process runs: `daemon` with `--config` and `--endpoint` when they are given
-/// (the logon process sees neither `BOSUN_CONFIG` nor `BOSUN_ENDPOINT`), and on launchd and
-/// systemd the current `PATH`, which they would otherwise replace with a minimal one.
+/// What the logon process runs: `daemon` with `--config`, `--endpoint` and `--operator-file`
+/// when they are given (the logon process sees none of `BOSUN_CONFIG`, `BOSUN_ENDPOINT` and
+/// `BOSUN_OPERATOR_FILE`), and on launchd and systemd the current `PATH`, which they would
+/// otherwise replace with a minimal one.
 pub(crate) fn launch(
     platform: Platform,
     name: &str,
     daemon: &Path,
     config: Option<&Path>,
     endpoint: Option<&str>,
+    operator_file: Option<&Path>,
 ) -> Result<Launch, String> {
     let text = |path: &Path| -> Result<String, String> {
         let absolute = std::path::absolute(path)
@@ -465,6 +467,10 @@ pub(crate) fn launch(
     if let Some(endpoint) = endpoint {
         args.push("--endpoint".to_owned());
         args.push(endpoint.to_owned());
+    }
+    if let Some(file) = operator_file {
+        args.push("--operator-file".to_owned());
+        args.push(text(file)?);
     }
     let (path_var, log_file) = match platform {
         Platform::Windows => (None, None),

@@ -120,12 +120,14 @@ pub(crate) async fn install(global: &Global, args: &InstallArgs) -> Result<Strin
         .clone()
         .or_else(|| var("BOSUN_CONFIG").map(PathBuf::from));
     let endpoint_arg = global.endpoint.clone().or_else(|| var("BOSUN_ENDPOINT"));
+    let operator_file = var(bosun_client::operator::FILE_ENV).map(PathBuf::from);
     let launch = install::launch(
         platform,
         name,
         &daemon,
         config.as_deref(),
         endpoint_arg.as_deref(),
+        operator_file.as_deref(),
     )
     .map_err(failed)?;
     let endpoint = endpoint_arg

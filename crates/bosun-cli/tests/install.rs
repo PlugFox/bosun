@@ -66,7 +66,15 @@ fn endpoint(dir: &Path) -> Endpoint {
     }
 }
 
-/// Runs `bosun` with `args` against `config` and `endpoint`, with neither variable set.
+/// The operator token's file of a test whose configuration is `config`: next to it, in the
+/// test's temporary directory, never in the user's own operator directory. `bosun install`
+/// passes it on to the registered daemon.
+fn operator_file(config: &Path) -> PathBuf {
+    config.with_file_name("operator.token")
+}
+
+/// Runs `bosun` with `args` against `config` and `endpoint`, with neither variable set and the
+/// operator token's file in the test's directory.
 fn bosun(config: &Path, endpoint: &Endpoint, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_bosun"))
         .args(args)
@@ -76,6 +84,7 @@ fn bosun(config: &Path, endpoint: &Endpoint, args: &[&str]) -> Output {
         .arg(endpoint.path())
         .env_remove("BOSUN_CONFIG")
         .env_remove("BOSUN_ENDPOINT")
+        .env("BOSUN_OPERATOR_FILE", operator_file(config))
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -346,6 +355,12 @@ async fn logon_registration_registers_queries_and_unregisters() {
         );
         if started {
             assert_eq!(checks(&report, "daemon")[0]["status"], "ok", "{report}");
+            // The registered daemon wrote its token where the test said, not per user.
+            assert!(
+                operator_file(&config).is_file(),
+                "the registered daemon wrote no token at {}",
+                operator_file(&config).display()
+            );
         }
     }
 
@@ -401,6 +416,7 @@ fn doctor_on(
         .arg(endpoint.path())
         .env_remove("BOSUN_CONFIG")
         .env_remove("BOSUN_ENDPOINT")
+        .env("BOSUN_OPERATOR_FILE", operator_file(config))
         .env("PATH", path)
         .stdin(Stdio::null());
     for (key, value) in env {

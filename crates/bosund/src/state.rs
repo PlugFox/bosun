@@ -154,6 +154,7 @@ pub(crate) async fn run(
     config: Config,
     config_path: PathBuf,
     endpoint: Endpoint,
+    operator_file: PathBuf,
     stop: impl Future<Output = ()>,
 ) -> Result<(), Failure> {
     let listener = listen::claim(&endpoint).await.map_err(|e| match e {
@@ -165,7 +166,7 @@ pub(crate) async fn run(
     })?;
 
     // A fresh operator token at every start, outside every checkout (#67).
-    let operator = match operator_token(&config, &endpoint) {
+    let operator = match operator_token(&config, operator_file) {
         Ok(operator) => operator,
         Err(e) => {
             listener.close();
@@ -180,6 +181,7 @@ pub(crate) async fn run(
         Err((opened, e)) => {
             listener.close();
             shut_down(opened).await;
+            operator.withdraw();
             return Err(Failure::Other(e));
         }
     };
@@ -187,6 +189,8 @@ pub(crate) async fn run(
         "bosund: listening at {endpoint}; {} identities",
         identities.len()
     );
+    // Kept to withdraw the token at the end: the state may outlive shutdown.
+    let control = operator.clone();
     let state = Arc::new(State {
         started_ms: now_ms(),
         identities,
@@ -222,13 +226,13 @@ pub(crate) async fn run(
         Ok(state) => shut_down(state.identities).await,
         Err(_) => eprintln!("bosund: a connection outlived shutdown; stores left to the OS"),
     }
+    control.withdraw();
     eprintln!("bosund: stopped");
     Ok(())
 }
 
-/// Writes a fresh operator token for `endpoint` and returns the control state that admits it.
-fn operator_token(config: &Config, endpoint: &Endpoint) -> Result<Control, String> {
-    let file = bosun_client::operator::path(endpoint)?;
+/// Writes a fresh operator token to `file` and returns the control state that admits it.
+fn operator_token(config: &Config, file: PathBuf) -> Result<Control, String> {
     let checkouts: Vec<&std::path::Path> =
         config.repos.values().map(|r| r.path.as_path()).collect();
     let token = control::issue(&file, &checkouts)?;

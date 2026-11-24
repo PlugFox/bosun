@@ -5,8 +5,8 @@
 //! - [`Spawner`] starts a child from a [`ChildSpec`] (argv, a constructed environment, a working
 //!   directory) inside a container, with separate stdout and stderr pipes, and hands back a
 //!   [`Tree`]: the child's [`ProcessKey`] (pid and start time), [`Tree::kill_tree`] and an async
-//!   wait. [`NativeSpawner`] is the in-process implementation; the session shim of #8 becomes a
-//!   second one behind the same trait.
+//!   wait. [`NativeSpawner`] is the in-process implementation; [`shim::ShimSpawner`], through
+//!   the session shim of #8, is the second one behind the same trait.
 //! - [`reap`] kills a recorded process after a restart only if its pid and its start time both
 //!   still match, so a reused pid is never killed.
 //! - [`Power`] holds the machine awake while work runs: [`PowerGuard`] issues one request on
@@ -17,7 +17,8 @@
 //!   disk floor of item worktrees (#8).
 //! - [`shim`] is the session shim (#129), run as the `bosun-shim` binary: it holds the child's
 //!   container, writes its output to files and its pid and exit to a record, and enforces the
-//!   wall-clock cap, so all of that outlives the daemon.
+//!   wall-clock cap, so all of that outlives the daemon. [`shim::ShimSpawner`] is the
+//!   [`Spawner`] through it, and [`shim::attach`] re-attaches to a session from its record.
 //! - `pipe` (Windows): `pipe::OwnerOnly` creates the daemon's named pipe with a DACL that admits
 //!   only the user it runs as, and `pipe::dacl` reads a handle's DACL back.
 //!

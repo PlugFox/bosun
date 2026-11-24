@@ -1501,6 +1501,15 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("the_exit_of_a_child_nobody_waited_for_is_in_the_record"),
         platform: None,
     },
+    // #130: the shim spawner and re-attach.
+    Mutant {
+        name: "mutant_shim_attach_by_pid",
+        issue: 130,
+        breaks: "attach takes a live pid for the shim whatever its start time",
+        package: "bosun-proc",
+        check: Check::Test("attach_refuses_a_record_whose_pid_changed_hands"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

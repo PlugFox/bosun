@@ -57,7 +57,7 @@ impl Container {
 
 /// Linux: the processes of `/proc` whose group (field 5 of `stat`) is `pgid`.
 #[cfg(target_os = "linux")]
-fn group_members(group: u32) -> io::Result<Vec<u32>> {
+pub(crate) fn group_members(group: u32) -> io::Result<Vec<u32>> {
     let mut members = Vec::new();
     for entry in std::fs::read_dir("/proc")? {
         let Ok(entry) = entry else { continue };
@@ -98,7 +98,7 @@ fn parse_stat_group(line: &str) -> Option<(char, u32)> {
 /// than Linux: the listing is a snapshot sized by a first call, and a process the user cannot
 /// inspect is skipped.
 #[cfg(target_os = "macos")]
-fn group_members(pgid: u32) -> io::Result<Vec<u32>> {
+pub(crate) fn group_members(pgid: u32) -> io::Result<Vec<u32>> {
     // SAFETY: a null buffer of size zero asks for the number of pids only.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     let count = usize::try_from(count).map_err(|_| io::Error::last_os_error())?;
@@ -130,7 +130,7 @@ fn group_members(pgid: u32) -> io::Result<Vec<u32>> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn group_members(_pgid: u32) -> io::Result<Vec<u32>> {
+pub(crate) fn group_members(_pgid: u32) -> io::Result<Vec<u32>> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 

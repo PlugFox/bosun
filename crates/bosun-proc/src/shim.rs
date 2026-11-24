@@ -21,6 +21,21 @@
 //! The shim does not detach from the job it runs in (`CREATE_BREAKAWAY_FROM_JOB`): the daemon's
 //! own job forbids breakaway, and a plain child already outlives its parent on Windows.
 //!
+//! # The daemon's side
+//!
+//! [`ShimSpawner`] is the crate's [`Spawner`] through the shim (#130): it writes the spec into a
+//! session directory, starts the shim binary whose path it was given, and waits for the first
+//! record. The [`Tree`] and the output it hands back read the shim's files, not pipes: stdout
+//! and stderr are tailed from the output files, the exit is read from the record, and the kill
+//! goes through the shim (the child is killed by pid and start time; the shim records its exit
+//! and kills the rest of the container). Nothing of it holds the session: a holder that drops
+//! everything, or dies, leaves the session running.
+//!
+//! [`attach`] re-attaches to a running or finished session from its record alone, with the
+//! output from the offsets the caller had read up to. A record whose shim is gone without an
+//! exit, and whose pid now names another process (its start time differs), is refused: that pid
+//! is not the session's, and nothing is ever killed or waited on through it.
+//!
 //! # Files
 //!
 //! The spec and the record are text, one `key=value` per line after a header line that names
@@ -31,13 +46,20 @@
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io;
+use std::future::Future;
+use std::io::{self, Read as _, Seek as _};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
-use crate::key::{ProcessKey, StartTime};
+use tokio::io::{AsyncRead, ReadBuf};
+
+use crate::key::{ProcessKey, StartTime, is_running};
+use crate::spawn::{ChildSpec, Output, Spawned, Spawner, Tree, WaitFuture};
 use crate::sys;
 
 const SPEC_HEADER: &str = "bosun-shim-spec";
@@ -490,6 +512,383 @@ pub fn run(spec_path: &Path) -> io::Result<i32> {
     // What the child left behind dies now (on Windows also when the job's handle closes).
     container.kill();
     Ok(exit.shim_code())
+}
+
+/// The name of the spec in a session directory of [`ShimSpawner`].
+pub const SPEC_FILE: &str = "session.spec";
+/// The name of the output directory in a session directory of [`ShimSpawner`].
+pub const OUTPUT_DIR: &str = "output";
+
+/// How often a reader of a session polls its files while nothing new is in them.
+const POLL: Duration = Duration::from_millis(20);
+/// How long [`ShimSpawner`] waits for the shim's first record.
+const RECORD_PATIENCE: Duration = Duration::from_secs(30);
+
+/// The record of the session in `dir`, a session directory of [`ShimSpawner`].
+#[must_use]
+pub fn session_record(dir: &Path) -> PathBuf {
+    record_path(&dir.join(SPEC_FILE))
+}
+
+/// How far a reader has read the output files: where [`attach`] resumes them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Offsets {
+    /// Bytes of stdout already read.
+    pub stdout: u64,
+    /// Bytes of stderr already read.
+    pub stderr: u64,
+}
+
+/// The [`Spawner`] through the session shim (see the module documentation).
+///
+/// The child's stdin is always closed: a [`ChildSpec`] that asks for a pipe is refused. Reading
+/// the output and waiting need a tokio runtime with the time driver enabled; the files are read
+/// with plain (short, local) blocking reads.
+#[derive(Debug, Clone)]
+pub struct ShimSpawner {
+    shim: PathBuf,
+    sessions: PathBuf,
+    wall_clock: Duration,
+}
+
+impl ShimSpawner {
+    /// A spawner that starts the shim binary at `shim`, keeps each session in a new directory
+    /// under `sessions`, and caps each child at `wall_clock`.
+    #[must_use]
+    pub fn new(
+        shim: impl Into<PathBuf>,
+        sessions: impl Into<PathBuf>,
+        wall_clock: Duration,
+    ) -> Self {
+        Self {
+            shim: shim.into(),
+            sessions: sessions.into(),
+            wall_clock,
+        }
+    }
+
+    /// Starts `spec` through the shim with `dir` as its session directory (created if missing):
+    /// the spec is [`SPEC_FILE`] in it, the output [`OUTPUT_DIR`], the record
+    /// [`session_record`]. Returns once the shim has written its first record, that is, with
+    /// the child on record.
+    ///
+    /// # Errors
+    ///
+    /// When `spec` asks for stdin, `dir` already holds a record, the spec cannot be written,
+    /// the shim cannot be started, or it exits or stalls without a record.
+    pub fn spawn_in(&self, spec: &ChildSpec, dir: &Path) -> io::Result<Spawned> {
+        if spec.stdin {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the session shim closes the child's stdin",
+            ));
+        }
+        std::fs::create_dir_all(dir)?;
+        let spec_path = dir.join(SPEC_FILE);
+        let record = record_path(&spec_path);
+        if record.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("a session is already recorded in {}", dir.display()),
+            ));
+        }
+        Spec {
+            program: spec.program.clone(),
+            args: spec.args.clone(),
+            env: spec.env.clone(),
+            cwd: spec.cwd.clone(),
+            output_dir: dir.join(OUTPUT_DIR),
+            wall_clock: self.wall_clock,
+        }
+        .write(&spec_path)?;
+        let mut command = Command::new(&self.shim);
+        command
+            .arg(&spec_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        }
+        let mut shim = command.spawn()?;
+        let deadline = Instant::now() + RECORD_PATIENCE;
+        let first = loop {
+            if let Ok(first) = Record::read(&record) {
+                break first;
+            }
+            if let Some(status) = shim.try_wait()? {
+                // The record may have landed just before the exit.
+                break Record::read(&record).map_err(|e| {
+                    io::Error::other(format!("the shim exited ({status}) without a record: {e}"))
+                })?;
+            }
+            if Instant::now() >= deadline {
+                shim.kill().ok();
+                shim.wait().ok();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("the shim wrote no record within {RECORD_PATIENCE:?}"),
+                ));
+            }
+            std::thread::sleep(POLL);
+        };
+        if first.shim.pid != shim.id() {
+            return Err(io::Error::other("the record names another shim"));
+        }
+        session(&first, &record, Offsets::default(), Some(shim))
+    }
+}
+
+impl Spawner for ShimSpawner {
+    fn spawn(&self, spec: &ChildSpec) -> io::Result<Spawned> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let name = format!(
+            "{}-{nanos}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        std::fs::create_dir_all(&self.sessions)?;
+        let dir = self.sessions.join(name);
+        // `create_dir`, not `create_dir_all`: the directory is this session's alone.
+        std::fs::create_dir(&dir)?;
+        self.spawn_in(spec, &dir)
+    }
+}
+
+/// Re-attaches to the session whose record is at `record_path`, running or finished: its
+/// output from `from` on, its exit when the shim writes it, and the kill through the shim.
+///
+/// # Errors
+///
+/// When the record cannot be read or an output file cannot be opened, and when the record has
+/// no exit while its shim's pid names a process with another start time: the shim is gone and
+/// the pid changed hands.
+pub fn attach(record_path: &Path, from: Offsets) -> io::Result<Spawned> {
+    let record = Record::read(record_path)?;
+    if record.exit.is_none() && changed_hands(record.shim)? {
+        return Err(io::Error::other(format!(
+            "the shim of {} is gone: pid {} now names another process",
+            record_path.display(),
+            record.shim.pid
+        )));
+    }
+    session(&record, record_path, from, None)
+}
+
+/// Whether a live process runs under `shim.pid` that is not the recorded one.
+fn changed_hands(shim: ProcessKey) -> io::Result<bool> {
+    let Some(start) = crate::key::start_time(shim.pid)? else {
+        return Ok(false);
+    };
+    if cfg!(mutant_shim_attach_by_pid) {
+        // Mutant (`mutant_shim_attach_by_pid`): a live pid is taken for the shim, whatever its
+        // start time.
+        return Ok(false);
+    }
+    Ok(start != shim.start)
+}
+
+/// The [`Spawned`] of a session: both outputs from `from`, the tree on the record.
+fn session(
+    record: &Record,
+    path: &Path,
+    from: Offsets,
+    shim: Option<std::process::Child>,
+) -> io::Result<Spawned> {
+    let watch = Watch {
+        record: path.to_path_buf(),
+        shim: record.shim,
+    };
+    let stdout = Tail::open(&record.stdout, from.stdout, watch.clone())?;
+    let stderr = Tail::open(&record.stderr, from.stderr, watch)?;
+    let tree = ShimTree {
+        record: path.to_path_buf(),
+        child: record.child,
+        shim_key: record.shim,
+        shim,
+    };
+    Ok(Spawned {
+        tree: Box::new(tree),
+        stdout: Box::new(stdout) as Output,
+        stderr: Box::new(stderr) as Output,
+        stdin: None,
+    })
+}
+
+/// Tells whether a session is over: its record holds the exit, or its shim is gone.
+#[derive(Debug, Clone)]
+struct Watch {
+    record: PathBuf,
+    shim: ProcessKey,
+}
+
+impl Watch {
+    fn over(&self) -> bool {
+        Record::read(&self.record).is_ok_and(|r| r.exit.is_some()) || !is_running(self.shim)
+    }
+}
+
+/// An output file read from an offset on, waiting at its end until the session is over.
+struct Tail {
+    file: File,
+    watch: Watch,
+    /// The session is over: the next empty read is the end.
+    over: bool,
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl Tail {
+    fn open(path: &Path, offset: u64, watch: Watch) -> io::Result<Self> {
+        let mut file = File::open(path)?;
+        file.seek(io::SeekFrom::Start(offset))?;
+        Ok(Self {
+            file,
+            watch,
+            over: false,
+            sleep: None,
+        })
+    }
+}
+
+impl AsyncRead for Tail {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        loop {
+            if let Some(sleep) = this.sleep.as_mut() {
+                if sleep.as_mut().poll(cx).is_pending() {
+                    return Poll::Pending;
+                }
+                this.sleep = None;
+            }
+            let read = this.file.read(buf.initialize_unfilled())?;
+            if read > 0 {
+                buf.advance(read);
+                return Poll::Ready(Ok(()));
+            }
+            if this.over {
+                return Poll::Ready(Ok(()));
+            }
+            if this.watch.over() {
+                // One more read: what the child wrote before it exited is in the file now.
+                this.over = true;
+                continue;
+            }
+            this.sleep = Some(Box::pin(tokio::time::sleep(POLL)));
+        }
+    }
+}
+
+/// The [`Tree`] of a session, read from its record.
+#[derive(Debug)]
+struct ShimTree {
+    record: PathBuf,
+    child: ProcessKey,
+    shim_key: ProcessKey,
+    /// The shim, when this process started it: reaped as soon as it exits.
+    shim: Option<std::process::Child>,
+}
+
+impl ShimTree {
+    /// The child's exit from the record; `None` while the shim runs without one.
+    fn exit(&mut self) -> io::Result<Option<Exit>> {
+        if let Some(shim) = self.shim.as_mut() {
+            shim.try_wait().ok();
+        }
+        if let Some(exit) = Record::read(&self.record).ok().and_then(|r| r.exit) {
+            return Ok(Some(exit));
+        }
+        if is_running(self.shim_key) {
+            return Ok(None);
+        }
+        // The shim is gone: the record it left is final.
+        Record::read(&self.record)?
+            .exit
+            .map(Some)
+            .ok_or_else(|| io::Error::other("the shim exited without recording the child's exit"))
+    }
+}
+
+impl Tree for ShimTree {
+    fn key(&self) -> ProcessKey {
+        self.child
+    }
+
+    /// Kills the child by pid and start time; the shim sees it exit, records the exit and kills
+    /// the rest of the container.
+    fn kill_tree(&mut self) -> io::Result<()> {
+        crate::key::reap(self.child).map(|_| ())
+    }
+
+    /// The container cannot be listed from outside the shim on Windows: the child while it
+    /// runs. On Unix, the child's process group while the shim runs.
+    fn members(&self) -> io::Result<Vec<u32>> {
+        if !is_running(self.shim_key) {
+            return Ok(Vec::new());
+        }
+        #[cfg(unix)]
+        {
+            sys::group_members(self.child.pid)
+        }
+        #[cfg(windows)]
+        {
+            Ok(is_running(self.child)
+                .then_some(self.child.pid)
+                .into_iter()
+                .collect())
+        }
+    }
+
+    fn wait(&mut self) -> WaitFuture<'_> {
+        Box::pin(async move {
+            loop {
+                if let Some(exit) = self.exit()? {
+                    return Ok(status_of(exit));
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        })
+    }
+}
+
+impl Drop for ShimTree {
+    fn drop(&mut self) {
+        // The session lives on; only the shim's exit status is collected, so that on Unix it
+        // does not stay a zombie of this process.
+        if let Some(mut shim) = self.shim.take()
+            && matches!(shim.try_wait(), Ok(None))
+        {
+            std::thread::spawn(move || shim.wait().ok());
+        }
+    }
+}
+
+/// The [`ExitStatus`] a recorded exit stands for.
+fn status_of(exit: Exit) -> ExitStatus {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        match exit {
+            Exit::Code(code) => ExitStatus::from_raw((code & 0xff) << 8),
+            Exit::Signal(signal) => ExitStatus::from_raw(signal & 0x7f),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(u32::from_ne_bytes(exit.shim_code().to_ne_bytes()))
+    }
 }
 
 #[cfg(test)]

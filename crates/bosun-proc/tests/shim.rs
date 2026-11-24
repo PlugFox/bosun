@@ -9,10 +9,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use bosun_proc::shim::{Exit, Record, Spec, record_path};
-use bosun_proc::{ProcessKey, is_running, reap, start_time};
+use bosun_proc::shim::{
+    Exit, Offsets, RECORD_VERSION, Record, ShimSpawner, Spec, attach, record_path, session_record,
+};
+use bosun_proc::{ChildSpec, ProcessKey, StartTime, is_running, reap, start_time};
 
 const ROLE: &str = "BOSUN_SHIM_HELPER";
+/// The directory a `holder` helper works in.
+const DIR: &str = "BOSUN_SHIM_HELPER_DIR";
+/// The code the `talk` role exits with.
+const TALKED_CODE: i32 = 9;
 const PREFIX: &str = "bosun-shim-helper";
 /// How long a sleeping helper lives: far beyond any test, short enough that a leak ends.
 const SLEEP: Duration = Duration::from_secs(60);
@@ -70,7 +76,11 @@ fn poll<T>(what: &str, mut found: impl FnMut() -> Option<T>) -> T {
 
 /// The `bosun-shim-helper` lines of the file at `path`, by key; empty while it is missing.
 fn reports(path: &Path) -> HashMap<String, String> {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+    parse(&std::fs::read_to_string(path).unwrap_or_default())
+}
+
+/// The `bosun-shim-helper` lines of `text`, by key.
+fn parse(text: &str) -> HashMap<String, String> {
     text.lines()
         .filter_map(|line| {
             let rest = line.strip_prefix(PREFIX)?.strip_prefix(' ')?;
@@ -183,6 +193,183 @@ fn a_shim_without_a_readable_spec_fails_with_its_own_code() {
     assert!(!record_path(&missing).exists());
 }
 
+/// The environment of a helper with `role`: the role, and on Windows `SystemRoot`.
+fn role_env(role: &str) -> Vec<(OsString, OsString)> {
+    let mut env = vec![(OsString::from(ROLE), OsString::from(role))];
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        env.push(("SystemRoot".into(), root));
+    }
+    env
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
+/// A holder process spawns a session through `ShimSpawner`, reads its first line and exits
+/// without a kill. The session outlives it; a new `attach` from the record alone reads the
+/// rest of the output from the holder's offset on and the exit. One session, one exit: the
+/// child that ran is the recorded one, it started once, and the exit seen is the one recorded.
+#[test]
+fn a_session_survives_its_holder_and_is_reattached() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let status = Command::new(std::env::current_exe().expect("current exe"))
+        .args(["run_role", "--exact", "--nocapture", "--quiet"])
+        .env_clear()
+        .envs(role_env("holder"))
+        .env(DIR, dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run the holder");
+    assert!(status.success(), "the holder failed: {status}");
+    let held = std::fs::read_to_string(dir.path().join("held")).expect("the holder's report");
+    let (path, offset) = held.trim_end().split_once('\n').expect("two lines");
+    let path = PathBuf::from(path);
+    let offset: u64 = offset.parse().expect("offset");
+
+    let before = Record::read(&path).expect("record");
+    let survived = before.exit.is_none() && is_running(before.child);
+    if !survived {
+        reap(before.child).ok();
+    }
+    assert!(survived, "the session ended with its holder: {before:?}");
+
+    std::fs::write(dir.path().join("go"), "").expect("let the child go on");
+    let (stdout, stderr, status, key) = runtime().block_on(async {
+        use tokio::io::AsyncReadExt;
+
+        let mut spawned = attach(
+            &path,
+            Offsets {
+                stdout: offset,
+                stderr: 0,
+            },
+        )
+        .expect("attach");
+        let (mut stdout, mut stderr) = (String::new(), String::new());
+        let (out, err) = tokio::join!(
+            spawned.stdout.read_to_string(&mut stdout),
+            spawned.stderr.read_to_string(&mut stderr),
+        );
+        out.expect("stdout");
+        err.expect("stderr");
+        let status = spawned.tree.wait().await.expect("wait");
+        (stdout, stderr, status, spawned.tree.key())
+    });
+    let after = Record::read(&path).expect("record");
+    let left = survivors(&[after.shim, after.child], Duration::from_secs(5));
+    for &key in &left {
+        reap(key).ok();
+    }
+
+    assert_eq!(key, before.child);
+    assert_eq!(after.child, before.child, "another child ran");
+    assert_eq!(status.code(), Some(TALKED_CODE));
+    assert_eq!(after.exit, Some(Exit::Code(TALKED_CODE)));
+    let rest = parse(&stdout);
+    assert!(
+        rest.contains_key("second"),
+        "the rest of stdout: {stdout:?}"
+    );
+    assert!(
+        !rest.contains_key("first"),
+        "read again before the offset: {stdout:?}"
+    );
+    assert!(parse(&stderr).contains_key("err"), "stderr: {stderr:?}");
+    let whole = std::fs::read_to_string(&after.stdout).expect("stdout file");
+    let starts = whole.lines().filter(|l| l.contains(" first ")).count();
+    assert_eq!(starts, 1, "the child started {starts} times: {whole:?}");
+    assert!(left.is_empty(), "still running after the exit: {left:?}");
+}
+
+/// A record without an exit whose shim pid is live under another start time is refused; the
+/// same record with the live process's own start time is attached.
+#[test]
+fn attach_refuses_a_record_whose_pid_changed_hands() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("output");
+    std::fs::create_dir(&output).expect("output dir");
+    let (stdout, stderr) = (output.join("stdout"), output.join("stderr"));
+    std::fs::write(&stdout, "").expect("stdout");
+    std::fs::write(&stderr, "").expect("stderr");
+    // A live process stands in for the shim and the child: this test.
+    let pid = std::process::id();
+    let live = ProcessKey {
+        pid,
+        start: start_time(pid).expect("start time").expect("live"),
+    };
+    let mut record = Record {
+        version: RECORD_VERSION,
+        shim: live,
+        child: live,
+        stdout,
+        stderr,
+        exit: None,
+        capped: false,
+    };
+    let path = dir.path().join("session.spec.record");
+    record.write(&path).expect("write the record");
+    // Dropping an attached session kills nothing.
+    let attached = attach(&path, Offsets::default());
+    assert!(attached.is_ok(), "the live shim's record: {attached:?}");
+    drop(attached);
+
+    record.shim.start = StartTime::from_raw(live.start.raw() ^ 1);
+    record.write(&path).expect("write the record");
+    let refused = attach(&path, Offsets::default());
+    assert!(
+        refused.is_err(),
+        "attached through a pid that changed hands"
+    );
+}
+
+/// The `holder` role: spawns a `talk` session through `ShimSpawner` in [`DIR`], reads its
+/// stdout up to the first line, writes the record's path and the bytes read to `held`, and
+/// drops everything without a kill.
+fn hold() {
+    use tokio::io::AsyncReadExt;
+
+    let dir = PathBuf::from(std::env::var_os(DIR).expect("the holder's directory"));
+    let shim = ShimSpawner::new(
+        env!("CARGO_BIN_EXE_bosun-shim"),
+        dir.join("sessions"),
+        SLEEP,
+    );
+    let child = ChildSpec {
+        program: std::env::current_exe().expect("current exe"),
+        args: ["run_role", "--exact", "--nocapture", "--quiet"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        env: role_env("talk"),
+        cwd: dir.clone(),
+        stdin: false,
+    };
+    let session = dir.join("session");
+    runtime().block_on(async {
+        let mut spawned = shim.spawn_in(&child, &session).expect("spawn");
+        let mut seen = Vec::new();
+        while !parse(&String::from_utf8_lossy(&seen)).contains_key("first") {
+            let mut chunk = [0_u8; 256];
+            let read = spawned.stdout.read(&mut chunk).await.expect("read");
+            assert!(read > 0, "stdout ended before the first line");
+            seen.extend_from_slice(&chunk[..read]);
+        }
+        let record = session_record(&session);
+        std::fs::write(
+            dir.join("held"),
+            format!("{}\n{}\n", record.display(), seen.len()),
+        )
+        .expect("report");
+        drop(spawned);
+    });
+}
+
 /// The helper's entry point: a no-op unless the role variable selects a role.
 #[test]
 fn run_role() {
@@ -201,6 +388,19 @@ fn run_role() {
             report(&mut std::io::stdout(), "out", "line");
             report(&mut std::io::stderr(), "err", "line");
             std::process::exit(SPOKEN_CODE);
+        }
+        "holder" => hold(),
+        // Says its first line, waits for `go` in its directory, says the rest and exits.
+        "talk" => {
+            report(&mut std::io::stdout(), "first", "line");
+            let deadline = Instant::now() + SLEEP;
+            while !Path::new("go").exists() {
+                assert!(Instant::now() < deadline, "no go within {SLEEP:?}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            report(&mut std::io::stdout(), "second", "line");
+            report(&mut std::io::stderr(), "err", "line");
+            std::process::exit(TALKED_CODE);
         }
         // Starts a sleeping grandchild, reports its pid, sleeps.
         "parent" => {

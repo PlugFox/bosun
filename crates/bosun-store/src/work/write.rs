@@ -503,6 +503,20 @@ pub(crate) async fn attempt_guards(
     Ok(())
 }
 
+pub(crate) async fn attempt_refusal(
+    conn: &mut SqliteConnection,
+    item: &ItemId,
+    attempt: u32,
+    reasons: &[String],
+) -> Result<(), Error> {
+    let attempt = attempt_id(conn, item, attempt).await?;
+    let json = serde_json::Value::from(reasons).to_string();
+    sqlx::query!("UPDATE attempt SET refusal = ? WHERE id = ?", json, attempt,)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 pub(crate) async fn end_run(conn: &mut SqliteConnection, end: &RunEnd) -> Result<(), Error> {
     let attempt = attempt_id(conn, &end.item, end.attempt).await?;
     let (exit, reset) = codec::exit(end.exit);

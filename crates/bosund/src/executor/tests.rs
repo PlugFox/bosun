@@ -1897,6 +1897,73 @@ async fn the_git_guards_refuse_before_the_verdict_and_the_trailers_reach_the_rep
     assert_eq!(missing, [("demo#6", head.as_str())]);
 }
 
+/// #137: an attempt refused by a precondition keeps its reasons. The agent commits, then leaves
+/// `loose.txt` untracked, twice: both attempts fail the clean tree, and the item ends Needs you
+/// (`attempts_exhausted`). The reasons are on each attempt's row, in the item report, and in
+/// the second attempt's prompt as the daemon's words
+/// (`mutant_executor_drop_precondition_reasons` stores none: all three lose them).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_precondition_refusal_reaches_the_report_and_the_next_prompt() {
+    let scene = Scene::new().await;
+    let prompt = scene.path("prompt");
+    scene.write_board(&[card(1, "Loose", "test -f loose.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            format!("stdin {}", prompt.display()),
+            "git commit --allow-empty -q -m one".to_owned(),
+            "write loose.txt x".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, Duration::from_secs(120)).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(state, State::NeedsYou(Reason::AttemptsExhausted));
+
+    let id = ItemId::new("demo#1");
+    let reader = scene.store.reader();
+    let attempts = reader.attempts(&id).await.unwrap();
+    assert_eq!(attempts.len(), 2, "{attempts:?}");
+    for attempt in &attempts {
+        assert!(
+            attempt
+                .refusal
+                .iter()
+                .any(|r| r.contains("the working tree is not clean") && r.contains("loose.txt")),
+            "attempt {}: {:?}",
+            attempt.attempt.number,
+            attempt.refusal
+        );
+    }
+
+    let facts = super::outbox::report_facts(reader, &id, "Loose".to_owned(), "demo", None)
+        .await
+        .unwrap();
+    let report = bosun_core::publish::render_report(
+        &facts,
+        bosun_core::publish::ReportOptions::for_repository(false),
+    );
+    assert!(
+        report.contains(
+            "- Attempt 1: fail, refused before its verdict: the working tree is not clean"
+        ),
+        "{report}"
+    );
+
+    // The second attempt's prompt (the script copies each prompt to the same file).
+    let prompt = std::fs::read_to_string(&prompt).unwrap();
+    assert!(prompt.contains("This is attempt 2 of 2."), "{prompt}");
+    assert!(
+        prompt.contains("Your previous attempt was refused by the daemon before its verdict ran"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("- the working tree is not clean: ?? loose.txt"),
+        "{prompt}"
+    );
+}
+
 /// #99: a second daemon on the same board. Card 1 carries the claim marker of another daemon id
 /// (of the same identity, so its login wrote it): the repository is refused, card 1 is not
 /// claimed (nothing written to the board, no snapshot, no session) and neither is card 2.

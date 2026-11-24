@@ -1601,6 +1601,17 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #137: the reasons of a refusal before the verdict are stored with the attempt.
+    Mutant {
+        name: "mutant_executor_drop_precondition_reasons",
+        issue: 137,
+        breaks: "a failed precondition's reasons are not stored: the report and prompt lack them",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::a_precondition_refusal_reaches_the_report_and_the_next_prompt",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

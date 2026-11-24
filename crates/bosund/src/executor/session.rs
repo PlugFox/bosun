@@ -132,7 +132,7 @@ fn entry_text(entry: &LiveEntry) -> String {
 }
 
 /// The prompt of the attempt: the snapshot's prose and verdict, its inlined comments, and the
-/// previous attempt's verdict output from the store (#2: never from the board).
+/// previous attempt's verdict output and refusal from the store (#2: never from the board).
 async fn prompt_of(shared: &Shared, claimed: &Claimed, run: &Run) -> prompt::Prompt {
     let reader = &shared.deps.reader;
     let previous = reader
@@ -143,6 +143,14 @@ async fn prompt_of(shared: &Shared, claimed: &Claimed, run: &Run) -> prompt::Pro
         .filter(|v| v.attempt < run.attempt)
         .filter_map(|v| v.tail)
         .next_back();
+    // Why the daemon refused the previous attempt before its verdict, if it did (#137).
+    let refusal = reader
+        .attempts(&run.item)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|a| a.attempt.number + 1 == run.attempt)
+        .map_or_default(|a| a.refusal);
     let daemon: BTreeSet<String> = reader
         .board_comments(&run.item)
         .await
@@ -156,6 +164,7 @@ async fn prompt_of(shared: &Shared, claimed: &Claimed, run: &Run) -> prompt::Pro
         max_attempts: Rules::default().max_attempts,
         previous_verdict: previous,
         verdict_tail_bytes: prompt::VERDICT_TAIL_BYTES,
+        previous_refusal: refusal,
         standing_instructions: String::new(),
         comments: claimed
             .snapshot
@@ -234,7 +243,7 @@ impl Drop for SessionDir {
         if let Err(e) = std::fs::remove_dir_all(&self.0)
             && e.kind() != std::io::ErrorKind::NotFound
         {
-            eprintln!("bosund: removing {}: {e}", self.0.display());
+            crate::log::log!("bosund: removing {}: {e}", self.0.display());
         }
     }
 }
@@ -263,7 +272,7 @@ impl TailFile {
         let file = match file {
             Ok(file) => Some(file),
             Err(e) => {
-                eprintln!("bosund: {}: {e}", path.display());
+                crate::log::log!("bosund: {}: {e}", path.display());
                 None
             }
         };
@@ -297,7 +306,7 @@ impl Drop for TailFile {
         if let Err(e) = std::fs::remove_file(&self.path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
-            eprintln!("bosund: removing {}: {e}", self.path.display());
+            crate::log::log!("bosund: removing {}: {e}", self.path.display());
         }
     }
 }
@@ -616,7 +625,7 @@ pub(crate) async fn session(
                     && reported != session_id
                     && !mismatch.swap(true, Ordering::Relaxed)
                 {
-                    eprintln!(
+                    crate::log::log!(
                         "bosund: {}: the session reports id {reported}, not {session_id}",
                         run.item
                     );
@@ -755,7 +764,7 @@ pub(crate) async fn session(
     });
     if run.mode == SpawnMode::Resume && exit == Exit::Crash && ended && !up.load(Ordering::Relaxed)
     {
-        eprintln!(
+        crate::log::log!(
             "bosund: {}: the resume of session {session_id} failed; a fresh session follows",
             run.item
         );

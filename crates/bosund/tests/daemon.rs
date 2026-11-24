@@ -181,6 +181,21 @@ async fn a_second_instance_exits() {
     let client = home.client().await;
     assert_eq!(client.daemon().pid, first.pid(), "the first one answers");
     assert_eq!(client.daemon().api_version, bosun_api::API_VERSION);
+
+    // Both log lines survive in the log file beside the configuration (#137), not on stderr
+    // only.
+    let log = bosun_client::log::path(&home.dir.path().join("config.toml"), &home.endpoint);
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        text.contains("bosund: logging to"),
+        "{}: {text}",
+        log.display()
+    );
+    assert!(
+        text.contains("bosund: another instance is already running at"),
+        "{}: {text}",
+        log.display()
+    );
 }
 
 /// The `tokens.by_session` rows of one identity as the session list of `recount`'s compare

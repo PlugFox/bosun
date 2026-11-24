@@ -22,6 +22,7 @@
 //! | `endpoint` | nothing listens at the endpoint (fail) |
 //! | `endpoint_acl` | Unix: the socket's mode is not 0600 (fail). Windows: skipped, see below |
 //! | `daemon` | the daemon does not answer `hello`, or speaks another API version (fail) |
+//! | `log` | never fails: names the daemon's log file (`bosun_client::log`, #137), ok when it exists, skipped when the daemon has not written it yet |
 //!
 //! The per-identity checks carry the identity's name. The `PATH` the daemon gets is the one
 //! the registration sets on macOS and Linux; on Windows, and with no registration, it is the
@@ -197,7 +198,30 @@ pub(crate) async fn run(inputs: &Inputs) -> Vec<Check> {
         (Ok(_), None) => Check::skip("registration", "not queried"),
     });
     daemon(&inputs.endpoint, &mut checks).await;
+    checks.push(log(inputs));
     checks
+}
+
+/// The daemon's log file (#137): where to look when the daemon stops or refuses an attempt,
+/// since the logon task discards its standard error.
+fn log(inputs: &Inputs) -> Check {
+    let (Some(config), Ok(endpoint)) = (
+        inputs.config.clone().or_else(bosun_config::default_path),
+        &inputs.endpoint,
+    ) else {
+        return Check::skip("log", "no configuration file or endpoint to place it by");
+    };
+    let file = bosun_client::log::path(&config, endpoint);
+    match std::fs::metadata(&file) {
+        Ok(meta) => Check::ok("log", format!("{} ({} bytes)", file.display(), meta.len())),
+        Err(_) => Check::skip(
+            "log",
+            format!(
+                "{}: not written yet; the daemon writes it from its start",
+                file.display()
+            ),
+        ),
+    }
 }
 
 fn config(inputs: &Inputs, checks: &mut Vec<Check>) -> Option<Config> {

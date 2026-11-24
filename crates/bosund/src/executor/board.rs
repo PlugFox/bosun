@@ -206,7 +206,7 @@ impl Visibility {
         match (self.read)() {
             Ok(public) => *self.known.get_or_init(|| public),
             Err(e) => {
-                eprintln!(
+                crate::log::log!(
                     "bosund: the repository's visibility cannot be read ({e}); verdict output \
                      stays off its reports"
                 );

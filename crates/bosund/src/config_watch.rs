@@ -74,11 +74,11 @@ pub(crate) fn spawn(
             let previous = tx.borrow().clone();
             let (config, error) = reload(&previous, &text, probe.as_ref());
             match &error {
-                Some(e) => eprintln!(
+                Some(e) => crate::log::log!(
                     "bosund: {}: the edit is invalid, the previous configuration stays: {e}",
                     path.display()
                 ),
-                None => eprintln!("bosund: {}: configuration reloaded", path.display()),
+                None => crate::log::log!("bosund: {}: configuration reloaded", path.display()),
             }
             reported.set(error);
             if config != *previous {

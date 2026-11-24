@@ -27,6 +27,8 @@ const DETAIL_CAP: usize = 2_000;
 const COMMAND_CAP: usize = 500;
 /// A verdict's one-line result.
 const LINE_CAP: usize = 300;
+/// The reasons an attempt was refused with, together; each is at most [`LINE_CAP`].
+const REFUSAL_CAP: usize = 1_000;
 /// A name shown as a code span: a test, a path, a branch.
 const NAME_CAP: usize = 200;
 /// A model name or a session id.
@@ -97,6 +99,10 @@ pub struct AttemptFacts {
     pub crash_retries: u32,
     /// Its verdict, once one ran.
     pub verdict: Option<VerdictFacts>,
+    /// Why the daemon refused it before its verdict (#137): its failed preconditions or guard
+    /// refusals, in the daemon's words; empty when nothing refused it. A reason may quote the
+    /// repository (a path, a commit message), so the renderer cleans it.
+    pub refusal: Vec<String>,
 }
 
 /// A verdict of one attempt.
@@ -203,13 +209,20 @@ pub struct Bill {
 pub struct ReportOptions {
     /// Publish the verdict output tails.
     pub tails: bool,
+    /// Publish the reasons an attempt was refused with before its verdict (#137): they name
+    /// files of the working tree and quote commit messages.
+    pub refusals: bool,
 }
 
 impl ReportOptions {
-    /// The defaults for a repository: verdict tails are off on public repositories (#5).
+    /// The defaults for a repository: verdict tails and refusal reasons are off on public
+    /// repositories (#5, #137).
     #[must_use]
     pub fn for_repository(public: bool) -> Self {
-        Self { tails: !public }
+        Self {
+            tails: !public,
+            refusals: !public,
+        }
     }
 }
 
@@ -239,7 +252,7 @@ pub fn render_report(facts: &ReportFacts, options: ReportOptions) -> String {
     }
     body.push_str("\n\n");
     facts_list(&mut body, facts);
-    attempts(&mut body, &facts.attempts);
+    attempts(&mut body, &facts.attempts, options.refusals);
     if let Some(summary) = &facts.summary {
         body.push_str("\n\n");
         body.push_str(&agent_section(summary));
@@ -330,8 +343,9 @@ fn facts_list(body: &mut String, facts: &ReportFacts) {
     }
 }
 
-/// The attempts, the latest [`ATTEMPTS_MAX`] of them.
-fn attempts(body: &mut String, attempts: &[AttemptFacts]) {
+/// The attempts, the latest [`ATTEMPTS_MAX`] of them; the reasons of a refusal only when
+/// `refusals`, else only that there was one.
+fn attempts(body: &mut String, attempts: &[AttemptFacts], refusals: bool) {
     if attempts.is_empty() {
         return;
     }
@@ -360,6 +374,26 @@ fn attempts(body: &mut String, attempts: &[AttemptFacts]) {
             let line = sanitise_inline(&redact_head(&verdict.line, LINE_CAP), LINE_CAP);
             if !line.is_empty() {
                 let _ = write!(body, ": {line}");
+            }
+        }
+        if !attempt.refusal.is_empty() && !refusals {
+            body.push_str(", refused before its verdict (the reasons are in `bosun item`)");
+        } else if !attempt.refusal.is_empty() {
+            // Each reason capped, as many as fit the attempt's budget; the rest counted.
+            let mut reasons: Vec<String> = Vec::new();
+            let mut used = 0;
+            for reason in &attempt.refusal {
+                let text = sanitise_inline(&redact_head(reason, LINE_CAP), LINE_CAP);
+                if !reasons.is_empty() && used + chars(&text) > REFUSAL_CAP {
+                    break;
+                }
+                used += chars(&text);
+                reasons.push(text);
+            }
+            let _ = write!(body, ", refused before its verdict: {}", reasons.join("; "));
+            let more = attempt.refusal.len() - reasons.len();
+            if more > 0 {
+                let _ = write!(body, " and {more} more");
             }
         }
         if let Some(model) = &attempt.model {

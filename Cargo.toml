@@ -262,6 +262,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_git_squash_skip_tree_check)",
   "cfg(mutant_git_merge_drop_trailers)",
   "cfg(mutant_git_merge_signed)",
+  # #137: the reasons of a refusal before the verdict.
+  "cfg(mutant_executor_drop_precondition_reasons)",
 ] }
 
 [workspace.lints.clippy]

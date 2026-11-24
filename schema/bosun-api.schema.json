@@ -315,6 +315,13 @@
           "minimum": 0,
           "type": "integer"
         },
+        "refusal": {
+          "description": "Why the daemon refused it before its verdict (#137): its failed preconditions or guard\nrefusals, in the daemon's words; empty when nothing refused it.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "sessions": {
           "description": "Its sessions, in order.",
           "items": {

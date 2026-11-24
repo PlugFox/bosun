@@ -177,6 +177,25 @@ async fn an_item_reads_back_as_the_machine_left_it() {
     assert_eq!(attempts.len(), 1);
     assert!(attempts[0].attempt.state.passed());
     assert!(attempts[0].ended_ms.is_some());
+    assert_eq!(attempts[0].refusal, Vec::<String>::new());
+    // The reasons the daemon refused an attempt with (#137): the last write wins.
+    let refusal = |reasons: &[&str]| Write::AttemptRefusal {
+        item: id(),
+        attempt: 1,
+        reasons: reasons.iter().map(|r| (*r).to_owned()).collect(),
+    };
+    store
+        .writer()
+        .write(vec![
+            refusal(&["first"]),
+            refusal(&["no commit was made since the base", "a \"quoted\" one"]),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.reader().attempts(&id()).await.unwrap()[0].refusal,
+        ["no commit was made since the base", "a \"quoted\" one"]
+    );
     assert_eq!(
         store.reader().item_counts().await.unwrap(),
         [("done".to_owned(), 1)]

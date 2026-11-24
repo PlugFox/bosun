@@ -184,7 +184,7 @@ impl Loop {
             match read {
                 Read::Nothing => {}
                 Read::Command(command) => {
-                    eprintln!(
+                    crate::log::log!(
                         "bosund: repository {repo_name}: {id}: the user's {command:?} in state {}",
                         item.state.as_str()
                     );
@@ -204,7 +204,7 @@ impl Loop {
                 }
                 Read::Revert => {
                     acted = true;
-                    eprintln!(
+                    crate::log::log!(
                         "bosund: repository {repo_name}: {id}: a change bosun did not make is                          reverted to {}",
                         item.state.as_str()
                     );

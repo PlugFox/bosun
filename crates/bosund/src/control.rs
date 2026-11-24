@@ -317,7 +317,7 @@ impl Control {
         let ours = std::fs::read_to_string(file)
             .is_ok_and(|text| digest(text.trim()) == self.inner.operator);
         if ours && let Err(e) = std::fs::remove_file(file) {
-            eprintln!(
+            crate::log::log!(
                 "bosund: cannot remove the operator token {}: {e}",
                 file.display()
             );
@@ -383,7 +383,7 @@ pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Valu
                 control.authorize(&p.operator)?;
                 control.set_killed(!p.release);
                 let state_name = if p.release { "running" } else { "killed" };
-                eprintln!(
+                crate::log::log!(
                     "bosund: the kill switch is {}",
                     if p.release { "released" } else { "thrown" }
                 );

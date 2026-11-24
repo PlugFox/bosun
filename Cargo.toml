@@ -250,6 +250,17 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #123: resources and worktrees in the configuration.
   "cfg(mutant_config_resource_any_capacity)",
   "cfg(mutant_config_worktree_root_inside_repo)",
+  # #124: item worktrees.
+  "cfg(mutant_git_worktree_skip_disk_floor)",
+  "cfg(mutant_git_worktree_unremoved_is_removed)",
+  "cfg(mutant_git_worktree_clear_unlisted)",
+  # #125: landing.
+  "cfg(mutant_git_rebase_keep_conflict)",
+  "cfg(mutant_git_ff_dirty_checkout)",
+  # #126: landing modes.
+  "cfg(mutant_git_squash_skip_tree_check)",
+  "cfg(mutant_git_merge_drop_trailers)",
+  "cfg(mutant_git_merge_signed)",
 ] }
 
 [workspace.lints.clippy]

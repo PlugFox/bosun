@@ -48,10 +48,27 @@
 //! data: `bosun-identity`'s `Env::add_git_config` appends it after the identity's own entries
 //! (the `credential.helper` reset is entry 0), and `Env::add_session_var` sets [`Hooks::env`].
 //!
+//! # Worktrees (#8)
+//!
+//! [`worktree`] makes an item's worktree on its own branch above a disk floor, and removes it
+//! or, when a held-open file blocks removal, quarantines and reports it.
+//!
+//! # Landing (#8)
+//!
+//! [`land`] rebases an item's branch onto its target (a conflict is aborted and reported) and
+//! fast-forwards the target, deferring when its checkout is dirty or mid-operation.
+//!
+//! # Landing modes (#8)
+//!
+//! [`merge::merge_commit`] builds the commit an item lands as (`ff`, `squash` or `no-ff`) with
+//! plumbing, refusing a tree other than the verified one; a new commit gets the trailers.
+//!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
 
 mod base;
 mod invoke;
+pub mod land;
+pub mod merge;
 mod message;
 mod precondition;
 mod protect;
@@ -60,6 +77,7 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 mod trailer;
+pub mod worktree;
 
 pub use base::Base;
 pub use invoke::{Error, Git, NO_HOOKS};

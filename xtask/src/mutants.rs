@@ -1519,6 +1519,80 @@ const MUTANTS: &[Mutant] = &[
         // Process groups are Unix; the test reads the groups from `/proc`.
         platform: Some(Platform::Linux),
     },
+    // #124: item worktrees.
+    Mutant {
+        name: "mutant_git_worktree_skip_disk_floor",
+        issue: 124,
+        breaks: "a worktree is made below the disk floor",
+        package: "bosun-git",
+        check: Check::Test("worktree::tests::no_worktree_is_created_below_the_disk_floor"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_worktree_unremoved_is_removed",
+        issue: 124,
+        breaks: "a worktree that could not be removed is reported as removed",
+        package: "bosun-git",
+        check: Check::Test(
+            "worktree::tests::a_worktree_with_a_file_held_open_is_quarantined_and_reported",
+        ),
+        // Only Windows refuses to delete a file held open.
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_git_worktree_clear_unlisted",
+        issue: 124,
+        breaks: "removal deletes a directory that is not a worktree git lists under the root",
+        package: "bosun-git",
+        check: Check::Test("worktree::tests::only_a_worktree_git_lists_under_the_root_is_deleted"),
+        platform: None,
+    },
+    // #125: landing.
+    Mutant {
+        name: "mutant_git_rebase_keep_conflict",
+        issue: 125,
+        breaks: "a conflicting rebase is left in the worktree",
+        package: "bosun-git",
+        check: Check::Test("land::tests::a_conflicting_rebase_is_aborted_and_reported"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_ff_dirty_checkout",
+        issue: 125,
+        breaks: "a fast-forward moves a checkout with local changes",
+        package: "bosun-git",
+        check: Check::Test("land::tests::a_dirty_checkout_of_the_target_defers_the_fast_forward"),
+        platform: None,
+    },
+    // #126: landing modes.
+    Mutant {
+        name: "mutant_git_squash_skip_tree_check",
+        issue: 126,
+        breaks: "a squash lands a tree other than the verified one",
+        package: "bosun-git",
+        check: Check::Test("merge::tests::a_squash_that_differs_from_the_verified_tree_is_refused"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_merge_drop_trailers",
+        issue: 126,
+        breaks: "a squash or merge commit lands without the Item, Run and Session trailers",
+        package: "bosun-git",
+        check: Check::Test(
+            "merge::tests::each_method_ends_with_the_verified_tree_and_the_trailers",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_merge_signed",
+        issue: 126,
+        breaks: "a squash or merge commit is signed, so landing waits on a signing program",
+        package: "bosun-git",
+        check: Check::Test(
+            "merge::tests::a_repository_that_signs_its_commits_still_lands_unsigned",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

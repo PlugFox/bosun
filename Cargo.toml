@@ -136,6 +136,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_shim_attach_by_pid)",
   "cfg(mutant_shim_child_shares_the_group)",
   "cfg(mutant_runner_inline_daemon_comments)",
+  "cfg(mutant_runner_auto_memory_on)",
   "cfg(mutant_runner_limit_is_crash)",
   "cfg(mutant_runner_loose_mcp)",
   "cfg(mutant_runner_question_from_text)",

@@ -90,6 +90,7 @@ decisions, follow-ups), then end the session. You may call it again; the last ca
 - If you cannot go on without an answer from a person, call `ask_question` with the question \
 and `blocking: true`, then end the session.
 - Use `note` for anything the person reviewing this item should read later.
+- Your memory is off. Anything a later session should know goes into the summary (decisions, follow-ups), where the person reviews it, not into memory files.
 - There is no \"done\" signal. Saying that you are done changes nothing: after you exit the \
 daemon runs the verdict command, and only its result decides.
 - Commit your work. Leave the working tree clean. Do not push, do not rewrite history below \

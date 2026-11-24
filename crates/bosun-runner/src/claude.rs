@@ -15,12 +15,17 @@
 //!        [--model <model>]
 //! ```
 //!
+//! with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` ([`AUTO_MEMORY_OFF`]) added to the environment.
+//!
 //! - `--strict-mcp-config` makes the CLI load the servers of `--mcp-config` only, so neither
 //!   the user's nor the repository's own MCP configuration (`.mcp.json`) reaches the session.
 //!   The file, from [`mcp_config`], holds `bosun` (the `bosun-mcp` server of #7) and the
 //!   repository's `repo.<name>.mcp_servers` (#4), nothing else.
 //! - `--setting-sources project` ([`SETTING_SOURCES`]): the user's own settings and hooks are
 //!   not loaded into an unattended session, only the repository's shared settings.
+//! - Auto memory is off ([`AUTO_MEMORY_OFF`], #135): the identity's `CLAUDE_CONFIG_DIR` is the
+//!   user's own, and its `projects/<project>/memory/` would carry one session's notes into the
+//!   prompt of every later session, unreviewed. What an agent learns goes into its summary.
 //! - The tools of `bosun` and of the repository's servers are pre-allowed; the policy's
 //!   rules follow. Push is denied unless the policy allows it ([`PUSH_RULES`]).
 //! - Each rule is one argument: a rule with a space (`Bash(git push:*)`) stays one rule.
@@ -105,6 +110,14 @@ pub const PUSH_RULES: &[&str] = &["Bash(git push:*)", "PowerShell(git push:*)"];
 /// the permission lists come from the policy on the command line (#62).
 pub const SETTING_SOURCES: &str = "project";
 
+/// The environment variable that turns Claude Code's auto memory off, and its value (#135):
+/// "Set to `1` to disable auto memory ... When disabled, Claude does not create or load auto
+/// memory files" (<https://code.claude.com/docs/en/env-vars>; also
+/// <https://code.claude.com/docs/en/memory#enable-or-disable-auto-memory>). The variable rather
+/// than `autoMemoryEnabled` through `--settings`: `0` forces auto memory on over the setting,
+/// so the variable is the switch that wins, and no repository settings file can turn it back on.
+pub const AUTO_MEMORY_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+
 /// The prompt a resumed session receives.
 pub const RESUME_PROMPT: &str = "The session was interrupted (a usage limit, a sleep or a \
 restart). Continue the task where you left off, and end as the exit protocol says.";
@@ -151,10 +164,16 @@ impl ClaudeRunner {
             args.push("--model".into());
             args.push(model.into());
         }
+        // Mutant `mutant_runner_auto_memory_on` (#135): the switch is not passed.
+        let env: Vec<(OsString, OsString)> = if cfg!(mutant_runner_auto_memory_on) {
+            Vec::new()
+        } else {
+            vec![(AUTO_MEMORY_OFF.0.into(), AUTO_MEMORY_OFF.1.into())]
+        };
         Spawn {
             program: self.program.clone(),
             args,
-            env: Vec::new(),
+            env,
             cwd: ctx.cwd.clone(),
             stdin: Some(stdin),
         }

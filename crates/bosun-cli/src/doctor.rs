@@ -12,6 +12,7 @@
 //! | `retention` | Claude Code deletes transcripts (`cleanupPeriodDays` of the directory's `settings.json`, 30 when absent) sooner than `retention.reingest_window` (warn, #3) |
 //! | `database_disk` | an identity's database directory is on a network or synced disk (fail) |
 //! | `stop_hook` | a repository's `.claude/settings.json` or `.claude/settings.local.json` still has a `hooks.Stop` entry, left over from an in-repository loop (warn, #75); either file is not valid JSON (warn) |
+//! | `auto_memory` | never; names a repository's auto memory directory under its identity's Claude configuration directory when it exists, for review (#135) |
 //! | `git` | `git` is not on the `PATH` the daemon gets (fail) |
 //! | `sh` | the verdict shell (D4 of #7: `sh` of the Git installation on Windows, or a repository's `verdict.shell`) is not found (fail; warn when no repository has a queue) |
 //! | `claude` | the agent CLI is not on the daemon's `PATH` (fail; warn when no repository has a queue) |
@@ -40,6 +41,12 @@
 //! `stop_hook` runs for each configured repository (of `--identity` only, when given) and names
 //! the repository in its detail. A stop hook that refuses the end of a turn would keep every
 //! headless session the daemon spawns from exiting; `docs/migration.md` says what to remove.
+//!
+//! `auto_memory` also runs for each configured repository. Sessions bosun spawned before #135
+//! ran with Claude Code's auto memory on, under the identity's `CLAUDE_CONFIG_DIR`, and may
+//! have written into `<config>/projects/<project>/memory/`, which every later session loads. The
+//! files there cannot be told apart from the user's own interactive sessions' (a memory file
+//! names no session), so the check names the directory and leaves the review to the user.
 //!
 //! The configuration is validated without the disk probe, so that a database on a network disk
 //! is reported by `database_disk` and not as an invalid file.
@@ -400,6 +407,43 @@ fn repositories(inputs: &Inputs, config: &Config, checks: &mut Vec<Check>) {
             continue;
         }
         checks.push(stop_hook(name, &repo.path).of(&repo.identity));
+        if let Some(identity) = config.identities.get(&repo.identity) {
+            checks.push(
+                auto_memory(name, &identity.claude_config_dir, &repo.path).of(&repo.identity),
+            );
+        }
+    }
+}
+
+/// Claude Code's project directory name for `root`: every character other than an ASCII
+/// letter or digit becomes `-` (`C:\src\app` is `C--src-app`).
+fn project_dir_name(root: &Path) -> String {
+    root.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// The auto memory directory of repository `name` at `root` under `config_dir` (#135): named
+/// when it exists, since sessions bosun ran before #135 may have written into it.
+pub(crate) fn auto_memory(name: &str, config_dir: &Path, root: &Path) -> Check {
+    let dir = config_dir
+        .join("projects")
+        .join(project_dir_name(root))
+        .join("memory");
+    if dir.is_dir() {
+        Check::ok(
+            "auto_memory",
+            format!("repo.{name}: auto memory at {}", dir.display()),
+        )
+        .fix(
+            "bosun sessions no longer read or write it (#135); review it for notes that              sessions bosun ran before wrote, and remove what you did not mean to keep",
+        )
+    } else {
+        Check::ok(
+            "auto_memory",
+            format!("repo.{name}: no auto memory at {}", dir.display()),
+        )
     }
 }
 
@@ -966,6 +1010,29 @@ mod tests {
             std::fs::write(dir.join("settings.json"), text).unwrap();
         }
         retention(dir, Duration::from_hours(days * 24))
+    }
+
+    #[test]
+    fn auto_memory_names_the_repository_s_memory_directory() {
+        let config = tempfile::tempdir().unwrap();
+        let root = Path::new("/fixture/repo-a");
+        assert_eq!(project_dir_name(Path::new("C:/src/app")), "C--src-app");
+        let absent = auto_memory("a", config.path(), root);
+        assert_eq!(absent.status, Status::Ok);
+        assert!(absent.detail.contains("no auto memory"), "{absent:?}");
+        assert!(absent.fix.is_none());
+        let dir = config
+            .path()
+            .join("projects")
+            .join(project_dir_name(root))
+            .join("memory");
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = auto_memory("a", config.path(), root);
+        assert!(
+            present.detail.contains(&dir.display().to_string()),
+            "{present:?}"
+        );
+        assert!(present.fix.is_some(), "{present:?}");
     }
 
     #[test]

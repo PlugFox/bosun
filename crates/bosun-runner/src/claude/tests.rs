@@ -234,6 +234,30 @@ fn the_command_loads_only_the_session_mcp_servers() {
 }
 
 #[test]
+fn the_command_turns_auto_memory_off() {
+    let ctx = ctx();
+    for spawn in [
+        ClaudeRunner::new("claude").command(&ctx),
+        ClaudeRunner::new("claude").resume_command(&ctx.session_id, &ctx),
+    ] {
+        let env: Vec<(String, String)> = spawn
+            .env
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert!(
+            env.contains(&("CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_owned(), "1".to_owned())),
+            "auto memory off: {env:?}"
+        );
+    }
+}
+
+#[test]
 fn mcp_config_refuses_a_bad_server() {
     let server = |name: &str, config: &str| McpServer {
         name: name.to_owned(),

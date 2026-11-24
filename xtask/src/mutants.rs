@@ -542,6 +542,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_runner_auto_memory_on",
+        issue: 135,
+        breaks: "the Claude command leaves auto memory on",
+        package: "bosun-runner",
+        check: Check::Test("claude::tests::the_command_turns_auto_memory_off"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_runner_limit_is_crash",
         issue: 52,
         breaks: "a usage-limit exit classifies as a crash",

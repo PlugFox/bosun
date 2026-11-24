@@ -15,8 +15,10 @@
 //!    container and exits with the child's code.
 //!
 //! Kill-on-close is on the shim's own job handle: if the shim dies, cleanly or not, everything
-//! in the container dies with it. On Unix the child dies with the shim through the
-//! parent-death signal on Linux; its descendants do not (see the crate documentation).
+//! in the container dies with it. Unix is weaker (see the crate documentation): on Linux the
+//! child dies with the shim through the parent-death signal, but its descendants do not; on
+//! macOS nothing does. What is left stays in the child's process group, which the record
+//! names (the child leads it), for the daemon's [`crate::reap`].
 //!
 //! The shim does not detach from the job it runs in (`CREATE_BREAKAWAY_FROM_JOB`): the daemon's
 //! own job forbids breakaway, and a plain child already outlives its parent on Windows.

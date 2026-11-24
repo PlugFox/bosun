@@ -102,12 +102,11 @@ fn survivors(keys: &[ProcessKey], limit: Duration) -> Vec<ProcessKey> {
     }
 }
 
-/// The shim is killed without warning: within 5 s neither its child nor the child's own child
-/// is left, by pid and start time.
-#[test]
-fn a_killed_shim_leaves_no_descendant_within_5_s() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (mut shim, record) = start_shim(dir.path(), &spec(dir.path(), "parent", SLEEP * 2));
+/// Starts a shim on a `parent` helper, waits for its grandchild, and kills the shim without
+/// warning (`TerminateProcess`, `SIGKILL`). Returns the child's and the grandchild's keys.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn kill_the_shim_of_a_parent(dir: &Path) -> (ProcessKey, ProcessKey) {
+    let (mut shim, record) = start_shim(dir, &spec(dir, "parent", SLEEP * 2));
     let record = poll("record", || Record::read(&record).ok());
     let grandchild: u32 = poll("grandchild report", || {
         reports(&record.stdout).remove("grandchild")
@@ -123,11 +122,73 @@ fn a_killed_shim_leaves_no_descendant_within_5_s() {
 
     shim.kill().expect("kill the shim");
     shim.wait().expect("wait");
-    let left = survivors(&[record.child, grandchild], Duration::from_secs(5));
+    (record.child, grandchild)
+}
+
+/// Windows: the shim is killed without warning; its job's last handle closes and takes the
+/// container: within 5 s neither its child nor the child's own child is left, by pid and start
+/// time.
+#[cfg(windows)]
+#[test]
+fn a_killed_shim_leaves_no_descendant_within_5_s() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (child, grandchild) = kill_the_shim_of_a_parent(dir.path());
+    let left = survivors(&[child, grandchild], Duration::from_secs(5));
     for &key in &left {
         reap(key).ok();
     }
     assert!(left.is_empty(), "still running: {left:?}");
+}
+
+/// Linux: the shim is killed without warning; its direct child dies with it through the
+/// parent-death signal within 5 s. The grandchild does not (the signal is not inherited, and
+/// the shim is no subreaper yet, E11 of #8): it is left for the daemon's reap of the group.
+/// The test pins that gap, so that closing it shows.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_shim_takes_its_direct_child_within_5_s() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (child, grandchild) = kill_the_shim_of_a_parent(dir.path());
+    let left = survivors(&[child], Duration::from_secs(5));
+    let grandchild_left = is_running(grandchild);
+    // The child leads the group the grandchild is in: reaping it by its key kills both.
+    reap(child).ok();
+    reap(grandchild).ok();
+    assert!(left.is_empty(), "the child outlived the shim: {left:?}");
+    assert!(
+        grandchild_left,
+        "the grandchild died with the shim: update the crate documentation and this test"
+    );
+}
+
+/// macOS: there is no parent-death signal, so a shim killed without warning takes nothing with
+/// it: the child and the grandchild run on until the daemon's reap of the recorded group (see
+/// the crate documentation). The test pins that, so that closing the gap shows.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_killed_shim_leaves_its_container_to_the_reap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (child, grandchild) = kill_the_shim_of_a_parent(dir.path());
+    std::thread::sleep(Duration::from_millis(500));
+    let left: Vec<_> = [child, grandchild]
+        .into_iter()
+        .filter(|&k| is_running(k))
+        .collect();
+    // The child leads the group the grandchild is in: reaping it by its key kills both.
+    reap(child).ok();
+    let after_reap = survivors(&[child, grandchild], Duration::from_secs(5));
+    for &key in &after_reap {
+        reap(key).ok();
+    }
+    assert_eq!(
+        left,
+        [child, grandchild],
+        "a process died with the shim: update the crate documentation and this test"
+    );
+    assert!(
+        after_reap.is_empty(),
+        "the reap of the group left: {after_reap:?}"
+    );
 }
 
 /// Nobody waits on the shim; when its child has exited, the record holds the child's code and

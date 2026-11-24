@@ -152,6 +152,8 @@ impl World {
                     policy_hash: None,
                     base_sha: Some("base".to_owned()),
                     branch: Some("main".to_owned()),
+                    base_refs_json: None,
+                    base_stash_json: None,
                 }),
                 transition(&running),
                 Write::Run(RunStart {

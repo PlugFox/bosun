@@ -58,6 +58,10 @@ pub struct Snapshot {
     pub base_sha: Option<String>,
     /// The branch HEAD was on at claim.
     pub branch: Option<String>,
+    /// Every ref at claim, full name to object, as a JSON object (#68).
+    pub base_refs_json: Option<String>,
+    /// The stash entries at claim, newest first, as a JSON array (#68).
+    pub base_stash_json: Option<String>,
 }
 
 /// A session about to be spawned for an attempt, with the provider session id bosun assigned to

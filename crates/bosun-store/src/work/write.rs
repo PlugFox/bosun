@@ -79,8 +79,9 @@ pub(crate) async fn insert_snapshot(
     let item = item_id(conn, &snapshot.item).await?;
     let Some(id) = sqlx::query_scalar!(
         r#"INSERT INTO snapshot (item_id, snapshot_key, taken_ms, hash, body, contract_json,
-                                 comments_json, config_hash, policy_hash, base_sha, branch)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 comments_json, config_hash, policy_hash, base_sha, branch,
+                                 base_refs, base_stash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (snapshot_key) DO NOTHING
            RETURNING id AS "id!: i64""#,
         item,
@@ -94,6 +95,8 @@ pub(crate) async fn insert_snapshot(
         snapshot.policy_hash,
         snapshot.base_sha,
         snapshot.branch,
+        snapshot.base_refs_json,
+        snapshot.base_stash_json,
     )
     .fetch_optional(&mut *conn)
     .await?

@@ -29,6 +29,7 @@ use super::*;
 use crate::config_watch;
 use crate::events::{Events, Options as EventOptions};
 
+mod recovery;
 mod sticky;
 
 /// How long a session that asked a blocking question may go on in these scenarios.
@@ -44,6 +45,13 @@ const BOARD_REPO: &str = "synthetic-owner/demo";
 fn built() -> &'static (PathBuf, PathBuf) {
     static BUILT: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
     BUILT.get_or_init(|| {
+        // A child test process (#68) is handed what its parent built.
+        if let (Some(agent), Some(mcp)) = (
+            std::env::var_os(BUILT_AGENT_VAR),
+            std::env::var_os(BUILT_MCP_VAR),
+        ) {
+            return (PathBuf::from(agent), PathBuf::from(mcp));
+        }
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         let mut build = Command::new(cargo);
         build
@@ -80,6 +88,10 @@ fn built() -> &'static (PathBuf, PathBuf) {
     })
 }
 
+/// The variables a child test process finds `fake-agent` and `bosun-mcp` in.
+const BUILT_AGENT_VAR: &str = "BOSUN_TEST_FAKE_AGENT";
+const BUILT_MCP_VAR: &str = "BOSUN_TEST_BOSUN_MCP";
+
 fn fake_agent() -> &'static Path {
     &built().0
 }
@@ -102,7 +114,8 @@ fn scene_endpoint(dir: &Path) -> bosun_client::Endpoint {
             std::process::id()
         ))
     } else {
-        bosun_client::Endpoint::new(dir.join("bosund.sock"))
+        // One per process: the child daemon of the crash tests shares the scene's directory.
+        bosun_client::Endpoint::new(dir.join(format!("bosund-{}.sock", std::process::id())))
     }
 }
 
@@ -184,9 +197,25 @@ struct Probe {
     calls: AtomicUsize,
 }
 
+/// Where a scene lives: a temporary directory it owns, or one a parent test process owns (the
+/// child daemon of the crash tests, #68).
+enum Root {
+    Temp(tempfile::TempDir),
+    Kept(PathBuf),
+}
+
+impl Root {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Temp(dir) => dir.path(),
+            Self::Kept(path) => path,
+        }
+    }
+}
+
 /// One scenario's world.
 struct Scene {
-    dir: tempfile::TempDir,
+    dir: Root,
     repo: PathBuf,
     board: PathBuf,
     config_path: PathBuf,
@@ -283,7 +312,28 @@ impl Scene {
     }
 
     async fn on(projects: Option<Arc<FakeGitHub>>) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let scene = Self::build(Root::Temp(tempfile::tempdir().unwrap()), projects).await;
+        scene.git(&["init", "-q", "-b", "main"]);
+        scene.git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/synthetic-owner/demo.git",
+        ]);
+        std::fs::write(scene.repo.join("README.md"), "demo\n").unwrap();
+        scene.git(&["add", "README.md"]);
+        scene.git(&["commit", "-q", "-m", "Start"]);
+        std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();
+        scene
+    }
+
+    /// The scene another test process set up at `root` (#68: the child daemon), with an API
+    /// and a store connection of its own.
+    async fn reopen(root: PathBuf) -> Self {
+        Self::build(Root::Kept(root), None).await
+    }
+
+    async fn build(dir: Root, projects: Option<Arc<FakeGitHub>>) -> Self {
         let d = dir.path();
         for sub in ["claude", "db", "gh", "repo", "scripts", "bin", "work"] {
             std::fs::create_dir_all(d.join(sub)).unwrap();
@@ -311,7 +361,7 @@ impl Scene {
         tokio::spawn(async move {
             crate::state::serve(listener, &api, std::future::pending()).await;
         });
-        let scene = Self {
+        Self {
             repo: d.join("repo"),
             board: d.join("board.toml"),
             config_path: d.join("config.toml"),
@@ -333,19 +383,7 @@ impl Scene {
             projects,
             login_listed: true,
             dir,
-        };
-        scene.git(&["init", "-q", "-b", "main"]);
-        scene.git(&[
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/synthetic-owner/demo.git",
-        ]);
-        std::fs::write(scene.repo.join("README.md"), "demo\n").unwrap();
-        scene.git(&["add", "README.md"]);
-        scene.git(&["commit", "-q", "-m", "Start"]);
-        std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();
-        scene
+        }
     }
 
     /// The agent CLI: `fake-agent` picking each item's script, behind a `.cmd` shim on Windows.
@@ -511,6 +549,7 @@ impl Scene {
             mcp: self.mcp.clone(),
             endpoint: self.endpoint.clone(),
             handshake: self.handshake,
+            boot: None,
             failpoint,
         };
         let deps = Deps {

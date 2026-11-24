@@ -664,6 +664,8 @@ async fn snapshots_comments_flaky_tests_and_boots() {
         policy_hash: Some("p".to_owned()),
         base_sha: Some("base".to_owned()),
         branch: Some("main".to_owned()),
+        base_refs_json: Some(r#"{"refs/heads/main":"base"}"#.to_owned()),
+        base_stash_json: Some("[]".to_owned()),
     };
     store
         .writer()

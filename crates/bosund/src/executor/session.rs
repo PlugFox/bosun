@@ -7,6 +7,10 @@
 //! (`bosun_proc::pipe::OwnerOnly`), on Unix it is mode 0600 in a 0700 directory. Both are removed
 //! when the session ends, however it ends.
 //!
+//! The session's standard output is also kept on disk while it runs ([`tail_path`], outside
+//! the session's directory) and removed when the session task ends: a daemon that dies leaves
+//! it, and crash recovery (#68) classifies the lost session from its tail.
+//!
 //! The handshake (#64): `bosun-mcp` must call `agent.hello` within [`Options::handshake`] after
 //! the spawn. A session that has not by then, or that ends without it, is killed and reported as
 //! [`Event::NoHandshake`]: the agent CLI would otherwise run on without its tools.
@@ -88,7 +92,7 @@ fn new_session_id(run: &Run) -> SessionId {
     SessionId::from_random_bytes(bytes)
 }
 
-fn exit_of(exit: &bosun_runner::Exit) -> Exit {
+pub(crate) fn exit_of(exit: &bosun_runner::Exit) -> Exit {
     match *exit {
         bosun_runner::Exit::Ok => Exit::Ok,
         // Mutant: the loop reports a limit as a crash, which counts once retried (#7).
@@ -231,6 +235,69 @@ impl Drop for SessionDir {
             && e.kind() != std::io::ErrorKind::NotFound
         {
             eprintln!("bosund: removing {}: {e}", self.0.display());
+        }
+    }
+}
+
+/// Where the standard output of session `session` is kept while it runs: what crash recovery
+/// classifies a session lost with the daemon from (#68). Outside the session's directory, which
+/// holds its credential.
+pub(crate) fn tail_path(work_dir: &Path, session: &str) -> PathBuf {
+    work_dir.join("tails").join(format!("{session}.jsonl"))
+}
+
+/// The session's output as it arrives, on disk, removed when the session task ends; a daemon
+/// that dies leaves it for the next start to read.
+struct TailFile {
+    path: PathBuf,
+    file: std::sync::Mutex<Option<std::fs::File>>,
+}
+
+impl TailFile {
+    /// Opens the file; one that cannot be opened is reported and nothing is kept.
+    fn open(path: PathBuf) -> Self {
+        let file = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::File::create(&path));
+        let file = match file {
+            Ok(file) => Some(file),
+            Err(e) => {
+                eprintln!("bosund: {}: {e}", path.display());
+                None
+            }
+        };
+        Self {
+            path,
+            file: std::sync::Mutex::new(file),
+        }
+    }
+
+    fn push(&self, line: &str) {
+        let mut file = self
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(f) = file.as_mut()
+            && writeln!(f, "{line}").is_err()
+        {
+            *file = None;
+        }
+    }
+}
+
+impl Drop for TailFile {
+    fn drop(&mut self) {
+        drop(
+            self.file
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+        if let Err(e) = std::fs::remove_file(&self.path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("bosund: removing {}: {e}", self.path.display());
         }
     }
 }
@@ -461,6 +528,7 @@ pub(crate) async fn session(
         cwd: command.cwd.clone(),
         stdin: command.stdin.is_some(),
     };
+    let tail_file = TailFile::open(tail_path(&shared.options.work_dir, session_id.as_str()));
     let spawned = match shared.deps.spawner.spawn(&spec) {
         Ok(spawned) => spawned,
         Err(e) => {
@@ -533,6 +601,7 @@ pub(crate) async fn session(
                         run.item
                     );
                 }
+                tail_file.push(&line);
                 tail.push(line);
                 texts
             }

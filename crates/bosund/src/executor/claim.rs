@@ -213,6 +213,9 @@ fn snapshot_row(item: &ItemId, key: &str, claimed: &Claimed) -> Write {
         policy_hash: Some(claimed.policy_hash.clone()),
         base_sha: Some(claimed.base.head.clone()),
         branch: claimed.base.branch.clone(),
+        // The rest of the base, for crash recovery (#68).
+        base_refs_json: Some(serde_json::json!(claimed.base.refs).to_string()),
+        base_stash_json: Some(serde_json::json!(claimed.base.stash).to_string()),
     })
 }
 

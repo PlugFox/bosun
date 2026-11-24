@@ -332,8 +332,12 @@ impl Drainer {
     /// The hidden key a comment is sent under.
     fn key(key: &str, tries: u32) -> String {
         if cfg!(mutant_outbox_no_key) {
-            // Mutant: no idempotence key; every send is a new comment.
-            format!("{key}/{tries}")
+            // Mutant: no idempotence key; every send is a new comment, a send repeated after a
+            // daemon restart (with the same `tries`) included.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            format!("{key}/{tries}-{nanos}")
         } else {
             key.to_owned()
         }

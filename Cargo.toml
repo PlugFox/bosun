@@ -216,6 +216,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_queue_markers_through_allowlist)",
   "cfg(mutant_loop_no_midrun_poll)",
   "cfg(mutant_loop_no_idle_backoff)",
+  # #68: crash recovery.
+  "cfg(mutant_recover_skip_reap)",
+  "cfg(mutant_recover_counts_crash)",
+  "cfg(mutant_recover_resume_before_board)",
 ] }
 
 [workspace.lints.clippy]

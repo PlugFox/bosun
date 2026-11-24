@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT s.snapshot_key, s.taken_ms, s.hash, s.body, s.contract_json, s.comments_json,\n                    s.config_hash, s.policy_hash, s.base_sha, s.branch\n             FROM item i JOIN snapshot s ON s.id = i.snapshot_id\n             WHERE i.item_key = ?",
+  "query": "SELECT s.snapshot_key, s.taken_ms, s.hash, s.body, s.contract_json, s.comments_json,\n                    s.config_hash, s.policy_hash, s.base_sha, s.branch, s.base_refs,\n                    s.base_stash\n             FROM item i JOIN snapshot s ON s.id = i.snapshot_id\n             WHERE i.item_key = ?",
   "describe": {
     "columns": [
       {
@@ -112,6 +112,28 @@
             "name": "branch"
           }
         }
+      },
+      {
+        "name": "base_refs",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "base_refs"
+          }
+        }
+      },
+      {
+        "name": "base_stash",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "snapshot",
+            "name": "base_stash"
+          }
+        }
       }
     ],
     "parameters": {
@@ -127,8 +149,10 @@
       true,
       true,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "25d11262815c84bd928cd369405d8c30fdad796a63ca7853d2db6ad091113d68"
+  "hash": "469a845529ba5a87c506345a8ff64ca98a6d99bf956c14407eee54c72f999273"
 }

@@ -189,3 +189,37 @@ fn once_runs_its_command_only_the_first_time() {
     assert_eq!(second.status.code(), Some(0));
     assert_eq!(String::from_utf8(second.stdout).unwrap(), "later\n");
 }
+
+#[test]
+fn a_server_of_the_mcp_configuration_that_cannot_start_is_left_out() {
+    let scratch = tempfile::tempdir().unwrap();
+    let empty_config = scratch.path().join("gitconfig");
+    std::fs::write(&empty_config, "").unwrap();
+    let mcp = scratch.path().join("mcp.json");
+    let missing = scratch.path().join("no-such-server");
+    std::fs::write(
+        &mcp,
+        serde_json::json!({"mcpServers": {"bosun": {"command": missing, "args": []}}}).to_string(),
+    )
+    .unwrap();
+    let script = scratch.path().join("script.txt");
+    std::fs::write(&script, "print ran\nmcp bosun note {\"text\": \"x\"}\n").unwrap();
+    let output = isolated(
+        env!("CARGO_BIN_EXE_fake-agent"),
+        scratch.path(),
+        &empty_config,
+    )
+    .arg("--fake-script")
+    .arg(&script)
+    .arg("--mcp-config")
+    .arg(&mcp)
+    .stdin(Stdio::null())
+    .output()
+    .unwrap();
+    // The script runs without the server, and a call to it is a script error.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+    assert_eq!(output.status.code(), Some(125), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot start"), "{stderr}");
+    assert!(stderr.contains("no connected MCP server"), "{stderr}");
+}

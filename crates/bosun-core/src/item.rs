@@ -169,6 +169,9 @@ pub enum Reason {
     Guard(Guard),
     /// Landing was refused (push or pull request refused, conflict).
     LandingRefused,
+    /// The session's MCP server (`bosun-mcp`) did not say hello in time, again after one
+    /// uncounted retry (#64): the agent would run without its tools.
+    Handshake,
 }
 
 /// The state of an item.
@@ -252,7 +255,8 @@ pub enum Exit {
     },
     /// Authentication expired.
     Auth,
-    /// The session died (a crash, a dead child after sleep, a missing MCP handshake).
+    /// The session died (a crash, a dead child after sleep). A missing MCP handshake is
+    /// [`Event::NoHandshake`].
     Crash,
 }
 
@@ -309,6 +313,15 @@ pub enum Event {
         /// The attempt.
         attempt: u32,
         /// The session that failed to resume.
+        spawn: u32,
+    },
+    /// The session's MCP server did not say hello within the handshake timeout after spawn
+    /// (#64); the daemon has killed the session. Retried once, uncounted toward the attempts;
+    /// a second miss is Needs you.
+    NoHandshake {
+        /// The attempt it belonged to.
+        attempt: u32,
+        /// The session's number.
         spawn: u32,
     },
     /// A blocking `ask_question` call (agent).
@@ -384,6 +397,7 @@ impl Event {
             Self::Cycle => "cycle",
             Self::Exited { .. } => "exited",
             Self::ResumeFailed { .. } => "resume_failed",
+            Self::NoHandshake { .. } => "no_handshake",
             Self::Question { .. } => "question",
             Self::Summary { .. } => "summary",
             Self::Note { .. } => "note",
@@ -722,6 +736,11 @@ impl Draft {
                     self.start(Next::Reset);
                 }
             }
+            Event::NoHandshake { attempt, spawn } => {
+                self.expect(&[State::Running])?;
+                self.session(*attempt, *spawn)?;
+                self.no_handshake();
+            }
             Event::Question { attempt } => {
                 self.expect(&[State::Running, State::Verifying])?;
                 self.current(*attempt)?;
@@ -892,6 +911,23 @@ impl Draft {
                     self.attempt_failed();
                 }
             }
+        }
+    }
+
+    /// A session whose MCP server never said hello (#64). It shares the attempt's crash retry:
+    /// the first miss resumes uncounted, the next one is Needs you, not a failed attempt,
+    /// because another attempt would start the same server again.
+    fn no_handshake(&mut self) {
+        let retries = self.ctx.rules.crash_retries;
+        let attempt = self.attempt_mut();
+        attempt.state = AttemptState::Exited;
+        if attempt.crash_retries < retries {
+            attempt.crash_retries += 1;
+            if !self.uncounted() {
+                self.start(Next::Resume);
+            }
+        } else {
+            self.needs_you(Reason::Handshake);
         }
     }
 
@@ -1384,6 +1420,25 @@ mod tests {
         assert_eq!(cur(&retried).0, 1);
         let failed = go(&retried, &exit(&retried, Exit::Crash), &ctx()).item;
         assert_eq!((failed.failed, cur(&failed).0), (1, 2));
+    }
+
+    #[test]
+    fn a_missed_handshake_is_retried_once_uncounted_then_needs_you() {
+        let item = running();
+        let miss = |item: &Item| {
+            let (attempt, spawn, _) = cur(item);
+            Event::NoHandshake { attempt, spawn }
+        };
+        let retried = go(&item, &miss(&item), &ctx());
+        assert_eq!(retried.transition.cause, "no_handshake");
+        let retried = retried.item;
+        assert_eq!((retried.state, retried.failed), (State::Running, 0));
+        assert_eq!(cur(&retried).0, 1, "the attempt counter is unchanged");
+        assert_eq!(cur(&retried).1, cur(&item).1 + 1, "a new session");
+        assert_eq!(retried.uncounted, 1);
+        let stuck = go(&retried, &miss(&retried), &ctx()).item;
+        assert_eq!(stuck.state, State::NeedsYou(Reason::Handshake));
+        assert_eq!((stuck.failed, cur(&stuck).0), (0, 1));
     }
 
     #[test]

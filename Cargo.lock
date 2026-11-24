@@ -165,6 +165,12 @@ dependencies = [
 [[package]]
 name = "bosun-mcp"
 version = "0.0.0"
+dependencies = [
+ "bosun-api",
+ "bosun-client",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "bosun-proc"
@@ -510,6 +516,7 @@ dependencies = [
 name = "fake-agent"
 version = "0.0.0"
 dependencies = [
+ "serde_json",
  "tempfile",
 ]
 

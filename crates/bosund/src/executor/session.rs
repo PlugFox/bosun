@@ -1,9 +1,22 @@
 //! One agent session (#7, #62): the fail-closed checks, the prompt, the agent environment, the
 //! run row before the spawn, the stream, the exit and the session's commit range.
+//!
+//! The session's files (the system prompt and the MCP configuration, which holds the session's
+//! credential) are written to the daemon's work directory, never into the working tree, and the
+//! MCP configuration is readable by the user only: on Windows its DACL admits the user alone
+//! (`bosun_proc::pipe::OwnerOnly`), on Unix it is mode 0600 in a 0700 directory. Both are removed
+//! when the session ends, however it ends.
+//!
+//! The handshake (#64): `bosun-mcp` must call `agent.hello` within [`Options::handshake`] after
+//! the spawn. A session that has not by then, or that ends without it, is killed and reported as
+//! [`Event::NoHandshake`]: the agent CLI would otherwise run on without its tools.
+//!
+//! [`Options::handshake`]: super::Options::handshake
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -159,16 +172,22 @@ async fn prompt_of(shared: &Shared, claimed: &Claimed, run: &Run) -> prompt::Pro
 pub(crate) const CREDENTIAL_VAR: &str = "BOSUN_AGENT_CREDENTIAL";
 
 /// The per-session MCP configuration: `bosun` and the repository's servers (#7). The `bosun`
-/// server gets the session's credential in its environment; its handshake is #64's.
+/// server gets the session's credential in its environment, and the endpoint to call
+/// `agent.hello` on (#64).
 fn mcp_file(
+    shared: &Shared,
     repo: &Repo,
     item: &ItemId,
     id: &SessionId,
     credential: &str,
 ) -> Result<String, String> {
     let bosun = serde_json::json!({
-        "command": "bosun-mcp",
-        "args": ["--item", item.0, "--session", id.as_str()],
+        "command": shared.options.mcp,
+        "args": [
+            "--item", item.0,
+            "--session", id.as_str(),
+            "--endpoint", shared.options.endpoint.to_string(),
+        ],
         "env": { CREDENTIAL_VAR: credential },
     })
     .to_string();
@@ -186,6 +205,67 @@ fn mcp_file(
         })
         .collect();
     mcp_config(&bosun, &servers).map_err(|e| e.to_string())
+}
+
+/// The session's directory under the daemon's work directory, removed with what it holds when
+/// dropped: at the end of the session and on every early return.
+struct SessionDir(PathBuf);
+
+impl SessionDir {
+    fn create(path: PathBuf) -> std::io::Result<Self> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for SessionDir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("bosund: removing {}: {e}", self.0.display());
+        }
+    }
+}
+
+/// Writes a new file that only the current user can read: an owner-only DACL on Windows, mode
+/// 0600 on Unix. A file left at `path` is replaced.
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    #[cfg(windows)]
+    let mut file = bosun_proc::pipe::OwnerOnly::new()?.create_file(path)?;
+    #[cfg(not(windows))]
+    let mut file = {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)?
+    };
+    file.write_all(text.as_bytes())?;
+    file.flush()
+}
+
+/// Where the session's MCP configuration goes: its directory, outside the working tree.
+fn mcp_path(dir: &Path, repo: &Repo) -> PathBuf {
+    if cfg!(mutant_mcp_config_in_tree) {
+        // Mutant: the configuration, credential and all, lands in the working tree.
+        return repo.path.join(".bosun-mcp.json");
+    }
+    dir.join("mcp.json")
 }
 
 /// The id a resumed session continues: the attempt's last run's.
@@ -286,19 +366,19 @@ pub(crate) async fn session(
         .work_dir
         .join("sessions")
         .join(session_id.as_str());
-    let files = (|| -> Result<(PathBuf, PathBuf), String> {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let system = dir.join("system.md");
+    let files = (|| -> Result<(SessionDir, PathBuf, PathBuf), String> {
+        let dir = SessionDir::create(dir).map_err(|e| e.to_string())?;
+        let system = dir.0.join("system.md");
         std::fs::write(&system, &prompt.system).map_err(|e| e.to_string())?;
-        let mcp = dir.join("mcp.json");
-        std::fs::write(
+        let mcp = mcp_path(&dir.0, repo);
+        write_private(
             &mcp,
-            mcp_file(repo, &run.item, &session_id, credential.token())?,
+            &mcp_file(shared, repo, &run.item, &session_id, credential.token())?,
         )
-        .map_err(|e| e.to_string())?;
-        Ok((system, mcp))
+        .map_err(|e| format!("{}: {e}", mcp.display()))?;
+        Ok((dir, system, mcp))
     })();
-    let (system_file, mcp_config_file) = match files {
+    let (session_dir, system_file, mcp_config_file) = match files {
         Ok(files) => files,
         Err(e) => {
             shared.trouble(format!("{}: the session files: {e}", run.item));
@@ -455,10 +535,22 @@ pub(crate) async fn session(
             });
         }
     };
+    // The handshake (#64): `bosun-mcp` says hello within the timeout, or the session is killed.
+    let handshake = tokio::time::sleep(shared.options.handshake);
+    tokio::pin!(handshake);
+    let mut awaiting_hello = !cfg!(mutant_mcp_skip_handshake);
+    let mut missed = false;
     let status = {
         let mut wait = tree.wait();
         loop {
             tokio::select! {
+                () = &mut handshake, if awaiting_hello => {
+                    awaiting_hello = false;
+                    if !credential.said_hello() {
+                        missed = true;
+                        break None;
+                    }
+                }
                 read = out.read_until(b'\n', &mut out_line), if out_open => {
                     if matches!(read, Ok(0) | Err(_)) {
                         out_open = false;
@@ -486,8 +578,13 @@ pub(crate) async fn session(
     set_child(&run.child, None);
     // Whatever the session left running in its container goes with it, and so does its
     // credential.
+    // A session that ended before the timeout must have said hello too.
+    let missed = missed || (awaiting_hello && status.is_some() && !credential.said_hello());
+    // Whatever the session left running in its container goes with it, and so do its
+    // credential and its files.
     let _ = tree.kill_tree();
     drop(credential);
+    drop(session_dir);
     let deadline = Instant::now() + DRAIN;
     while out_open || err_open {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -517,6 +614,26 @@ pub(crate) async fn session(
         }
     }
     let ended = status.is_some();
+    if missed {
+        shared.trouble(format!(
+            "{}: bosun-mcp ({}) did not say hello within {} s of the spawn; the session was \
+             killed",
+            run.item,
+            shared.options.mcp.display(),
+            shared.options.handshake.as_secs()
+        ));
+        end(shared, run, Exit::Crash, start_head.as_deref(), &git_repo).await;
+        shared.publish(EventBody::SessionEnded {
+            item: run.item.to_string(),
+            attempt: run.attempt,
+            spawn: run.spawn,
+            exit: events::exit_name(Some(Exit::Crash)).to_owned(),
+        });
+        return Event::NoHandshake {
+            attempt: run.attempt,
+            spawn: run.spawn,
+        };
+    }
     let (exit, published) = match status {
         Some(status) => {
             let code = status.ok().and_then(|s| s.code());

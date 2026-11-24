@@ -98,6 +98,17 @@ impl OwnerOnly {
         self.descriptor.create_pipe(options, addr.as_ref())
     }
 
+    /// Creates the new file `path` for writing with this descriptor, so only the current user
+    /// can open it (#64: the per-session MCP configuration, which holds a credential). Fails
+    /// when the file exists.
+    ///
+    /// # Errors
+    ///
+    /// What `CreateFileW` fails with: `AlreadyExists` when `path` exists.
+    pub fn create_file(&self, path: &std::path::Path) -> io::Result<std::fs::File> {
+        self.descriptor.create_file(path)
+    }
+
     /// Checks that the DACL of `handle` is this descriptor's: one allow entry, for [`sid`].
     ///
     /// # Errors
@@ -158,6 +169,30 @@ mod tests {
         assert_eq!(aces[0].sid, owner.sid(), "{aces:?}");
         assert_ne!(aces[0].mask, 0, "{aces:?}");
         owner.verify(&pipe).unwrap();
+    }
+
+    #[test]
+    fn an_owner_only_file_has_one_allow_entry_for_the_user() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("bosun-proc-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("private.json");
+        let _ = std::fs::remove_file(&path);
+        let owner = OwnerOnly::new().unwrap();
+        let mut file = owner.create_file(&path).unwrap();
+        file.write_all(b"{}").unwrap();
+        owner.verify(&file).unwrap();
+        drop(file);
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        let again = owner.create_file(&path).unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists, "{again}");
+        // A file created the ordinary way inherits more than the user.
+        let plain = dir.join("plain.json");
+        let _ = std::fs::remove_file(&plain);
+        let file = std::fs::File::create(&plain).unwrap();
+        assert!(owner.verify(&file).is_err());
+        drop(file);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]

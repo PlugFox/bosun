@@ -410,6 +410,85 @@ mod tests {
         store.close().await.unwrap();
     }
 
+    /// #64: migration 8 rebuilds `item` to allow the reason `handshake`; an item stored by
+    /// version 7, with an attempt and a transition referring to it, survives it, the foreign
+    /// keys still hold, and the new reason is accepted, an unknown one refused.
+    #[tokio::test]
+    async fn an_item_of_version_7_survives_migration_8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = open(&path, &Options::default(), &up_to(7)).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO repo (id, path) VALUES (1, '/fixture/repo');
+             INSERT INTO item (id, item_key, repo_id, state, reason, attempt_number, seq,
+                               created_ms, updated_ms)
+             VALUES (3, 'demo#1', 1, 'needs_you', 'auth', 1, 4, 10, 20);
+             INSERT INTO attempt (id, item_id, number, state, spawn, started_ms)
+             VALUES (1, 3, 1, 'exited', 1, 10);
+             INSERT INTO transition (transition_key, item_id, seq, attempt, from_state, to_state,
+                                     cause, ts_ms)
+             VALUES ('demo#1/t4', 3, 4, 1, 'running', 'needs_you', 'exited', 20);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let pool = store.reader().pool();
+        let row: (i64, String, String, Option<String>, i64) =
+            sqlx::query_as("SELECT id, item_key, state, reason, seq FROM item")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row,
+            (
+                3,
+                "demo#1".to_owned(),
+                "needs_you".to_owned(),
+                Some("auth".to_owned()),
+                4
+            )
+        );
+        let broken: Vec<(String, i64)> =
+            sqlx::query_as("SELECT \"table\", rowid FROM pragma_foreign_key_check")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        assert!(broken.is_empty(), "{broken:?}");
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index'
+               AND name IN ('item_repo', 'item_state')",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(indexes, 2);
+        store.close().await.unwrap();
+
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE item SET reason = 'handshake' WHERE id = 3")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let refused = sqlx::query("UPDATE item SET reason = 'unknown' WHERE id = 3")
+            .execute(&mut conn)
+            .await;
+        assert!(refused.is_err());
+        conn.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn a_newer_database_is_refused_untouched() {
         let dir = tempfile::tempdir().unwrap();

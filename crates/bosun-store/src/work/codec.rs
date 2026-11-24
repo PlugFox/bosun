@@ -147,6 +147,7 @@ pub(crate) fn reason(reason: Reason) -> &'static str {
         Reason::Guard(Guard::IgnoredFile) => "guard_ignored_file",
         Reason::Guard(Guard::GitConfig) => "guard_git_config",
         Reason::LandingRefused => "landing_refused",
+        Reason::Handshake => "handshake",
     }
 }
 
@@ -164,6 +165,7 @@ pub(crate) fn parse_reason(name: &str) -> Result<Reason, Error> {
         "guard_ignored_file" => Reason::Guard(Guard::IgnoredFile),
         "guard_git_config" => Reason::Guard(Guard::GitConfig),
         "landing_refused" => Reason::LandingRefused,
+        "handshake" => Reason::Handshake,
         other => return Err(corrupt("reason", other)),
     })
 }
@@ -314,6 +316,7 @@ mod tests {
             Reason::Guard(Guard::IgnoredFile),
             Reason::Guard(Guard::GitConfig),
             Reason::LandingRefused,
+            Reason::Handshake,
         ]
         .map(State::NeedsYou);
         let states = [

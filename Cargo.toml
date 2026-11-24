@@ -236,6 +236,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #121: resource leases.
   "cfg(mutant_lease_one_by_one)",
   "cfg(mutant_lease_keep_dead_holder)",
+  "cfg(mutant_lease_hold_and_wait)",
 ] }
 
 [workspace.lints.clippy]

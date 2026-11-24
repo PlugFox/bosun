@@ -11,11 +11,14 @@
 //!   implementation (one row, one transaction). Resources are taken in one fixed global order,
 //!   by name, whatever order the request listed them in; two requests for the same pair can
 //!   therefore never each hold one of it, and never deadlock.
-//! - The request is granted when it has taken every resource it needs: all or nothing. Until
-//!   then it holds no usable lease, and releasing or reaping its holder returns what it took.
-//! - A resource without a free slot queues the requests trying it, first come first served, so
-//!   a request needing two resources is not starved by a stream of one-resource requests: they
-//!   queue behind it. [`Leases::serve`] steps every request in arrival order.
+//! - The request is granted when it has taken every resource it needs: all or nothing. There is
+//!   no hold-and-wait (#121): an attempt that finds one of its resources without a free slot
+//!   returns everything it took in this attempt, takes none of the set, and queues on the whole
+//!   set; its next attempt starts again from the first resource.
+//! - Every resource's queue is ordered by filing, first come first served, and a request that
+//!   was refused waits in the queue of every resource it needs, so a request needing two
+//!   resources is not starved by a stream of one-resource requests: they queue behind it.
+//!   [`Leases::serve`] runs one attempt for every request in arrival order.
 //! - Each grant records the request's wait, from its filing to its grant, for every resource it
 //!   needed ([`Leases::waits`]).
 
@@ -96,7 +99,8 @@ pub enum Step {
     Took(String),
     /// The holder took its last resource: the request is granted.
     Granted,
-    /// This resource has no free slot for the holder yet; the holder queues for it.
+    /// This resource has no free slot for the holder yet: the attempt returned what it took and
+    /// the holder queues on its whole set.
     Blocked(String),
 }
 
@@ -115,16 +119,30 @@ pub struct Wait<H> {
 struct Slot<H> {
     resource: Resource,
     holders: Vec<H>,
-    /// Holders trying this resource and not yet given it, first come first served.
-    queue: VecDeque<H>,
+    /// Holders waiting for this resource, with their requests' filing numbers, in filing
+    /// order: first come first served.
+    queue: VecDeque<(u64, H)>,
+}
+
+impl<H: Clone + Eq> Slot<H> {
+    /// Queues `holder` (filed as `seq`) in filing order, unless it is queued already.
+    fn enqueue(&mut self, seq: u64, holder: &H) {
+        if self.queue.iter().any(|(_, h)| h == holder) {
+            return;
+        }
+        let at = self.queue.partition_point(|&(s, _)| s < seq);
+        self.queue.insert(at, (seq, holder.clone()));
+    }
 }
 
 #[derive(Debug, Clone)]
 struct Request<H> {
     holder: H,
+    /// The filing number: the order the queues serve requests in.
+    seq: u64,
     /// The resources in the order they are taken.
     order: Vec<String>,
-    /// How many of `order` are taken.
+    /// How many of `order` this attempt has taken.
     taken: usize,
     filed: i64,
 }
@@ -135,6 +153,8 @@ pub struct Leases<H> {
     slots: BTreeMap<String, Slot<H>>,
     /// Pending requests, in arrival order.
     pending: Vec<Request<H>>,
+    /// The next request's filing number.
+    next_seq: u64,
     waits: Vec<Wait<H>>,
 }
 
@@ -164,6 +184,7 @@ impl<H: Clone + Eq> Leases<H> {
         Ok(Self {
             slots,
             pending: Vec::new(),
+            next_seq: 0,
             waits: Vec::new(),
         })
     }
@@ -212,8 +233,11 @@ impl<H: Clone + Eq> Leases<H> {
                 .into_iter()
                 .collect()
         };
+        let seq = self.next_seq;
+        self.next_seq += 1;
         self.pending.push(Request {
             holder,
+            seq,
             order,
             taken: 0,
             filed: now,
@@ -223,6 +247,9 @@ impl<H: Clone + Eq> Leases<H> {
 
     /// Advances `holder`'s pending request by one resource at `now`.
     ///
+    /// A resource without a free slot for the holder ends the attempt: the request returns
+    /// every resource it took in this attempt and queues on its whole set ([`Step::Blocked`]).
+    ///
     /// # Panics
     /// Never: [`Leases::acquire`] files only requests for resources the table has.
     pub fn step(&mut self, holder: &H, now: i64) -> Step {
@@ -230,21 +257,21 @@ impl<H: Clone + Eq> Leases<H> {
             return Step::Idle;
         };
         let request = &self.pending[index];
+        let seq = request.seq;
         let name = request.order[request.taken].clone();
         let slot = self
             .slots
             .get_mut(&name)
             .expect("acquire checked every resource exists");
-        if !slot.queue.contains(holder) {
-            slot.queue.push_back(holder.clone());
-        }
+        slot.enqueue(seq, holder);
         // The first `free` holders in the queue may take a slot; the rest wait their turn.
         let free = slot.resource.capacity.saturating_sub(slot.holders.len());
-        let turn = slot.queue.iter().position(|h| h == holder);
+        let turn = slot.queue.iter().position(|(_, h)| h == holder);
         if turn.is_none_or(|t| t >= free) {
+            self.back_off(index);
             return Step::Blocked(name);
         }
-        slot.queue.retain(|h| h != holder);
+        slot.queue.retain(|(_, h)| h != holder);
         slot.holders.push(holder.clone());
         let request = &mut self.pending[index];
         request.taken += 1;
@@ -262,21 +289,51 @@ impl<H: Clone + Eq> Leases<H> {
         Step::Granted
     }
 
-    /// Steps every pending request in arrival order until none moves; returns the holders
-    /// granted, in grant order.
+    /// Ends the attempt of the pending request at `index`: it returns what it took in this
+    /// attempt and waits in the queue of every resource it needs, in filing order.
+    fn back_off(&mut self, index: usize) {
+        let request = &mut self.pending[index];
+        let returned = if cfg!(mutant_lease_hold_and_wait) {
+            // Mutant (`mutant_lease_hold_and_wait`): the attempt keeps what it took and waits
+            // for the rest.
+            0
+        } else {
+            std::mem::take(&mut request.taken)
+        };
+        let request = &self.pending[index];
+        for (i, name) in request.order.iter().enumerate() {
+            let slot = self
+                .slots
+                .get_mut(name)
+                .expect("acquire checked every resource exists");
+            if i < returned {
+                slot.holders.retain(|h| h != &request.holder);
+            }
+            if i >= request.taken {
+                slot.enqueue(request.seq, &request.holder);
+            }
+        }
+    }
+
+    /// Runs one attempt for every pending request in arrival order, and again while any is
+    /// granted; returns the holders granted, in grant order.
     pub fn serve(&mut self, now: i64) -> Vec<H> {
         let mut granted = Vec::new();
         loop {
             let mut moved = false;
             let holders: Vec<H> = self.pending.iter().map(|r| r.holder.clone()).collect();
             for holder in holders {
-                match self.step(&holder, now) {
-                    Step::Took(_) => moved = true,
-                    Step::Granted => {
-                        moved = true;
-                        granted.push(holder);
+                // One attempt: step until the request is granted or refused.
+                loop {
+                    match self.step(&holder, now) {
+                        Step::Took(_) => {}
+                        Step::Granted => {
+                            moved = true;
+                            granted.push(holder);
+                            break;
+                        }
+                        Step::Idle | Step::Blocked(_) => break,
                     }
-                    Step::Idle | Step::Blocked(_) => {}
                 }
             }
             if !moved {
@@ -295,7 +352,7 @@ impl<H: Clone + Eq> Leases<H> {
         for slot in self.slots.values_mut() {
             let (holders, queue) = (slot.holders.len(), slot.queue.len());
             slot.holders.retain(|h| h != holder);
-            slot.queue.retain(|h| h != holder);
+            slot.queue.retain(|(_, h)| h != holder);
             released |= slot.holders.len() != holders || slot.queue.len() != queue;
         }
         released
@@ -312,7 +369,7 @@ impl<H: Clone + Eq> Leases<H> {
         let known = self
             .slots
             .values()
-            .flat_map(|s| s.holders.iter().chain(s.queue.iter()))
+            .flat_map(|s| s.holders.iter().chain(s.queue.iter().map(|(_, h)| h)))
             .chain(self.pending.iter().map(|r| &r.holder));
         for holder in known {
             if !dead.contains(holder) && !alive(holder) {
@@ -414,6 +471,29 @@ mod tests {
         }
         assert_eq!(split, None, "a step found each holding one of the pair");
         assert_eq!(done, ["one", "two"]);
+    }
+
+    #[test]
+    fn an_attempt_that_finds_one_resource_held_takes_none_of_the_set() {
+        let mut leases = table(&[("a", 1), ("b", 1)]);
+        leases.acquire("g", &["b"], 0).unwrap();
+        assert_eq!(leases.serve(0), ["g"]);
+        leases.acquire("x", &["b", "a"], 1).unwrap();
+        assert_eq!(leases.step(&"x", 1), Step::Took("a".to_owned()));
+        // `b` is held: the attempt returns `a` rather than hold it while it waits.
+        assert_eq!(leases.step(&"x", 1), Step::Blocked("b".to_owned()));
+        assert_eq!(leases.holds(&"x"), NONE);
+        assert_eq!(leases.holders("a"), NONE);
+        // It queues on the whole set: a later request for `a` alone waits behind it.
+        leases.acquire("y", &["a"], 2).unwrap();
+        assert_eq!(leases.serve(2), NONE);
+        assert_eq!(leases.holds(&"x"), NONE);
+        assert_eq!(leases.holds(&"y"), NONE);
+        leases.release(&"g");
+        assert_eq!(leases.serve(3), ["x"]);
+        assert_eq!(leases.holds(&"x"), ["a", "b"]);
+        leases.release(&"x");
+        assert_eq!(leases.serve(4), ["y"]);
     }
 
     #[test]

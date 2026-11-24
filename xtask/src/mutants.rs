@@ -1394,6 +1394,16 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_lease_hold_and_wait",
+        issue: 121,
+        breaks: "an attempt that finds a resource held keeps what it took while it waits",
+        package: "bosun-core",
+        check: Check::Test(
+            "lease::tests::an_attempt_that_finds_one_resource_held_takes_none_of_the_set",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_publish_pr_body_overwrite",
         issue: 122,
         breaks: "updating a pull request body replaces all of it, not only the daemon's region",

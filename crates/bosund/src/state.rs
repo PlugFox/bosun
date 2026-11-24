@@ -25,6 +25,7 @@ use crate::config_watch;
 use crate::control::{self, Control};
 use crate::events::{self, Batch, Events, Subscriber};
 use crate::executor;
+use crate::leases::Leases;
 use crate::listen::{self, ClaimError, Listener};
 
 /// How often the ingest's counters are compared for `ingest_progress` and `ingest_pass`.
@@ -101,6 +102,8 @@ pub(crate) struct State {
     pub(crate) credentials: Credentials,
     /// Pauses, the kill switch, the daily cap and the operator token (#67).
     pub(crate) control: Control,
+    /// The lease manager every loop shares (#8), which `lease.*` reaches too.
+    pub(crate) leases: Arc<Leases>,
 }
 
 impl State {
@@ -111,6 +114,7 @@ impl State {
             identities: BTreeMap::new(),
             credentials: Credentials::default(),
             control: Control::default(),
+            leases: Arc::new(Leases::none()),
         }
     }
 
@@ -196,6 +200,19 @@ pub(crate) async fn run(
         "bosund: listening at {endpoint}; {} identities",
         identities.len()
     );
+    // The lease manager (#8, E15): one for every loop and the API, journalled next to the
+    // operator token.
+    let leases = match Leases::new(&config, &lease_dir) {
+        Ok(leases) => Arc::new(leases),
+        Err(e) => {
+            crate::log::log!("bosund: the resources cannot be leased: {e}");
+            let mut empty = config.clone();
+            empty.resources.clear();
+            Arc::new(
+                Leases::new(&empty, &lease_dir).expect("a table without resources is always valid"),
+            )
+        }
+    };
     // Kept to withdraw the token at the end: the state may outlive shutdown.
     let control = operator.clone();
     let state = Arc::new(State {
@@ -203,6 +220,7 @@ pub(crate) async fn run(
         identities,
         credentials: Credentials::default(),
         control: operator,
+        leases: leases.clone(),
     });
 
     let progress = tokio::spawn(watch_ingest(state.clone()));
@@ -216,19 +234,6 @@ pub(crate) async fn run(
         config_watch::Reported::default(),
     );
     let budget = tokio::spawn(follow_budget(state.clone(), config_rx.clone()));
-    // The lease manager (#8, E15): one for every loop, journalled next to the operator token.
-    let leases = match crate::leases::Leases::new(&config, &lease_dir) {
-        Ok(leases) => Arc::new(leases),
-        Err(e) => {
-            crate::log::log!("bosund: the resources cannot be leased: {e}");
-            let mut empty = config.clone();
-            empty.resources.clear();
-            Arc::new(
-                crate::leases::Leases::new(&empty, &lease_dir)
-                    .expect("a table without resources is always valid"),
-            )
-        }
-    };
     let loops = start_loops(&config, &state, &config_rx, &endpoint, &leases);
     drop(config_rx);
     serve(listener, &state, stop).await;

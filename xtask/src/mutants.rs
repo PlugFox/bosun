@@ -1877,6 +1877,34 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_api_lease_acquire_always_grants",
+        issue: 156,
+        breaks: "lease.acquire answers granted without asking the lease manager",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::leases::a_command_holding_a_resource_blocks_an_item_until_it_exits",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_lease_without_operator",
+        issue: 156,
+        breaks: "the lease methods skip the operator token: an agent's own connection takes leases",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::leases::a_lease_call_without_the_operator_token_is_refused",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_cli_with_exit_zero",
+        issue: 156,
+        breaks: "bosun with exits 0 whatever its command's exit code",
+        package: "bosun-cli",
+        check: Check::Test("with::tests::the_commands_exit_code_is_the_clis"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

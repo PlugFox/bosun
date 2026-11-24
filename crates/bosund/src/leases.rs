@@ -20,20 +20,29 @@
 //! - The wait of a granted request is written to the requesting repository's store, one
 //!   `lease_wait` row per resource: filed, granted, and released with the holder (E15: the
 //!   per-identity databases keep only the wait history).
+//! - A `bosun with` command leases through the API ([`dispatch`], `lease.acquire` and
+//!   `lease.release` under the operator token): it polls its request
+//!   ([`Leases::acquire_command`]) instead of awaiting it, its wait goes to the store of the
+//!   identity it names with no item, and its lease and request end with its process.
 
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
+use bosun_api::rpc::{ErrorObject, code};
+use bosun_api::{AcquireResult, Method, ReleaseResult, method};
 use bosun_config::Config;
 use bosun_core::{ItemId, Scope};
 use bosun_proc::{ProcessKey, StartTime};
 use bosun_store::{Write, Writer};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::oneshot;
 
+use crate::api::{call, failed};
 use crate::executor::now_ms;
+use crate::state::State;
 
 /// The journal's file name in the daemon's directory.
 pub(crate) const JOURNAL: &str = "leases.json";
@@ -229,6 +238,21 @@ impl Leases {
         Ok(this)
     }
 
+    /// A manager of no resource: it grants nothing, so its journal is never written.
+    #[cfg(test)]
+    pub(crate) fn none() -> Self {
+        Self {
+            inner: Mutex::new(Inner {
+                model: bosun_core::Leases::new(Vec::new()).expect("an empty table is valid"),
+                granted: Vec::new(),
+                waiting: Vec::new(),
+            }),
+            scopes: std::collections::BTreeMap::new(),
+            journal: PathBuf::new(),
+            daemon: own_key(),
+        }
+    }
+
     /// The names of the resources, as `needs` lists them.
     pub(crate) fn names(&self) -> BTreeSet<String> {
         self.scopes.keys().cloned().collect()
@@ -339,64 +363,117 @@ impl Leases {
     /// An unknown resource (one added to the configuration after the daemon started), or a
     /// holder that holds or waits for another set.
     pub(crate) async fn acquire(&self, request: Request) -> Result<(), String> {
-        let resources = self.instances(&request)?;
+        let Some(filed) = self.file(&request)? else {
+            return Ok(());
+        };
+        let mut guard = Withdraw {
+            leases: self,
+            holder: Some(request.holder.clone()),
+        };
+        let granted = filed.granted.await;
+        guard.holder = None;
+        record(&request, &filed.resources, filed.filed_ms, granted).await
+    }
+
+    /// Files `request` under the lock: `None` when its holder already holds exactly that set,
+    /// else what its grant is awaited on.
+    fn file(&self, request: &Request) -> Result<Option<Pending>, String> {
+        let resources = self.instances(request)?;
         let holder = request.holder.clone();
         let (grant, granted) = oneshot::channel();
         let filed_ms = now_ms();
+        let mut inner = self.lock();
+        if let Some(entry) = inner.granted.iter().find(|e| e.holder == holder) {
+            if entry.resources == resources {
+                return Ok(None);
+            }
+            return Err(format!(
+                "{holder} holds {} and asks for {}",
+                entry.resources.join(", "),
+                resources.join(", ")
+            ));
+        }
+        inner
+            .model
+            .acquire(holder.clone(), &resources, filed_ms)
+            .map_err(|e| format!("{holder}: {e}"))?;
+        inner.waiting.push(Waiter {
+            holder,
+            resources: resources.clone(),
+            writer: request.writer.clone(),
+            grant,
+        });
+        self.serve(&mut inner);
+        Ok(Some(Pending {
+            resources,
+            filed_ms,
+            granted,
+        }))
+    }
+
+    /// A `bosun with` command's request, polled: the first call files it, a later one with the
+    /// same set only says whether it is granted (`true`). The wait is recorded when it is
+    /// granted; the request lasts until [`Leases::release`] or until its process is gone
+    /// ([`Leases::release_stale`]).
+    ///
+    /// # Errors
+    ///
+    /// An unknown resource, or a holder that holds or waits for another set.
+    pub(crate) fn acquire_command(self: &Arc<Self>, request: Request) -> Result<bool, String> {
+        let resources = self.instances(&request)?;
+        let holder = request.holder.clone();
         {
-            let mut inner = self.lock();
-            if let Some(entry) = inner.granted.iter().find(|e| e.holder == holder) {
-                if entry.resources == resources {
-                    return Ok(());
+            let inner = self.lock();
+            let held = inner
+                .granted
+                .iter()
+                .find(|e| e.holder == holder)
+                .map(|e| (true, &e.resources));
+            let waits = inner
+                .waiting
+                .iter()
+                .find(|w| w.holder == holder)
+                .map(|w| (false, &w.resources));
+            if let Some((granted, asked)) = held.or(waits) {
+                if *asked == resources {
+                    return Ok(granted);
                 }
                 return Err(format!(
-                    "{holder} holds {} and asks for {}",
-                    entry.resources.join(", "),
+                    "{holder} {} {} and asks for {}",
+                    if granted { "holds" } else { "waits for" },
+                    asked.join(", "),
                     resources.join(", ")
                 ));
             }
-            inner
-                .model
-                .acquire(holder.clone(), &resources, filed_ms)
-                .map_err(|e| format!("{holder}: {e}"))?;
-            inner.waiting.push(Waiter {
-                holder: holder.clone(),
-                resources: resources.clone(),
-                writer: request.writer.clone(),
-                grant,
-            });
-            self.serve(&mut inner);
         }
-        let mut guard = Withdraw {
-            leases: self,
-            holder: Some(holder.clone()),
+        let Some(filed) = self.file(&request)? else {
+            return Ok(true);
         };
-        let granted_ms = granted
-            .await
-            .map_err(|_| format!("the request of {holder} was dropped"))?;
-        guard.holder = None;
-        if let Some(writer) = &request.writer {
-            let label = holder.label();
-            let mut writes = Vec::new();
-            for resource in &resources {
-                writes.push(Write::LeaseFiled {
-                    item: holder.item(),
-                    holder: label.clone(),
-                    resource: resource.clone(),
-                    filed_ms,
-                });
-                writes.push(Write::LeaseGranted {
-                    holder: label.clone(),
-                    resource: resource.clone(),
-                    filed_ms,
-                    at_ms: granted_ms,
-                });
+        let granted_now = self.lock().granted.iter().any(|e| e.holder == holder);
+        // The grant is awaited apart, as the command polls; a withdrawn request ends the task.
+        tokio::spawn(async move {
+            let granted = filed.granted.await;
+            if granted.is_ok()
+                && let Err(e) = record(&request, &filed.resources, filed.filed_ms, granted).await
+            {
+                crate::log::log!("bosund: {e}");
             }
-            if let Err(e) = writer.write(writes).await {
-                crate::log::log!("bosund: the lease wait of {holder} cannot be stored: {e}");
-            }
-        }
-        Ok(())
+        });
+        Ok(granted_now)
+    }
+
+    /// Of `names`: those no `[resource.<name>]` configures, and whether one of the others is
+    /// of the repository scope.
+    pub(crate) fn check(&self, names: &[String]) -> (Vec<String>, bool) {
+        let unknown = names
+            .iter()
+            .filter(|n| !self.scopes.contains_key(*n))
+            .cloned()
+            .collect();
+        let repository = names
+            .iter()
+            .any(|n| self.scopes.get(n) == Some(&Scope::Repository));
+        (unknown, repository)
     }
 
     /// Runs the model's attempts, records what it granted and tells their waiters; journals a
@@ -442,11 +519,14 @@ impl Leases {
         entry
     }
 
-    /// Releases what `holder` holds, withdraws its request, and records the release.
-    pub(crate) async fn release(&self, holder: &Holder) {
-        let entry = {
+    /// Releases what `holder` holds, withdraws its request, and records the release; whether
+    /// it held or waited for anything.
+    pub(crate) async fn release(&self, holder: &Holder) -> bool {
+        let (known, entry) = {
             let mut inner = self.lock();
-            self.release_locked(&mut inner, holder)
+            let known = inner.granted.iter().any(|e| &e.holder == holder)
+                || inner.waiting.iter().any(|w| &w.holder == holder);
+            (known, self.release_locked(&mut inner, holder))
         };
         if let Some(Entry {
             writer: Some(writer),
@@ -461,17 +541,28 @@ impl Leases {
                 crate::log::log!("bosund: the release of {holder}'s lease cannot be stored: {e}");
             }
         }
+        known
     }
 
-    /// Releases every lease whose holder is gone (E16); returns those holders.
+    /// Releases every lease whose holder is gone (E16), and withdraws the request of a
+    /// command whose process is gone; returns those holders.
     pub(crate) fn release_stale(&self) -> Vec<Holder> {
         let mut inner = self.lock();
-        let dead: Vec<Holder> = inner
+        let mut dead: Vec<Holder> = inner
             .granted
             .iter()
             .filter(|e| !self.lives(e))
             .map(|e| e.holder.clone())
             .collect();
+        dead.extend(
+            inner
+                .waiting
+                .iter()
+                .filter(
+                    |w| matches!(w.holder, Holder::Command(key) if !bosun_proc::is_running(key)),
+                )
+                .map(|w| w.holder.clone()),
+        );
         for holder in &dead {
             crate::log::log!("bosund: the lease of {holder} is released: its holder is gone");
             self.release_locked(&mut inner, holder);
@@ -547,6 +638,134 @@ fn write_journal(path: &Path, journal: &Journal) -> std::io::Result<()> {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// The holder of the running process `pid`; refused when it is not running.
+fn command(pid: u32) -> Result<Holder, ErrorObject> {
+    match bosun_proc::start_time(pid) {
+        Ok(Some(start)) => Ok(Holder::Command(ProcessKey { pid, start })),
+        _ => Err(ErrorObject::new(
+            code::INVALID_PARAMS,
+            format!("no process {pid} is running"),
+        )),
+    }
+}
+
+/// The `lease.*` methods (#8): a `bosun with` command's leases. The operator token is checked
+/// before anything else; then the leases of every process that is gone are released, so a
+/// command that died does not block the next one until a loop ticks.
+pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObject> {
+    let leases = &state.leases;
+    match name {
+        method::LeaseAcquire::NAME => {
+            call::<method::LeaseAcquire, _, _>(p, |p| async move {
+                if !cfg!(mutant_api_lease_without_operator) {
+                    // Mutant (`mutant_api_lease_without_operator`): the token is not checked.
+                    state.control.authorize(&p.operator)?;
+                }
+                leases.release_stale();
+                let served = state.identity(&p.identity)?;
+                let (unknown, repository) = leases.check(&p.resources);
+                let refuse = |message: String| ErrorObject::new(code::INVALID_PARAMS, message);
+                if p.resources.is_empty() {
+                    return Err(refuse("no resource is named".to_owned()));
+                }
+                if !unknown.is_empty() {
+                    return Err(refuse(format!("no resource named {}", unknown.join(", "))));
+                }
+                if let Some(repo) = &p.repo
+                    && !served.repos.iter().any(|(n, _)| n == repo)
+                {
+                    return Err(refuse(format!(
+                        "identity {} has no repository named {repo:?}",
+                        served.name
+                    )));
+                }
+                if repository && p.repo.is_none() {
+                    return Err(refuse(
+                        "a repository-scope resource needs the repository (`repo`)".to_owned(),
+                    ));
+                }
+                let holder = command(p.pid)?;
+                if cfg!(mutant_api_lease_acquire_always_grants) {
+                    // Mutant (`mutant_api_lease_acquire_always_grants`): the manager is not asked.
+                    return Ok(AcquireResult { granted: true });
+                }
+                let request = Request {
+                    holder,
+                    names: p.resources.clone(),
+                    repo: p.repo.clone().unwrap_or_default(),
+                    identity: served.name.clone(),
+                    writer: Some(served.store.writer().clone()),
+                };
+                let granted = leases.acquire_command(request).map_err(failed)?;
+                Ok(AcquireResult { granted })
+            })
+            .await
+        }
+        method::LeaseRelease::NAME => {
+            call::<method::LeaseRelease, _, _>(p, |p| async move {
+                if !cfg!(mutant_api_lease_without_operator) {
+                    state.control.authorize(&p.operator)?;
+                }
+                leases.release_stale();
+                // A process that is gone was released above.
+                let released = match command(p.pid) {
+                    Ok(holder) => leases.release(&holder).await,
+                    Err(_) => false,
+                };
+                Ok(ReleaseResult { released })
+            })
+            .await
+        }
+        _ => Err(ErrorObject::new(
+            code::METHOD_NOT_FOUND,
+            format!("no method {name}"),
+        )),
+    }
+}
+
+/// A request filed and not granted yet.
+struct Pending {
+    /// Its resource instances, in the global order.
+    resources: Vec<String>,
+    filed_ms: i64,
+    /// Resolves with the grant's time; fails when the request is withdrawn.
+    granted: oneshot::Receiver<i64>,
+}
+
+/// Writes the wait of `request`, granted (or withdrawn) as `granted` says, to its store: one
+/// row per resource.
+async fn record(
+    request: &Request,
+    resources: &[String],
+    filed_ms: i64,
+    granted: Result<i64, oneshot::error::RecvError>,
+) -> Result<(), String> {
+    let holder = &request.holder;
+    let granted_ms = granted.map_err(|_| format!("the request of {holder} was dropped"))?;
+    if let Some(writer) = &request.writer {
+        let label = holder.label();
+        let mut writes = Vec::new();
+        for resource in resources {
+            writes.push(Write::LeaseFiled {
+                item: holder.item(),
+                holder: label.clone(),
+                resource: resource.clone(),
+                filed_ms,
+            });
+            writes.push(Write::LeaseGranted {
+                holder: label.clone(),
+                resource: resource.clone(),
+                filed_ms,
+                at_ms: granted_ms,
+            });
+        }
+        if let Err(e) = writer.write(writes).await {
+            crate::log::log!("bosund: the lease wait of {holder} cannot be stored: {e}");
+        }
+    }
+    Ok(())
 }
 
 /// Withdraws a request whose `acquire` future was dropped before it was granted.

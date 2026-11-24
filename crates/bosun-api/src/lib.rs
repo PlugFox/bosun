@@ -49,10 +49,13 @@
 //! | `session.get` | [`SessionParams`] | [`SessionInfo`] |
 //! | `session.tail` | [`TailParams`] | [`SessionTail`] |
 //! | `tokens.pace` | [`PaceParams`] | [`Pace`] |
+//! | `lease.acquire` | [`AcquireParams`] | [`AcquireResult`] |
+//! | `lease.release` | [`ReleaseParams`] | [`ReleaseResult`] |
 //!
 //! The `agent.*` methods name no identity: their credential does ([`agent`]). `control.kill`
 //! names none either: the kill switch is daemon-wide. The `control.*` methods that change
-//! anything take the operator token ([`control`]), and so does `item.restart`.
+//! anything take the operator token ([`control`]), and so do `item.restart` and the `lease.*`
+//! methods ([`lease`]); `lease.release` names no identity: its holder is a process.
 
 pub mod agent;
 pub mod control;
@@ -60,6 +63,7 @@ mod estimates;
 pub mod event;
 pub mod item;
 mod items;
+pub mod lease;
 pub mod pace;
 pub mod queue;
 mod report;
@@ -94,6 +98,7 @@ pub use items::{
     AttemptReport, Evidence, FlakyVerdict, InferredItem, InferredItems, InferredSession, ItemRow,
     Items, ParkedTime, RefusedEdit, RetriedItem, RunCommit, RunSession, TrailerMissing, Trailers,
 };
+pub use lease::{AcquireParams, AcquireResult, ReleaseParams, ReleaseResult};
 pub use pace::{Pace, PaceParams, PaceReference};
 pub use queue::{
     CardView, ColumnView, LintFinding, LintParams, LintResult, QueueParams, QueueView, RepoQueue,
@@ -333,6 +338,20 @@ pub mod method {
         crate::Pace,
         "Eqv per minute over the last hour, the odometers of today and of this run of the daemon, and the reference pace with where it came from (the configured daily budget until limit windows are measured)."
     );
+    method!(
+        LeaseAcquire,
+        "lease.acquire",
+        crate::AcquireParams,
+        crate::AcquireResult,
+        "Asks for the leases of the named resources for a running process (a `bosun with`      command): the first call files the request, later calls with the same pid and set report      whether it is granted. Never says who holds a resource. Takes the operator token."
+    );
+    method!(
+        LeaseRelease,
+        "lease.release",
+        crate::ReleaseParams,
+        crate::ReleaseResult,
+        "Releases what a process holds and withdraws its request; releasing nothing is not an      error. Takes the operator token."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -363,6 +382,8 @@ pub const METHODS: &[&str] = &[
     method::SessionGet::NAME,
     method::SessionTail::NAME,
     method::TokensPace::NAME,
+    method::LeaseAcquire::NAME,
+    method::LeaseRelease::NAME,
 ];
 
 /// The prefix of the `agent.*` group: the only methods an agent credential admits.
@@ -624,6 +645,8 @@ pub fn schema() -> Value {
     add_method::<method::SessionGet>(&mut generator, &mut methods);
     add_method::<method::SessionTail>(&mut generator, &mut methods);
     add_method::<method::TokensPace>(&mut generator, &mut methods);
+    add_method::<method::LeaseAcquire>(&mut generator, &mut methods);
+    add_method::<method::LeaseRelease>(&mut generator, &mut methods);
     let notifications = json!({
         event::EVENT: {
             "description": "One event of the subscribed identity, in sequence order.",

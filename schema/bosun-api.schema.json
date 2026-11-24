@@ -27,6 +27,59 @@
       ],
       "type": "object"
     },
+    "AcquireParams": {
+      "description": "Params of `lease.acquire`.",
+      "properties": {
+        "identity": {
+          "description": "The identity whose store records the wait, and whose instances of `identity`-scope\nresources are asked for.",
+          "type": "string"
+        },
+        "operator": {
+          "default": "",
+          "description": "The operator token the daemon wrote at start. Missing, it is refused like a wrong one.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "The process that holds the lease: the caller itself.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "repo": {
+          "description": "A repository of the identity, by its name in the configuration: its instances of\n`repository`-scope resources. Required when one is asked for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resources": {
+          "description": "The resources by their names in the configuration (`[resource.<name>]`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "resources",
+        "pid"
+      ],
+      "type": "object"
+    },
+    "AcquireResult": {
+      "description": "Result of `lease.acquire`.",
+      "properties": {
+        "granted": {
+          "description": "The whole set is held; `false`: the request waits.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "granted"
+      ],
+      "type": "object"
+    },
     "AgentAck": {
       "description": "Result of a recorded `agent.ask_question`, `agent.submit_summary` or `agent.note` call.",
       "properties": {
@@ -2927,6 +2980,39 @@
       ],
       "type": "object"
     },
+    "ReleaseParams": {
+      "description": "Params of `lease.release`.",
+      "properties": {
+        "operator": {
+          "default": "",
+          "description": "The operator token the daemon wrote at start. Missing, it is refused like a wrong one.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "The process whose lease is released and whose request is withdrawn.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pid"
+      ],
+      "type": "object"
+    },
+    "ReleaseResult": {
+      "description": "Result of `lease.release`.",
+      "properties": {
+        "released": {
+          "description": "The process held or waited for something; releasing nothing is not an error.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "released"
+      ],
+      "type": "object"
+    },
     "RepeatedRead": {
       "description": "One file of [`RepeatedReads`].",
       "properties": {
@@ -4761,6 +4847,24 @@
       },
       "result": {
         "$ref": "#/$defs/RestartResult"
+      }
+    },
+    "lease.acquire": {
+      "description": "Asks for the leases of the named resources for a running process (a `bosun with`      command): the first call files the request, later calls with the same pid and set report      whether it is granted. Never says who holds a resource. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/AcquireParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AcquireResult"
+      }
+    },
+    "lease.release": {
+      "description": "Releases what a process holds and withdraws its request; releasing nothing is not an      error. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/ReleaseParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ReleaseResult"
       }
     },
     "queue.get": {

@@ -52,6 +52,7 @@ impl Served {
             identities,
             credentials: crate::agent::Credentials::default(),
             control: crate::control::Control::default(),
+            leases: std::sync::Arc::new(crate::leases::Leases::none()),
         });
         let endpoint = if cfg!(windows) {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);

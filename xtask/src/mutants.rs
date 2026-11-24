@@ -1365,7 +1365,7 @@ const MUTANTS: &[Mutant] = &[
         breaks: "a card without `model` spawns its session with no `--model`: the repository's default is not passed",
         package: "bosund",
         check: Check::Test(
-            "executor::tests::a_session_asks_for_the_cards_model_else_the_repositorys_default",
+            "executor::tests::a_session_asks_for_the_card_model_else_the_repository_default",
         ),
         platform: None,
     },

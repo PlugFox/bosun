@@ -1988,7 +1988,7 @@ async fn an_identity_refused_at_the_session_is_needs_you_as_identity() {
 /// asked for. `mutant_runner_no_default_model` leaves the repository's default out, and the
 /// first session gets no `--model`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_session_asks_for_the_cards_model_else_the_repositorys_default() {
+async fn a_session_asks_for_the_card_model_else_the_repository_default() {
     let scene = Scene::new().await;
     let p = |name: &str| scene.path(name).display().to_string();
     let mut haiku = card(2, "Overrides", "test -f two.txt", "Item two.");

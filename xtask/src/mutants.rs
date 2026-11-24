@@ -1011,6 +1011,41 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("work::tests::the_last_accepted_summary_of_an_attempt_wins"),
         platform: None,
     },
+    // Parking in the loop (#66).
+    Mutant {
+        name: "mutant_loop_limit_counts",
+        issue: 66,
+        breaks: "the loop reports a limit as a crash: a second limit fails the attempt",
+        package: "bosund",
+        check: Check::Test("executor::tests::a_limit_parks_and_resumes_without_counting"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_no_park_cap",
+        issue: 66,
+        breaks: "the loop does not apply `daemon.park_cap`: a fake limit forever parks forever",
+        package: "bosund",
+        check: Check::Test("executor::tests::a_fake_limit_forever_ends_in_needs_you_at_the_cap"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_auth_retries",
+        issue: 66,
+        breaks: "an expired authentication is retried like a crash",
+        package: "bosund",
+        check: Check::Test("executor::tests::an_expired_authentication_is_needs_you_with_no_retry"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_skip_wake_check",
+        issue: 66,
+        breaks: "after a sleep the session's child is not revalidated: a dead one is waited on",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::after_a_sleep_a_dead_child_is_retried_once_uncounted_and_a_live_one_runs_on",
+        ),
+        platform: None,
+    },
 ];
 
 /// The agent.* scenario of #63, which hosts two mutants.

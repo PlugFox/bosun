@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 
+use super::park::ChildSlot;
 use super::verdict::killed;
 use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms};
 use crate::agent::Binding;
@@ -40,6 +41,8 @@ pub(crate) struct Run {
     pub(crate) attempt: u32,
     pub(crate) spawn: u32,
     pub(crate) mode: SpawnMode,
+    /// Where the session's child is recorded while it runs, for the wake check (#66).
+    pub(crate) child: ChildSlot,
 }
 
 impl Run {
@@ -75,6 +78,8 @@ fn new_session_id(run: &Run) -> SessionId {
 fn exit_of(exit: &bosun_runner::Exit) -> Exit {
     match *exit {
         bosun_runner::Exit::Ok => Exit::Ok,
+        // Mutant: the loop reports a limit as a crash, which counts once retried (#7).
+        bosun_runner::Exit::Limit { .. } if cfg!(mutant_loop_limit_counts) => Exit::Crash,
         bosun_runner::Exit::Limit { reset } => Exit::Limit {
             reset_ms: reset.and_then(|t| {
                 t.duration_since(UNIX_EPOCH)
@@ -82,6 +87,8 @@ fn exit_of(exit: &bosun_runner::Exit) -> Exit {
                     .and_then(|d| i64::try_from(d.as_millis()).ok())
             }),
         },
+        // Mutant: an expired authentication is retried like a crash.
+        bosun_runner::Exit::Auth if cfg!(mutant_loop_auth_retries) => Exit::Crash,
         bosun_runner::Exit::Auth => Exit::Auth,
         // A runner never reads a question from output; it is an MCP call (#63).
         bosun_runner::Exit::Question | bosun_runner::Exit::Crash { .. } => Exit::Crash,
@@ -190,7 +197,9 @@ async fn resumed_id(shared: &Shared, run: &Run) -> Option<SessionId> {
 
 /// Runs one session to its end and records it. Returns the machine's event: its exit as the
 /// runner classified it, `auth` when the identity checks refused (#2), `crash` when it could
-/// not be started.
+/// not be started, and `resume_failed` when a resume crashed before the session came up (the
+/// CLI found no conversation to resume, #66): the machine then resets the tree to the last
+/// commit and starts a fresh session, uncounted.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn session(
     shared: &Arc<Shared>,
@@ -378,6 +387,7 @@ pub(crate) async fn session(
         stdin,
     } = spawned;
     let key = tree.key();
+    set_child(&run.child, Some(key));
     let child = Write::SessionChild {
         item: run.item.clone(),
         attempt: run.attempt,
@@ -407,11 +417,20 @@ pub(crate) async fn session(
     let (mut out_open, mut err_open) = (true, true);
     let mut tail = Tail::default();
     let mismatch = std::sync::atomic::AtomicBool::new(false);
+    // The session came up (the CLI's `init`): a crash after it is not a failed resume.
+    let up = std::sync::atomic::AtomicBool::new(false);
     let on_line = |stream: OutputStream, bytes: &[u8], tail: &mut Tail| {
         let line = String::from_utf8_lossy(bytes).trim_end().to_owned();
         let texts: Vec<String> = match stream {
             OutputStream::Stdout => {
-                let texts = runner.live_entries(&line).iter().map(entry_text).collect();
+                let entries = runner.live_entries(&line);
+                if entries
+                    .iter()
+                    .any(|e| matches!(e, LiveEntry::Started { .. }))
+                {
+                    up.store(true, Ordering::Relaxed);
+                }
+                let texts = entries.iter().map(entry_text).collect();
                 if let Some(reported) = runner.session_id(&line)
                     && reported != session_id
                     && !mismatch.swap(true, Ordering::Relaxed)
@@ -463,6 +482,8 @@ pub(crate) async fn session(
             }
         }
     };
+    // The child has exited or is being killed: no wake check may take it for dead now.
+    set_child(&run.child, None);
     // Whatever the session left running in its container goes with it, and so does its
     // credential.
     let _ = tree.kill_tree();
@@ -495,6 +516,7 @@ pub(crate) async fn session(
             () = tokio::time::sleep(left) => break,
         }
     }
+    let ended = status.is_some();
     let (exit, published) = match status {
         Some(status) => {
             let code = status.ok().and_then(|s| s.code());
@@ -511,7 +533,24 @@ pub(crate) async fn session(
         spawn: run.spawn,
         exit: events::exit_name(published).to_owned(),
     });
+    if run.mode == SpawnMode::Resume && exit == Exit::Crash && ended && !up.load(Ordering::Relaxed)
+    {
+        eprintln!(
+            "bosund: {}: the resume of session {session_id} failed; a fresh session follows",
+            run.item
+        );
+        return Event::ResumeFailed {
+            attempt: run.attempt,
+            spawn: run.spawn,
+        };
+    }
     run.exited(exit)
+}
+
+fn set_child(slot: &ChildSlot, key: Option<bosun_proc::ProcessKey>) {
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = key;
 }
 
 fn mode_name(mode: SpawnMode) -> &'static str {

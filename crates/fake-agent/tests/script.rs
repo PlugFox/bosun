@@ -164,3 +164,28 @@ fn the_script_dir_picks_the_items_script_and_wait_waits_for_its_file() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "item seven");
 }
+
+#[test]
+fn once_runs_its_command_only_the_first_time() {
+    let scratch = tempfile::tempdir().unwrap();
+    let empty_config = scratch.path().join("gitconfig");
+    std::fs::write(&empty_config, "").unwrap();
+    let (printed, exited) = (scratch.path().join("m1"), scratch.path().join("m2"));
+    let script = scratch.path().join("script.txt");
+    std::fs::write(
+        &script,
+        format!(
+            "once {} print first\nonce {} exit 3\nprint later\n",
+            printed.display(),
+            exited.display()
+        ),
+    )
+    .unwrap();
+    let first = run(&script, scratch.path(), &empty_config, "");
+    assert_eq!(first.status.code(), Some(3));
+    assert_eq!(String::from_utf8(first.stdout).unwrap(), "first\n");
+    assert!(printed.exists() && exited.exists());
+    let second = run(&script, scratch.path(), &empty_config, "");
+    assert_eq!(second.status.code(), Some(0));
+    assert_eq!(String::from_utf8(second.stdout).unwrap(), "later\n");
+}

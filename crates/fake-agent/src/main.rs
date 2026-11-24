@@ -30,6 +30,7 @@
 //! | `sleep <ms>` | sleeps |
 //! | `wait <path>` | waits until the file exists (at most 60 s, then a script error) |
 //! | `exit <code>` | exits with the code; the end of the script exits with 0 |
+//! | `once <marker> <command>` | runs the command (`exit` too) only when the file `marker` does not exist, creating it first: a resumed or retried session of the same script plays a later part |
 //!
 //! A script error (a missing script, an unknown command, a failed git command) is reported on
 //! standard error and exits with [`SCRIPT_ERROR`].
@@ -94,9 +95,22 @@ fn run() -> Result<u8, String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
-        let rest = rest.trim();
         let at = |e: String| format!("{}:{}: {e}", script.display(), number + 1);
+        let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let (command, rest) = if command == "once" {
+            let (marker, inner) = rest
+                .trim()
+                .split_once(' ')
+                .ok_or_else(|| at("once needs a marker and a command".to_owned()))?;
+            if Path::new(marker).exists() {
+                continue;
+            }
+            write_file(Path::new(marker), "").map_err(at)?;
+            inner.trim().split_once(' ').unwrap_or((inner.trim(), ""))
+        } else {
+            (command, rest)
+        };
+        let rest = rest.trim();
         if command == "exit" {
             return rest
                 .parse()

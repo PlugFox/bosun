@@ -10,6 +10,7 @@ mod attempt;
 mod commit;
 mod event;
 mod item;
+mod lease;
 mod merge;
 mod path;
 mod price;
@@ -28,6 +29,7 @@ pub use item::{
     Next, Outcome, Park, ParkReason, Reason, Rules, SpawnMode, State, Stepped, Transition,
     TransitionKey, UserCommand, step,
 };
+pub use lease::{Acquire, Leases, Refused, Resource, Scope, Wait};
 pub use merge::{KeyMismatch, merge};
 pub use path::{PathStyle, canonical_path, repo_root, strip_root, style_of};
 pub use price::{

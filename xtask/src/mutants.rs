@@ -1367,6 +1367,22 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("view::tests::the_speedometer_labels_its_reference_configured"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_lease_one_by_one",
+        issue: 8,
+        breaks: "a lease request takes its resources one by one, in the order given, and keeps them while it waits",
+        package: "bosun-core",
+        check: Check::Test("lease::tests::two_items_wanting_the_same_pair_never_deadlock"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_lease_keep_dead_holder",
+        issue: 8,
+        breaks: "a lease whose holder is gone is kept, and its queued request keeps blocking",
+        package: "bosun-core",
+        check: Check::Test("lease::tests::a_lease_whose_holder_is_gone_is_released"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

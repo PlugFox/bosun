@@ -229,6 +229,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #74: the TUI's Session and Tokens tabs.
   "cfg(mutant_tui_ignore_resync)",
   "cfg(mutant_tui_pace_unlabelled)",
+  "cfg(mutant_lease_one_by_one)",
+  "cfg(mutant_lease_keep_dead_holder)",
 ] }
 
 [workspace.lints.clippy]

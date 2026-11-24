@@ -248,6 +248,7 @@ async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObj
             })
             .await
         }
+        name if name.starts_with("control.") => crate::control::dispatch(state, name, p).await,
         _ => Err(ErrorObject::new(
             code::METHOD_NOT_FOUND,
             format!("no method {name}"),

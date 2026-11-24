@@ -12,6 +12,10 @@
 //! bosund [--config <file>] [--endpoint <socket or pipe>]
 //! ```
 //!
+//! At start it writes a fresh operator token, the credential of the control switches (#67), to
+//! the file `bosun_client::operator::path` names (`BOSUN_OPERATOR_FILE`, else per endpoint); a
+//! file inside a configured repository's checkout is refused (exit code 1).
+//!
 //! The configuration is `--config`, else `bosun_config::default_path` (`BOSUN_CONFIG`, else
 //! the platform's location). The endpoint is `--endpoint`, else `bosun_client::Endpoint::resolve`
 //! (`BOSUN_ENDPOINT`, else per user).
@@ -34,6 +38,7 @@ mod agent;
 mod api;
 mod commits;
 mod config_watch;
+mod control;
 mod events;
 mod executor;
 mod listen;

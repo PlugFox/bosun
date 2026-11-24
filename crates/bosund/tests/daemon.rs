@@ -75,6 +75,10 @@ impl Home {
         command
             .env("BOSUN_CONFIG", self.dir.path().join("config.toml"))
             .env("BOSUN_ENDPOINT", self.endpoint.path())
+            .env(
+                "BOSUN_OPERATOR_FILE",
+                self.dir.path().join("operator.token"),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -378,4 +382,69 @@ async fn sigterm_stops_cleanly() {
         Client::connect(&home.endpoint).await,
         Err(Error::NotRunning { .. })
     ));
+}
+
+/// #67: the control switches take the operator token the daemon writes at start; a client
+/// without it (an agent's own connection) is refused, and `control.status` only reads.
+#[tokio::test]
+async fn the_switches_take_the_operator_token() {
+    use bosun_api::{KillParams, PauseParams};
+
+    let home = Home::new(&[("personal", "cache-and-models")]);
+    let _daemon = home.start().await;
+    let token = std::fs::read_to_string(home.dir.path().join("operator.token")).unwrap();
+    let token = token.trim().to_owned();
+    assert!(token.starts_with("bosun-operator-"), "{token}");
+
+    let mut client = home.client().await;
+    let refused = |e: Error| matches!(e, Error::Rpc(rpc) if rpc.code == code::UNAUTHORIZED);
+    for operator in [String::new(), "bosun-operator-guess".to_owned()] {
+        let pause = PauseParams {
+            operator: operator.clone(),
+            identity: "personal".to_owned(),
+            repo: None,
+        };
+        let e = client
+            .call::<method::ControlPause>(&pause)
+            .await
+            .unwrap_err();
+        assert!(refused(e), "pause with {operator:?}");
+        let kill = KillParams {
+            operator,
+            release: false,
+        };
+        let e = client.call::<method::ControlKill>(&kill).await.unwrap_err();
+        assert!(refused(e), "kill");
+    }
+    let ask = IdentityParams {
+        identity: "personal".to_owned(),
+    };
+    let status = client.call::<method::ControlStatus>(&ask).await.unwrap();
+    assert!(!status.paused && !status.killed, "{status:?}");
+
+    let pause = PauseParams {
+        operator: token.clone(),
+        identity: "personal".to_owned(),
+        repo: None,
+    };
+    assert!(
+        client
+            .call::<method::ControlPause>(&pause)
+            .await
+            .unwrap()
+            .paused
+    );
+    let kill = KillParams {
+        operator: token,
+        release: false,
+    };
+    assert!(
+        client
+            .call::<method::ControlKill>(&kill)
+            .await
+            .unwrap()
+            .killed
+    );
+    let status = client.call::<method::ControlStatus>(&ask).await.unwrap();
+    assert!(status.paused && status.killed, "{status:?}");
 }

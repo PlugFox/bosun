@@ -8,6 +8,9 @@
 //! bosun uninstall [--name <name>]
 //! bosun doctor [--identity <name>] [--name <name>]
 //! bosun report [--since <t>] [--until <t>] [--repo <name>] [--identity <name>]
+//! bosun pause [--repo <name>] [--identity <name>]
+//! bosun resume [--repo <name>] [--identity <name>]
+//! bosun kill [--release]
 //! ```
 //!
 //! Every command also takes `--format text|json` (default `text`; `report` also takes `md`,
@@ -55,6 +58,12 @@
 //!   up or down (`doctor.rs`). It prints every check, failed or not; it exits 0 when none failed
 //!   (warnings allowed) and 7 when one did.
 //!
+//! - `pause` and `resume`: pause one repository (`--repo`) or every repository of each
+//!   identity, and lift it (`control.pause`, `control.resume`); the attempt in flight finishes
+//!   and no new session starts. `kill` throws the daemon-wide kill switch (`control.kill`):
+//!   every child is killed, every item parks, no board is written; `kill --release` releases
+//!   it. All three send the daemon's operator token, read from its file (`control.rs`).
+//!
 //! `--name` names the registration (default `bosun`): a second daemon, or a test.
 //!
 //! # JSON
@@ -95,6 +104,7 @@
 
 mod admin;
 mod artefact;
+mod control;
 mod doctor;
 mod install;
 mod markdown;
@@ -203,6 +213,16 @@ enum Command {
     /// Checks the registration, configuration, directories, retention, git and the endpoint.
     #[command(after_help = EXIT_CODES)]
     Doctor(NameArgs),
+    /// Pauses a repository, or every repository: the current attempt finishes, nothing new
+    /// starts.
+    #[command(after_help = EXIT_CODES)]
+    Pause(control::PauseArgs),
+    /// Lifts a pause.
+    #[command(after_help = EXIT_CODES)]
+    Resume(control::PauseArgs),
+    /// The kill switch: kills every child, parks every item, stops every board write.
+    #[command(after_help = EXIT_CODES)]
+    Kill(control::KillArgs),
 }
 
 #[derive(Debug, Args)]
@@ -557,6 +577,9 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
         Command::Install(args) => return admin::install(global, args).await,
         Command::Uninstall(args) => return admin::uninstall(global, args).await,
         Command::Doctor(args) => return admin::doctor(global, args).await,
+        Command::Pause(args) => return control::pause(global, args, true).await,
+        Command::Resume(args) => return control::pause(global, args, false).await,
+        Command::Kill(args) => return control::kill(global, args).await,
         _ => {}
     }
     let repo = match &cli.command {
@@ -630,7 +653,7 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
             }
         }
         // Answered above, before the configuration is required.
-        Command::Install(_) | Command::Uninstall(_) | Command::Doctor(_) => {}
+        _ => {}
     }
     Ok(output(global, sections))
 }

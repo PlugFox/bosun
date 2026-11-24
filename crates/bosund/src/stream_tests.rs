@@ -51,6 +51,7 @@ impl Served {
             started_ms: 0,
             identities,
             credentials: crate::agent::Credentials::default(),
+            control: crate::control::Control::default(),
         });
         let endpoint = if cfg!(windows) {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);

@@ -44,17 +44,25 @@
 //! these counts, and the uncounted ones are capped (`daemon.park_cap`). A sleep (a gap between
 //! ticks) revalidates the session's child; a dead one is a crash of the attempt.
 //!
+//! # Holds and budgets
+//!
+//! See [`hold`]: every step runs under the hold of [`crate::control::Control`] on the
+//! repository (a pause, the kill switch, the daily cap); the kill switch kills the child in
+//! flight as soon as it is thrown; the item's eqv and wall-clock caps are checked every few
+//! ticks, and so are the automatic pause and the daily cap.
+//!
 //! # Not here
 //!
 //! The agent's calls are answered by [`crate::agent`] (#63) under the credential each session
 //! is issued at spawn; a blocking question comes back here as [`Event::Question`].
 //!
 //! The `bosun-mcp` server and its handshake (#64), the outbox drainer, the sticky report and user
-//! commands (#65), pauses, the kill switch and budgets (#67), and crash recovery (#68): an item
-//! found in flight at start keeps its repository waiting for #68.
+//! commands (#65), and crash recovery (#68): an item found in flight at start keeps its
+//! repository waiting for #68.
 
 mod claim;
 mod git;
+mod hold;
 mod identity;
 mod park;
 mod session;
@@ -168,6 +176,8 @@ pub(crate) struct Deps {
     pub(crate) clock: Arc<dyn Clock>,
     /// Whether a recorded child still runs, checked after a sleep.
     pub(crate) alive: Alive,
+    /// Pauses, the kill switch and the daily cap (#67).
+    pub(crate) control: crate::control::Control,
 }
 
 impl fmt::Debug for Deps {
@@ -317,6 +327,10 @@ pub(crate) struct Loop {
     halted: bool,
     /// The sleep detector.
     gaps: park::Gaps,
+    /// Holds and budgets.
+    watch: hold::Watch,
+    /// Wakes on every change of the control state.
+    control: watch::Receiver<u64>,
 }
 
 impl fmt::Debug for Loop {
@@ -332,6 +346,7 @@ impl Loop {
     pub(crate) fn new(options: Options, deps: Deps, config: watch::Receiver<Arc<Config>>) -> Self {
         let (done_tx, done_rx) = mpsc::unbounded_channel();
         let gaps = park::Gaps::new(options.poll);
+        let control = deps.control.subscribe();
         Self {
             shared: Arc::new(Shared { options, deps }),
             config,
@@ -345,6 +360,8 @@ impl Loop {
             waiting: false,
             halted: false,
             gaps,
+            watch: hold::Watch::default(),
+            control,
         }
     }
 
@@ -364,6 +381,7 @@ impl Loop {
                     self.on_config().await;
                 }
                 _ = tick.tick() => self.on_tick().await,
+                Ok(()) = self.control.changed() => self.on_control().await,
             }
         }
         if let Some(cur) = self.current.as_mut()
@@ -386,9 +404,10 @@ impl Loop {
         } else {
             config.daemon.park_cap
         };
+        let now_ms = self.shared.deps.clock.wall_ms();
         Ctx {
-            now_ms: self.shared.deps.clock.wall_ms(),
-            hold: None,
+            now_ms,
+            hold: self.hold(now_ms),
             rules: Rules {
                 park_cap,
                 ..Rules::default()
@@ -830,6 +849,7 @@ impl Loop {
             // Mutant (`mutant_loop_skip_wake_check`): the child is not revalidated after a sleep.
             self.revalidate(gap).await;
         }
+        self.watch_tick().await;
         if let Some(cur) = self.current.as_ref() {
             if matches!(cur.item.state, State::Parked(_)) {
                 self.apply(Event::Tick).await;
@@ -985,7 +1005,8 @@ impl Loop {
             .filter(|s| matches!(s.item.state, State::Done(_)))
             .map(|s| s.item.id.clone())
             .collect();
-        let plan = bosun_core::plan(&cards, &satisfied, &bosun_core::Gates::default(), now_ms());
+        let now = self.shared.deps.clock.wall_ms();
+        let plan = bosun_core::plan(&cards, &satisfied, &self.gates(now), now);
         for id in &plan.cycles {
             let Some(card) = changes
                 .cards

@@ -1,0 +1,40 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.session_key AS \"session_key!\", MAX(s.kind = 'run') AS \"run!: bool\",\n                      MAX(m.ts_ms) AS \"last_ms!: i64\"\n               FROM message m\n               JOIN session s ON s.id = m.session_id\n               JOIN repo r ON r.id = m.repo_id\n               WHERE r.path = ? AND m.ts_ms >= ?\n               GROUP BY s.session_key\n               ORDER BY s.session_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "session_key!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "session_key"
+          }
+        }
+      },
+      {
+        "name": "run!: bool",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "last_ms!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "7284dd5faf7a78156bc60a9470329ddd6d1114611964ce35bb0f67309778e208"
+}

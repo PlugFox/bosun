@@ -395,6 +395,8 @@ pub(crate) async fn session(
         repo_mcp_servers: repo.mcp_servers.keys().cloned().collect(),
         policy: ToolPolicy {
             allow_push: repo.policy.push,
+            // The operator token's file (#67).
+            deny: shared.deps.control.deny_rules(),
             ..ToolPolicy::default()
         },
         model: claimed.snapshot.contract.model.clone(),

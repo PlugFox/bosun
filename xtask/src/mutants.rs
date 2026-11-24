@@ -1474,6 +1474,24 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #128: escape attempts and the members of a container.
+    Mutant {
+        name: "mutant_proc_allow_breakaway",
+        issue: 128,
+        breaks: "the Job Object allows breakaway; a grandchild leaves it and outlives the tree",
+        package: "bosun-proc",
+        check: Check::Test("spawn::tests::a_grandchild_that_tries_to_escape_dies_with_the_tree"),
+        // Job Objects exist on Windows only.
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_proc_members_child_only",
+        issue: 128,
+        breaks: "members lists the direct child only, not the descendants left in the container",
+        package: "bosun-proc",
+        check: Check::Test("spawn::tests::members_lists_the_processes_left_in_the_container"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

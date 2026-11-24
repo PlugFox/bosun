@@ -57,6 +57,16 @@ pub trait Tree: Send + fmt::Debug {
     /// When the operating system refuses the kill.
     fn kill_tree(&mut self) -> io::Result<()>;
 
+    /// The pids of the processes left in the container: the child while it runs and every
+    /// descendant still inside, whether or not the child has exited. Windows lists the Job
+    /// Object exactly; Unix lists the process group, best effort (see the crate documentation),
+    /// and on macOS more weakly still, from a snapshot of the process table.
+    ///
+    /// # Errors
+    ///
+    /// When the operating system refuses the query.
+    fn members(&self) -> io::Result<Vec<u32>>;
+
     /// Waits for the child itself to exit. Its descendants may outlive it, still inside the
     /// container until [`Tree::kill_tree`] or the drop.
     fn wait(&mut self) -> WaitFuture<'_>;
@@ -168,6 +178,15 @@ impl Tree for NativeTree {
             return Ok(());
         }
         self.container.kill_all()
+    }
+
+    fn members(&self) -> io::Result<Vec<u32>> {
+        if cfg!(mutant_proc_members_child_only) {
+            // Mutant (`mutant_proc_members_child_only`): the direct child alone, and nothing
+            // once it has exited; its descendants go unlisted.
+            return Ok(self.child.id().into_iter().collect());
+        }
+        self.container.members()
     }
 
     fn wait(&mut self) -> WaitFuture<'_> {
@@ -286,6 +305,101 @@ mod tests {
         // The drop cleans up whatever a broken kill left.
         drop(spawned);
         assert!(left.is_empty(), "still running: {left:?}");
+    }
+
+    /// Windows: a grandchild started with `CREATE_BREAKAWAY_FROM_JOB` is refused breakaway (or,
+    /// when the job above refuses first, starts detached) and stays in the job: `kill_tree`
+    /// leaves neither it nor the child within 5 s.
+    #[cfg(windows)]
+    #[test]
+    fn a_grandchild_that_tries_to_escape_dies_with_the_tree() {
+        let rt = runtime();
+        let (left, how, spawned) = rt.block_on(async {
+            let mut spawned = NativeSpawner
+                .spawn(&helper::spec(Role::Escape))
+                .expect("spawn");
+            let child = spawned.tree.key();
+            let grandchild = helper::read_key(&mut spawned.stdout, "grandchild").await;
+            let grandchild = key_of(grandchild.parse().expect("pid"));
+            let how = helper::read_key(&mut spawned.stdout, "escape").await;
+            let status = spawned.tree.wait().await.expect("wait");
+            assert!(status.success(), "{status}");
+            spawned.tree.kill_tree().expect("kill tree");
+            let left = survivors(&[child, grandchild], Duration::from_secs(5));
+            (left, how, spawned)
+        });
+        drop(spawned);
+        // A grandchild outside the job survives the drop too: reap it by pid and start time.
+        for &key in &left {
+            crate::reap(key).ok();
+        }
+        assert!(left.is_empty(), "still running ({how}): {left:?}");
+    }
+
+    /// Unix: a grandchild that calls `setsid` leaves the process group and survives
+    /// `kill_tree`, the gap the crate documentation names and cgroups (#8) close. The test pins
+    /// the gap so that closing it shows; the grandchild is reaped by pid and start time.
+    #[cfg(unix)]
+    #[test]
+    fn a_grandchild_that_calls_setsid_leaves_the_process_group() {
+        let rt = runtime();
+        let (grandchild, spawned) = rt.block_on(async {
+            let mut spawned = NativeSpawner
+                .spawn(&helper::spec(Role::Escape))
+                .expect("spawn");
+            let grandchild = helper::read_key(&mut spawned.stdout, "grandchild").await;
+            let grandchild = key_of(grandchild.parse().expect("pid"));
+            let status = spawned.tree.wait().await.expect("wait");
+            assert!(status.success(), "{status}");
+            spawned.tree.kill_tree().expect("kill tree");
+            (grandchild, spawned)
+        });
+        drop(spawned);
+        let left = survivors(&[grandchild], Duration::from_millis(500));
+        crate::reap(grandchild).ok();
+        assert_eq!(left, [grandchild], "setsid no longer escapes the group");
+    }
+
+    /// Polls until `tree` lists no process, for at most `limit`. Returns the last listing.
+    fn members_after(tree: &dyn Tree, limit: Duration) -> Vec<u32> {
+        let deadline = Instant::now() + limit;
+        loop {
+            let members = tree.members().expect("members");
+            if members.is_empty() || Instant::now() >= deadline {
+                return members;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A child that starts a grandchild and exits: `members` still lists the grandchild, and
+    /// not the child; after `kill_tree` it lists nothing.
+    #[test]
+    fn members_lists_the_processes_left_in_the_container() {
+        let rt = runtime();
+        let (child, grandchild, after_exit, after_kill, spawned) = rt.block_on(async {
+            let mut spawned = NativeSpawner
+                .spawn(&helper::spec(Role::Parent))
+                .expect("spawn");
+            let child = spawned.tree.key().pid;
+            let grandchild: u32 = helper::read_key(&mut spawned.stdout, "grandchild")
+                .await
+                .parse()
+                .expect("pid");
+            let status = spawned.tree.wait().await.expect("wait");
+            assert!(status.success(), "{status}");
+            let after_exit = spawned.tree.members().expect("members");
+            spawned.tree.kill_tree().expect("kill tree");
+            let after_kill = members_after(spawned.tree.as_ref(), Duration::from_secs(5));
+            (child, grandchild, after_exit, after_kill, spawned)
+        });
+        drop(spawned);
+        assert!(
+            after_exit.contains(&grandchild),
+            "grandchild {grandchild} missing from {after_exit:?}"
+        );
+        assert!(!after_exit.contains(&child), "the exited child is listed");
+        assert!(after_kill.is_empty(), "left after the kill: {after_kill:?}");
     }
 
     /// A holder process that owns the job and is killed without warning (`TerminateProcess`)

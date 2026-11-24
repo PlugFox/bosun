@@ -28,15 +28,20 @@ pub(crate) enum Role {
     /// Spawns a `ParentStay` through `NativeSpawner`, reports the child's and the grandchild's
     /// pids, sleeps holding the job.
     Holder,
+    /// Starts a sleeping grandchild that tries to leave the container, reports its pid and how
+    /// it was started (`escape`), exits. Windows: `CREATE_BREAKAWAY_FROM_JOB`, and when the job
+    /// refuses breakaway, a plain detached process. Unix: `setsid`, a new session and group.
+    Escape,
 }
 
 impl Role {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Sleep,
         Self::Speak,
         Self::Parent,
         Self::ParentStay,
         Self::Holder,
+        Self::Escape,
     ];
 
     fn name(self) -> &'static str {
@@ -46,6 +51,7 @@ impl Role {
             Self::Parent => "parent",
             Self::ParentStay => "parent-stay",
             Self::Holder => "holder",
+            Self::Escape => "escape",
         }
     }
 }
@@ -147,6 +153,51 @@ pub(crate) fn start_holder() -> (std::process::Child, u32, u32) {
     (holder, child, grandchild)
 }
 
+/// Starts a sleeping helper that tries to leave this process's container, and says how.
+///
+/// Windows: with `CREATE_BREAKAWAY_FROM_JOB` first. A job without `JOB_OBJECT_LIMIT_BREAKAWAY_OK`
+/// refuses it (`ERROR_ACCESS_DENIED`), and so does any job above it, such as the one a daemon
+/// that runs these tests holds them in; then a plain detached process in a new process group.
+#[cfg(windows)]
+fn spawn_escaping() -> (std::process::Child, &'static str) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
+    };
+
+    let detached = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    let breakaway = std_command(Role::Sleep)
+        .creation_flags(detached | CREATE_BREAKAWAY_FROM_JOB)
+        .spawn();
+    if let Ok(child) = breakaway {
+        return (child, "breakaway");
+    }
+    let child = std_command(Role::Sleep)
+        .creation_flags(detached)
+        .spawn()
+        .expect("spawn detached");
+    (child, "detached")
+}
+
+/// Unix: `setsid` before `exec`, so the grandchild leads a new session and process group.
+#[cfg(unix)]
+fn spawn_escaping() -> (std::process::Child, &'static str) {
+    use std::os::unix::process::CommandExt;
+
+    let mut command = std_command(Role::Sleep);
+    // SAFETY: the closure runs in the forked child before `exec` and calls only `setsid`, which
+    // is async-signal-safe; it allocates nothing and takes no lock.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    (command.spawn().expect("spawn with setsid"), "setsid")
+}
+
 /// The helper's entry point: a no-op unless the role variable selects a role.
 #[test]
 fn run_role() {
@@ -183,6 +234,11 @@ fn run_role() {
             if role == Role::ParentStay {
                 std::thread::sleep(SLEEP);
             }
+        }
+        Role::Escape => {
+            let (grandchild, how) = spawn_escaping();
+            report(&mut out, "grandchild", grandchild.id());
+            report(&mut out, "escape", how);
         }
         Role::Holder => {
             let rt = tokio::runtime::Builder::new_current_thread()

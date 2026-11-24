@@ -23,11 +23,15 @@
 //! On Windows the container is a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. The child
 //! is created suspended, assigned to the job and only then resumed, so nothing it starts can
 //! run outside the job. Killing the job kills every process in it, and when the last handle to
-//! the job closes (the daemon exits, cleanly or not) Windows kills them too.
+//! the job closes (the daemon exits, cleanly or not) Windows kills them too. The job does not
+//! allow breakaway, so a descendant that asks for `CREATE_BREAKAWAY_FROM_JOB` is refused, and
+//! [`Tree::members`] lists the job's processes exactly.
 //!
 //! On Unix the container is a process group: the child leads a new group and its descendants
 //! inherit it, so `kill(-pgid, SIGKILL)` kills the tree. A descendant that calls `setsid` or
-//! `setpgid` leaves the group and escapes; cgroups (#8) close that gap. On Linux the child also
+//! `setpgid` leaves the group and escapes; cgroups (#8) close that gap. [`Tree::members`] lists
+//! the group from the process table, best effort: from `/proc` on Linux, and on macOS from a
+//! `proc_listallpids` snapshot, weaker still. On Linux the child also
 //! gets `PR_SET_PDEATHSIG(SIGKILL)`, so it dies with the daemon; its own descendants do not
 //! (the signal is not inherited), and they stay in the group for [`Tree::kill_tree`] only while
 //! the daemon lives. The signal fires when the *thread* that spawned the child exits, so the

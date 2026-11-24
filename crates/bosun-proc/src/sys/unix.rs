@@ -45,6 +45,93 @@ impl Container {
     pub(crate) fn kill(&self) {
         self.kill_all().ok();
     }
+
+    /// The pids of the live (not zombie) processes in the group. Best effort: the process
+    /// table is read one process at a time, so a process that starts or exits meanwhile may be
+    /// missed or listed; a process that left the group with `setsid` is not listed at all.
+    pub(crate) fn members(&self) -> io::Result<Vec<u32>> {
+        let pgid = u32::try_from(self.pgid).map_err(|_| io::Error::other("a negative pgid"))?;
+        group_members(pgid)
+    }
+}
+
+/// Linux: the processes of `/proc` whose group (field 5 of `stat`) is `pgid`.
+#[cfg(target_os = "linux")]
+fn group_members(group: u32) -> io::Result<Vec<u32>> {
+    let mut members = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let Ok(entry) = entry else { continue };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        // The process may exit between the listing and the read.
+        let Ok(text) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if let Some((state, found)) = parse_stat_group(&text)
+            && found == group
+            && !matches!(state, 'Z' | 'X' | 'x')
+        {
+            members.push(pid);
+        }
+    }
+    Ok(members)
+}
+
+/// The state (field 3) and the process group (field 5) of a `/proc/<pid>/stat` line, counted
+/// from the command name's last `)` as in [`parse_stat`].
+#[cfg(any(target_os = "linux", test))]
+fn parse_stat_group(line: &str) -> Option<(char, u32)> {
+    let rest = &line[line.rfind(')')? + 1..];
+    let mut fields = rest.split_ascii_whitespace();
+    let state = fields.next()?.chars().next()?;
+    // Field 4, the parent, lies between the state and the group.
+    let group = fields.nth(1)?.parse().ok()?;
+    Some((state, group))
+}
+
+/// macOS: every pid of `proc_listallpids` whose BSD info names `pgid` as its group. Weaker
+/// than Linux: the listing is a snapshot sized by a first call, and a process the user cannot
+/// inspect is skipped.
+#[cfg(target_os = "macos")]
+fn group_members(pgid: u32) -> io::Result<Vec<u32>> {
+    // SAFETY: a null buffer of size zero asks for the number of pids only.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let count = usize::try_from(count).map_err(|_| io::Error::last_os_error())?;
+    // Room for processes started since the first call.
+    let mut pids: Vec<libc::pid_t> = vec![0; count + 64];
+    let bytes = libc::c_int::try_from(pids.len() * std::mem::size_of::<libc::pid_t>())
+        .map_err(|_| io::Error::other("too many processes"))?;
+    // SAFETY: the buffer is `pids`, writable, and `bytes` is its length in bytes.
+    let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    let listed = usize::try_from(listed).map_err(|_| io::Error::last_os_error())?;
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+        .expect("proc_bsdinfo is small");
+    let mut members = Vec::new();
+    for &pid in &pids[..listed.min(pids.len())] {
+        if pid <= 0 {
+            continue;
+        }
+        // SAFETY: `proc_bsdinfo` is plain C data; all zeros is a valid value.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        // SAFETY: the buffer is `info`, writable, and `size` is its length.
+        let written = unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
+        };
+        if written == size && info.pbi_pgid == pgid && info.pbi_status != libc::SZOMB {
+            members.extend(u32::try_from(pid).ok());
+        }
+    }
+    Ok(members)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn group_members(_pgid: u32) -> io::Result<Vec<u32>> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 /// Spawns `command` as the leader of a new process group; on Linux it also dies with the
@@ -199,7 +286,14 @@ pub(crate) fn free_space(path: &std::path::Path) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_stat;
+    use super::{parse_stat, parse_stat_group};
+
+    #[test]
+    fn the_group_is_field_five_counted_from_the_last_parenthesis() {
+        let stat = "4242 (a (b) c) S 1 4200 4242 0\n";
+        assert_eq!(parse_stat_group(stat), Some(('S', 4200)));
+        assert_eq!(parse_stat_group("4242 (x) S 1"), None);
+    }
 
     #[test]
     fn stat_fields_are_counted_from_the_last_parenthesis() {

@@ -7,17 +7,19 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
-    WAIT_OBJECT_0,
+    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FILETIME, HANDLE,
+    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicProcessIdList,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject,
 };
 use windows_sys::Win32::System::Power::{
     PowerClearRequest, PowerCreateRequest, PowerRequestSystemRequired, PowerSetRequest,
@@ -61,11 +63,22 @@ impl Container {
         // security descriptor; the call has no other preconditions.
         let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
         let job = owned(raw).ok_or_else(io::Error::last_os_error)?;
+        // Breakaway is never allowed: without `JOB_OBJECT_LIMIT_BREAKAWAY_OK` a process that
+        // asks for `CREATE_BREAKAWAY_FROM_JOB` is refused, so nothing leaves the job.
+        let mut flags = 0;
         if !cfg!(mutant_proc_no_kill_on_close) {
+            flags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        }
+        if cfg!(mutant_proc_allow_breakaway) {
+            // Mutant (`mutant_proc_allow_breakaway`): a grandchild may break away and outlive
+            // the tree.
+            flags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        }
+        if flags != 0 {
             // SAFETY: the structure is plain C data (integers and nested integer structures);
             // all zeros is a valid value, meaning "no limits".
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            info.BasicLimitInformation.LimitFlags = flags;
             // SAFETY: `job` is a live job handle with all access; the pointer and length
             // describe `info`, which outlives the call, and match the information class.
             let ok = unsafe {
@@ -106,6 +119,65 @@ impl Container {
     /// [`Container::kill_all`], best effort. The handle's close kills the rest regardless.
     pub(crate) fn kill(&self) {
         self.kill_all().ok();
+    }
+
+    /// The pids of the processes in the job (`JobObjectBasicProcessIdList`). The list is read
+    /// into a buffer that grows until the whole of it fits.
+    pub(crate) fn members(&self) -> io::Result<Vec<u32>> {
+        let header = mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+        let word = mem::size_of::<usize>();
+        let mut capacity = 16;
+        loop {
+            // A `usize` buffer, so the list and its id array are aligned.
+            let mut buffer = vec![0_usize; header / word + capacity];
+            let bytes = u32::try_from(buffer.len() * word)
+                .map_err(|_| io::Error::other("too many processes in the job"))?;
+            // SAFETY: the job handle is live and was created with all access; the pointer and
+            // length describe `buffer`, writable, aligned for the structure and at least as
+            // large as its header; the return length may be null.
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.job.as_raw_handle(),
+                    JobObjectBasicProcessIdList,
+                    buffer.as_mut_ptr().cast(),
+                    bytes,
+                    ptr::null_mut(),
+                )
+            };
+            let mut more = false;
+            if ok == 0 {
+                let e = io::Error::last_os_error();
+                #[expect(clippy::cast_possible_wrap, reason = "Win32 error codes fit an i32")]
+                if e.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+                    return Err(e);
+                }
+                more = true;
+            }
+            let list: *const JOBOBJECT_BASIC_PROCESS_ID_LIST = buffer.as_ptr().cast();
+            // SAFETY: `list` points to the start of `buffer`, aligned and large enough for the
+            // header, which the call filled in.
+            let (assigned, listed) = unsafe {
+                (
+                    (*list).NumberOfAssignedProcesses,
+                    (*list).NumberOfProcessIdsInList,
+                )
+            };
+            let (assigned, listed) = (assigned as usize, listed as usize);
+            if more || listed < assigned {
+                // Processes joined between the calls, or the buffer was short: grow and retry.
+                capacity = assigned.max(capacity) * 2;
+                continue;
+            }
+            // The id array is an array of `usize`, so its offset is a whole number of words.
+            let ids = buffer
+                .get(header / word..)
+                .and_then(|ids| ids.get(..listed))
+                .ok_or_else(|| io::Error::other("the job listed more ids than fit"))?;
+            return Ok(ids
+                .iter()
+                .filter_map(|&id| u32::try_from(id).ok())
+                .collect());
+        }
     }
 }
 

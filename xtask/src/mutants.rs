@@ -1276,6 +1276,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_loop_ignores_quota",
+        issue: 106,
+        breaks: "a Projects v2 board with less than 10% of its quota left is read at the usual pace",
+        package: "bosund",
+        check: Check::Test("executor::board::tests::a_low_quota_waits_for_the_reset"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_recover_skip_reap",
         issue: 68,
         breaks: "recovery does not kill the children a previous daemon left running",

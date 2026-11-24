@@ -115,18 +115,7 @@ impl fmt::Display for ReplyError {
     }
 }
 
-/// The GraphQL rate limit as of one response: the quota metric of #5.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RateLimit {
-    /// Points per hour.
-    pub limit: u64,
-    /// Points left in this window.
-    pub remaining: u64,
-    /// Points used in this window.
-    pub used: u64,
-    /// When the window resets, in Unix seconds.
-    pub reset: u64,
-}
+pub use crate::queue::RateLimit;
 
 impl RateLimit {
     /// The rate limit in `headers` (name, value pairs, names in any case), if all four numbers

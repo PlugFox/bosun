@@ -216,6 +216,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_queue_markers_through_allowlist)",
   "cfg(mutant_loop_no_midrun_poll)",
   "cfg(mutant_loop_no_idle_backoff)",
+  "cfg(mutant_loop_ignores_quota)",
   # #68: crash recovery.
   "cfg(mutant_recover_skip_reap)",
   "cfg(mutant_recover_counts_crash)",

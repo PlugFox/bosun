@@ -34,6 +34,11 @@
 //! [`Pace`] says when the board is read next. A local file is read every tick. A Projects v2
 //! board follows [`Pacer`]: every 30 s while an item is in flight or the last poll found a
 //! change, backing off to five minutes while the board stays idle.
+//!
+//! The quota counts too ([`Queue::rate_limit`]): while less than [`RESERVE_PERCENT`] of it is
+//! left, the next read waits for the quota's reset (on the pace's clock, never more than an
+//! hour, the length of GitHub's window, so a wrong clock cannot stop the reads), keeping the
+//! rest for the loop's writes. At or above the reserve the pace is the idleness one.
 
 use std::fmt;
 use std::path::Path;
@@ -43,8 +48,10 @@ use std::time::Duration;
 use bosun_config::{Config, Identity, Queue as QueueConfig, Repo};
 use bosun_git::Git;
 use bosun_identity::{Env, inherited};
-use bosun_queue::projects_v2::{Binding, GhCli, Pacer, ProjectRef};
-use bosun_queue::{Card, Changes, Cursor, ItemId, LocalFile, Owned, ProjectsV2, Queue, QueueError};
+use bosun_queue::projects_v2::{Binding, GhCli, Pacer, ProjectRef, RESERVE_PERCENT};
+use bosun_queue::{
+    Card, Changes, Cursor, ItemId, LocalFile, Owned, ProjectsV2, Queue, QueueError, RateLimit,
+};
 
 use super::identity;
 
@@ -77,12 +84,34 @@ impl Pace {
     }
 
     /// The board was read at `now`; `active`: an item is in flight, `changed`: the read found
-    /// a change.
-    pub(crate) fn polled(&mut self, now: Duration, active: bool, changed: bool) {
-        if let Some(pacer) = &mut self.pacer {
-            self.due = Some(now + pacer.next(active, changed, None, 0));
+    /// a change; `rate`: the board's quota as last seen, `wall`: the Unix seconds at `now`.
+    pub(crate) fn polled(
+        &mut self,
+        now: Duration,
+        active: bool,
+        changed: bool,
+        rate: Option<&RateLimit>,
+        wall: u64,
+    ) {
+        let Some(pacer) = &mut self.pacer else {
+            return;
+        };
+        let mut wait = pacer.next(active, changed, None, 0);
+        // Mutant (`mutant_loop_ignores_quota`): a nearly spent quota is read at the usual pace.
+        if let Some(rate) = rate.filter(|r| low(r) && !cfg!(mutant_loop_ignores_quota)) {
+            let until_reset = Duration::from_secs(rate.reset.saturating_sub(wall));
+            wait = wait.max(until_reset.min(WINDOW));
         }
+        self.due = Some(now + wait);
     }
+}
+
+/// The longest wait for a quota's reset: GitHub's quota window.
+const WINDOW: Duration = Duration::from_hours(1);
+
+/// Whether less than [`RESERVE_PERCENT`] of the quota is left.
+fn low(rate: &RateLimit) -> bool {
+    rate.remaining.saturating_mul(100) < rate.limit.saturating_mul(RESERVE_PERCENT)
 }
 
 /// A queue backend, shared by the loop and its tasks.
@@ -277,6 +306,11 @@ impl Queue for Lazy {
     fn lint_target(&self, item: ItemId) -> Result<Card, QueueError> {
         self.queue()?.lint_target(item)
     }
+
+    /// The connected backend's quota; none before a connection (asking does not connect).
+    fn rate_limit(&self) -> Option<RateLimit> {
+        self.lock().as_ref()?.rate_limit()
+    }
 }
 
 /// `owner/name` of a GitHub remote URL (`https://host/owner/name.git`, `git@host:owner/name`).
@@ -362,7 +396,7 @@ mod tests {
         while now <= span {
             if pace.due(now) {
                 at.push(now.as_secs());
-                pace.polled(now, active, false);
+                pace.polled(now, active, false, None, 0);
             }
             now += tick;
         }
@@ -397,8 +431,82 @@ mod tests {
         reads(&mut pace, ACTIVE, hour, false);
         let resumed = hour + IDLE_MAX;
         assert!(pace.due(resumed));
-        pace.polled(resumed, true, false);
+        pace.polled(resumed, true, false, None, 0);
         assert!(pace.due(resumed + ACTIVE));
+    }
+
+    /// #106: under 10% of the quota left, the next read waits for the reset; at 50% the pace
+    /// is the normal one. The quota is the board's, read through the loop's [`Lazy`] wrapper.
+    #[test]
+    fn a_low_quota_waits_for_the_reset() {
+        use std::sync::Arc;
+
+        use bosun_queue::projects_v2::fake::FakeGitHub;
+        use bosun_queue::projects_v2::{Binding, ProjectRef};
+        use bosun_queue::{Column, ProjectsV2, Queue, RateLimit};
+
+        use super::{Lazy, Shared};
+
+        let github = Arc::new(FakeGitHub::new());
+        github.add_project("synthetic-owner", 1, &Column::ALL.map(Column::name));
+        let board = {
+            let github = github.clone();
+            Lazy::new(Box::new(move || {
+                let binding = Binding::new(
+                    "synthetic-owner/demo",
+                    [ProjectRef::new("synthetic-owner", 1)],
+                    ["synthetic-owner"],
+                );
+                Ok(Arc::new(ProjectsV2::connect(github.clone(), binding)?) as Shared)
+            }))
+        };
+        assert_eq!(board.rate_limit(), None, "not connected yet");
+        let quota = |remaining: u64, reset: u64| RateLimit {
+            limit: 5000,
+            remaining,
+            used: 5000 - remaining,
+            reset,
+        };
+        let wall = 1_800_000_000;
+        let reset_in = Duration::from_mins(20);
+        let reset = wall + reset_in.as_secs();
+        let start = Duration::from_secs(100);
+
+        // 5% left, the reset 20 minutes away: no read before it, one right after.
+        github.set_rate_limit(quota(250, reset));
+        board.poll(None).unwrap();
+        let rate = board.rate_limit();
+        assert_eq!(rate, Some(quota(250, reset)), "forwarded by the wrapper");
+        let mut pace = Pace::new(true, ACTIVE);
+        assert!(pace.due(start));
+        pace.polled(start, true, false, rate.as_ref(), wall);
+        let mut now = start + ACTIVE;
+        while now + ACTIVE / 2 < start + reset_in {
+            assert!(
+                !pace.due(now),
+                "read at {now:?}, the reset at {:?}",
+                start + reset_in
+            );
+            now += ACTIVE;
+        }
+        assert!(pace.due(start + reset_in), "read right after the reset");
+
+        // 50% left: the normal pace, active and idle.
+        github.set_rate_limit(quota(2500, reset));
+        board.poll(None).unwrap();
+        let rate = board.rate_limit();
+        assert_eq!(rate, Some(quota(2500, reset)));
+        for active in [true, false] {
+            let mut normal = Pace::new(true, ACTIVE);
+            let mut pace = Pace::new(true, ACTIVE);
+            normal.polled(start, active, false, None, 0);
+            pace.polled(start, active, false, rate.as_ref(), wall);
+            assert!(pace.due(start + ACTIVE * if active { 1 } else { 2 }));
+            for tick in 1..=40 {
+                let at = start + ACTIVE * tick;
+                assert_eq!(pace.due(at), normal.due(at), "{active} {tick}");
+            }
+        }
     }
 
     #[test]

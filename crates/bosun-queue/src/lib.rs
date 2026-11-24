@@ -49,7 +49,7 @@ pub use lint::{
 pub use local::LocalFile;
 #[cfg(feature = "projects_v2")]
 pub use projects_v2::ProjectsV2;
-pub use queue::{Changes, Cursor, Gone, Queue, QueueError, RateLimited};
+pub use queue::{Changes, Cursor, Gone, Queue, QueueError, RateLimit, RateLimited};
 pub use snapshot::Snapshot;
 
 /// Lowercase hex of `bytes`.

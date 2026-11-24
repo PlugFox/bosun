@@ -75,6 +75,25 @@ pub trait Queue {
     ///
     /// [`QueueError::NotFound`] when the item has no card; otherwise the board cannot be read.
     fn lint_target(&self, item: ItemId) -> Result<Card, QueueError>;
+
+    /// The remote board's quota as last seen, for the poll pace (#60, #106): `None` for a
+    /// backend with no quota (the local file) or before any response reported one.
+    fn rate_limit(&self) -> Option<RateLimit> {
+        None
+    }
+}
+
+/// A remote board's hourly quota as of one response: the quota metric of #5.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimit {
+    /// Points per hour.
+    pub limit: u64,
+    /// Points left in this window.
+    pub remaining: u64,
+    /// Points used in this window.
+    pub used: u64,
+    /// When the window resets, in Unix seconds.
+    pub reset: u64,
 }
 
 /// Where a previous [`Queue::poll`] left off. Opaque to the caller, who stores it as text

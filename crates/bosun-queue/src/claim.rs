@@ -139,6 +139,9 @@ mod tests {
             fn upsert_comment(&self, _: ItemId, _: &str, _: &str) -> Result<(), QueueError> {
                 unreachable!()
             }
+            fn remove_label(&self, _: ItemId, _: &str) -> Result<(), QueueError> {
+                unreachable!()
+            }
             fn lint_target(&self, _: ItemId) -> Result<Card, QueueError> {
                 unreachable!()
             }

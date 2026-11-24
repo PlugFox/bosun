@@ -10,8 +10,9 @@
 //! GitHub, and a reorder or a Status change does not. Every request is logged by operation name
 //! ([`FakeGitHub::requests`]).
 //!
-//! The mutations the backend sends (`UpdateStatus`, `AddComment`, `UpdateComment`) are carried
-//! out as the viewer ([`FakeGitHub::set_viewer`]), the login the token belongs to. Faults are
+//! The mutations the backend sends (`UpdateStatus`, `AddComment`, `UpdateComment`,
+//! `RemoveLabels`) are carried out as the viewer ([`FakeGitHub::set_viewer`]), the login the
+//! token belongs to. Faults are
 //! injected per operation: [`FakeGitHub::fail_next`] (a lost response, a secondary rate limit,
 //! a lost scope) and [`FakeGitHub::after_next`] (the user acting right after a request, before
 //! the backend's next one).
@@ -552,6 +553,7 @@ impl GraphQl for FakeGitHub {
             "UpdateStatus" => update_status(&mut state, variables),
             "AddComment" => add_comment(&mut state, variables),
             "UpdateComment" => update_comment(&mut state, variables),
+            "RemoveLabels" => remove_labels(&mut state, variables),
             other => {
                 return Err(TransportError::Malformed(format!(
                     "the fake does not know the operation `{other}`"
@@ -731,7 +733,7 @@ fn issue_json(state: &State, key: &(String, u64), stored: &Stored, variables: &V
         "body": issue.body,
         "author": issue.author.as_ref().map(|l| json!({ "login": l })),
         "editor": issue.editor.as_ref().map(|l| json!({ "login": l })),
-        "labels": { "nodes": issue.labels.iter().map(|n| json!({ "name": n }))
+        "labels": { "nodes": issue.labels.iter().map(|n| json!({ "id": label_id(n), "name": n }))
             .collect::<Vec<_>>() },
         "blockedBy": { "nodes": blocked_by },
         "comments": comments_page,
@@ -921,4 +923,34 @@ fn update_comment(state: &mut State, variables: &Value) -> Value {
         "data": { "updateIssueComment": null },
         "errors": not_found("Could not resolve to a node."),
     })
+}
+
+/// The node id the fake gives the label `name`.
+fn label_id(name: &str) -> String {
+    format!("LA_{name}")
+}
+
+fn remove_labels(state: &mut State, variables: &Value) -> Value {
+    let subject = var(variables, "labelable").as_str().unwrap_or_default();
+    let ids: Vec<&str> = var(variables, "labels")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let Some(key) = state.issue_by_node(subject).map(|(key, _)| key.clone()) else {
+        return json!({
+            "data": { "removeLabelsFromLabelable": null },
+            "errors": not_found("Could not resolve to a node."),
+        });
+    };
+    let updated_at = state.tick();
+    if let Some(stored) = state.issues.get_mut(&key) {
+        stored
+            .issue
+            .labels
+            .retain(|name| !ids.contains(&label_id(name).as_str()));
+        stored.updated_at = updated_at;
+    }
+    json!({ "data": { "removeLabelsFromLabelable": { "clientMutationId": null } } })
 }

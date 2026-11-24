@@ -78,6 +78,10 @@ impl Queue for Lazy {
         self.queue()?.upsert_comment(item, key, body)
     }
 
+    fn remove_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
+        self.queue()?.remove_label(item, label)
+    }
+
     fn lint_target(&self, item: ItemId) -> Result<Card, QueueError> {
         self.queue()?.lint_target(item)
     }

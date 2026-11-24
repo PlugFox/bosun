@@ -179,6 +179,8 @@ struct Issue {
     author: Option<String>,
     editor: Option<String>,
     labels: Vec<String>,
+    /// The node id of each label, by name: what a label removal names.
+    label_ids: Vec<(String, String)>,
     comments: Vec<RawComment>,
     blocked_by: Vec<(String, u64)>,
 }
@@ -311,7 +313,7 @@ const ISSUE_FIELDS: &str = "fragment Fields on Issue {
   body
   author { login }
   editor { login }
-  labels(first: 100) { nodes { name } }
+  labels(first: 100) { nodes { id name } }
   blockedBy(first: 100) { nodes { number repository { nameWithOwner } } }
   comments(first: $first) {
     pageInfo { hasNextPage endCursor }
@@ -373,6 +375,12 @@ value: {singleSelectOptionId: $option}}) {
 const ADD_COMMENT: &str = "mutation AddComment($subject: ID!, $body: String!) {
   addComment(input: {subjectId: $subject, body: $body}) {
     commentEdge { node { id } }
+  }
+}";
+
+const REMOVE_LABELS: &str = "mutation RemoveLabels($labelable: ID!, $labels: [ID!]!) {
+  removeLabelsFromLabelable(input: {labelableId: $labelable, labelIds: $labels}) {
+    clientMutationId
   }
 }";
 
@@ -763,6 +771,14 @@ impl<T: GraphQl> ProjectsV2<T> {
                 .flatten()
                 .filter_map(|l| l["name"].as_str().map(str::to_owned))
                 .collect(),
+            label_ids: node["labels"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| {
+                    Some((l["name"].as_str()?.to_owned(), l["id"].as_str()?.to_owned()))
+                })
+                .collect(),
             comments,
             blocked_by: node["blockedBy"]["nodes"]
                 .as_array()
@@ -1076,6 +1092,26 @@ impl<T: GraphQl> Queue for ProjectsV2<T> {
             // Deleted between the read and the edit: the deletion rules apply.
         }
         self.create_missing(item, &located.id, key, &wanted, true)
+    }
+
+    fn remove_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
+        let (located, _) = self.located_card(item)?;
+        let Some((_, id)) = located
+            .issue
+            .label_ids
+            .iter()
+            .find(|(name, _)| name == label)
+        else {
+            return Ok(());
+        };
+        let data = self.mutate(
+            REMOVE_LABELS,
+            &json!({ "labelable": located.id, "labels": [id] }),
+        )?;
+        if data["removeLabelsFromLabelable"].is_null() {
+            return Err(QueueError::NotFound(item));
+        }
+        Ok(())
     }
 
     fn lint_target(&self, item: ItemId) -> Result<Card, QueueError> {

@@ -1181,6 +1181,36 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("view_tests::a_queue_holds_only_the_identitys_repositories"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_outbox_no_key",
+        issue: 65,
+        breaks: "board comments are sent without their idempotence key: a replay duplicates them",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::sticky::a_ten_minute_outage_mid_item_ends_the_item_and_the_board_converges_once",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_outbox_stored_body",
+        issue: 65,
+        breaks: "the report body first rendered for an outbox row is replayed as stored",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::sticky::an_out_of_order_replay_leaves_the_newest_report",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_outbox_stop_on_outage",
+        issue: 65,
+        breaks: "landing waits for the board: an outage stops the item",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::sticky::a_ten_minute_outage_mid_item_ends_the_item_and_the_board_converges_once",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

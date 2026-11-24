@@ -59,6 +59,7 @@ pub(crate) fn static_lint(card: &Card, repo: &Repo, on_board: &BTreeSet<u64>) ->
 
 /// Runs the claim of `card` for `item`; `key` is the claim effect's key, which keys the
 /// snapshot.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn claim(
     shared: &Arc<Shared>,
     config: &Config,
@@ -90,6 +91,23 @@ pub(crate) async fn claim(
         Ok(Claim::Released(_)) => return ClaimOutcome::Lost,
         Err(e) => return ClaimOutcome::Board(e),
     };
+    // A restart consumes its label (#5). A removal that fails leaves the label; the loop acts
+    // on a label once, so it cannot restart again for it.
+    if card
+        .labels
+        .iter()
+        .any(|l| l == super::commands::RESTART_LABEL)
+    {
+        let queue = shared.deps.queue.clone();
+        let id = card.id;
+        let removed =
+            blocking(move || queue.remove_label(id, super::commands::RESTART_LABEL)).await;
+        if let Err(e) = removed {
+            shared.trouble(format!(
+                "the `restart` label of {item} cannot be removed: {e}"
+            ));
+        }
+    }
 
     // Only text by logins on the author allowlist is inlined, never the daemon's (#2).
     let allowed: BTreeSet<String> = identity

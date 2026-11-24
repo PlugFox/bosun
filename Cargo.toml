@@ -200,6 +200,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #70: the stage-1 read methods and CLI commands.
   "cfg(mutant_cli_action_without_command)",
   "cfg(mutant_api_queue_other_identity)",
+  # #65: the outbox drainer.
+  "cfg(mutant_outbox_no_key)",
+  "cfg(mutant_outbox_stored_body)",
+  "cfg(mutant_outbox_stop_on_outage)",
 ] }
 
 [workspace.lints.clippy]

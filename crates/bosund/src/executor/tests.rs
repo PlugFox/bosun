@@ -29,6 +29,8 @@ use super::*;
 use crate::config_watch;
 use crate::events::{Events, Options as EventOptions};
 
+mod sticky;
+
 /// How long a session that asked a blocking question may go on in these scenarios.
 const GRACE: Duration = Duration::from_secs(2);
 
@@ -380,11 +382,20 @@ impl Scene {
         std::fs::write(self.scripts.join(format!("demo_{card}.script")), text).unwrap();
     }
 
-    /// The board holds `cards`, in this order: the local file rewritten, or the fake's issues
+    /// The board holds `cards`, in this order: the local file rewritten (atomically, as an
+    /// editor that saves atomically does: the loop polls it meanwhile), or the fake's issues
     /// edited (only what changed moves their `updatedAt`) and its project's items set.
     fn write_board(&self, cards: &[Card]) {
         let Some(fake) = &self.projects else {
-            std::fs::write(&self.board, LocalFile::render(cards)).unwrap();
+            let temp = self.board.with_extension("toml.saving");
+            std::fs::write(&temp, LocalFile::render(cards)).unwrap();
+            // On Windows a rename over a file being read is refused for a moment.
+            let mut tries = 0;
+            while let Err(e) = std::fs::rename(&temp, &self.board) {
+                tries += 1;
+                assert!(tries < 100, "the board cannot be replaced: {e}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
             return;
         };
         for card in cards {
@@ -445,6 +456,15 @@ impl Scene {
 
     /// Starts the loop and the configuration watcher.
     fn start(&self, failpoint: Option<Failpoint>) -> (JoinHandle<()>, JoinHandle<()>) {
+        self.start_with(failpoint, self.queue())
+    }
+
+    /// Starts the loop on `queue` and the configuration watcher.
+    fn start_with(
+        &self,
+        failpoint: Option<Failpoint>,
+        queue: Arc<dyn Queue + Send + Sync>,
+    ) -> (JoinHandle<()>, JoinHandle<()>) {
         let (tx, rx) = watch::channel(Arc::new(self.config()));
         let probe: Arc<dyn DiskProbe + Send + Sync> = Arc::new(SystemProbe::new());
         let watcher = config_watch::spawn(
@@ -471,7 +491,7 @@ impl Scene {
             reader: self.store.reader().clone(),
             writer: self.store.writer().clone(),
             events: self.events.clone(),
-            queue: self.queue(),
+            queue,
             spawner: self.spawner.clone(),
             power: Arc::new(bosun_proc::FakePower::default()),
             logins: Arc::new(FixedLogins(self.path("login"))),

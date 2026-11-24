@@ -17,7 +17,7 @@ use bosun_store::{VerdictEnd, VerdictStart, Write};
 use tokio::sync::{oneshot, watch};
 
 use super::workspace::Unopened;
-use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms};
+use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms, workspace};
 use crate::events;
 
 /// Resolves when `kill` is raised; never when its sender is gone without raising it.
@@ -103,7 +103,7 @@ pub(crate) async fn verdict(
     config: &Config,
     claimed: &Claimed,
     run: &Run,
-    kill: watch::Receiver<bool>,
+    mut kill: watch::Receiver<bool>,
 ) -> (Event, Vec<String>) {
     let Some(wt) = &claimed.worktree else {
         return run_in(shared, config, claimed, run, kill, &claimed.workdir).await;
@@ -118,9 +118,17 @@ pub(crate) async fn verdict(
             Vec::new(),
         )
     };
-    let Some((_, identity)) = lookup(config, &shared.options.repo) else {
+    let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
         return fail();
     };
+    // The item's leases are held through its verdicts (#8): already, unless it was recovered
+    // straight to its verdict.
+    if let Err(e) = super::hold_leases(shared, repo, claimed, &run.item, &mut kill).await {
+        if let Some(e) = e {
+            shared.trouble(format!("the verdict of {}: its leases: {e}", run.item));
+        }
+        return fail();
+    }
     let dir = claimed.workdir.clone();
     let head = match blocking(move || git::head(&Git::new(dir))).await {
         Ok(head) => head,
@@ -171,6 +179,7 @@ pub(crate) async fn verdict(
 }
 
 /// [`verdict`]'s run itself, in `cwd`.
+#[allow(clippy::too_many_lines)]
 async fn run_in(
     shared: &Arc<Shared>,
     config: &Config,
@@ -202,10 +211,19 @@ async fn run_in(
             return (fail(RunResult::Fail), Vec::new());
         }
     };
+    let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+        env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect();
+    // The shared build directory (E1), and the checkout's files made newer than its last build.
+    // Mutant (`mutant_loop_no_build_env`): the directory is not injected into the run.
+    let inject = !cfg!(mutant_loop_no_build_env);
+    if let Err(e) = workspace::shared_build(repo, cwd, &mut vars, inject).await {
+        shared.trouble(format!("the verdict of {}: {e}", run.item));
+        return (fail(RunResult::Fail), Vec::new());
+    }
     let spec = VerdictSpec {
         shell,
         command: command.clone(),
-        env: env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect(),
+        env: vars,
         // The checkout in stage 1; a checkout of the commit in worktree mode (#8).
         cwd: cwd.to_owned(),
         timeout: claimed

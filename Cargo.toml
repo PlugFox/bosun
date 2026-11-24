@@ -295,6 +295,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_verdict_in_item_worktree)",
   "cfg(mutant_loop_verdict_checkout_without_setup)",
   "cfg(mutant_loop_keep_verdict_checkout)",
+  "cfg(mutant_loop_skip_leases)",
+  "cfg(mutant_loop_keep_stale_leases)",
+  "cfg(mutant_loop_skip_mtime_touch)",
+  "cfg(mutant_loop_no_build_env)",
 ] }
 
 [workspace.lints.clippy]

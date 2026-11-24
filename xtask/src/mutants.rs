@@ -1838,6 +1838,44 @@ const MUTANTS: &[Mutant] = &[
             "executor::tests::worktrees::the_verdict_checkout_is_removed_after_each_run",
         ),
         platform: None,
+    }, // #155: the lease manager in the loop; the shared build directory and the mtime rule.
+    Mutant {
+        name: "mutant_loop_skip_leases",
+        issue: 155,
+        breaks: "a session starts without waiting for its lease",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::leases::two_items_that_need_the_same_resource_never_overlap_and_the_wait_is_recorded",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_keep_stale_leases",
+        issue: 155,
+        breaks: "a journalled lease whose daemon and shim are gone is kept at start",
+        package: "bosund",
+        check: Check::Test("leases::tests::a_lease_whose_owners_are_gone_is_released_at_start"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_skip_mtime_touch",
+        issue: 155,
+        breaks: "a worktree's tracked files are not made newer than the shared build",
+        package: "bosund",
+        check: Check::Test(
+            "executor::workspace::tests::a_worktree_entered_after_another_build_has_its_tracked_files_touched",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_no_build_env",
+        issue: 155,
+        breaks: "the shared build directory is not injected into verdict runs",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::leases::a_verdict_under_the_shared_build_gets_its_directory_and_fresh_file_times",
+        ),
+        platform: None,
     },
 ];
 

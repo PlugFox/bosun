@@ -21,6 +21,13 @@
 //!   one that cannot be removed is quarantined, recorded with the file that blocked, and
 //!   reported once: never left behind silently, and its path is never used again.
 //!
+//! - With `worktree.shared_build` (E1), every process the daemon starts in one of the
+//!   repository's worktrees (setup and teardown, sessions, verdict runs) gets the shared build
+//!   directory as its variable ([`build_env`]), and the worktree's tracked files are made newer
+//!   than any build first ([`enter`]): the build tools judge freshness by modification time
+//!   only, so a worktree older than the last build, made from another worktree's sources,
+//!   would otherwise be taken as built (the E1 measurement).
+//!
 //! The git work is blocking and synchronous; the functions that also write to the store or run
 //! a command are async and move their git work to the blocking pool ([`super::blocking`]).
 
@@ -621,10 +628,20 @@ impl Workspace {
                 String::new(),
             )
         })?;
+        let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+            env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect();
+        // The shared build directory (E1), and the files made newer than its last build.
+        if let Some(build) = self.config.shared_build.as_ref() {
+            vars.push((build.env.clone().into(), build.dir.clone().into_os_string()));
+            let owned = dir.to_owned();
+            blocking(move || enter(&owned))
+                .await
+                .map_err(|e| failed(format!("cannot run: {e}"), String::new()))?;
+        }
         let spec = VerdictSpec {
             shell,
             command: command.to_owned(),
-            env: env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect(),
+            env: vars,
             cwd: dir.to_owned(),
             timeout: self.timeout,
             limits: Limits::default(),
@@ -647,6 +664,81 @@ impl Workspace {
             )),
         }
     }
+}
+
+/// The shared build directory of `repo` (E1) as the variable a process gets: `(env, dir)`;
+/// `None` without `worktree.shared_build`.
+pub(crate) fn build_env(repo: &Repo) -> Option<(std::ffi::OsString, std::ffi::OsString)> {
+    let build = repo.worktree.as_ref()?.shared_build.as_ref()?;
+    Some((build.env.clone().into(), build.dir.clone().into_os_string()))
+}
+
+/// Under `repo`'s shared build (E1), before a process starts in the worktree at `dir`: adds
+/// the directory's variable to `vars` when `inject`, and touches the worktree's tracked files
+/// ([`enter`]). Nothing without `worktree.shared_build`.
+///
+/// # Errors
+///
+/// The files cannot be touched.
+pub(crate) async fn shared_build(
+    repo: &Repo,
+    dir: &Path,
+    vars: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    inject: bool,
+) -> Result<(), String> {
+    let Some(build) = build_env(repo) else {
+        return Ok(());
+    };
+    if inject {
+        vars.push(build);
+    }
+    let dir = dir.to_owned();
+    blocking(move || enter(&dir)).await
+}
+
+/// Sets the modification time of every tracked file of the worktree at `dir` to now (the E1
+/// rule): what a build tool judging freshness by modification time sees as newer than the last
+/// build of the shared directory, which may have come from another worktree. A tracked path
+/// that is missing or not a regular file is skipped; untracked and ignored files are not
+/// touched. Costs one rebuild of the workspace's own crates.
+///
+/// # Errors
+///
+/// `git ls-files` fails, or a tracked file's time cannot be set.
+pub(crate) fn enter(dir: &Path) -> Result<(), String> {
+    if cfg!(mutant_loop_skip_mtime_touch) {
+        // Mutant (`mutant_loop_skip_mtime_touch`): nothing is touched.
+        return Ok(());
+    }
+    let listed = Git::new(dir)
+        .run(&["ls-files", "-z"], None)
+        .map_err(|e| format!("the tracked files of {}: {e}", dir.display()))?;
+    let now = std::time::SystemTime::now();
+    for name in listed.split(' ').filter(|n| !n.is_empty()) {
+        let path = dir.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {}
+            _ => continue,
+        }
+        touch(&path, now).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Sets `path`'s modification time to `at`, opening it only to write its attributes.
+fn touch(path: &Path, at: std::time::SystemTime) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        /// `FILE_WRITE_ATTRIBUTES`: enough to set the times, also of a read-only file.
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .open(path)?
+    };
+    #[cfg(not(windows))]
+    let file = std::fs::File::open(path)?;
+    file.set_modified(at)
 }
 
 /// The bytes of the files under `path`, links not followed; what cannot be read counts as
@@ -764,6 +856,7 @@ mod tests {
                 clock: Arc::new(SystemClock::new()),
                 alive: Arc::new(|_| true),
                 control: crate::control::Control::with_token("bosun-test-workspace", None),
+                leases: Arc::new(crate::leases::Leases::new(&config, &d.join("state")).unwrap()),
             };
             Self {
                 repo,
@@ -1065,6 +1158,64 @@ mod tests {
             ws.close(&w.shared, w.identity(), &again, None).await,
             Closed::Removed
         );
+    }
+
+    #[test]
+    fn a_worktree_entered_after_another_build_has_its_tracked_files_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let gitconfig = dir.path().join("gitconfig");
+        std::fs::write(
+            &gitconfig,
+            "[user]\n\tname = Synthetic Agent\n\temail = agent@example.com\n",
+        )
+        .unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        git(&gitconfig, &repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        for name in ["one.txt", "src/two.txt", "three.txt"] {
+            std::fs::write(repo.join(name), "tracked\n").unwrap();
+        }
+        git(&gitconfig, &repo, &["add", "-A"]);
+        git(&gitconfig, &repo, &["commit", "-q", "-m", "Start"]);
+        std::fs::write(repo.join("untracked.txt"), "untracked\n").unwrap();
+        std::fs::write(repo.join("ignored.txt"), "ignored\n").unwrap();
+        std::fs::remove_file(repo.join("three.txt")).unwrap();
+
+        // Another worktree's build is newer than every file here.
+        let old = std::time::SystemTime::now() - Duration::from_hours(1);
+        let (tracked, untouched) = (
+            ["one.txt", "src/two.txt"].map(|n| repo.join(n)),
+            ["untracked.txt", "ignored.txt"].map(|n| repo.join(n)),
+        );
+        for path in tracked.iter().chain(&untouched) {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+
+        let started = std::time::SystemTime::now();
+        enter(&repo).unwrap();
+        for path in &tracked {
+            assert!(
+                modified(path) >= started,
+                "{} was not touched",
+                path.display()
+            );
+        }
+        for path in &untouched {
+            let at = modified(path);
+            assert!(
+                at < started - Duration::from_mins(30),
+                "{} was touched: {at:?}",
+                path.display()
+            );
+        }
+        assert!(!repo.join("three.txt").exists());
     }
 
     #[tokio::test]

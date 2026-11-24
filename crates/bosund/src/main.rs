@@ -30,6 +30,7 @@
 //! `bosund: another instance is already running at <endpoint> (pid <pid>)`, the pid omitted
 //! when the other instance did not answer `hello` in time.
 
+mod agent;
 mod api;
 mod commits;
 mod config_watch;

@@ -26,6 +26,9 @@ clap = { version = "4.6.9", default-features = false, features = [
 # The OS file id (inode, Windows file index) that keys a transcript file, so a rename is not a
 # new file (#3, #21). Maintained with `notify`, which watching (#22) uses.
 file-id = "0.2.3"
+# The random agent credentials of bosund (#63): the OS's random source. Already in the graph
+# through `tempfile`, so it adds nothing new to build.
+getrandom = { version = "0.4.3", default-features = false }
 # The Unix system calls of `bosun-proc` (#50): process groups, the parent-death signal, the
 # start time of a process.
 libc = "0.2.191"
@@ -175,6 +178,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_live_verdict)",
   "cfg(mutant_loop_effect_before_transition)",
   "cfg(mutant_loop_ignore_hash_change)",
+  # #63: the agent.* methods, the per-session credential, rate caps.
+  "cfg(mutant_agent_any_item)",
+  "cfg(mutant_agent_no_rate_cap)",
+  "cfg(mutant_agent_first_summary_wins)",
 ] }
 
 [workspace.lints.clippy]

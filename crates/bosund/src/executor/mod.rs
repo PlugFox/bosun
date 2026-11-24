@@ -12,7 +12,7 @@
 //! | --- | --- |
 //! | `Claim` | the claim task ([`claim`]): claim write and re-read (#5), snapshot, static lint, base capture, the verdict on the base commit (D7), the configuration and policy hashes |
 //! | `Spawn` | the session task ([`session`]): fail-closed identity checks, the prompt, the agent environment, the run row, the spawn with the power request held, the stream, the exit, the session's commit range |
-//! | `Kill` | the running task's kill signal |
+//! | `Kill` | the running task's kill signal; for a blocking question, after [`Options::question_grace`] |
 //! | `CheckPreconditions` | the verdict preconditions of `bosun-git` (and the guards of #59, see [`guards`]) |
 //! | `RunVerdict` | the verdict task ([`verdict`]): always the snapshot's command |
 //! | `Land` | `local` landing: nothing to push |
@@ -38,7 +38,10 @@
 //!
 //! # Not here
 //!
-//! The MCP calls of the agent (#63, #64), the outbox drainer, the sticky report and user
+//! The agent's calls are answered by [`crate::agent`] (#63) under the credential each session
+//! is issued at spawn; a blocking question comes back here as [`Event::Question`].
+//!
+//! The `bosun-mcp` server and its handshake (#64), the outbox drainer, the sticky report and user
 //! commands (#65), parking control (#66), pauses, the kill switch and budgets (#67), and crash
 //! recovery (#68): an item found in flight at start keeps its repository waiting for #68.
 
@@ -59,7 +62,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bosun_api::EventBody;
 use bosun_config::{Config, Identity, Repo};
 use bosun_core::{
-    Ctx, Effect, EffectKind, Event, Item, ItemId, Rules, SpawnMode, State, Stepped, step,
+    Ctx, Effect, EffectKind, Event, Item, ItemId, Reason, Rules, SpawnMode, State, Stepped, step,
 };
 use bosun_proc::{Power, PowerGuard, Spawner};
 use bosun_queue::{Card, Column, Cursor, Queue};
@@ -70,6 +73,10 @@ use tokio::task::JoinHandle;
 use crate::events::{self, Events};
 
 pub(crate) use identity::{GhLogins, Logins};
+
+/// How long a session that asked a blocking question may go on before it is killed: time to
+/// write down what it has (#7).
+pub(crate) const QUESTION_GRACE: Duration = Duration::from_secs(10);
 
 /// The fixed parts of one repository's loop.
 pub(crate) struct Options {
@@ -86,6 +93,8 @@ pub(crate) struct Options {
     pub(crate) poll: Duration,
     /// How long a passed identity check before a claim is trusted.
     pub(crate) recheck: Duration,
+    /// How long a session that asked a blocking question may go on before it is killed.
+    pub(crate) question_grace: Duration,
     /// Test only: a transition this returns `true` for fails to be written.
     #[cfg(test)]
     pub(crate) failpoint: Option<Failpoint>,
@@ -116,6 +125,8 @@ pub(crate) struct Deps {
     pub(crate) spawner: Arc<dyn Spawner>,
     pub(crate) power: Arc<dyn Power>,
     pub(crate) logins: Arc<dyn Logins>,
+    /// The agent credentials the API admits; each session is issued one (#63).
+    pub(crate) credentials: crate::agent::Credentials,
 }
 
 impl fmt::Debug for Deps {
@@ -429,7 +440,15 @@ impl Loop {
                     }
                 }
                 EffectKind::Kill => {
-                    if let Some(task) = self.current.as_ref().and_then(|c| c.task.as_ref()) {
+                    // A blocking question's session gets its grace when the item leaves the
+                    // loop ([`Loop::finish`]).
+                    let question = self
+                        .current
+                        .as_ref()
+                        .is_some_and(|c| c.item.state == State::NeedsYou(Reason::Question));
+                    if !question
+                        && let Some(task) = self.current.as_ref().and_then(|c| c.task.as_ref())
+                    {
                         let _ = task.kill.send(true);
                     }
                 }
@@ -517,6 +536,17 @@ impl Loop {
         let config = self.config();
         let item = cur.item.id.clone();
         let done = self.done_tx.clone();
+        // A blocking question the API recorded under this session's credential (#63).
+        let on_blocking: Box<dyn Fn() + Send + Sync> = {
+            let (done, item) = (done.clone(), item.clone());
+            Box::new(move || {
+                let _ = done.send(Done::Event {
+                    item: item.clone(),
+                    event: Event::Question { attempt },
+                    failing: Vec::new(),
+                });
+            })
+        };
         let handle = tokio::spawn(async move {
             let run = session::Run {
                 item: item.clone(),
@@ -524,7 +554,8 @@ impl Loop {
                 spawn,
                 mode,
             };
-            let event = session::session(&shared, &config, &claimed, &run, kill_rx).await;
+            let event =
+                session::session(&shared, &config, &claimed, &run, kill_rx, on_blocking).await;
             let _ = done.send(Done::Event {
                 item,
                 event,
@@ -642,9 +673,17 @@ impl Loop {
         let Some(mut cur) = self.current.take() else {
             return;
         };
-        if let Some(task) = cur.task.take() {
-            let _ = task.kill.send(true);
-            let _ = task.handle.await;
+        if let Some(mut task) = cur.task.take() {
+            // A session that asked a blocking question may end on its own within its grace.
+            let grace = if cur.item.state == State::NeedsYou(Reason::Question) {
+                self.shared.options.question_grace
+            } else {
+                Duration::ZERO
+            };
+            if tokio::time::timeout(grace, &mut task.handle).await.is_err() {
+                let _ = task.kill.send(true);
+                let _ = task.handle.await;
+            }
         }
         let done = matches!(cur.item.state, State::Done(_));
         if !done && let Some(claimed) = &cur.claimed {

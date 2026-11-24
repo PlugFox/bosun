@@ -24,6 +24,7 @@ use tokio::sync::watch;
 
 use super::verdict::killed;
 use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms};
+use crate::agent::Binding;
 use crate::events;
 
 /// The provider name of the Claude runner's sessions in the store.
@@ -147,12 +148,21 @@ async fn prompt_of(shared: &Shared, claimed: &Claimed, run: &Run) -> prompt::Pro
     })
 }
 
+/// The variable of the `bosun` MCP server that carries the session's credential (#63).
+pub(crate) const CREDENTIAL_VAR: &str = "BOSUN_AGENT_CREDENTIAL";
+
 /// The per-session MCP configuration: `bosun` and the repository's servers (#7). The `bosun`
-/// server's own handshake and credential are #63.
-fn mcp_file(repo: &Repo, item: &ItemId, id: &SessionId) -> Result<String, String> {
+/// server gets the session's credential in its environment; its handshake is #64's.
+fn mcp_file(
+    repo: &Repo,
+    item: &ItemId,
+    id: &SessionId,
+    credential: &str,
+) -> Result<String, String> {
     let bosun = serde_json::json!({
         "command": "bosun-mcp",
         "args": ["--item", item.0, "--session", id.as_str()],
+        "env": { CREDENTIAL_VAR: credential },
     })
     .to_string();
     let servers: Vec<McpServer> = repo
@@ -188,6 +198,7 @@ pub(crate) async fn session(
     claimed: &Claimed,
     run: &Run,
     mut kill: watch::Receiver<bool>,
+    on_blocking: Box<dyn Fn() + Send + Sync>,
 ) -> Event {
     let crash = run.exited(Exit::Crash);
     let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
@@ -241,6 +252,25 @@ pub(crate) async fn session(
         }
     }
 
+    // The session's credential (#63), revoked when `credential` is dropped: when the process
+    // is gone, or on any early return.
+    let credential = shared.deps.credentials.issue(Binding {
+        identity: repo.identity.clone(),
+        item: run.item.clone(),
+        attempt: run.attempt,
+        session: session_id.to_string(),
+        repo: repo.path.clone(),
+        writer: shared.deps.writer.clone(),
+        on_blocking,
+    });
+    let credential = match credential {
+        Ok(credential) => credential,
+        Err(e) => {
+            shared.trouble(format!("{}: the session's credential: {e}", run.item));
+            return crash;
+        }
+    };
+
     let prompt = prompt_of(shared, claimed, run).await;
     let dir = shared
         .options
@@ -252,7 +282,11 @@ pub(crate) async fn session(
         let system = dir.join("system.md");
         std::fs::write(&system, &prompt.system).map_err(|e| e.to_string())?;
         let mcp = dir.join("mcp.json");
-        std::fs::write(&mcp, mcp_file(repo, &run.item, &session_id)?).map_err(|e| e.to_string())?;
+        std::fs::write(
+            &mcp,
+            mcp_file(repo, &run.item, &session_id, credential.token())?,
+        )
+        .map_err(|e| e.to_string())?;
         Ok((system, mcp))
     })();
     let (system_file, mcp_config_file) = match files {
@@ -429,8 +463,10 @@ pub(crate) async fn session(
             }
         }
     };
-    // Whatever the session left running in its container goes with it.
+    // Whatever the session left running in its container goes with it, and so does its
+    // credential.
     let _ = tree.kill_tree();
+    drop(credential);
     let deadline = Instant::now() + DRAIN;
     while out_open || err_open {
         let left = deadline.saturating_duration_since(Instant::now());

@@ -7,8 +7,9 @@
 //! - The API is versioned by one integer, [`API_VERSION`], returned by [`method::Hello`]. Within a
 //!   version changes are additive only (new optional fields, new methods); anything else bumps
 //!   it, and a client refuses a daemon whose version it does not know.
-//! - Every method except [`method::Hello`] names an identity, and its result holds rows of that
-//!   identity only (#2, rule 4).
+//! - Every method except [`method::Hello`] and the `agent.*` group names an identity, and its
+//!   result holds rows of that identity only (#2, rule 4). An `agent.*` method is bound to one
+//!   identity by its credential ([`agent`]).
 //! - [`schema`] is the JSON Schema of every method's params and result; `cargo xtask gen-api`
 //!   writes it to `schema/bosun-api.schema.json` and CI fails when it is stale.
 //!
@@ -32,7 +33,14 @@
 //! | `report.exact` | [`ReportParams`] | [`Report`] |
 //! | `report.estimates` | [`ReportParams`] | [`Estimates`] |
 //! | `events.subscribe` | [`SubscribeParams`] | [`SubscribeResult`], then the notifications of [`event`] |
+//! | `agent.hello` | [`AgentHelloParams`] | [`AgentHelloResult`] |
+//! | `agent.ask_question` | [`AskQuestionParams`] | [`AgentAck`] |
+//! | `agent.submit_summary` | [`SubmitSummaryParams`] | [`AgentAck`] |
+//! | `agent.note` | [`NoteParams`] | [`AgentAck`] |
+//!
+//! The `agent.*` methods name no identity: their credential does ([`agent`]).
 
+pub mod agent;
 mod estimates;
 pub mod event;
 mod items;
@@ -46,6 +54,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+pub use agent::{
+    AgentAck, AgentHelloParams, AgentHelloResult, AskQuestionParams, NoteParams,
+    SubmitSummaryParams,
+};
 pub use estimates::{
     ByFile, ByTool, Estimates, FileRow, Finding, FindingRow, RepeatedRead, RepeatedReads,
     ResultCost, ToolRow,
@@ -180,6 +192,34 @@ pub mod method {
      connection then carries the `events.event` and `events.resync` notifications in \
      `x-notifications` and takes no more requests."
     );
+    method!(
+        AgentHello,
+        "agent.hello",
+        crate::AgentHelloParams,
+        crate::AgentHelloResult,
+        "The handshake of an agent session's `bosun-mcp`: what its credential is bound to.      Refused for a credential that is not live or names another item."
+    );
+    method!(
+        AgentAskQuestion,
+        "agent.ask_question",
+        crate::AskQuestionParams,
+        crate::AgentAck,
+        "Records a question of the agent with its attempt and HEAD. A blocking one sends the      item to Needs you and ends the session after a short grace period; one that does not      block goes into the item report."
+    );
+    method!(
+        AgentSubmitSummary,
+        "agent.submit_summary",
+        crate::SubmitSummaryParams,
+        crate::AgentAck,
+        "Records the agent's summary with its attempt and HEAD; the last one of an attempt      wins. It changes no state, whatever it says."
+    );
+    method!(
+        AgentNote,
+        "agent.note",
+        crate::NoteParams,
+        crate::AgentAck,
+        "Records a note of the agent with its attempt and HEAD; it changes no state."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -194,7 +234,14 @@ pub const METHODS: &[&str] = &[
     method::ReportExact::NAME,
     method::ReportEstimates::NAME,
     method::EventsSubscribe::NAME,
+    method::AgentHello::NAME,
+    method::AgentAskQuestion::NAME,
+    method::AgentSubmitSummary::NAME,
+    method::AgentNote::NAME,
 ];
+
+/// The prefix of the `agent.*` group: the only methods an agent credential admits.
+pub const AGENT_GROUP: &str = "agent.";
 
 /// Params of `hello`: none yet.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -436,6 +483,10 @@ pub fn schema() -> Value {
     add_method::<method::ReportExact>(&mut generator, &mut methods);
     add_method::<method::ReportEstimates>(&mut generator, &mut methods);
     add_method::<method::EventsSubscribe>(&mut generator, &mut methods);
+    add_method::<method::AgentHello>(&mut generator, &mut methods);
+    add_method::<method::AgentAskQuestion>(&mut generator, &mut methods);
+    add_method::<method::AgentSubmitSummary>(&mut generator, &mut methods);
+    add_method::<method::AgentNote>(&mut generator, &mut methods);
     let notifications = json!({
         event::EVENT: {
             "description": "One event of the subscribed identity, in sequence order.",

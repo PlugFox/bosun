@@ -27,6 +27,80 @@
       ],
       "type": "object"
     },
+    "AgentAck": {
+      "description": "Result of a recorded `agent.ask_question`, `agent.submit_summary` or `agent.note` call.",
+      "properties": {
+        "attempt": {
+          "description": "The attempt the call is bound to.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head_sha": {
+          "description": "The commit HEAD resolved to at the time of the call; `null` when it could not be read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt"
+      ],
+      "type": "object"
+    },
+    "AgentHelloParams": {
+      "description": "Params of `agent.hello`: the handshake `bosun-mcp` makes after it starts.",
+      "properties": {
+        "credential": {
+          "description": "The session's credential, from its MCP configuration.",
+          "type": "string"
+        },
+        "item": {
+          "description": "The item the session works on, as the daemon named it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "credential",
+        "item"
+      ],
+      "type": "object"
+    },
+    "AgentHelloResult": {
+      "description": "Result of `agent.hello`: what the credential is bound to.",
+      "properties": {
+        "api_version": {
+          "description": "The API version of the daemon.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "item": {
+          "type": "string"
+        },
+        "session": {
+          "description": "The provider's session id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "identity",
+        "item",
+        "attempt",
+        "session"
+      ],
+      "type": "object"
+    },
     "Agreement": {
       "description": "The agreement with the provider's own totals (Claude Code's `cost-state`, the last record\nof each root transcript): for each root session that has them and a message in the range,\nthe token sums of its messages inside the provider's window, main transcript and\nsub-agents, against the provider's (#46).\n\nThe provider's window runs from when its counter started (`startTime`: the counter starts\nagain when a session is resumed in a new process) to the timestamp of the last record\nbefore the `cost-state` line (records after it are not in it), both inclusive. A check\nstored before the window was (#46) has an open window until `bosun reingest`.\n\nA session is within the tolerance when `|transcripts - provider| * 100 <= tolerance *\nprovider` on the total of the four categories, and exceeds it when `(transcripts -\nprovider) * 100 > tolerance * provider`. The criterion is one-sided: the provider also\ncounts calls the transcripts never hold, so it may be larger ([`Undercount`]); the\ntranscripts may not. The categories are shown for reading.",
       "properties": {
@@ -88,6 +162,32 @@
         "total",
         "absent_models",
         "rows"
+      ],
+      "type": "object"
+    },
+    "AskQuestionParams": {
+      "description": "Params of `agent.ask_question`.",
+      "properties": {
+        "blocking": {
+          "description": "The agent cannot go on without an answer: the item goes to Needs you and the session is\nended after a short grace period. A question that does not block goes into the item\nreport.",
+          "type": "boolean"
+        },
+        "credential": {
+          "type": "string"
+        },
+        "item": {
+          "type": "string"
+        },
+        "text": {
+          "description": "The question, for the user.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "credential",
+        "item",
+        "text",
+        "blocking"
       ],
       "type": "object"
     },
@@ -1761,6 +1861,26 @@
       ],
       "type": "object"
     },
+    "NoteParams": {
+      "description": "Params of `agent.note`.",
+      "properties": {
+        "credential": {
+          "type": "string"
+        },
+        "item": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "credential",
+        "item",
+        "text"
+      ],
+      "type": "object"
+    },
     "OldMethod": {
       "description": "The old method: per session, only the last usage block of its main transcript, as the\nscripts bosun replaces summed it. It ignores every earlier message and every sub-agent.\n\nOver the messages of the scope: for each root session with a main-transcript message in\nit, the last such message (by time, then message id); their sums.",
       "properties": {
@@ -2594,6 +2714,43 @@
       ],
       "type": "object"
     },
+    "SubmitSummaryParams": {
+      "description": "Params of `agent.submit_summary`. It may be called more than once; the last call of an\nattempt wins.",
+      "properties": {
+        "body": {
+          "description": "The summary of the work.",
+          "type": "string"
+        },
+        "credential": {
+          "type": "string"
+        },
+        "decisions": {
+          "default": [],
+          "description": "Decisions taken on the way.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "followups": {
+          "default": [],
+          "description": "Follow-ups for later items.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "item": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "credential",
+        "item",
+        "body"
+      ],
+      "type": "object"
+    },
     "SubscribeParams": {
       "description": "Params of `events.subscribe`.",
       "properties": {
@@ -3102,6 +3259,42 @@
   "title": "bosun local API",
   "x-api-version": 1,
   "x-methods": {
+    "agent.ask_question": {
+      "description": "Records a question of the agent with its attempt and HEAD. A blocking one sends the      item to Needs you and ends the session after a short grace period; one that does not      block goes into the item report.",
+      "params": {
+        "$ref": "#/$defs/AskQuestionParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AgentAck"
+      }
+    },
+    "agent.hello": {
+      "description": "The handshake of an agent session's `bosun-mcp`: what its credential is bound to.      Refused for a credential that is not live or names another item.",
+      "params": {
+        "$ref": "#/$defs/AgentHelloParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AgentHelloResult"
+      }
+    },
+    "agent.note": {
+      "description": "Records a note of the agent with its attempt and HEAD; it changes no state.",
+      "params": {
+        "$ref": "#/$defs/NoteParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AgentAck"
+      }
+    },
+    "agent.submit_summary": {
+      "description": "Records the agent's summary with its attempt and HEAD; the last one of an attempt      wins. It changes no state, whatever it says.",
+      "params": {
+        "$ref": "#/$defs/SubmitSummaryParams"
+      },
+      "result": {
+        "$ref": "#/$defs/AgentAck"
+      }
+    },
     "events.subscribe": {
       "description": "Subscribes to the identity's events from `from_seq` of `epoch`, or from now. The connection then carries the `events.event` and `events.resync` notifications in `x-notifications` and takes no more requests.",
       "params": {

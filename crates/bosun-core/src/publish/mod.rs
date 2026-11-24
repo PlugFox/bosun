@@ -15,6 +15,7 @@
 
 use std::fmt::Write as _;
 
+pub mod pr;
 mod redact;
 mod report;
 mod sanitise;

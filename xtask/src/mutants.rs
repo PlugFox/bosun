@@ -590,6 +590,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_queue_lint_functions_are_programs",
+        issue: 7,
+        breaks: "a shell function the verdict defines is refused as a program the PATH lacks",
+        package: "bosun-queue",
+        check: Check::Test("shell::tests::function_definitions_are_followed_not_programs"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_queue_local_no_key",
         issue: 51,
         breaks: "the local-file backend does not look comments up by key before posting",
@@ -787,6 +795,24 @@ const MUTANTS: &[Mutant] = &[
         breaks: "code fences have a fixed length instead of outrunning the content's backticks",
         package: "bosun-core",
         check: Check::Test("publish::report::tests::ten_backticks_cannot_close_the_fence"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_publish_pr_body_overwrite",
+        issue: 8,
+        breaks: "a pull request body update replaces the whole body, not only the daemon's region (#8)",
+        package: "bosun-core",
+        check: Check::Test("publish::pr::tests::an_update_rewrites_only_the_daemon_region"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_publish_pr_raw_summary",
+        issue: 8,
+        breaks: "the agent's summary reaches a pull request body unsanitised (#8)",
+        package: "bosun-core",
+        check: Check::Test(
+            "publish::pr::tests::the_hostile_corpus_stays_inert_in_a_pull_request_body",
+        ),
         platform: None,
     },
     Mutant {

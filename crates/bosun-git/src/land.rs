@@ -259,7 +259,10 @@ pub fn fast_forward(repo: &Git, branch: &str, to: &str) -> Result<FastForward, E
         )?
         .trim()
         .to_owned();
-    if !repo.test(&["merge-base", "--is-ancestor", &head, &to])? {
+    // Mutant (`mutant_git_ff_skip_descendant_check`): any commit is taken as a descendant.
+    if !cfg!(mutant_git_ff_skip_descendant_check)
+        && !repo.test(&["merge-base", "--is-ancestor", &head, &to])?
+    {
         return Err(Error::NotDescendant {
             branch: branch.to_owned(),
             head,
@@ -270,7 +273,14 @@ pub fn fast_forward(repo: &Git, branch: &str, to: &str) -> Result<FastForward, E
         return Ok(FastForward::Moved { from: head, to });
     }
 
-    let Some(holder) = holder(repo, &full)? else {
+    // Mutant (`mutant_git_ff_checked_out_by_ref`): a checked-out branch moves by its ref alone,
+    // like one no worktree has checked out.
+    let holder = if cfg!(mutant_git_ff_checked_out_by_ref) {
+        None
+    } else {
+        holder(repo, &full)?
+    };
+    let Some(holder) = holder else {
         repo.run(
             &["update-ref", "-m", "bosun: fast-forward", &full, &to, &head],
             None,

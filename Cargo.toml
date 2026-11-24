@@ -267,6 +267,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #134: the trailer hook acts only in the item's checkout; tests' git drops the session.
   "cfg(mutant_git_trailers_everywhere)",
   "cfg(mutant_git_test_env_inherited)",
+  # #147: the branch guard of worktree removal; the fast-forward's descendant check and move.
+  "cfg(mutant_git_worktree_remove_any_branch)",
+  "cfg(mutant_git_ff_skip_descendant_check)",
+  "cfg(mutant_git_ff_checked_out_by_ref)",
 ] }
 
 [workspace.lints.clippy]

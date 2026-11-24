@@ -1629,6 +1629,34 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::the_test_git_drops_the_session_variables"),
         platform: None,
     },
+    // #147: the branch guard of worktree removal; the fast-forward's descendant check and
+    // in-checkout move.
+    Mutant {
+        name: "mutant_git_worktree_remove_any_branch",
+        issue: 147,
+        breaks: "removing a worktree deletes a branch outside bosun/",
+        package: "bosun-git",
+        check: Check::Test("worktree::tests::a_branch_outside_the_prefix_is_never_deleted"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_ff_skip_descendant_check",
+        issue: 147,
+        breaks: "a fast-forward moves a branch to a commit that does not descend from it",
+        package: "bosun-git",
+        check: Check::Test(
+            "land::tests::a_commit_that_does_not_descend_from_the_branch_is_refused",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_ff_checked_out_by_ref",
+        issue: 147,
+        breaks: "a fast-forward moves a checked-out branch's ref and leaves its files behind",
+        package: "bosun-git",
+        check: Check::Test("land::tests::a_clean_checkout_of_the_target_moves_with_its_files"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

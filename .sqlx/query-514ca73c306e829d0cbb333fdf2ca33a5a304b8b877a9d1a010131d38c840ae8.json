@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE worktree SET bytes = ? WHERE path = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "514ca73c306e829d0cbb333fdf2ca33a5a304b8b877a9d1a010131d38c840ae8"
+}

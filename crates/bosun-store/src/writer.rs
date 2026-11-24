@@ -22,7 +22,8 @@ use crate::error::{Error, from_db, to_db};
 use crate::read;
 use crate::work::write as work;
 use crate::work::{
-    AgentCall, NewItem, RunCommits, RunEnd, RunStart, Snapshot, VerdictEnd, VerdictStart,
+    AgentCall, LandingRow, NewItem, NewProcess, NewWorktree, RunCommits, RunEnd, RunStart,
+    Snapshot, VerdictEnd, VerdictStart, WorktreeState,
 };
 
 /// How many batches may wait for the writer before senders wait too.
@@ -166,6 +167,55 @@ pub enum Write {
         started_ms: i64,
         pid: u32,
     },
+    /// A git worktree the daemon made for an item (#8). Keyed by its path: writing it again
+    /// stores nothing.
+    Worktree(NewWorktree),
+    /// The worktree at `path` was removed, or quarantined with the file that blocked its
+    /// removal and the error. Only a worktree still `created` ends: the first end is kept.
+    /// `bytes`, when given, is its last measured size.
+    WorktreeEnded {
+        path: String,
+        /// [`WorktreeState::Removed`] or [`WorktreeState::Quarantined`].
+        state: WorktreeState,
+        blocking: Option<String>,
+        error: Option<String>,
+        bytes: Option<u64>,
+        at_ms: i64,
+    },
+    /// The size on disk of the worktree at `path`, in bytes, as last measured.
+    WorktreeBytes { path: String, bytes: u64 },
+    /// A session shim the daemon started (#8). Keyed by its record's path: writing it again
+    /// stores nothing.
+    Process(NewProcess),
+    /// How far the daemon has read the shim's output files (E18). An offset only grows: the
+    /// larger of the stored and the written one is kept.
+    ProcessOffsets {
+        record_path: String,
+        stdout: u64,
+        stderr: u64,
+    },
+    /// The shim is gone; the first time recorded is kept.
+    ProcessGone { record_path: String, at_ms: i64 },
+    /// A request of `holder` for `resource` (#8, E15), for an item or (`None`) a `bosun with`
+    /// command. Keyed by `(holder, resource, filed_ms)`: writing it again stores nothing.
+    LeaseFiled {
+        item: Option<ItemId>,
+        holder: String,
+        resource: String,
+        filed_ms: i64,
+    },
+    /// The request filed at `filed_ms` was granted; the first grant recorded is kept.
+    LeaseGranted {
+        holder: String,
+        resource: String,
+        filed_ms: i64,
+        at_ms: i64,
+    },
+    /// `holder` released what it held: every granted request of it not yet released.
+    LeaseReleased { holder: String, at_ms: i64 },
+    /// Where the item's landing stands (#8). Keyed by the item: the attempt, target and time
+    /// are replaced, and a column given as `None` keeps its stored value.
+    Landing(LandingRow),
     /// Mutant `mutant_ingest_reingest_truncates` (#21): deletes every ingested row, as a
     /// reingest that truncates before it rebuilds would.
     #[cfg(mutant_ingest_reingest_truncates)]
@@ -326,6 +376,8 @@ fn failpoint(row: usize) {
 #[cfg(not(test))]
 fn failpoint(_row: usize) {}
 
+// Long: one arm per kind of write.
+#[allow(clippy::too_many_lines)]
 async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
     match write {
         Write::SourceFile(file) => upsert_source_file(conn, &file).await,
@@ -411,6 +463,49 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             started_ms,
             pid,
         } => work::insert_boot(conn, number, started_ms, pid).await,
+        Write::Worktree(new) => work::insert_worktree(conn, &new).await,
+        Write::WorktreeEnded {
+            path,
+            state,
+            blocking,
+            error,
+            bytes,
+            at_ms,
+        } => {
+            let end = work::WorktreeEnd {
+                path: &path,
+                state,
+                blocking: blocking.as_deref(),
+                error: error.as_deref(),
+                bytes,
+                at_ms,
+            };
+            work::end_worktree(conn, &end).await
+        }
+        Write::WorktreeBytes { path, bytes } => work::worktree_bytes(conn, &path, bytes).await,
+        Write::Process(new) => work::insert_process(conn, &new).await,
+        Write::ProcessOffsets {
+            record_path,
+            stdout,
+            stderr,
+        } => work::process_offsets(conn, &record_path, stdout, stderr).await,
+        Write::ProcessGone { record_path, at_ms } => {
+            work::process_gone(conn, &record_path, at_ms).await
+        }
+        Write::LeaseFiled {
+            item,
+            holder,
+            resource,
+            filed_ms,
+        } => work::lease_filed(conn, item.as_ref(), &holder, &resource, filed_ms).await,
+        Write::LeaseGranted {
+            holder,
+            resource,
+            filed_ms,
+            at_ms,
+        } => work::lease_granted(conn, &holder, &resource, filed_ms, at_ms).await,
+        Write::LeaseReleased { holder, at_ms } => work::lease_released(conn, &holder, at_ms).await,
+        Write::Landing(landing) => work::upsert_landing(conn, &landing).await,
         #[cfg(mutant_ingest_reingest_truncates)]
         Write::Truncate => {
             conn.execute(

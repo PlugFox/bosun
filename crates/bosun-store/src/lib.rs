@@ -11,6 +11,9 @@
 //! - The loop's tables (#7, #57): items, snapshots, attempts, run sessions, verdict runs, the
 //!   transition log and the outbox. A transition is written under its idempotence key in one
 //!   transaction with the item it produced and its board writes, so a replay is a no-op.
+//! - Stage 2's tables (#8): worktrees, session shims and their output offsets, the history of
+//!   lease waits (the live leases are the daemon's, E15) and landings. Every write is keyed, so
+//!   a replay stores nothing new.
 //! - Readers use a read-only pool ([`Reader`]). Every derived number (cost, eqv) is computed at
 //!   query time from raw token counts and the price rows.
 //!
@@ -44,9 +47,10 @@ pub use link::{CommitLink, Link, LinkedSession};
 pub use read::{Bill, By, Group, Reader};
 pub use report::{CheckRow, ToolRow, UsageRow, VersionHealth, WindowSums};
 pub use work::{
-    AgentCall, AgentCallKind, AgentCallRow, AttemptRow, ItemHistory, NewItem, OutboxOp, OutboxRow,
-    RecordedChild, RunCommitRow, RunCommits, RunEnd, RunRow, RunStart, Snapshot, StoredItem,
-    TransitionRow, VerdictEnd, VerdictRow, VerdictStart,
+    AgentCall, AgentCallKind, AgentCallRow, AttemptRow, ItemHistory, LandingRow, LeaseWaitRow,
+    NewItem, NewProcess, NewWorktree, OutboxOp, OutboxRow, PrState, ProcessRow, RecordedChild,
+    RunCommitRow, RunCommits, RunEnd, RunRow, RunStart, Snapshot, StoredItem, TransitionRow,
+    VerdictEnd, VerdictRow, VerdictStart, WorktreeKind, WorktreeRow, WorktreeState,
 };
 pub use writer::{PriceChange, Repo, SourceFile, Write, Writer};
 

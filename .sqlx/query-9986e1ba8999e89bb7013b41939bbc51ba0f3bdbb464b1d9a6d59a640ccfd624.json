@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO landing (item_id, attempt, target, head_sha, verified_tree, landed_sha,\n                              delivered_ms, pr_number, pr_url, pr_state, updated_ms)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n         ON CONFLICT (item_id) DO UPDATE SET\n             attempt = excluded.attempt,\n             target = excluded.target,\n             head_sha = coalesce(excluded.head_sha, head_sha),\n             verified_tree = coalesce(excluded.verified_tree, verified_tree),\n             landed_sha = coalesce(excluded.landed_sha, landed_sha),\n             delivered_ms = coalesce(excluded.delivered_ms, delivered_ms),\n             pr_number = coalesce(excluded.pr_number, pr_number),\n             pr_url = coalesce(excluded.pr_url, pr_url),\n             pr_state = coalesce(excluded.pr_state, pr_state),\n             updated_ms = excluded.updated_ms",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "9986e1ba8999e89bb7013b41939bbc51ba0f3bdbb464b1d9a6d59a640ccfd624"
+}

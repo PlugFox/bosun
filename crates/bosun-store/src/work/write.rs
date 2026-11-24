@@ -5,8 +5,8 @@ use sqlx::sqlite::SqliteConnection;
 
 use super::codec;
 use super::{
-    AgentCall, AgentCallKind, NewItem, RunCommits, RunEnd, RunStart, Snapshot, VerdictEnd,
-    VerdictStart,
+    AgentCall, AgentCallKind, LandingRow, NewItem, NewProcess, NewWorktree, RunCommits, RunEnd,
+    RunStart, Snapshot, VerdictEnd, VerdictStart, WorktreeState,
 };
 use crate::error::{Error, to_db};
 use crate::writer::{Repo, upsert_repo};
@@ -797,6 +797,303 @@ pub(crate) async fn insert_boot(
         number,
         started_ms,
         pid,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn insert_worktree(
+    conn: &mut SqliteConnection,
+    new: &NewWorktree,
+) -> Result<(), Error> {
+    let item = item_id(conn, &new.item).await?;
+    let kind = codec::worktree_kind(new.kind);
+    sqlx::query!(
+        "INSERT INTO worktree (item_id, path, branch, base_sha, kind, user_base_json, created_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (path) DO NOTHING",
+        item,
+        new.path,
+        new.branch,
+        new.base_sha,
+        kind,
+        new.user_base_json,
+        new.created_ms,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// How a worktree ended: removed, or quarantined with what blocked its removal.
+pub(crate) struct WorktreeEnd<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) state: WorktreeState,
+    pub(crate) blocking: Option<&'a str>,
+    pub(crate) error: Option<&'a str>,
+    pub(crate) bytes: Option<u64>,
+    pub(crate) at_ms: i64,
+}
+
+/// The worktree at `path` was removed or quarantined. Only a worktree still `created` ends: a
+/// replay, or a later end, keeps the first. Ending it as `created` fails the batch (the table's
+/// `CHECK` refuses a created worktree with an end).
+pub(crate) async fn end_worktree(
+    conn: &mut SqliteConnection,
+    end: &WorktreeEnd<'_>,
+) -> Result<(), Error> {
+    let state = codec::worktree_state(end.state);
+    let bytes = end.bytes.map(|b| to_db(b, "worktree size")).transpose()?;
+    let updated = sqlx::query!(
+        "UPDATE worktree SET state = ?, blocking = ?, error = ?, bytes = coalesce(?, bytes),
+                             ended_ms = ?
+         WHERE path = ? AND state = 'created'",
+        state,
+        end.blocking,
+        end.error,
+        bytes,
+        end.at_ms,
+        end.path,
+    )
+    .execute(&mut *conn)
+    .await?;
+    if updated.rows_affected() == 0 {
+        known_worktree(conn, end.path).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn worktree_bytes(
+    conn: &mut SqliteConnection,
+    path: &str,
+    bytes: u64,
+) -> Result<(), Error> {
+    let bytes = to_db(bytes, "worktree size")?;
+    let updated = sqlx::query!("UPDATE worktree SET bytes = ? WHERE path = ?", bytes, path)
+        .execute(&mut *conn)
+        .await?;
+    if updated.rows_affected() == 0 {
+        known_worktree(conn, path).await?;
+    }
+    Ok(())
+}
+
+/// Fails unless a worktree at `path` is recorded.
+async fn known_worktree(conn: &mut SqliteConnection, path: &str) -> Result<(), Error> {
+    sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM worktree WHERE path = ?"#,
+        path
+    )
+    .fetch_optional(conn)
+    .await?
+    .map(drop)
+    .ok_or_else(|| Error::UnknownRow(format!("worktree {path}")))
+}
+
+pub(crate) async fn insert_process(
+    conn: &mut SqliteConnection,
+    new: &NewProcess,
+) -> Result<(), Error> {
+    let item = item_id(conn, &new.item).await?;
+    sqlx::query!(
+        "INSERT INTO process (item_id, attempt, spawn, session_key, pid, pid_started_ms,
+                              record_path, credential_digest, started_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (record_path) DO NOTHING",
+        item,
+        new.attempt,
+        new.spawn,
+        new.session_key,
+        new.pid,
+        new.pid_started_ms,
+        new.record_path,
+        new.credential_digest,
+        new.started_ms,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// How far the daemon has read the shim's output files (E18). An offset only grows: a write
+/// that arrives late, with an offset already passed, leaves the stored one.
+pub(crate) async fn process_offsets(
+    conn: &mut SqliteConnection,
+    record_path: &str,
+    stdout: u64,
+    stderr: u64,
+) -> Result<(), Error> {
+    let stdout = to_db(stdout, "stdout offset")?;
+    let stderr = to_db(stderr, "stderr offset")?;
+    // Mutant (`mutant_store_process_offsets_overwrite`): the offsets are stored as given, so a
+    // late write moves them back.
+    let updated = if cfg!(mutant_store_process_offsets_overwrite) {
+        sqlx::query!(
+            "UPDATE process SET stdout_offset = ?, stderr_offset = ? WHERE record_path = ?",
+            stdout,
+            stderr,
+            record_path,
+        )
+        .execute(&mut *conn)
+        .await?
+    } else {
+        sqlx::query!(
+            "UPDATE process SET stdout_offset = max(stdout_offset, ?),
+                                stderr_offset = max(stderr_offset, ?)
+             WHERE record_path = ?",
+            stdout,
+            stderr,
+            record_path,
+        )
+        .execute(&mut *conn)
+        .await?
+    };
+    if updated.rows_affected() == 0 {
+        return Err(Error::UnknownRow(format!("process {record_path}")));
+    }
+    Ok(())
+}
+
+/// The shim is gone. The first time recorded is kept.
+pub(crate) async fn process_gone(
+    conn: &mut SqliteConnection,
+    record_path: &str,
+    at_ms: i64,
+) -> Result<(), Error> {
+    let updated = sqlx::query!(
+        "UPDATE process SET gone_ms = coalesce(gone_ms, ?) WHERE record_path = ?",
+        at_ms,
+        record_path,
+    )
+    .execute(conn)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(Error::UnknownRow(format!("process {record_path}")));
+    }
+    Ok(())
+}
+
+/// A request of `holder` for `resource`, filed at `filed_ms`: one row, keyed by the three.
+pub(crate) async fn lease_filed(
+    conn: &mut SqliteConnection,
+    item: Option<&ItemId>,
+    holder: &str,
+    resource: &str,
+    filed_ms: i64,
+) -> Result<(), Error> {
+    let item = match item {
+        Some(item) => Some(item_id(conn, item).await?),
+        None => None,
+    };
+    // Mutant (`mutant_store_lease_wait_duplicates`): the key is ignored, so a replayed request
+    // is a second row, which the unique key refuses: the batch fails.
+    if cfg!(mutant_store_lease_wait_duplicates) {
+        sqlx::query!(
+            "INSERT INTO lease_wait (item_id, holder, resource, filed_ms) VALUES (?, ?, ?, ?)",
+            item,
+            holder,
+            resource,
+            filed_ms,
+        )
+        .execute(conn)
+        .await?;
+    } else {
+        sqlx::query!(
+            "INSERT INTO lease_wait (item_id, holder, resource, filed_ms) VALUES (?, ?, ?, ?)
+             ON CONFLICT (holder, resource, filed_ms) DO NOTHING",
+            item,
+            holder,
+            resource,
+            filed_ms,
+        )
+        .execute(conn)
+        .await?;
+    }
+    Ok(())
+}
+
+/// The request was granted. The first grant recorded is kept.
+pub(crate) async fn lease_granted(
+    conn: &mut SqliteConnection,
+    holder: &str,
+    resource: &str,
+    filed_ms: i64,
+    at_ms: i64,
+) -> Result<(), Error> {
+    let updated = sqlx::query!(
+        "UPDATE lease_wait SET granted_ms = coalesce(granted_ms, ?)
+         WHERE holder = ? AND resource = ? AND filed_ms = ?",
+        at_ms,
+        holder,
+        resource,
+        filed_ms,
+    )
+    .execute(conn)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(Error::UnknownRow(format!(
+            "lease request of {holder} for {resource} at {filed_ms}"
+        )));
+    }
+    Ok(())
+}
+
+/// `holder` released what it held: every granted request of it not yet released.
+pub(crate) async fn lease_released(
+    conn: &mut SqliteConnection,
+    holder: &str,
+    at_ms: i64,
+) -> Result<(), Error> {
+    sqlx::query!(
+        "UPDATE lease_wait SET released_ms = ?
+         WHERE holder = ? AND granted_ms IS NOT NULL AND released_ms IS NULL",
+        at_ms,
+        holder,
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Where the item's landing stands, keyed by the item. The attempt, the target and the time are
+/// replaced; a column given as `None` keeps its stored value.
+pub(crate) async fn upsert_landing(
+    conn: &mut SqliteConnection,
+    landing: &LandingRow,
+) -> Result<(), Error> {
+    let item = item_id(conn, &landing.item).await?;
+    let pr_number = landing
+        .pr_number
+        .map(|n| to_db(n, "pull request number"))
+        .transpose()?;
+    let pr_state = landing.pr_state.map(codec::pr_state);
+    sqlx::query!(
+        "INSERT INTO landing (item_id, attempt, target, head_sha, verified_tree, landed_sha,
+                              delivered_ms, pr_number, pr_url, pr_state, updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (item_id) DO UPDATE SET
+             attempt = excluded.attempt,
+             target = excluded.target,
+             head_sha = coalesce(excluded.head_sha, head_sha),
+             verified_tree = coalesce(excluded.verified_tree, verified_tree),
+             landed_sha = coalesce(excluded.landed_sha, landed_sha),
+             delivered_ms = coalesce(excluded.delivered_ms, delivered_ms),
+             pr_number = coalesce(excluded.pr_number, pr_number),
+             pr_url = coalesce(excluded.pr_url, pr_url),
+             pr_state = coalesce(excluded.pr_state, pr_state),
+             updated_ms = excluded.updated_ms",
+        item,
+        landing.attempt,
+        landing.target,
+        landing.head_sha,
+        landing.verified_tree,
+        landing.landed_sha,
+        landing.delivered_ms,
+        pr_number,
+        landing.pr_url,
+        pr_state,
+        landing.updated_ms,
     )
     .execute(conn)
     .await?;

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE lease_wait SET granted_ms = coalesce(granted_ms, ?)\n         WHERE holder = ? AND resource = ? AND filed_ms = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "2238b7df4ecb3fce24cc3fd14aaa75e537581c3669b888b08333a09676611831"
+}

@@ -4,7 +4,7 @@
 use bosun_core::{Attempt, Column, Exit, Item, ItemId, Reason, RunResult, SpawnMode};
 
 use super::codec;
-use super::{AgentCallKind, Snapshot};
+use super::{AgentCallKind, PrState, Snapshot, WorktreeKind, WorktreeState};
 use crate::error::{Error, from_db};
 use crate::read::Reader;
 
@@ -136,6 +136,78 @@ pub struct OutboxRow {
     pub tries: u32,
     pub last_error: Option<String>,
     pub created_ms: i64,
+}
+
+/// A worktree the daemon made (#8), as recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRow {
+    pub item: ItemId,
+    pub path: String,
+    pub branch: String,
+    pub base_sha: String,
+    pub kind: WorktreeKind,
+    pub state: WorktreeState,
+    /// A quarantined worktree: the file that blocked its removal, and the error.
+    pub blocking: Option<String>,
+    pub error: Option<String>,
+    /// Its size on disk when it was last measured.
+    pub bytes: Option<u64>,
+    /// The user's checkout at claim (E4), as JSON; `None` for a verdict checkout.
+    pub user_base_json: Option<String>,
+    pub created_ms: i64,
+    /// When it was removed or quarantined.
+    pub ended_ms: Option<i64>,
+}
+
+/// A session shim the daemon started (#8), with how far its output has been read (E18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRow {
+    pub item: ItemId,
+    pub attempt: u32,
+    pub spawn: u32,
+    pub session_key: String,
+    pub pid: u32,
+    pub pid_started_ms: i64,
+    pub record_path: String,
+    pub stdout_offset: u64,
+    pub stderr_offset: u64,
+    pub credential_digest: Option<Vec<u8>>,
+    pub started_ms: i64,
+    pub gone_ms: Option<i64>,
+}
+
+/// One wait for a leased resource (#8, E15): a request, its grant and its release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseWaitRow {
+    /// `None` for a `bosun with` command.
+    pub item: Option<ItemId>,
+    /// The holder's label.
+    pub holder: String,
+    pub resource: String,
+    pub filed_ms: i64,
+    pub granted_ms: Option<i64>,
+    pub released_ms: Option<i64>,
+}
+
+/// Where an item's landing stands (#8): every step of landing is redone from it. Written as
+/// [`crate::Write::Landing`], keyed by the item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandingRow {
+    pub item: ItemId,
+    pub attempt: u32,
+    /// The branch it lands on.
+    pub target: String,
+    /// The item's head after the rebase.
+    pub head_sha: Option<String>,
+    /// The tree its verdict passed on.
+    pub verified_tree: Option<String>,
+    /// The commit it landed as.
+    pub landed_sha: Option<String>,
+    pub delivered_ms: Option<i64>,
+    pub pr_number: Option<u64>,
+    pub pr_url: Option<String>,
+    pub pr_state: Option<PrState>,
+    pub updated_ms: i64,
 }
 
 fn number(value: i64, what: &'static str) -> Result<u32, Error> {
@@ -689,6 +761,205 @@ impl Reader {
             .fetch_one(&self.pool)
             .await?;
         last.map(|n| number(n, "boot number")).transpose()
+    }
+
+    /// The worktrees made for `item`, in the order they were made.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn worktrees(&self, item: &ItemId) -> Result<Vec<WorktreeRow>, Error> {
+        self.worktrees_where(Some(item), None).await
+    }
+
+    /// The worktrees still on disk (state `created`), of every item.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn open_worktrees(&self) -> Result<Vec<WorktreeRow>, Error> {
+        self.worktrees_where(None, Some(WorktreeState::Created))
+            .await
+    }
+
+    /// The quarantined worktrees, of every item.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn quarantined_worktrees(&self) -> Result<Vec<WorktreeRow>, Error> {
+        self.worktrees_where(None, Some(WorktreeState::Quarantined))
+            .await
+    }
+
+    async fn worktrees_where(
+        &self,
+        item: Option<&ItemId>,
+        state: Option<WorktreeState>,
+    ) -> Result<Vec<WorktreeRow>, Error> {
+        let key = item.map(|id| id.0.as_str());
+        let state = state.map(codec::worktree_state);
+        let rows = sqlx::query!(
+            "SELECT i.item_key, w.path, w.branch, w.base_sha, w.kind, w.state, w.blocking,
+                    w.error, w.bytes, w.user_base_json, w.created_ms, w.ended_ms
+             FROM worktree w JOIN item i ON i.id = w.item_id
+             WHERE (?1 IS NULL OR i.item_key = ?1) AND (?2 IS NULL OR w.state = ?2)
+             ORDER BY w.id",
+            key,
+            state,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(WorktreeRow {
+                    item: ItemId::new(row.item_key),
+                    path: row.path,
+                    branch: row.branch,
+                    base_sha: row.base_sha,
+                    kind: codec::parse_worktree_kind(&row.kind)?,
+                    state: codec::parse_worktree_state(&row.state)?,
+                    blocking: row.blocking,
+                    error: row.error,
+                    bytes: row.bytes.map(|b| from_db(b, "worktree size")).transpose()?,
+                    user_base_json: row.user_base_json,
+                    created_ms: row.created_ms,
+                    ended_ms: row.ended_ms,
+                })
+            })
+            .collect()
+    }
+
+    /// The session shims not known to be gone, of every item, in the order they started.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn processes(&self) -> Result<Vec<ProcessRow>, Error> {
+        let rows = sqlx::query!(
+            "SELECT i.item_key, p.attempt, p.spawn, p.session_key, p.pid, p.pid_started_ms,
+                    p.record_path, p.stdout_offset, p.stderr_offset, p.credential_digest,
+                    p.started_ms, p.gone_ms
+             FROM process p JOIN item i ON i.id = p.item_id
+             WHERE p.gone_ms IS NULL
+             ORDER BY p.id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProcessRow {
+                    item: ItemId::new(row.item_key),
+                    attempt: number(row.attempt, "attempt number")?,
+                    spawn: number(row.spawn, "spawn number")?,
+                    session_key: row.session_key,
+                    pid: number(row.pid, "pid")?,
+                    pid_started_ms: row.pid_started_ms,
+                    record_path: row.record_path,
+                    stdout_offset: from_db(row.stdout_offset, "stdout offset")?,
+                    stderr_offset: from_db(row.stderr_offset, "stderr offset")?,
+                    credential_digest: row.credential_digest,
+                    started_ms: row.started_ms,
+                    gone_ms: row.gone_ms,
+                })
+            })
+            .collect()
+    }
+
+    /// The lease waits filed with `from_ms <= filed_ms < to_ms`, in the order they were filed.
+    ///
+    /// # Errors
+    ///
+    /// A database error.
+    pub async fn lease_waits(&self, from_ms: i64, to_ms: i64) -> Result<Vec<LeaseWaitRow>, Error> {
+        let rows = sqlx::query!(
+            r#"SELECT i.item_key AS "item_key?: String", l.holder, l.resource, l.filed_ms,
+                      l.granted_ms, l.released_ms
+               FROM lease_wait l LEFT JOIN item i ON i.id = l.item_id
+               WHERE l.filed_ms >= ? AND l.filed_ms < ?
+               ORDER BY l.filed_ms, l.id"#,
+            from_ms,
+            to_ms,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| LeaseWaitRow {
+                item: row.item_key.map(ItemId::new),
+                holder: row.holder,
+                resource: row.resource,
+                filed_ms: row.filed_ms,
+                granted_ms: row.granted_ms,
+                released_ms: row.released_ms,
+            })
+            .collect())
+    }
+
+    /// Where the landing of `item` stands, if it has begun.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn landing(&self, item: &ItemId) -> Result<Option<LandingRow>, Error> {
+        Ok(self
+            .landings_where(Some(item), None)
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    /// The landings whose pull request is open, of every item.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn open_pull_requests(&self) -> Result<Vec<LandingRow>, Error> {
+        self.landings_where(None, Some(PrState::Open)).await
+    }
+
+    async fn landings_where(
+        &self,
+        item: Option<&ItemId>,
+        pr_state: Option<PrState>,
+    ) -> Result<Vec<LandingRow>, Error> {
+        let key = item.map(|id| id.0.as_str());
+        let pr_state = pr_state.map(codec::pr_state);
+        let rows = sqlx::query!(
+            "SELECT i.item_key, l.attempt, l.target, l.head_sha, l.verified_tree, l.landed_sha,
+                    l.delivered_ms, l.pr_number, l.pr_url, l.pr_state, l.updated_ms
+             FROM landing l JOIN item i ON i.id = l.item_id
+             WHERE (?1 IS NULL OR i.item_key = ?1) AND (?2 IS NULL OR l.pr_state = ?2)
+             ORDER BY l.id",
+            key,
+            pr_state,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(LandingRow {
+                    item: ItemId::new(row.item_key),
+                    attempt: number(row.attempt, "attempt number")?,
+                    target: row.target,
+                    head_sha: row.head_sha,
+                    verified_tree: row.verified_tree,
+                    landed_sha: row.landed_sha,
+                    delivered_ms: row.delivered_ms,
+                    pr_number: row
+                        .pr_number
+                        .map(|n| from_db(n, "pull request number"))
+                        .transpose()?,
+                    pr_url: row.pr_url,
+                    pr_state: row
+                        .pr_state
+                        .as_deref()
+                        .map(codec::parse_pr_state)
+                        .transpose()?,
+                    updated_ms: row.updated_ms,
+                })
+            })
+            .collect()
     }
 
     /// The state names of every item, with how many items are in each: for the overview.

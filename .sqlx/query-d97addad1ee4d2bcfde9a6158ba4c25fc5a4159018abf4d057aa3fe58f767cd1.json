@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE lease_wait SET released_ms = ?\n         WHERE holder = ? AND granted_ms IS NOT NULL AND released_ms IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "d97addad1ee4d2bcfde9a6158ba4c25fc5a4159018abf4d057aa3fe58f767cd1"
+}

@@ -1693,6 +1693,23 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #150: the worktree, process, lease-wait and landing tables.
+    Mutant {
+        name: "mutant_store_process_offsets_overwrite",
+        issue: 150,
+        breaks: "a process's output offsets go back when a smaller offset is written",
+        package: "bosun-store",
+        check: Check::Test("work::tests::a_worktree_its_process_and_its_landing_read_back"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_lease_wait_duplicates",
+        issue: 150,
+        breaks: "a replayed lease request is a second wait row, or fails its batch",
+        package: "bosun-store",
+        check: Check::Test("work::tests::a_lease_wait_is_filed_granted_and_released_once"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

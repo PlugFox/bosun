@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO worktree (item_id, path, branch, base_sha, kind, user_base_json, created_ms)\n         VALUES (?, ?, ?, ?, ?, ?, ?)\n         ON CONFLICT (path) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "13980b425d01c67c78769b93f54ee424f252e26146bad6942d967741ac66889b"
+}

@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.item_key, l.attempt, l.target, l.head_sha, l.verified_tree, l.landed_sha,\n                    l.delivered_ms, l.pr_number, l.pr_url, l.pr_state, l.updated_ms\n             FROM landing l JOIN item i ON i.id = l.item_id\n             WHERE (?1 IS NULL OR i.item_key = ?1) AND (?2 IS NULL OR l.pr_state = ?2)\n             ORDER BY l.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "item_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "item_key"
+          }
+        }
+      },
+      {
+        "name": "attempt",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "attempt"
+          }
+        }
+      },
+      {
+        "name": "target",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "target"
+          }
+        }
+      },
+      {
+        "name": "head_sha",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "head_sha"
+          }
+        }
+      },
+      {
+        "name": "verified_tree",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "verified_tree"
+          }
+        }
+      },
+      {
+        "name": "landed_sha",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "landed_sha"
+          }
+        }
+      },
+      {
+        "name": "delivered_ms",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "delivered_ms"
+          }
+        }
+      },
+      {
+        "name": "pr_number",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "pr_number"
+          }
+        }
+      },
+      {
+        "name": "pr_url",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "pr_url"
+          }
+        }
+      },
+      {
+        "name": "pr_state",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "pr_state"
+          }
+        }
+      },
+      {
+        "name": "updated_ms",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "landing",
+            "name": "updated_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "f74f39a0a54b8bca745823de182c3d7849689f0a490f504efc53b166cee74a83"
+}

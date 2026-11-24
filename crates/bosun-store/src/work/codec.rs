@@ -2,13 +2,15 @@
 //!
 //! The state and attempt-state names come from `bosun_core` (`as_str`); the detail of a state
 //! (a park, an outcome, a reason) and the smaller enums are named here. Every name is in a
-//! `CHECK` of migration 0005, so a value that does not read back is corruption.
+//! `CHECK` of migration 0005 (stage 2's of migration 0013), so a value that does not read back
+//! is corruption.
 
 use bosun_core::{
     AttemptState, Column, EffectKind, Exit, Guard, Next, Outcome, Park, ParkReason, Reason,
     RunResult, SpawnMode, State,
 };
 
+use super::{PrState, WorktreeKind, WorktreeState};
 use crate::error::Error;
 
 fn corrupt(what: &str, value: &str) -> Error {
@@ -279,6 +281,55 @@ pub(crate) fn effect_kind(kind: EffectKind) -> &'static str {
     }
 }
 
+pub(crate) fn worktree_kind(kind: WorktreeKind) -> &'static str {
+    match kind {
+        WorktreeKind::Item => "item",
+        WorktreeKind::Verdict => "verdict",
+    }
+}
+
+pub(crate) fn parse_worktree_kind(name: &str) -> Result<WorktreeKind, Error> {
+    Ok(match name {
+        "item" => WorktreeKind::Item,
+        "verdict" => WorktreeKind::Verdict,
+        other => return Err(corrupt("worktree kind", other)),
+    })
+}
+
+pub(crate) fn worktree_state(state: WorktreeState) -> &'static str {
+    match state {
+        WorktreeState::Created => "created",
+        WorktreeState::Removed => "removed",
+        WorktreeState::Quarantined => "quarantined",
+    }
+}
+
+pub(crate) fn parse_worktree_state(name: &str) -> Result<WorktreeState, Error> {
+    Ok(match name {
+        "created" => WorktreeState::Created,
+        "removed" => WorktreeState::Removed,
+        "quarantined" => WorktreeState::Quarantined,
+        other => return Err(corrupt("worktree state", other)),
+    })
+}
+
+pub(crate) fn pr_state(state: PrState) -> &'static str {
+    match state {
+        PrState::Open => "open",
+        PrState::Merged => "merged",
+        PrState::Closed => "closed",
+    }
+}
+
+pub(crate) fn parse_pr_state(name: &str) -> Result<PrState, Error> {
+    Ok(match name {
+        "open" => PrState::Open,
+        "merged" => PrState::Merged,
+        "closed" => PrState::Closed,
+        other => return Err(corrupt("pull request state", other)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +427,19 @@ mod tests {
         ] {
             let (name, reset) = exit(e);
             assert_eq!(parse_exit(name, reset).unwrap(), e);
+        }
+        for kind in [WorktreeKind::Item, WorktreeKind::Verdict] {
+            assert_eq!(parse_worktree_kind(worktree_kind(kind)).unwrap(), kind);
+        }
+        for state in [
+            WorktreeState::Created,
+            WorktreeState::Removed,
+            WorktreeState::Quarantined,
+        ] {
+            assert_eq!(parse_worktree_state(worktree_state(state)).unwrap(), state);
+        }
+        for state in [PrState::Open, PrState::Merged, PrState::Closed] {
+            assert_eq!(parse_pr_state(pr_state(state)).unwrap(), state);
         }
         assert!(parse_attempt_state("nope").is_err());
         assert!(parse_state("parked", None, None, Some("resume"), None, None).is_err());

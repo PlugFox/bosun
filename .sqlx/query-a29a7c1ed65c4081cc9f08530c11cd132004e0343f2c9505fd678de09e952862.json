@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE process SET gone_ms = coalesce(gone_ms, ?) WHERE record_path = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a29a7c1ed65c4081cc9f08530c11cd132004e0343f2c9505fd678de09e952862"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO lease_wait (item_id, holder, resource, filed_ms) VALUES (?, ?, ?, ?)\n             ON CONFLICT (holder, resource, filed_ms) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "fb0e14a82101d6dfd59a7e5764964b39da22bba1be22754e6c078d8c36113b6a"
+}

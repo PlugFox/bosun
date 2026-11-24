@@ -123,8 +123,12 @@ pub struct Record {
     pub version: u32,
     /// The shim's pid and start time.
     pub shim: ProcessKey,
-    /// The child's pid and start time.
+    /// The child's pid and start time. On Unix the child leads the container's process group,
+    /// so its pid is also the group's id.
     pub child: ProcessKey,
+    /// Windows: the value of the shim's handle to the container's job, through which another
+    /// process lists the container ([`crate::Tree::members`]). `None` on Unix.
+    pub job: Option<u64>,
     /// The child's stdout file.
     pub stdout: PathBuf,
     /// The child's stderr file.
@@ -336,6 +340,9 @@ impl Record {
         line("shim-start", &self.shim.start.raw().to_string());
         line("child-pid", &self.child.pid.to_string());
         line("child-start", &self.child.start.raw().to_string());
+        if let Some(job) = self.job {
+            line("job", &job.to_string());
+        }
         line("stdout", utf8(self.stdout.as_os_str())?);
         line("stderr", utf8(self.stderr.as_os_str())?);
         match self.exit {
@@ -356,6 +363,7 @@ impl Record {
         let (mut shim_pid, mut shim_start, mut child_pid, mut child_start) =
             (None, None, None, None);
         let (mut stdout, mut stderr, mut exit, mut capped) = (None, None, None, false);
+        let mut job = None;
         for (key, value) in lines(text, RECORD_HEADER, RECORD_VERSION)? {
             let value = decode(value)?;
             match key {
@@ -363,6 +371,7 @@ impl Record {
                 "shim-start" => shim_start = Some(number(key, &value)?),
                 "child-pid" => child_pid = Some(number(key, &value)?),
                 "child-start" => child_start = Some(number(key, &value)?),
+                "job" => job = Some(number(key, &value)?),
                 "stdout" => stdout = Some(PathBuf::from(value)),
                 "stderr" => stderr = Some(PathBuf::from(value)),
                 "exit-code" => exit = Some(Exit::Code(number(key, &value)?)),
@@ -383,6 +392,7 @@ impl Record {
             version: RECORD_VERSION,
             shim: key(shim_pid, shim_start, "shim")?,
             child: key(child_pid, child_start, "child")?,
+            job,
             stdout: stdout.ok_or_else(|| missing("stdout"))?,
             stderr: stderr.ok_or_else(|| missing("stderr"))?,
             exit,
@@ -453,7 +463,7 @@ pub fn run(spec_path: &Path) -> io::Result<i32> {
         .stderr(File::create(&stderr)?);
 
     let mut record = None;
-    let (mut child, container) = sys::spawn_gated(&mut command, |pid, start| {
+    let (mut child, container) = sys::spawn_gated(&mut command, |pid, start, job| {
         let first = Record {
             version: RECORD_VERSION,
             shim: ProcessKey {
@@ -464,6 +474,7 @@ pub fn run(spec_path: &Path) -> io::Result<i32> {
                 pid,
                 start: StartTime::from_raw(start),
             },
+            job,
             stdout: stdout.clone(),
             stderr: stderr.clone(),
             exit: None,
@@ -614,6 +625,14 @@ impl ShimSpawner {
             use std::os::windows::process::CommandExt;
             command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
         }
+        // Unix: the shim leads a group of its own (and its child another), so a signal to the
+        // holder's group (a terminal's Ctrl-C, a kill of the daemon's group) does not reach the
+        // session, and a kill of the session's group does not reach the holder.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let mut shim = command.spawn()?;
         let deadline = Instant::now() + RECORD_PATIENCE;
         let first = loop {
@@ -712,6 +731,7 @@ fn session(
         record: path.to_path_buf(),
         child: record.child,
         shim_key: record.shim,
+        job: record.job,
         shim,
     };
     Ok(Spawned {
@@ -798,6 +818,12 @@ struct ShimTree {
     record: PathBuf,
     child: ProcessKey,
     shim_key: ProcessKey,
+    /// Windows: the shim's handle value of the job ([`Record::job`]).
+    #[cfg_attr(
+        unix,
+        expect(dead_code, reason = "the Unix container is the child's group")
+    )]
+    job: Option<u64>,
     /// The shim, when this process started it: reaped as soon as it exits.
     shim: Option<std::process::Child>,
 }
@@ -833,22 +859,25 @@ impl Tree for ShimTree {
         crate::key::reap(self.child).map(|_| ())
     }
 
-    /// The container cannot be listed from outside the shim on Windows: the child while it
-    /// runs. On Unix, the child's process group while the shim runs.
+    /// The container, as for the native tree. Windows: the shim's job, through a query-only
+    /// duplicate of the shim's handle ([`Record::job`]); nothing once the shim is gone, since
+    /// its job died with it. Unix: the child's process group (its id is the child's pid), best
+    /// effort as the native one, and listed after the shim is gone too, since on Unix what the
+    /// shim left behind lives on in the group (see the module documentation).
     fn members(&self) -> io::Result<Vec<u32>> {
-        if !is_running(self.shim_key) {
-            return Ok(Vec::new());
-        }
         #[cfg(unix)]
         {
             sys::group_members(self.child.pid)
         }
         #[cfg(windows)]
         {
-            Ok(is_running(self.child)
-                .then_some(self.child.pid)
-                .into_iter()
-                .collect())
+            let job = self.job.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "the record names no job")
+            })?;
+            Ok(
+                sys::job_members_of(self.shim_key.pid, self.shim_key.start.raw(), job)?
+                    .unwrap_or_default(),
+            )
         }
     }
 
@@ -948,6 +977,7 @@ mod tests {
                 pid: 20,
                 start: StartTime::from_raw(u64::MAX),
             },
+            job: None,
             stdout: PathBuf::from("/out/stdout"),
             stderr: PathBuf::from("/out/stderr"),
             exit: None,
@@ -957,6 +987,7 @@ mod tests {
         assert_eq!(decoded, record);
         record.exit = Some(Exit::Code(-1));
         record.capped = true;
+        record.job = Some(0x1a4);
         let decoded = Record::decode(&record.encode().expect("encode")).expect("decode");
         assert_eq!(decoded, record);
         record.exit = Some(Exit::Signal(9));

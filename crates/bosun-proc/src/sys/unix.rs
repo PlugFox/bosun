@@ -187,9 +187,13 @@ fn pipe() -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
 }
 
 /// Spawns `command` as the leader of a new process group (on Linux with the parent-death
-/// signal, as [`spawn_contained`]), calls `before_run` with its pid and start time, and only
-/// then lets it `exec`: the program runs no instruction before `before_run` has returned `Ok`.
-/// When it fails, the child exits before `exec` and the spawn fails.
+/// signal, as [`spawn_contained`]), calls `before_run` with its pid and start time (and `None`:
+/// the container needs no handle, the record's child pid names the group), and only then lets
+/// it `exec`: the program runs no instruction before `before_run` has returned `Ok`. When it
+/// fails, the child exits before `exec` and the spawn fails.
+///
+/// The group is the child's own, never the caller's: killing the container (`kill(-pgid)`, or a
+/// [`reap`] of the child's key) must not reach the shim or whoever started it.
 ///
 /// Unix has no suspended start, so the forked child itself holds the gate: before `exec` it
 /// writes its pid to one pipe and blocks reading a byte from another. A second thread reads the
@@ -199,7 +203,7 @@ fn pipe() -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
 /// descriptors are closed when this returns.
 pub(crate) fn spawn_gated(
     command: &mut std::process::Command,
-    before_run: impl FnOnce(u32, u64) -> io::Result<()> + Send,
+    before_run: impl FnOnce(u32, u64, Option<u64>) -> io::Result<()> + Send,
 ) -> io::Result<(std::process::Child, Container)> {
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
@@ -213,7 +217,12 @@ pub(crate) fn spawn_gated(
         gate_read.as_raw_fd(),
         gate_write.as_raw_fd(),
     );
-    command.process_group(0);
+    if cfg!(mutant_shim_child_shares_the_group) {
+        // Mutant (`mutant_shim_child_shares_the_group`): the child stays in the shim's group, so
+        // the container's `kill(-pgid)` finds no group and its descendants outlive a kill.
+    } else {
+        command.process_group(0);
+    }
     #[cfg(target_os = "linux")]
     let parent = pid_t(std::process::id())?;
     // SAFETY: the closure runs in the forked child before `exec` and calls only `prctl`,
@@ -260,7 +269,7 @@ pub(crate) fn spawn_gated(
                 .map_err(|_| io::Error::other("a negative pid"))?;
             let start =
                 read_start(pid, true)?.ok_or_else(|| io::Error::other("the child has no start"))?;
-            before_run(pid, start)?;
+            before_run(pid, start, None)?;
             std::fs::File::from(gate_write).write_all(&[1])
         });
         let spawned = command.spawn();

@@ -1510,6 +1510,15 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("attach_refuses_a_record_whose_pid_changed_hands"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_shim_child_shares_the_group",
+        issue: 130,
+        breaks: "the shim's child stays in the shim's process group; a kill misses its descendants",
+        package: "bosun-proc",
+        check: Check::Test("a_session_lists_its_container_and_kill_tree_ends_it"),
+        // Process groups are Unix; the test reads the groups from `/proc`.
+        platform: Some(Platform::Linux),
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

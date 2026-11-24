@@ -348,6 +348,109 @@ fn a_session_survives_its_holder_and_is_reattached() {
     assert!(left.is_empty(), "still running after the exit: {left:?}");
 }
 
+/// Linux: the process group of `pid`, field 5 of `/proc/<pid>/stat` counted from the last `)`.
+#[cfg(target_os = "linux")]
+fn group_of(pid: u32) -> u32 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
+    let rest = &stat[stat.rfind(')').expect("comm") + 1..];
+    rest.split_ascii_whitespace()
+        .nth(2)
+        .expect("pgrp")
+        .parse()
+        .expect("a number")
+}
+
+/// A session of `ShimSpawner` whose child has started a grandchild: `members`, from outside the
+/// shim, lists both; `kill_tree` ends both within 5 s and nothing else: the shim lives on to
+/// record the exit, and afterwards nothing is listed. On Unix the child leads a group of its
+/// own, apart from the shim's and this process's, which is what keeps the kill off them.
+#[test]
+fn a_session_lists_its_container_and_kill_tree_ends_it() {
+    use tokio::io::AsyncReadExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = ShimSpawner::new(
+        env!("CARGO_BIN_EXE_bosun-shim"),
+        dir.path().join("sessions"),
+        SLEEP * 2,
+    );
+    let child = ChildSpec {
+        program: std::env::current_exe().expect("current exe"),
+        args: ["run_role", "--exact", "--nocapture", "--quiet"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        env: role_env("parent"),
+        cwd: dir.path().to_path_buf(),
+        stdin: false,
+    };
+    let session = dir.path().join("session");
+    let (child, grandchild, listed, status, left, after) = runtime().block_on(async {
+        let mut spawned = shim.spawn_in(&child, &session).expect("spawn");
+        let mut seen = Vec::new();
+        let grandchild: u32 = loop {
+            if let Some(pid) = parse(&String::from_utf8_lossy(&seen)).remove("grandchild") {
+                break pid.parse().expect("pid");
+            }
+            let mut chunk = [0_u8; 256];
+            let read = spawned.stdout.read(&mut chunk).await.expect("read");
+            assert!(read > 0, "stdout ended before the grandchild's report");
+            seen.extend_from_slice(&chunk[..read]);
+        };
+        let grandchild = ProcessKey {
+            pid: grandchild,
+            start: start_time(grandchild).expect("start time").expect("live"),
+        };
+        let child = spawned.tree.key();
+        let listed = poll("both in the members", || {
+            let members = spawned.tree.members().expect("members");
+            (members.contains(&child.pid) && members.contains(&grandchild.pid)).then_some(members)
+        });
+        #[cfg(target_os = "linux")]
+        {
+            let record = Record::read(&session_record(&session)).expect("record");
+            assert_eq!(group_of(child.pid), child.pid, "the child leads no group");
+            assert_eq!(group_of(grandchild.pid), child.pid);
+            assert_ne!(
+                group_of(record.shim.pid),
+                child.pid,
+                "the shim is in the group"
+            );
+            assert_ne!(
+                group_of(std::process::id()),
+                child.pid,
+                "the holder is in it"
+            );
+        }
+        spawned.tree.kill_tree().expect("kill tree");
+        let status = spawned.tree.wait().await.expect("wait");
+        let left = survivors(&[child, grandchild], Duration::from_secs(5));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let after = loop {
+            let members = spawned.tree.members().expect("members");
+            if members.is_empty() || Instant::now() >= deadline {
+                break members;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        (child, grandchild, listed, status, left, after)
+    });
+    for &key in &left {
+        reap(key).ok();
+    }
+    let record = Record::read(&session_record(&session)).expect("record");
+    assert!(left.is_empty(), "still running after kill_tree: {left:?}");
+    assert!(
+        listed.contains(&child.pid) && listed.contains(&grandchild.pid),
+        "{listed:?}"
+    );
+    assert!(
+        record.exit.is_some(),
+        "the shim recorded no exit: the kill reached it ({status})"
+    );
+    assert!(after.is_empty(), "listed after the kill: {after:?}");
+}
+
 /// A record without an exit whose shim pid is live under another start time is refused; the
 /// same record with the live process's own start time is attached.
 #[test]
@@ -368,6 +471,7 @@ fn attach_refuses_a_record_whose_pid_changed_hands() {
         version: RECORD_VERSION,
         shim: live,
         child: live,
+        job: None,
         stdout,
         stderr,
         exit: None,

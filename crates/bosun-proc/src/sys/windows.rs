@@ -7,8 +7,8 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FILETIME, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    DuplicateHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FILETIME,
+    HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -25,10 +25,10 @@ use windows_sys::Win32::System::Power::{
     PowerClearRequest, PowerCreateRequest, PowerRequestSystemRequired, PowerSetRequest,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, GetProcessTimes, OpenProcess, OpenThread,
-    POWER_REQUEST_CONTEXT_SIMPLE_STRING, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, REASON_CONTEXT, REASON_CONTEXT_0, ResumeThread,
-    THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, GetCurrentProcess, GetProcessTimes, OpenProcess,
+    OpenThread, POWER_REQUEST_CONTEXT_SIMPLE_STRING, PROCESS_ACCESS_RIGHTS, PROCESS_DUP_HANDLE,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, REASON_CONTEXT,
+    REASON_CONTEXT_0, ResumeThread, THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
 };
 
 /// `POWER_REQUEST_CONTEXT_VERSION` of `minwinbase.h`; `windows-sys` does not export it.
@@ -36,6 +36,10 @@ const POWER_REQUEST_CONTEXT_VERSION: u32 = 0;
 
 /// The exit code of a process bosun kills.
 const KILLED: u32 = 1;
+
+/// `JOB_OBJECT_QUERY` of `winnt.h`: the right to query a job. `windows-sys` has it under
+/// `Win32_System_SystemServices`, a large feature for one constant.
+const JOB_OBJECT_QUERY: u32 = 4;
 
 /// Takes ownership of a handle a call just returned; `None` for a null one.
 fn owned(raw: HANDLE) -> Option<OwnedHandle> {
@@ -271,13 +275,14 @@ pub(crate) fn spawn_contained(
     Ok((child, container))
 }
 
-/// Spawns `command` suspended in a new job, calls `before_run` with its pid and start time,
-/// and only then resumes it: the child runs no instruction before `before_run` has returned
-/// `Ok`. When it fails, the child is killed and the error returned. No console window is
-/// created.
+/// Spawns `command` suspended in a new job, calls `before_run` with its pid, its start time and
+/// the value of this process's handle to the job ([`job_members_of`] lists the job through
+/// it), and only then resumes it: the child runs no instruction before `before_run` has
+/// returned `Ok`. When it fails, the child is killed and the error returned. No console window
+/// is created.
 pub(crate) fn spawn_gated(
     command: &mut std::process::Command,
-    before_run: impl FnOnce(u32, u64) -> io::Result<()>,
+    before_run: impl FnOnce(u32, u64, Option<u64>) -> io::Result<()>,
 ) -> io::Result<(std::process::Child, Container)> {
     use std::os::windows::process::CommandExt;
 
@@ -285,10 +290,12 @@ pub(crate) fn spawn_gated(
     command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
     let mut child = command.spawn()?;
     let pid = child.id();
+    // A handle is an opaque value of this process; it is recorded, never dereferenced here.
+    let job = container.job.as_raw_handle() as usize as u64;
     let started = container
         .assign(child.as_raw_handle())
         .and_then(|()| creation_time(child.as_raw_handle()))
-        .and_then(|start| before_run(pid, start))
+        .and_then(|start| before_run(pid, start, Some(job)))
         .and_then(|()| resume(pid));
     if let Err(e) = started {
         child.kill().ok();
@@ -349,6 +356,51 @@ fn open_live(pid: u32, access: PROCESS_ACCESS_RIGHTS) -> io::Result<Option<Owned
     // SAFETY: the handle is live and was opened with `SYNCHRONIZE`; a zero timeout only polls.
     let exited = unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_OBJECT_0;
     Ok((!exited).then_some(process))
+}
+
+/// The members of the job that the live process `holder` (pid and start time) holds under the
+/// handle value `job`, as [`spawn_gated`] reports it: the handle is duplicated into this
+/// process with query access only, the job listed, and the duplicate closed. `None` when no
+/// process with that pid and start time runs: the holder is gone, and its job died with it.
+///
+/// While the duplicate is open the job has a second handle, so a holder that dies in that
+/// window takes its container down only when the duplicate closes, microseconds later.
+pub(crate) fn job_members_of(holder: u32, start: u64, job: u64) -> io::Result<Option<Vec<u32>>> {
+    let Some(process) = open_live(
+        holder,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_DUP_HANDLE,
+    )?
+    else {
+        return Ok(None);
+    };
+    // The start time is read through the handle that duplicates: the pid cannot change hands
+    // in between.
+    if creation_time(process.as_raw_handle())? != start {
+        return Ok(None);
+    }
+    let source =
+        usize::try_from(job).map_err(|_| io::Error::other("a job handle out of range"))? as HANDLE;
+    let mut duplicate: HANDLE = ptr::null_mut();
+    // SAFETY: `process` is live and was opened with `PROCESS_DUP_HANDLE`; `source` is a value
+    // in that process's handle table, which the call validates (a stale or foreign value fails
+    // or yields a handle the job query refuses); the current-process pseudo handle needs no
+    // closing; `duplicate` is a writable local.
+    let ok = unsafe {
+        DuplicateHandle(
+            process.as_raw_handle(),
+            source,
+            GetCurrentProcess(),
+            &raw mut duplicate,
+            JOB_OBJECT_QUERY,
+            0,
+            0,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let duplicate = owned(duplicate).ok_or_else(|| io::Error::other("a null duplicate"))?;
+    job_members(duplicate.as_raw_handle()).map(Some)
 }
 
 pub(crate) fn start_time(pid: u32) -> io::Result<Option<u64>> {

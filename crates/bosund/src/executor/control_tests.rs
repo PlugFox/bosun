@@ -246,6 +246,8 @@ async fn the_kill_switch_leaves_no_child_and_writes_no_board() {
             .expect("the session runs"),
     };
     assert!(bosun_proc::is_running(key));
+    // The writes queued before the kill (the claim's column and report) are sent first.
+    drained(&scene).await;
     let board = std::fs::read_to_string(&scene.board).unwrap();
 
     let thrown = Instant::now();
@@ -340,6 +342,8 @@ async fn an_item_over_its_eqv_or_wall_clock_cap_is_killed_and_needs_you() {
     }
     std::fs::write(scene.path("release2"), "").unwrap();
     let two = ended(&scene, 2, Duration::from_secs(60)).await;
+    // The board gets every row before the loop (and its drainer) stops.
+    drained(&scene).await;
     task.abort();
     watcher.abort();
 
@@ -355,6 +359,70 @@ async fn an_item_over_its_eqv_or_wall_clock_cap_is_killed_and_needs_you() {
     assert_eq!(figures[1]["item"], "demo#2");
     let used: u64 = figures[1]["used"].as_str().unwrap().parse().unwrap();
     assert!(used >= 2 * 3_600_000, "{figures:?}");
+
+    // #111: the Needs-you comment and the sticky report show the figure that tripped.
+    for (n, figure) in [
+        (1, "1,500,000 eqv of its 1,000,000 eqv cap"),
+        (2, "active wall clock 121 min of its 120 min cap"),
+    ] {
+        let card = scene.cards().into_iter().find(|c| c.id.0 == n).unwrap();
+        let keyed = |prefix: &str| -> Vec<String> {
+            card.comments
+                .iter()
+                .filter(|c| c.key.as_deref().is_some_and(|k| k.starts_with(prefix)))
+                .map(|c| c.body.clone())
+                .collect()
+        };
+        let reports = keyed("report:");
+        assert_eq!(reports.len(), 1, "item {n}: {:#?}", card.comments);
+        assert!(reports[0].contains(figure), "item {n}: {}", reports[0]);
+        let needs: Vec<String> = keyed(&format!("demo#{n}/"))
+            .into_iter()
+            .filter(|b| b.contains("needs you"))
+            .collect();
+        assert_eq!(needs.len(), 1, "item {n}: {:#?}", card.comments);
+        assert!(needs[0].contains(figure), "item {n}: {}", needs[0]);
+    }
+}
+
+/// #111: the sticky report of a finished item shows its cost, the eqv of its run sessions'
+/// messages, and the model each attempt ran.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_sticky_report_of_a_finished_item_shows_its_eqv_and_model() {
+    let scene = Scene::new().await;
+    let p = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[card(1, "Costed", "test -f one.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            format!("write {} x", p("flag1")),
+            format!("wait {}", p("release1")),
+            "commit one.txt one".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    wait_file(&scene.path("flag1")).await;
+    let session = scene.runs(1).await.remove(0).session_key;
+    scene.usage(1, &session, 123_456).await;
+    std::fs::write(scene.path("release1"), "").unwrap();
+    let state = ended(&scene, 1, Duration::from_secs(60)).await;
+    assert_eq!(state, State::Done(Outcome::Pass));
+    drained(&scene).await;
+    task.abort();
+    watcher.abort();
+    let card = scene.cards().into_iter().find(|c| c.id.0 == 1).unwrap();
+    let report = card
+        .comments
+        .iter()
+        .find(|c| c.key.as_deref() == Some("report:demo#1"))
+        .map(|c| c.body.clone())
+        .expect("the sticky report");
+    for want in [
+        "Cost: eqv 123,456; tokens 123,456 in".to_owned(),
+        format!("model `{}`", bosun_core::DEFAULT_REFERENCE_MODEL),
+    ] {
+        assert!(report.contains(&want), "{want:?} missing from {report}");
+    }
 }
 
 /// #67: reaching the daily cap (less the reserve) parks the queue; the loop's clock passing

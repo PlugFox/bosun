@@ -741,6 +741,42 @@ async fn snapshots_comments_flaky_tests_and_boots() {
         [(1, "tests::a".to_owned()), (1, "tests::b".to_owned())]
     );
 
+    // An item's notes (#111): one per kind, the last write wins.
+    assert_eq!(store.reader().item_note(&id(), "lint").await.unwrap(), None);
+    let note = |kind: &str, body: &str| Write::ItemNote {
+        item: id(),
+        kind: kind.to_owned(),
+        body: body.to_owned(),
+        at_ms: T0,
+    };
+    store
+        .writer()
+        .write(vec![
+            note("lint", "[\"first\"]"),
+            note("lint", "[\"second\"]"),
+            note("budget", "{}"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .reader()
+            .item_note(&id(), "lint")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("[\"second\"]")
+    );
+    assert_eq!(
+        store
+            .reader()
+            .item_note(&id(), "budget")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("{}")
+    );
+
     assert_eq!(store.reader().last_boot().await.unwrap(), None);
     store
         .writer()

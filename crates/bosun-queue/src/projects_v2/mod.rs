@@ -31,6 +31,8 @@
 //!   else) are kept whatever the list says, with their key and an empty body (#106): the
 //!   daemon must see its own claim markers and stickies, and a second daemon's, even when its
 //!   login is not on its own list. Their text is never reported, so never inlined.
+//! - **Closed issues.** A closed issue stays on the board in its column, with
+//!   [`Card::closed`] set: the daemon cancels its item and never claims it (#5, #111).
 //! - **Dependencies.** GitHub's own issue dependencies (`blockedBy`) within the repository are
 //!   reported in [`Card::blocked_by`], beside the contract's `blocked-by` (see
 //!   [`Card::blockers`]). A blocker in another repository cannot be named by an [`ItemId`] and
@@ -51,6 +53,10 @@
 //!   comment the user deleted is never reposted by [`Queue::comment`] and is recreated once by
 //!   [`Queue::upsert_comment`]; deleted again, it stays deleted. The backend remembers which
 //!   comments it posted or found, and which it recreated, for its lifetime.
+//! - **Labels.** [`Queue::add_label`] puts a label the repository already has (one lookup by
+//!   name, then `addLabelsToLabelable`); a label the repository lacks is
+//!   [`QueueError::Setup`], since creating labels is the user's. [`Queue::remove_label`]
+//!   removes one by its node id.
 //! - **Claim.** [`crate::claim()`] runs on these writes and on [`Queue::lint_target`] as the
 //!   re-read.
 //! - **Typed errors.** A secondary rate limit (a 403 or 429 with `Retry-After`, or a message
@@ -185,6 +191,7 @@ struct Issue {
     labels: Vec<String>,
     /// The node id of each label, by name: what a label removal names.
     label_ids: Vec<(String, String)>,
+    closed: bool,
     comments: Vec<RawComment>,
     blocked_by: Vec<(String, u64)>,
 }
@@ -315,6 +322,7 @@ const ISSUE_FIELDS: &str = "fragment Fields on Issue {
   number
   title
   body
+  closed
   author { login }
   editor { login }
   labels(first: 100) { nodes { id name } }
@@ -387,6 +395,50 @@ const REMOVE_LABELS: &str = "mutation RemoveLabels($labelable: ID!, $labels: [ID
     clientMutationId
   }
 }";
+
+const LABEL: &str = "query Label($owner: String!, $name: String!, $label: String!) {
+  repository(owner: $owner, name: $name) {
+    label(name: $label) { id name }
+  }
+}";
+
+const ADD_LABELS: &str = "mutation AddLabels($labelable: ID!, $labels: [ID!]!) {
+  addLabelsToLabelable(input: {labelableId: $labelable, labelIds: $labels}) {
+    clientMutationId
+  }
+}";
+
+const VISIBILITY: &str = "query Visibility($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { visibility }
+}";
+
+/// Whether the repository `owner/name` is public, as `transport`'s identity sees it (#5: the
+/// verdict output tails are off on a public repository). `INTERNAL` is not public.
+///
+/// # Errors
+///
+/// [`QueueError::Setup`] when the name is not `owner/name` or the repository is not visible;
+/// otherwise the request's error. A caller that cannot tell treats the repository as public.
+pub fn is_public<T: GraphQl>(transport: &T, repository: &str) -> Result<bool, QueueError> {
+    let (owner, name) = repository
+        .split_once('/')
+        .filter(|(o, n)| !o.is_empty() && !n.is_empty() && !n.contains('/'))
+        .ok_or_else(|| {
+            QueueError::Setup(format!("the repository `{repository}` is not `owner/name`"))
+        })?;
+    let reply = transport
+        .execute(VISIBILITY, &json!({ "owner": owner, "name": name }))
+        .map_err(transport_error)?;
+    match reply.data["repository"]["visibility"].as_str() {
+        Some(visibility) => Ok(visibility.eq_ignore_ascii_case("PUBLIC")),
+        None if reply.data["repository"].is_null() => Err(QueueError::Setup(format!(
+            "the repository {repository} does not exist or is not visible to this identity"
+        ))),
+        None => Err(QueueError::Remote(format!(
+            "the visibility of {repository} is missing from the response"
+        ))),
+    }
+}
 
 const UPDATE_COMMENT: &str = "mutation UpdateComment($id: ID!, $body: String!) {
   updateIssueComment(input: {id: $id, body: $body}) {
@@ -784,6 +836,7 @@ impl<T: GraphQl> ProjectsV2<T> {
                 })
                 .collect(),
             comments,
+            closed: node["closed"].as_bool() == Some(true),
             blocked_by: node["blockedBy"]["nodes"]
                 .as_array()
                 .into_iter()
@@ -856,6 +909,7 @@ impl<T: GraphQl> ProjectsV2<T> {
             body,
             labels: issue.labels.clone(),
             draft: false,
+            closed: issue.closed,
             comments,
             blocked_by,
         }
@@ -1108,6 +1162,32 @@ impl<T: GraphQl> Queue for ProjectsV2<T> {
             // Deleted between the read and the edit: the deletion rules apply.
         }
         self.create_missing(item, &located.id, key, &wanted, true)
+    }
+
+    fn add_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {
+        let (located, _) = self.located_card(item)?;
+        if located.issue.labels.iter().any(|name| name == label) {
+            return Ok(());
+        }
+        let data = self.request(
+            LABEL,
+            &json!({ "owner": self.owner, "name": self.name, "label": label }),
+            &["NOT_FOUND"],
+        )?;
+        let Some(id) = data["repository"]["label"]["id"].as_str() else {
+            return Err(QueueError::Setup(format!(
+                "the repository {} has no label `{label}`; create it once on GitHub",
+                self.binding.repository
+            )));
+        };
+        let data = self.mutate(
+            ADD_LABELS,
+            &json!({ "labelable": located.id, "labels": [id] }),
+        )?;
+        if data["addLabelsToLabelable"].is_null() {
+            return Err(QueueError::NotFound(item));
+        }
+        Ok(())
     }
 
     fn remove_label(&self, item: ItemId, label: &str) -> Result<(), QueueError> {

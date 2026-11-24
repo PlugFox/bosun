@@ -5,6 +5,7 @@
 //! | The user | On an item that is | Means |
 //! | --- | --- | --- |
 //! | removes the card, or moves it to Backlog | in flight or Needs you | cancel |
+//! | closes the card's issue | in flight or Needs you | cancel (#111) |
 //! | moves it to Ready | in flight | start over when its turn comes ([`UserCommand::Requeue`]) |
 //! | moves it to Ready | Needs you or cancelled | retry with a fresh attempt counter |
 //! | moves it to Done | in flight or Needs you | accepted, user-closed, no verdict |
@@ -60,6 +61,14 @@ pub(crate) fn read(state: State, card: Option<&Card>, pending: bool, restarted: 
             Read::Nothing
         };
     };
+    // Mutant (`mutant_queue_closed_not_cancel`): a closed issue is read by its column alone.
+    if card.closed && !cfg!(mutant_queue_closed_not_cancel) {
+        return if owned {
+            Read::Command(UserCommand::Cancel)
+        } else {
+            Read::Nothing
+        };
+    }
     match card.column {
         Column::Backlog if owned => Read::Command(UserCommand::Cancel),
         Column::Ready if in_flight => Read::Command(UserCommand::Requeue),
@@ -279,6 +288,7 @@ mod tests {
             body: String::new(),
             labels: labels.iter().map(|l| (*l).to_owned()).collect(),
             draft: false,
+            closed: false,
             comments: Vec::new(),
             blocked_by: Vec::new(),
         }
@@ -377,6 +387,36 @@ mod tests {
                 read(state, card.as_ref(), false, false),
                 want,
                 "{state:?} {card:?}"
+            );
+        }
+    }
+
+    /// #111: closing the issue of a card is a cancel, in whatever column the card stays.
+    #[test]
+    fn a_closed_issue_is_a_cancel() {
+        let closed = |column| Card {
+            closed: true,
+            ..card(column, &[])
+        };
+        let needs = State::NeedsYou(Reason::Lint);
+        for (state, column) in [
+            (State::Running, Column::InProgress),
+            (State::Verifying, Column::Verify),
+            (needs, Column::NeedsYou),
+            // Moved to Ready and closed: closed wins, no retry.
+            (needs, Column::Ready),
+        ] {
+            assert_eq!(
+                read(state, Some(&closed(column)), false, false),
+                Read::Command(UserCommand::Cancel),
+                "{state:?} in {column:?}"
+            );
+        }
+        for state in [State::Done(Outcome::Pass), State::Cancelled, State::Ready] {
+            assert_eq!(
+                read(state, Some(&closed(Column::Ready)), false, false),
+                Read::Nothing,
+                "{state:?}"
             );
         }
     }

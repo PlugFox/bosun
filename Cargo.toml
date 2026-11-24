@@ -220,6 +220,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_recover_skip_reap)",
   "cfg(mutant_recover_counts_crash)",
   "cfg(mutant_recover_resume_before_board)",
+  # #111: the stage-1 loose ends.
+  "cfg(mutant_report_tails_on_public)",
+  "cfg(mutant_queue_closed_not_cancel)",
 ] }
 
 [workspace.lints.clippy]

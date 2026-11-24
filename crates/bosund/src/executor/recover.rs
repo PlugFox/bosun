@@ -73,6 +73,7 @@ fn bare_card(id: bosun_queue::ItemId) -> Card {
         body: String::new(),
         labels: Vec::new(),
         draft: false,
+        closed: false,
         comments: Vec::new(),
         blocked_by: Vec::new(),
     }

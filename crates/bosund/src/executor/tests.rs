@@ -497,6 +497,21 @@ impl Scene {
         }
     }
 
+    /// The repository's visibility: the fake's answer for a Projects v2 scene (private unless
+    /// a scenario makes it public); a local-file scene has no GitHub to ask, so it is public.
+    fn visibility(&self) -> board::Visibility {
+        match &self.projects {
+            None => board::Visibility::fixed(true),
+            Some(fake) => {
+                let fake = fake.clone();
+                board::Visibility::new(Box::new(move || {
+                    bosun_queue::projects_v2::is_public(&fake, BOARD_REPO)
+                        .map_err(|e| e.to_string())
+                }))
+            }
+        }
+    }
+
     /// The loop's board: the local file, or the fake connected at the loop's first poll.
     fn queue(&self) -> board::Shared {
         match &self.projects {
@@ -557,6 +572,7 @@ impl Scene {
             writer: self.store.writer().clone(),
             events: self.events.clone(),
             queue,
+            visibility: Arc::new(self.visibility()),
             spawner: self.spawner.clone(),
             power: Arc::new(bosun_proc::FakePower::default()),
             logins: Arc::new(FixedLogins(self.path("login"))),
@@ -614,6 +630,7 @@ fn card(id: u64, title: &str, verdict: &str, prose: &str) -> Card {
         body: format!("{prose}\n\n```bosun\nverdict = \"{verdict}\"\n```\n"),
         labels: Vec::new(),
         draft: false,
+        closed: false,
         comments: Vec::new(),
         blocked_by: Vec::new(),
     }
@@ -1228,6 +1245,24 @@ async fn agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_
 
     task.abort();
     watcher.abort();
+}
+
+/// Waits until the outbox of the scene's repository is empty; names the rows left when it
+/// times out.
+async fn drained(scene: &Scene) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let rows = outbox::pending(scene.store.reader(), "demo").await.unwrap();
+        if rows.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the outbox to drain; at {} ms: {rows:#?}",
+            scene.clock.wall_ms()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Waits for item `card` to end; at most `limit`.

@@ -91,6 +91,7 @@ mod tests {
             body: body.into(),
             labels: Vec::new(),
             draft: false,
+            closed: false,
             comments: vec![Comment {
                 author: "me".into(),
                 key: None,

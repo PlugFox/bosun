@@ -1,10 +1,11 @@
 //! The `queue.*` methods (#4, #5, #70): each board as the Queue tab shows it, and the static
 //! lint of one card.
 //!
-//! The board is read here as the loop reads it (a local file is re-read whole; a Projects v2
-//! board is not read by this version), so the answer is the board now, not the loop's last
-//! poll. Only the repositories of the identity the request names are read (#2, rule 4): their
-//! boards and their items live in that identity's configuration and store only.
+//! The board is read through the backend the loop reads (#111: the repository's
+//! [`crate::executor::board::Board`], a local file re-read whole or the Projects v2 board the
+//! loop connected), so the answer is the board now, not the loop's last poll. Only the
+//! repositories of the identity the request names are read (#2, rule 4): their boards and their
+//! items live in that identity's configuration and store only.
 //!
 //! The lint is the loop's static lint (`executor::claim::static_lint`): programs resolve through
 //! the repository's verdict shell in its checkout, and `blocked-by` targets must be on the board.
@@ -17,16 +18,15 @@ use bosun_api::rpc::{ErrorObject, code};
 use bosun_api::{
     CardView, ColumnView, LintFinding, LintResult, Method, QueueView, RepoQueue, method,
 };
-use bosun_config::{Queue as QueueConfig, Repo};
+use bosun_config::Repo;
 use bosun_queue::lint::verdict_shell;
-use bosun_queue::{
-    Card, Column, Lint, LintContext, LocalFile, Queue, Severity, ShellResolver, Snapshot,
-};
+use bosun_queue::{Card, Column, Lint, LintContext, Severity, ShellResolver, Snapshot};
 use bosun_store::StoredItem;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::api::{call, failed};
+use crate::executor::board::Shared;
 use crate::overview::queue_kind;
 use crate::state::{Served, State};
 
@@ -90,7 +90,8 @@ pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Valu
             call::<method::QueueLint, _, _>(p, |p| async move {
                 let served = state.identity(&p.identity)?;
                 let (name, repo) = repo_named(state, served, &p.repo)?;
-                let board = local_board(repo).map_err(|e| ErrorObject::new(code::FAILED, e))?;
+                let board =
+                    board_of(served, name).map_err(|e| ErrorObject::new(code::FAILED, e))?;
                 let card_id = bosun_queue::ItemId(p.card);
                 let (cards, card) = blocking(move || {
                     let changes = board.poll(None)?;
@@ -130,14 +131,11 @@ pub(crate) fn item_id(repo: &str, card: u64) -> String {
     format!("{repo}#{card}")
 }
 
-/// The board of `repo`, when this version reads it.
-fn local_board(repo: &Repo) -> Result<LocalFile, String> {
-    match &repo.queue {
-        Some(QueueConfig::LocalFile { file }) => Ok(LocalFile::new(file)),
-        Some(QueueConfig::Projects { .. }) => {
-            Err("a Projects v2 board is not read by this version".to_owned())
-        }
-        Some(_) => Err("this queue kind is not read by this version".to_owned()),
+/// The board of `served`'s repository `name`: the one its loop reads and writes (#111).
+pub(crate) fn board_of(served: &Served, name: &str) -> Result<Shared, String> {
+    match served.boards.get(name) {
+        Some(Ok(board)) => Ok(board.queue.clone()),
+        Some(Err(e)) => Err(e.clone()),
         None => Err("the repository has no queue".to_owned()),
     }
 }
@@ -158,7 +156,7 @@ async fn repo_queue(served: &Served, (name, repo): &NamedRepo, items: &[StoredIt
         error: None,
         columns: Vec::new(),
     };
-    let board = match local_board(repo) {
+    let board = match board_of(served, name) {
         Ok(board) => board,
         Err(e) => {
             view.error = Some(e);

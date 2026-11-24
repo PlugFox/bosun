@@ -1315,6 +1315,26 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_report_tails_on_public",
+        issue: 111,
+        breaks: "the visibility is not asked: a public repository's sticky report carries verdict output",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::board_scenes::the_verdict_tail_is_published_on_a_private_repository_only",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_closed_not_cancel",
+        issue: 111,
+        breaks: "a closed issue is not a cancel: the item in flight runs on",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::board_scenes::an_issue_closed_mid_session_cancels_the_item_and_kills_the_session",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

@@ -10,13 +10,14 @@
 //!   repository's checkout (the automatic pause), the identity's eqv since local midnight (the
 //!   daily cap, less the reserve), and the item's own eqv and active wall-clock time against its
 //!   caps (the card's, else `[budget]`). An item over a cap is killed and goes to Needs you; the
-//!   figure is the `budget_exceeded` event and the daemon's log.
+//!   figure is the `budget_exceeded` event, the daemon's log, and the item's note, which its
+//!   Needs-you comment and sticky report show (#111).
 
 use std::time::Duration;
 
 use bosun_api::{EventBody, Wide};
 use bosun_core::{Event, Hold, ItemId, State};
-use bosun_store::{By, Group};
+use bosun_store::{By, Group, Write};
 
 use super::Loop;
 
@@ -324,6 +325,22 @@ impl Loop {
             limit: Wide(limit),
             until_ms: None,
         });
+        // Stored before the transition queues the comment that shows it.
+        let figure = super::outbox::BudgetFigure {
+            cap: cap.to_owned(),
+            used,
+            limit,
+        };
+        let note = Write::ItemNote {
+            item,
+            kind: super::outbox::NOTE_BUDGET.to_owned(),
+            body: serde_json::to_string(&figure).unwrap_or_default(),
+            at_ms: now,
+        };
+        if let Err(e) = self.shared.deps.writer.write(vec![note]).await {
+            self.halt(&e.to_string());
+            return;
+        }
         self.apply(Event::BudgetExceeded).await;
     }
 

@@ -75,6 +75,8 @@ pub const CHECKS: &[(&str, Check)] = &[
         lint_target_reads_the_live_card,
     ),
     ("remove_label_is_idempotent", remove_label_is_idempotent),
+    ("add_label_is_idempotent", add_label_is_idempotent),
+    ("a_closed_card_is_read_closed", a_closed_card_is_read_closed),
 ];
 
 /// Runs every check, each on a fresh harness from `new`.
@@ -103,6 +105,7 @@ pub fn card(id: u64, column: Column, verdict: &str) -> Card {
         body: format!("Work for card {id}.\n\n```bosun\nverdict = {verdict:?}\n```\n"),
         labels: Vec::new(),
         draft: false,
+        closed: false,
         comments: Vec::new(),
         blocked_by: Vec::new(),
     }
@@ -451,4 +454,62 @@ pub fn remove_label_is_idempotent(harness: &mut dyn Harness) {
         queue.remove_label(ItemId(9), "restart"),
         Err(QueueError::NotFound(_))
     ));
+}
+
+/// `add_label` puts a label the board knows on a card and keeps the others; putting it again
+/// is a no-op; an unknown item is refused (#111: `bosun restart-item` on every backend).
+///
+/// # Panics
+///
+/// When the backend fails the check.
+pub fn add_label_is_idempotent(harness: &mut dyn Harness) {
+    let mut cards = vec![
+        card(1, Column::InProgress, "true"),
+        card(2, Column::Backlog, "true"),
+    ];
+    cards[0].labels = vec!["keep".to_owned()];
+    // The label exists on the board: another card carries it.
+    cards[1].labels = vec!["restart".to_owned()];
+    harness.user_writes(&cards);
+    let queue = harness.queue();
+    queue.add_label(ItemId(1), "restart").expect("add_label");
+    queue
+        .add_label(ItemId(1), "restart")
+        .expect("add_label replayed");
+    let live = queue.lint_target(ItemId(1)).expect("lint_target");
+    assert_eq!(live.labels, ["keep", "restart"]);
+    assert_eq!(live.column, Column::InProgress);
+    assert!(matches!(
+        queue.add_label(ItemId(9), "restart"),
+        Err(QueueError::NotFound(_))
+    ));
+}
+
+/// A card whose issue the user closed is read closed, by the poll and by the lint's re-read,
+/// and the poll reports it edited (#111: closing an issue cancels its item).
+///
+/// # Panics
+///
+/// When the backend fails the check.
+pub fn a_closed_card_is_read_closed(harness: &mut dyn Harness) {
+    let mut cards = vec![
+        card(1, Column::InProgress, "true"),
+        card(2, Column::Ready, "true"),
+    ];
+    harness.user_writes(&cards);
+    let first = poll(harness, None);
+    assert!(first.cards.iter().all(|c| !c.closed), "{:?}", first.cards);
+    cards[0].closed = true;
+    harness.user_writes(&cards);
+    let next = poll(harness, Some(&first.cursor));
+    assert!(next.card(ItemId(1)).expect("card 1").closed);
+    assert!(!next.card(ItemId(2)).expect("card 2").closed);
+    assert_eq!(next.edited, [ItemId(1)]);
+    assert!(
+        harness
+            .queue()
+            .lint_target(ItemId(1))
+            .expect("lint_target")
+            .closed
+    );
 }

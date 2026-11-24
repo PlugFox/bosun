@@ -472,4 +472,4 @@ pub(crate) async fn on_tail(app: &mut App, feed: &mut Feed, changed: TailChanged
 
 #[cfg(test)]
 #[path = "feed_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -21,4 +21,4 @@ context  [###########.............] 92.4k of 200.0k (46%)  peak 120.0k
 
 
 
- 1-4 tab  p pause  r resume  K kill switch  R restart item  q quit
+ 1-4 tab  p pause  r resume  K kill switch  k release  R restart  q quit

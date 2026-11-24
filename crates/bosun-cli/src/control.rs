@@ -87,12 +87,13 @@ pub(crate) async fn pause(
 /// `kill [--release]`.
 pub(crate) async fn kill(global: &Global, args: &KillArgs) -> Result<String, Failure> {
     let (mut client, operator) = connect_operator(global).await?;
-    let target = Target {
-        release: args.release,
-        ..Target::default()
+    let action = if args.release {
+        Action::ReleaseKill
+    } else {
+        Action::Kill
     };
     let Outcome::Kill(result) =
-        actions::perform(&mut client, Action::Kill, &operator, &target).await?
+        actions::perform(&mut client, action, &operator, &Target::default()).await?
     else {
         return Err(Failure::new(exit::FAILED, "an unexpected answer"));
     };

@@ -903,8 +903,13 @@ mod tests {
     fn every_action_has_a_command() {
         let cli = Cli::command();
         for spec in bosun_client::actions::ACTIONS {
+            let mut words = spec.command.split_whitespace();
+            let command = words.next().and_then(|name| cli.find_subcommand(name));
             assert!(
-                cli.find_subcommand(spec.command).is_some(),
+                command.is_some_and(|command| words.all(|flag| {
+                    let long = flag.strip_prefix("--");
+                    long.is_some() && command.get_arguments().any(|a| a.get_long() == long)
+                })),
                 "the action {:?} has no command `bosun {}`",
                 spec.action,
                 spec.command

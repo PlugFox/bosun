@@ -21,4 +21,4 @@ the last hour, eqv per minute (peak 32.5k):
 
 
 
- 1-4 tab  p pause  r resume  K kill switch  R restart item  q quit
+ 1-4 tab  p pause  r resume  K kill switch  k release  R restart  q quit

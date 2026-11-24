@@ -96,8 +96,7 @@ fn tab_bar(app: &App, width: u16) -> Line<'static> {
 /// The key line, from the shared table and the view's own keys.
 pub(crate) fn key_line(tab: Tab) -> String {
     let mut out = String::from(match tab {
-        Tab::Overview => " 1-4 tab  j/k move",
-        Tab::Queue => " 1-4 tab  hjkl move",
+        Tab::Overview | Tab::Queue => " 1-4 tab  arrows",
         Tab::Session | Tab::Tokens => " 1-4 tab",
     });
     for spec in ACTIONS {

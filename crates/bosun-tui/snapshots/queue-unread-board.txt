@@ -21,4 +21,4 @@ beta (personal)  local_file  board -  [2/2]
 
 
 
- 1-4 tab  hjkl move  p pause  r resume  K kill switch  R restart item  q quit
+ 1-4 tab  arrows  p pause  r resume  K kill switch  k release  R restart  q quit

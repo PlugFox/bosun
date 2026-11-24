@@ -36,7 +36,7 @@ mod sticky;
 /// `BOSUN_*` and the command-scope configuration (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`,
 /// `GIT_CONFIG_VALUE_*`) that points git at the session's hooks, so a scene's git behaves the
 /// same inside a session and outside one. (`bosun-git`'s tests have their own copy.)
-fn without_session(command: &mut Command) -> &mut Command {
+pub(super) fn without_session(command: &mut Command) -> &mut Command {
     for (name, _) in std::env::vars_os() {
         let text = name.to_string_lossy();
         if text.starts_with("BOSUN_")

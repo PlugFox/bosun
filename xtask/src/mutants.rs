@@ -1737,6 +1737,38 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("item::tests::a_second_conflict_needs_the_user"),
         platform: None,
     },
+    // #152: the daemon's clone and its item worktrees.
+    Mutant {
+        name: "mutant_loop_worktree_in_user_repo",
+        issue: 152,
+        breaks: "an item worktree is made from the user's checkout, not the daemon's clone",
+        package: "bosund",
+        check: Check::Test(
+            "executor::workspace::tests::an_item_worktree_hangs_off_the_daemons_clone_not_the_users_checkout",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_setup_failure_ignored",
+        issue: 152,
+        breaks: "a failing worktree setup command is treated as success",
+        package: "bosund",
+        check: Check::Test(
+            "executor::workspace::tests::a_failing_setup_is_reported_and_leaves_no_worktree",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_quarantine_unrecorded",
+        issue: 152,
+        breaks: "a quarantined worktree is recorded as removed",
+        package: "bosund",
+        check: Check::Test(
+            "executor::workspace::tests::a_quarantined_worktree_is_recorded_and_the_next_one_gets_a_new_path",
+        ),
+        // Only Windows refuses to delete a file held open.
+        platform: Some(Platform::Windows),
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

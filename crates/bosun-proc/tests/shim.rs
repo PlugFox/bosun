@@ -493,6 +493,66 @@ fn attach_refuses_a_record_whose_pid_changed_hands() {
     );
 }
 
+/// A finished session is attached, not refused, whatever its shim's pid names now: the record
+/// is final, so the output is read to its end from the offsets and the wait answers the
+/// recorded exit at once. Nothing is waited on or killed through the stale pid.
+#[test]
+fn attach_to_a_finished_session_reads_the_rest_and_the_recorded_exit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("output");
+    std::fs::create_dir(&output).expect("output dir");
+    let (stdout, stderr) = (output.join("stdout"), output.join("stderr"));
+    std::fs::write(&stdout, "seen\nunseen\n").expect("stdout");
+    std::fs::write(&stderr, "err\n").expect("stderr");
+    // The pids are this test's, under another start time: they changed hands.
+    let pid = std::process::id();
+    let live = start_time(pid).expect("start time").expect("live");
+    let stale = ProcessKey {
+        pid,
+        start: StartTime::from_raw(live.raw() ^ 1),
+    };
+    let record = Record {
+        version: RECORD_VERSION,
+        shim: stale,
+        child: stale,
+        job: None,
+        stdout,
+        stderr,
+        exit: Some(Exit::Code(3)),
+        capped: false,
+    };
+    let path = dir.path().join("session.spec.record");
+    record.write(&path).expect("write the record");
+
+    let (out, err, status) = runtime().block_on(async {
+        use tokio::io::AsyncReadExt;
+
+        let mut spawned = attach(
+            &path,
+            Offsets {
+                stdout: 5,
+                stderr: 0,
+            },
+        )
+        .expect("a finished session attaches");
+        let (mut out, mut err) = (String::new(), String::new());
+        let (o, e) = tokio::join!(
+            spawned.stdout.read_to_string(&mut out),
+            spawned.stderr.read_to_string(&mut err),
+        );
+        o.expect("stdout");
+        e.expect("stderr");
+        let status = tokio::time::timeout(PATIENCE, spawned.tree.wait())
+            .await
+            .expect("the wait answers at once")
+            .expect("wait");
+        (out, err, status)
+    });
+    assert_eq!(out, "unseen\n");
+    assert_eq!(err, "err\n");
+    assert_eq!(status.code(), Some(3));
+}
+
 /// The `holder` role: spawns a `talk` session through `ShimSpawner` in [`DIR`], reads its
 /// stdout up to the first line, writes the record's path and the bytes read to `held`, and
 /// drops everything without a kill.

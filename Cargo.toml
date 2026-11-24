@@ -204,6 +204,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_outbox_no_key)",
   "cfg(mutant_outbox_stored_body)",
   "cfg(mutant_outbox_stop_on_outage)",
+  # #75: the leftover-hook check of doctor.
+  "cfg(mutant_doctor_skip_stop_hook)",
 ] }
 
 [workspace.lints.clippy]

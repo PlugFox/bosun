@@ -472,6 +472,52 @@ fn doctor_fails_naming_a_missing_tool() {
 }
 
 #[test]
+fn doctor_reports_a_leftover_stop_hook_by_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = queued_config(dir.path(), "");
+    let endpoint = endpoint(dir.path());
+    let name = unique("bosun-doctor-test");
+    let stop_hook = || {
+        let (_, report) = doctor(&config, &endpoint, &name);
+        let found = checks(&report, "stop_hook");
+        assert_eq!(found.len(), 1, "{report}");
+        assert_eq!(found[0]["identity"], "work", "{report}");
+        found[0].clone()
+    };
+
+    // A repository with no agent settings: green.
+    let check = stop_hook();
+    assert_eq!(check["status"], "ok", "{check}");
+
+    // A synthetic stop hook of an in-repository loop, in the local settings.
+    let settings = dir.path().join("repo").join(".claude");
+    std::fs::create_dir_all(&settings).unwrap();
+    std::fs::write(
+        settings.join("settings.json"),
+        r#"{"permissions": {"allow": ["Bash(cargo test:*)"]}}"#,
+    )
+    .unwrap();
+    let local = settings.join("settings.local.json");
+    std::fs::write(
+        &local,
+        r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python loop.py"}]}]}}"#,
+    )
+    .unwrap();
+    let check = stop_hook();
+    assert_eq!(check["status"], "warn", "{check}");
+    let detail = check["detail"].as_str().unwrap();
+    assert!(detail.contains("repo.app"), "{detail}");
+    assert!(detail.contains(&local.display().to_string()), "{detail}");
+    assert!(!detail.contains("settings.json,"), "{detail}");
+    assert!(check["fix"].is_string(), "{check}");
+
+    // Removed: green again.
+    std::fs::write(&local, r#"{"hooks": {}}"#).unwrap();
+    let check = stop_hook();
+    assert_eq!(check["status"], "ok", "{check}");
+}
+
+#[test]
 fn doctor_reports_a_login_that_differs() {
     let dir = tempfile::tempdir().unwrap();
     let gh_dir = dir.path().join("gh-work");

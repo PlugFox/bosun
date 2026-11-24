@@ -11,6 +11,7 @@
 //! | `claude_config_dir` | an identity's Claude configuration directory does not exist (fail) |
 //! | `retention` | Claude Code deletes transcripts (`cleanupPeriodDays` of the directory's `settings.json`, 30 when absent) sooner than `retention.reingest_window` (warn, #3) |
 //! | `database_disk` | an identity's database directory is on a network or synced disk (fail) |
+//! | `stop_hook` | a repository's `.claude/settings.json` or `.claude/settings.local.json` still has a `hooks.Stop` entry, left over from an in-repository loop (warn, #75); either file is not valid JSON (warn) |
 //! | `git` | `git` is not on the `PATH` the daemon gets (fail) |
 //! | `sh` | the verdict shell (D4 of #7: `sh` of the Git installation on Windows, or a repository's `verdict.shell`) is not found (fail; warn when no repository has a queue) |
 //! | `claude` | the agent CLI is not on the daemon's `PATH` (fail; warn when no repository has a queue) |
@@ -35,6 +36,10 @@
 //! connects to one of the daemon's instances, and a client has no `unsafe` to read it with
 //! (#12). The daemon itself creates every instance with a DACL of one entry, for its user, and
 //! refuses to listen when the DACL it reads back differs (#71).
+//!
+//! `stop_hook` runs for each configured repository (of `--identity` only, when given) and names
+//! the repository in its detail. A stop hook that refuses the end of a turn would keep every
+//! headless session the daemon spawns from exiting; `docs/migration.md` says what to remove.
 //!
 //! The configuration is validated without the disk probe, so that a database on a network disk
 //! is reported by `database_disk` and not as an invalid file.
@@ -154,6 +159,10 @@ pub(crate) async fn run(inputs: &Inputs) -> Vec<Check> {
     let config = config(inputs, &mut checks);
     if let Some(config) = &config {
         identities(inputs, config, &mut checks);
+        // Mutant `mutant_doctor_skip_stop_hook` (#75): repositories are not looked at.
+        if !cfg!(mutant_doctor_skip_stop_hook) {
+            repositories(inputs, config, &mut checks);
+        }
     }
 
     let platform = Platform::host();
@@ -375,6 +384,96 @@ fn database_disk(probe: &SystemProbe, name: &str, database: &Path) -> Check {
             ),
         ),
     }
+}
+
+/// The agent settings files that can declare hooks, in a repository's `.claude` (#75).
+const AGENT_SETTINGS: [&str; 2] = ["settings.json", "settings.local.json"];
+
+/// `stop_hook` of each configured repository.
+fn repositories(inputs: &Inputs, config: &Config, checks: &mut Vec<Check>) {
+    for (name, repo) in &config.repos {
+        if inputs
+            .identity
+            .as_ref()
+            .is_some_and(|only| *only != repo.identity)
+        {
+            continue;
+        }
+        checks.push(stop_hook(name, &repo.path).of(&repo.identity));
+    }
+}
+
+/// Whether a `hooks.Stop` value declares anything: `null` and empty are not hooks.
+fn declares(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Array(entries) => !entries.is_empty(),
+        serde_json::Value::Object(entries) => !entries.is_empty(),
+        _ => true,
+    }
+}
+
+/// A stop hook left in repository `name` at `root` by an in-repository loop (#75): Claude
+/// Code's `.claude/settings.json` and `.claude/settings.local.json`, each looked at for a
+/// `hooks.Stop` entry. Every file that has one is named.
+pub(crate) fn stop_hook(name: &str, root: &Path) -> Check {
+    if !root.is_dir() {
+        return Check::skip(
+            "stop_hook",
+            format!("repo.{name}: {} is not a directory", root.display()),
+        );
+    }
+    let dir = root.join(".claude");
+    let mut found = Vec::new();
+    let mut unreadable = Vec::new();
+    for file in AGENT_SETTINGS.map(|f| dir.join(f)) {
+        let text = match std::fs::read_to_string(&file) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                unreadable.push(format!("cannot read {}: {e}", file.display()));
+                continue;
+            }
+            Ok(text) => text,
+        };
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Err(e) => unreadable.push(format!("{} is not valid JSON: {e}", file.display())),
+            Ok(value) => {
+                if value.pointer("/hooks/Stop").is_some_and(declares) {
+                    found.push(file.display().to_string());
+                }
+            }
+        }
+    }
+    if !found.is_empty() {
+        let files = found.join(", ");
+        return Check::warn(
+            "stop_hook",
+            format!(
+                "repo.{name}: a Stop hook in {files}; a hook that refuses the end of a turn \
+                 keeps the headless sessions bosun runs there from exiting"
+            ),
+            format!(
+                "remove the Stop entry from \"hooks\" in {files}, and the script it runs \
+                 (docs/migration.md)"
+            ),
+        );
+    }
+    if !unreadable.is_empty() {
+        return Check::warn(
+            "stop_hook",
+            format!("repo.{name}: {}", unreadable.join("; ")),
+            "correct the file; Claude Code reads it too",
+        );
+    }
+    Check::ok(
+        "stop_hook",
+        format!(
+            "repo.{name}: no Stop hook in {}",
+            AGENT_SETTINGS
+                .map(|f| dir.join(f).display().to_string())
+                .join(" or ")
+        ),
+    )
 }
 
 /// The `PATH` the daemon gets: the registration's, else this process's (see the module
@@ -934,6 +1033,42 @@ mod tests {
         assert_eq!(check(Ok("other".to_owned())).status, Status::Fail);
         assert_eq!(check(Ok(String::new())).status, Status::Fail);
         assert_eq!(check(Err("offline".to_owned())).status, Status::Fail);
+    }
+
+    #[test]
+    fn a_stop_hook_is_found_in_either_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let claude = root.join(".claude");
+        // No `.claude` directory at all.
+        assert_eq!(stop_hook("app", root).status, Status::Ok);
+        std::fs::create_dir_all(&claude).unwrap();
+        let hook = r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "loop"}]}]}}"#;
+        for (settings, local, status) in [
+            (Some("{}"), None, Status::Ok),
+            (Some(r#"{"hooks": {"PreToolUse": [{}]}}"#), None, Status::Ok),
+            (Some(r#"{"hooks": {"Stop": []}}"#), None, Status::Ok),
+            (Some(r#"{"hooks": {"Stop": null}}"#), None, Status::Ok),
+            (Some(hook), None, Status::Warn),
+            (None, Some(hook), Status::Warn),
+            (Some("not json"), None, Status::Warn),
+        ] {
+            for (file, text) in [("settings.json", settings), ("settings.local.json", local)] {
+                let path = claude.join(file);
+                match text {
+                    Some(text) => std::fs::write(&path, text).unwrap(),
+                    None => {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+            let check = stop_hook("app", root);
+            assert_eq!(check.status, status, "{settings:?} {local:?}: {check:?}");
+            if status == Status::Warn {
+                assert!(check.fix.is_some(), "{check:?}");
+            }
+        }
+        assert_eq!(stop_hook("app", &root.join("absent")).status, Status::Skip);
     }
 
     #[test]

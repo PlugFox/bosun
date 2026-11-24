@@ -59,7 +59,8 @@
 //!   still succeeds and says so on stderr: the registration is in place.
 //! - `uninstall`: stops that daemon and removes everything install created.
 //! - `doctor`: checks the registration, the configuration, each identity's directories,
-//!   Claude Code's transcript retention, the tools on the daemon's PATH (`git`, `sh`, `claude`,
+//!   Claude Code's transcript retention, a stop hook left in a repository's agent settings
+//!   (`docs/migration.md`), the tools on the daemon's PATH (`git`, `sh`, `claude`,
 //!   `gh`), each identity's GitHub login, and the endpoint and who may open it, with the daemon
 //!   up or down (`doctor.rs`). It prints every check, failed or not; it exits 0 when none failed
 //!   (warnings allowed) and 7 when one did.

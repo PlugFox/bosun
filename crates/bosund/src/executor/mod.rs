@@ -36,18 +36,27 @@
 //! `refs/bosun/items/<item>` (uncommitted changes as one extra commit) and the checkout is
 //! reset to the item's base, so the next item starts from a clean tree on the claim branch.
 //!
+//! # Parking
+//!
+//! See [`park`]: a limit parks the item until its reset time on the loop's [`Clock`] and the
+//! next tick past it resumes the session by id; a resume that fails resets the tree to the last
+//! commit and starts a fresh session; an expired authentication is Needs you at once. None of
+//! these counts, and the uncounted ones are capped (`daemon.park_cap`). A sleep (a gap between
+//! ticks) revalidates the session's child; a dead one is a crash of the attempt.
+//!
 //! # Not here
 //!
 //! The agent's calls are answered by [`crate::agent`] (#63) under the credential each session
 //! is issued at spawn; a blocking question comes back here as [`Event::Question`].
 //!
 //! The `bosun-mcp` server and its handshake (#64), the outbox drainer, the sticky report and user
-//! commands (#65), parking control (#66), pauses, the kill switch and budgets (#67), and crash
-//! recovery (#68): an item found in flight at start keeps its repository waiting for #68.
+//! commands (#65), pauses, the kill switch and budgets (#67), and crash recovery (#68): an item
+//! found in flight at start keeps its repository waiting for #68.
 
 mod claim;
 mod git;
 mod identity;
+mod park;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -73,6 +82,7 @@ use tokio::task::JoinHandle;
 use crate::events::{self, Events};
 
 pub(crate) use identity::{GhLogins, Logins};
+pub(crate) use park::{Alive, Clock, SystemClock};
 
 /// How long a session that asked a blocking question may go on before it is killed: time to
 /// write down what it has (#7).
@@ -127,6 +137,10 @@ pub(crate) struct Deps {
     pub(crate) logins: Arc<dyn Logins>,
     /// The agent credentials the API admits; each session is issued one (#63).
     pub(crate) credentials: crate::agent::Credentials,
+    /// The clocks of park timers and of the sleep detector.
+    pub(crate) clock: Arc<dyn Clock>,
+    /// Whether a recorded child still runs, checked after a sleep.
+    pub(crate) alive: Alive,
 }
 
 impl fmt::Debug for Deps {
@@ -244,6 +258,8 @@ struct Current {
     power: Option<std::sync::Mutex<PowerGuard>>,
     /// The failing tests of the current attempt's first verdict run, for `flaky_test`.
     failing: Vec<String>,
+    /// The running session's child, for the wake check.
+    child: park::ChildSlot,
 }
 
 /// A lint result, cached per card body.
@@ -272,6 +288,8 @@ pub(crate) struct Loop {
     waiting: bool,
     /// The store refused a transition: the loop stops.
     halted: bool,
+    /// The sleep detector.
+    gaps: park::Gaps,
 }
 
 impl fmt::Debug for Loop {
@@ -286,6 +304,7 @@ impl fmt::Debug for Loop {
 impl Loop {
     pub(crate) fn new(options: Options, deps: Deps, config: watch::Receiver<Arc<Config>>) -> Self {
         let (done_tx, done_rx) = mpsc::unbounded_channel();
+        let gaps = park::Gaps::new(options.poll);
         Self {
             shared: Arc::new(Shared { options, deps }),
             config,
@@ -298,6 +317,7 @@ impl Loop {
             backoff: None,
             waiting: false,
             halted: false,
+            gaps,
         }
     }
 
@@ -333,11 +353,17 @@ impl Loop {
 
     fn ctx(&self) -> Ctx {
         let config = self.config();
+        let park_cap = if cfg!(mutant_loop_no_park_cap) {
+            // Mutant: the configured cap of uncounted parks is not applied.
+            u32::MAX
+        } else {
+            config.daemon.park_cap
+        };
         Ctx {
-            now_ms: now_ms(),
+            now_ms: self.shared.deps.clock.wall_ms(),
             hold: None,
             rules: Rules {
-                park_cap: config.daemon.park_cap,
+                park_cap,
                 ..Rules::default()
             },
         }
@@ -547,12 +573,15 @@ impl Loop {
                 });
             })
         };
+        let child = park::ChildSlot::default();
+        let slot = child.clone();
         let handle = tokio::spawn(async move {
             let run = session::Run {
                 item: item.clone(),
                 attempt,
                 spawn,
                 mode,
+                child: slot,
             };
             let event =
                 session::session(&shared, &config, &claimed, &run, kill_rx, on_blocking).await;
@@ -563,6 +592,9 @@ impl Loop {
             });
         });
         self.set_task(kill, handle).await;
+        if let Some(cur) = self.current.as_mut() {
+            cur.child = child;
+        }
         None
     }
 
@@ -763,6 +795,14 @@ impl Loop {
     }
 
     async fn on_tick(&mut self) {
+        let clock = &self.shared.deps.clock;
+        let gap = self.gaps.observe(clock.wall_ms(), clock.mono());
+        if let Some(gap) = gap
+            && !cfg!(mutant_loop_skip_wake_check)
+        {
+            // Mutant (`mutant_loop_skip_wake_check`): the child is not revalidated after a sleep.
+            self.revalidate(gap).await;
+        }
         if let Some(cur) = self.current.as_ref() {
             if matches!(cur.item.state, State::Parked(_)) {
                 self.apply(Event::Tick).await;
@@ -773,6 +813,51 @@ impl Loop {
             return;
         }
         self.schedule().await;
+    }
+
+    /// After a sleep: the running session's child is revalidated by its pid and start time
+    /// (#7, Parking). A dead one is a crash of the attempt, which the machine retries once
+    /// uncounted; its task is stopped, so its own late report is stale.
+    async fn revalidate(&mut self, gap: Duration) {
+        let Some(cur) = self.current.as_mut() else {
+            return;
+        };
+        let recorded = *cur
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (Some(key), State::Running, Some(attempt)) =
+            (recorded, cur.item.state, cur.item.attempt.as_ref())
+        else {
+            return;
+        };
+        let (number, spawn) = (attempt.number, attempt.spawn);
+        let alive = self.shared.deps.alive.clone();
+        if blocking(move || alive(key)).await {
+            eprintln!(
+                "bosund: repository {}: woke after {} s; the session of {} still runs",
+                self.shared.options.repo,
+                gap.as_secs(),
+                cur.item.id
+            );
+            return;
+        }
+        self.shared.trouble(format!(
+            "woke after {} s; the session of {} died: a crash of attempt {number}",
+            gap.as_secs(),
+            cur.item.id
+        ));
+        if let Some(task) = cur.task.take() {
+            let _ = task.kill.send(true);
+            let _ = task.handle.await;
+        }
+        self.apply(Event::Exited {
+            attempt: number,
+            spawn,
+            exit: bosun_core::Exit::Crash,
+            text: String::new(),
+        })
+        .await;
     }
 
     /// Polls the board and claims the next card, bouncing those that fail lint.
@@ -917,6 +1002,7 @@ impl Loop {
             task: None,
             power: None,
             failing: Vec::new(),
+            child: park::ChildSlot::default(),
         });
         self.apply(Event::Claim).await;
     }

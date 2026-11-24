@@ -458,6 +458,8 @@ fn start_loops(
             power: Arc::new(SystemPower),
             logins: Arc::new(executor::GhLogins),
             credentials: state.credentials.clone(),
+            clock: Arc::new(executor::SystemClock::new()),
+            alive: Arc::new(bosun_proc::is_running),
         };
         eprintln!("bosund: repository {name}: the loop runs");
         loops.push(tokio::spawn(

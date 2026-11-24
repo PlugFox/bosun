@@ -7,12 +7,12 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use bosun_config::{Config, DiskProbe, SystemProbe};
-use bosun_core::{Outcome, Reason, State};
+use bosun_core::{Outcome, ParkReason, Reason, SpawnMode, State};
 use bosun_identity::{Bundle, ProbeError, TokenLogin};
 use bosun_proc::{ChildSpec, NativeSpawner, Spawned, Spawner};
 use bosun_queue::{Card, Column, LocalFile, Queue};
@@ -102,6 +102,39 @@ impl Spawner for Counting {
     }
 }
 
+/// The system's clocks, with a wall clock the test moves forward (a simulated sleep, a park
+/// timer run out) while the monotonic clock goes on as it is.
+#[derive(Debug)]
+struct TestClock {
+    system: SystemClock,
+    ahead_ms: AtomicI64,
+}
+
+impl TestClock {
+    fn advance(&self, by: Duration) {
+        let ms = i64::try_from(by.as_millis()).unwrap();
+        self.ahead_ms.fetch_add(ms, Ordering::SeqCst);
+    }
+}
+
+impl Clock for TestClock {
+    fn wall_ms(&self) -> i64 {
+        self.system.wall_ms() + self.ahead_ms.load(Ordering::SeqCst)
+    }
+
+    fn mono(&self) -> Duration {
+        self.system.mono()
+    }
+}
+
+/// The wake check's liveness probe: the real one, unless the test declares the child dead (it
+/// died in the sleep); counts its calls.
+#[derive(Debug, Default)]
+struct Probe {
+    dead: AtomicBool,
+    calls: AtomicUsize,
+}
+
 /// One scenario's world.
 struct Scene {
     dir: tempfile::TempDir,
@@ -113,6 +146,8 @@ struct Scene {
     store: Store,
     spawner: Arc<Counting>,
     credentials: crate::agent::Credentials,
+    clock: Arc<TestClock>,
+    probe: Arc<Probe>,
 }
 
 impl Scene {
@@ -185,6 +220,11 @@ impl Scene {
             store,
             spawner: Arc::new(Counting::default()),
             credentials: crate::agent::Credentials::default(),
+            clock: Arc::new(TestClock {
+                system: SystemClock::new(),
+                ahead_ms: AtomicI64::new(0),
+            }),
+            probe: Arc::new(Probe::default()),
             dir,
         };
         scene.git(&["init", "-q", "-b", "main"]);
@@ -286,18 +326,47 @@ impl Scene {
             power: Arc::new(bosun_proc::FakePower::default()),
             logins: Arc::new(FixedLogins),
             credentials: self.credentials.clone(),
+            clock: self.clock.clone(),
+            alive: {
+                let probe = self.probe.clone();
+                Arc::new(move |key| {
+                    probe.calls.fetch_add(1, Ordering::SeqCst);
+                    !probe.dead.load(Ordering::SeqCst) && bosun_proc::is_running(key)
+                })
+            },
         };
         let task = tokio::spawn(Loop::new(options, deps, rx).run());
         (task, watcher)
     }
 
     async fn state(&self, card: u64) -> Option<State> {
+        self.item(card).await.map(|i| i.state)
+    }
+
+    async fn item(&self, card: u64) -> Option<Item> {
         self.store
             .reader()
             .item(&ItemId::new(format!("demo#{card}")))
             .await
             .unwrap()
-            .map(|s| s.item.state)
+            .map(|s| s.item)
+    }
+
+    async fn runs(&self, card: u64) -> Vec<bosun_store::RunRow> {
+        self.store
+            .reader()
+            .runs(&ItemId::new(format!("demo#{card}")))
+            .await
+            .unwrap()
+    }
+
+    /// A stream fixture of `fixtures/claude-stream`.
+    fn stream(name: &str) -> String {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/claude-stream")
+            .join(name)
+            .display()
+            .to_string()
     }
 }
 
@@ -899,4 +968,285 @@ async fn agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_
 
     task.abort();
     watcher.abort();
+}
+
+/// Waits for item `card` to end; at most `limit`.
+async fn ended(scene: &Scene, card: u64, limit: Duration) -> State {
+    let mut state = None;
+    wait_for(&format!("item {card} to end"), limit, async || {
+        state = scene.state(card).await;
+        terminal(state)
+    })
+    .await;
+    state.unwrap()
+}
+
+fn modes(runs: &[bosun_store::RunRow]) -> Vec<(u32, SpawnMode)> {
+    runs.iter().map(|r| (r.attempt, r.mode)).collect()
+}
+
+/// #66: a limit message parks the item, the park timer (the default backoff, then a parsed
+/// reset) runs out on the loop's clock, and the session is resumed by id; the attempt counter
+/// does not move (`mutant_loop_limit_counts` reports the limit as a crash: the second one fails
+/// the attempt).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_limit_parks_and_resumes_without_counting() {
+    let scene = Scene::new().await;
+    let m = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[card(1, "Limited", "test -f one.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            format!(
+                "once {} replay {}",
+                m("m1"),
+                Scene::stream("limit-no-reset.jsonl")
+            ),
+            format!("once {} exit 1", m("m2")),
+            format!(
+                "once {} replay {}",
+                m("m3"),
+                Scene::stream("limit-reset.jsonl")
+            ),
+            format!("once {} exit 1", m("m4")),
+            "commit one.txt one".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+
+    // Parked for the default backoff: it stays parked while the clock does not move.
+    let mut park = None;
+    wait_for(
+        "the limit to park the item",
+        Duration::from_secs(30),
+        async || {
+            park = match scene.state(1).await {
+                Some(State::Parked(park)) => Some(park),
+                _ => None,
+            };
+            park.is_some()
+        },
+    )
+    .await;
+    let park = park.unwrap();
+    assert_eq!(park.reason, ParkReason::Limit);
+    let until = park.until_ms.expect("a limit parks until a time");
+    assert!(
+        until > scene.clock.wall_ms() + 14 * 60_000,
+        "the default backoff: {park:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(matches!(scene.state(1).await, Some(State::Parked(_))));
+    assert_eq!(
+        scene.runs(1).await.len(),
+        1,
+        "no resume before the park ends"
+    );
+
+    scene.clock.advance(Duration::from_mins(16));
+    let state = ended(&scene, 1, Duration::from_secs(60)).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(state, State::Done(Outcome::Pass));
+    let item = scene.item(1).await.unwrap();
+    assert_eq!(
+        (item.attempts, item.failed),
+        (1, 0),
+        "the attempt counter did not move"
+    );
+    assert_eq!(item.uncounted, 2);
+    let runs = scene.runs(1).await;
+    assert_eq!(
+        modes(&runs),
+        [
+            (1, SpawnMode::Fresh),
+            (1, SpawnMode::Resume),
+            (1, SpawnMode::Resume)
+        ]
+    );
+    assert!(
+        runs.iter().all(|r| r.session_key == runs[0].session_key),
+        "resumed by id: {runs:?}"
+    );
+    let parks = scene
+        .store
+        .reader()
+        .transitions(&ItemId::new("demo#1"))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.to == "parked")
+        .count();
+    assert_eq!(parks, 2);
+}
+
+/// #66: a resume that fails (the CLI finds no conversation) resets the tree to the last commit
+/// and starts a fresh session of the same attempt, uncounted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_resume_starts_a_fresh_session_from_the_last_commit() {
+    let scene = Scene::new().await;
+    let m = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[card(
+        1,
+        "Resume fails",
+        "test -f one.txt && test -f kept.txt",
+        "Item one.",
+    )]);
+    scene.script(
+        1,
+        &[
+            format!("once {} commit kept.txt kept", m("m1")),
+            format!("once {} write loose.txt uncommitted", m("m2")),
+            format!(
+                "once {} replay {}",
+                m("m3"),
+                Scene::stream("limit-reset.jsonl")
+            ),
+            format!("once {} exit 1", m("m4")),
+            format!(
+                "once {} replay {}",
+                m("m5"),
+                Scene::stream("crash-error-result.jsonl")
+            ),
+            format!("once {} exit 1", m("m6")),
+            "commit one.txt one".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, Duration::from_secs(60)).await;
+    task.abort();
+    watcher.abort();
+    // The loose file would fail the clean-tree precondition had the tree not been reset.
+    assert_eq!(state, State::Done(Outcome::Pass));
+    let item = scene.item(1).await.unwrap();
+    assert_eq!((item.attempts, item.failed), (1, 0), "uncounted");
+    let runs = scene.runs(1).await;
+    assert_eq!(
+        modes(&runs),
+        [
+            (1, SpawnMode::Fresh),
+            (1, SpawnMode::Resume),
+            (1, SpawnMode::Reset)
+        ]
+    );
+    assert_eq!(runs[1].session_key, runs[0].session_key);
+    assert_ne!(runs[2].session_key, runs[0].session_key, "a fresh session");
+    // Reset to the last commit, not to the base.
+    assert!(scene.repo.join("kept.txt").exists());
+    assert!(!scene.repo.join("loose.txt").exists());
+}
+
+/// #66: an agent that prints a fake limit forever cannot park its item forever: the cap of
+/// uncounted parks sends it to Needs you, well inside the timeout (`mutant_loop_no_park_cap`
+/// does not apply the cap: the test fails on its timeout).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fake_limit_forever_ends_in_needs_you_at_the_cap() {
+    let scene = Scene::new().await;
+    scene.write_board(&[card(1, "Always limited", "test -f one.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            format!("replay {}", Scene::stream("limit-reset.jsonl")),
+            "exit 1".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, Duration::from_secs(60)).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(state, State::NeedsYou(Reason::ParkCap));
+    let cap = scene.config().daemon.park_cap;
+    let item = scene.item(1).await.unwrap();
+    assert_eq!((item.attempts, item.failed), (1, 0));
+    assert_eq!(scene.runs(1).await.len(), usize::try_from(cap).unwrap() + 1);
+}
+
+/// #66: an expired authentication is Needs you at once, with no retry
+/// (`mutant_loop_auth_retries` retries it like a crash).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_authentication_is_needs_you_with_no_retry() {
+    let scene = Scene::new().await;
+    scene.write_board(&[card(1, "Logged out", "test -f one.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            format!("replay {}", Scene::stream("auth-expired.jsonl")),
+            "exit 1".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, Duration::from_secs(60)).await;
+    // Time for a retry to show.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(state, State::NeedsYou(Reason::Auth));
+    assert_eq!(scene.runs(1).await.len(), 1);
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 1);
+}
+
+/// #66: a simulated 20-minute sleep (the wall clock jumps, the monotonic clock does not). Item
+/// 1's child died in it: a crash of the attempt, retried once uncounted by resuming. Item 2's
+/// child lives: its session runs on and ends normally, with no second session
+/// (`mutant_loop_skip_wake_check` never revalidates: item 1 waits on its dead session).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_sleep_a_dead_child_is_retried_once_uncounted_and_a_live_one_runs_on() {
+    let scene = Scene::new().await;
+    let p = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[
+        card(1, "Dies asleep", "test -f one.txt", "Item one."),
+        card(2, "Sleeps through", "test -f two.txt", "Item two."),
+    ]);
+    scene.script(
+        1,
+        &[
+            format!("write {} x", p("flag1")),
+            format!("once {} wait {}", p("m1"), p("never")),
+            "commit one.txt one".to_owned(),
+        ],
+    );
+    scene.script(
+        2,
+        &[
+            format!("write {} x", p("flag2")),
+            format!("wait {}", p("release2")),
+            "commit two.txt two".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let checks = || scene.probe.calls.load(Ordering::SeqCst);
+
+    // Item 1: the child is declared dead in the sleep.
+    wait_file(&scene.path("flag1")).await;
+    scene.probe.dead.store(true, Ordering::SeqCst);
+    scene.clock.advance(Duration::from_mins(20));
+    wait_for("the wake check", Duration::from_secs(20), async || {
+        checks() > 0
+    })
+    .await;
+    scene.probe.dead.store(false, Ordering::SeqCst);
+    let state = ended(&scene, 1, Duration::from_secs(30)).await;
+    assert_eq!(state, State::Done(Outcome::Pass));
+    let item = scene.item(1).await.unwrap();
+    assert_eq!((item.attempts, item.failed, item.uncounted), (1, 0, 1));
+    assert_eq!(
+        modes(&scene.runs(1).await),
+        [(1, SpawnMode::Fresh), (1, SpawnMode::Resume)]
+    );
+
+    // Item 2: the child lives through the sleep.
+    wait_file(&scene.path("flag2")).await;
+    let before = checks();
+    scene.clock.advance(Duration::from_mins(20));
+    wait_for("the wake check", Duration::from_secs(20), async || {
+        checks() > before
+    })
+    .await;
+    std::fs::write(scene.path("release2"), "").unwrap();
+    let state = ended(&scene, 2, Duration::from_secs(30)).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(state, State::Done(Outcome::Pass));
+    assert_eq!(modes(&scene.runs(2).await), [(1, SpawnMode::Fresh)]);
+    assert_eq!(scene.item(2).await.unwrap().uncounted, 0);
 }

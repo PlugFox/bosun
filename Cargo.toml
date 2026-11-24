@@ -182,6 +182,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_agent_any_item)",
   "cfg(mutant_agent_no_rate_cap)",
   "cfg(mutant_agent_first_summary_wins)",
+  "cfg(mutant_loop_limit_counts)",
+  "cfg(mutant_loop_no_park_cap)",
+  "cfg(mutant_loop_auth_retries)",
+  "cfg(mutant_loop_skip_wake_check)",
 ] }
 
 [workspace.lints.clippy]

@@ -159,6 +159,42 @@ fn a_token_in_a_verdict_tail_is_redacted() {
 }
 
 #[test]
+fn a_secret_split_by_an_invisible_character_is_redacted() {
+    // Joined at run time, so the source holds no token-shaped literal. Each split character
+    // breaks the token's shape until cleaning removes it (#138).
+    let (head, rest) = ("ghp_ABCDEFGHIJKLMNO", "PQRSTUVWXYZabcdefghij");
+    for split in ['\u{200B}', '\u{202E}'] {
+        let secret = format!("{head}{split}{rest}");
+        let mut facts = facts();
+        facts.detail = Some(format!("leaked {secret}"));
+        facts.attempts = vec![attempt(
+            1,
+            AttemptState::Fail,
+            &format!("running\nGITHUB_TOKEN {secret}\nfailed"),
+        )];
+        facts.attempts[0].verdict.as_mut().unwrap().line = format!("token {secret}");
+        facts.summary = Some(AgentSummary {
+            attempt: 1,
+            head: "abc1234".into(),
+            done: format!("Used {secret}."),
+            decisions: vec![format!("Kept {secret}.")],
+            deviations: vec![],
+            questions: vec![],
+            followups: vec![],
+        });
+        let body = render_report(&facts, ReportOptions::for_repository(false));
+        assert!(!body.contains(head), "{body}");
+        assert!(
+            code_blocks(&body)
+                .iter()
+                .any(|b| b.contains("GITHUB_TOKEN [redacted]\nfailed")),
+            "{body}"
+        );
+        assert_eq!(body.matches("redacted").count(), 5, "{body}");
+    }
+}
+
+#[test]
 fn a_200_kb_tail_renders_under_the_cap_and_keeps_its_last_lines() {
     let mut tail = String::new();
     let mut n = 0;

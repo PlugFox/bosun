@@ -461,7 +461,7 @@ impl Drainer {
                     "The agent asked a blocking question in attempt {attempt} (its text, \
                      not checked by bosun):\n\n"
                 );
-                let text = publish::sanitise(&publish::redact(question), COMMENT_CAP);
+                let text = publish::sanitise(&publish::scrub(question), COMMENT_CAP);
                 for line in text.lines() {
                     body.push_str("> ");
                     body.push_str(line);

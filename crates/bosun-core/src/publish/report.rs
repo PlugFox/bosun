@@ -11,6 +11,7 @@ use std::fmt::Write as _;
 
 use super::redact::redact;
 use super::sanitise::{sanitise, sanitise_inline};
+use super::scrub;
 use super::text::{chars, clean, code_block, code_span, first_chars};
 use crate::attempt::{AttemptState, RunResult};
 use crate::item::{Guard, ItemId, Outcome, ParkReason, Reason, State};
@@ -497,7 +498,11 @@ fn tails(body: &mut String, attempts: &[AttemptFacts], options: ReportOptions) {
         let Some(verdict) = &attempt.verdict else {
             continue;
         };
+        #[cfg(mutant_publish_redact_before_clean)]
+        // Mutant (`mutant_publish_redact_before_clean`): redacted, then cleaned.
         let tail = clean(&redact(&verdict.tail));
+        #[cfg(not(mutant_publish_redact_before_clean))]
+        let tail = scrub(&verdict.tail);
         let tail = tail.trim_end();
         if tail.is_empty() {
             continue;
@@ -576,18 +581,25 @@ fn first_chars_from_end(s: &str, n: usize) -> &str {
     }
 }
 
-/// The redacted head of `text`, long enough for anything that renders in `cap` characters.
+/// The cleaned and redacted head of `text` ([`scrub`]), long enough for anything that renders
+/// in `cap` characters.
 ///
 /// Redacting a megabyte to publish a kilobyte is waste, so the text is cut first, and the cut
 /// drops the trailing partial word: a token cut in half would no longer have its shape and
 /// would slip past the redactor.
 fn redact_head(text: &str, cap: usize) -> String {
     let head = first_chars(text, cap.saturating_mul(4).saturating_add(4096));
-    if head.len() == text.len() {
-        return redact(text);
+    let cut = if head.len() == text.len() {
+        text
+    } else {
+        head.rfind(char::is_whitespace).map_or("", |i| &head[..i])
+    };
+    if cfg!(mutant_publish_redact_before_clean) {
+        // Mutant (`mutant_publish_redact_before_clean`): redacted before it is cleaned; the
+        // caller cleans it after.
+        return redact(cut);
     }
-    let whole_words = head.rfind(char::is_whitespace).map_or("", |i| &head[..i]);
-    redact(whole_words)
+    scrub(cut)
 }
 
 /// `s` as a code span of at most `cap` characters of content.

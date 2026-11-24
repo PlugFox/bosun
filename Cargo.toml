@@ -160,6 +160,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_publish_no_redact)",
   "cfg(mutant_publish_truncate_back)",
   "cfg(mutant_publish_short_fence)",
+  # #122: the pull request body and squash message.
+  "cfg(mutant_publish_pr_body_overwrite)",
+  "cfg(mutant_publish_pr_raw_summary)",
+  # #138: cleaning before redacting.
+  "cfg(mutant_publish_redact_before_clean)",
   "cfg(mutant_api_default_pipe_acl)",
   "cfg(mutant_doctor_skip_tool_paths)",
   "cfg(mutant_report_item_last_attempt)",
@@ -230,6 +235,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #133: the repository's default model.
   "cfg(mutant_runner_no_default_model)",
   "cfg(mutant_config_queue_without_model)",
+  # #121: resource leases.
+  "cfg(mutant_lease_one_by_one)",
+  "cfg(mutant_lease_keep_dead_holder)",
+  "cfg(mutant_lease_hold_and_wait)",
 ] }
 
 [workspace.lints.clippy]

@@ -1377,6 +1377,60 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::a_repository_with_a_queue_and_no_model_is_refused"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_lease_one_by_one",
+        issue: 121,
+        breaks: "leases are taken one by one in the order a request lists them, not by name",
+        package: "bosun-core",
+        check: Check::Test("lease::tests::two_items_wanting_the_same_pair_never_deadlock"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_lease_keep_dead_holder",
+        issue: 121,
+        breaks: "release_stale keeps the leases of a holder that is gone",
+        package: "bosun-core",
+        check: Check::Test("lease::tests::a_lease_whose_holder_is_gone_is_released"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_lease_hold_and_wait",
+        issue: 121,
+        breaks: "an attempt that finds a resource held keeps what it took while it waits",
+        package: "bosun-core",
+        check: Check::Test(
+            "lease::tests::an_attempt_that_finds_one_resource_held_takes_none_of_the_set",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_publish_pr_body_overwrite",
+        issue: 122,
+        breaks: "updating a pull request body replaces all of it, not only the daemon's region",
+        package: "bosun-core",
+        check: Check::Test("publish::pr::tests::an_update_rewrites_only_the_daemon_region"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_publish_pr_raw_summary",
+        issue: 122,
+        breaks: "the agent's summary goes into the pull request body unsanitised",
+        package: "bosun-core",
+        check: Check::Test(
+            "publish::pr::tests::the_hostile_corpus_stays_inert_in_a_pull_request_body",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_publish_redact_before_clean",
+        issue: 138,
+        breaks: "the report redacts text before cleaning it, so a secret split by an invisible character is published",
+        package: "bosun-core",
+        check: Check::Test(
+            "publish::report::tests::a_secret_split_by_an_invisible_character_is_redacted",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

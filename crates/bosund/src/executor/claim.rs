@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use bosun_config::{Config, Repo};
 use bosun_core::ItemId;
-use bosun_git::{Base, Git};
+use bosun_git::{Base, Git, GitConfig};
+use bosun_queue::claim::other_claimants;
 use bosun_queue::lint::verdict_shell;
-use bosun_queue::{Card, Claim, Lint, LintContext, ShellResolver, Snapshot};
+use bosun_queue::{Card, Claim, Lint, LintContext, QueueError, ShellResolver, Snapshot};
 use bosun_runner::verdict::{Limits, Outcome, VerdictSpec};
 use bosun_store::Write;
 use sha2::{Digest, Sha256};
@@ -75,10 +76,19 @@ pub(crate) async fn claim(
     }
     let queue = shared.deps.queue.clone();
     let daemon = shared.options.daemon_id.clone();
+    // Another daemon's claim marker already on the card (#5): the repository is refused before
+    // anything is written to the board.
+    let others = other_claimants(&card, &daemon);
+    if !others.is_empty() {
+        return ClaimOutcome::Board(QueueError::Contested {
+            item: card.id,
+            others,
+        });
+    }
     let card = match blocking(move || bosun_queue::claim(queue.as_ref(), &card, &daemon)).await {
         Ok(Claim::Claimed(card)) => card,
         Ok(Claim::Released(_)) => return ClaimOutcome::Lost,
-        Err(e) => return ClaimOutcome::Failed(e.to_string()),
+        Err(e) => return ClaimOutcome::Board(e),
     };
 
     // Only text by logins on the author allowlist is inlined, never the daemon's (#2).
@@ -132,10 +142,41 @@ pub(crate) async fn claim(
         }
     }
 
+    // Git's own configuration (#59), after the verdict on the base commit: what the guards
+    // compare with before every verdict of the item.
+    let path = repo.path.clone();
+    let git_config = match blocking(move || GitConfig::capture(&Git::new(path))).await {
+        Ok(git_config) => git_config,
+        Err(e) => {
+            return ClaimOutcome::Failed(format!("git's configuration cannot be recorded: {e}"));
+        }
+    };
+
     let Some((repo_hash, policy_hash)) = hashes(config, &shared.options.repo) else {
         return ClaimOutcome::Failed("the repository is no longer configured".to_owned());
     };
-    let write = Write::Snapshot(bosun_store::Snapshot {
+    let claimed = Claimed {
+        snapshot,
+        base,
+        git_config,
+        repo_hash,
+        policy_hash,
+    };
+    if let Err(e) = shared
+        .deps
+        .writer
+        .write(vec![snapshot_row(item, key, &claimed)])
+        .await
+    {
+        return ClaimOutcome::Failed(format!("the snapshot cannot be stored: {e}"));
+    }
+    ClaimOutcome::Confirmed(Box::new(claimed))
+}
+
+/// The snapshot row of `claimed`, keyed by the claim effect's `key`.
+fn snapshot_row(item: &ItemId, key: &str, claimed: &Claimed) -> Write {
+    let snapshot = &claimed.snapshot;
+    Write::Snapshot(bosun_store::Snapshot {
         item: item.clone(),
         key: key.to_owned(),
         taken_ms: now_ms(),
@@ -150,20 +191,11 @@ pub(crate) async fn claim(
                 .collect::<Vec<_>>(),
         )
         .to_string(),
-        config_hash: Some(repo_hash.clone()),
-        policy_hash: Some(policy_hash.clone()),
-        base_sha: Some(base.head.clone()),
-        branch: base.branch.clone(),
-    });
-    if let Err(e) = shared.deps.writer.write(vec![write]).await {
-        return ClaimOutcome::Failed(format!("the snapshot cannot be stored: {e}"));
-    }
-    ClaimOutcome::Confirmed(Box::new(Claimed {
-        snapshot,
-        base,
-        repo_hash,
-        policy_hash,
-    }))
+        config_hash: Some(claimed.repo_hash.clone()),
+        policy_hash: Some(claimed.policy_hash.clone()),
+        base_sha: Some(claimed.base.head.clone()),
+        branch: claimed.base.branch.clone(),
+    })
 }
 
 /// Runs the snapshot's verdict once on the base commit. `Ok(true)` when it passes.

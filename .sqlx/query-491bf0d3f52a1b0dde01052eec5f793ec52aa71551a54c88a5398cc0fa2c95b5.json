@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE attempt SET guard_ignored = ?, guard_git_config = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "491bf0d3f52a1b0dde01052eec5f793ec52aa71551a54c88a5398cc0fa2c95b5"
+}

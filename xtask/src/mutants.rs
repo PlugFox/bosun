@@ -1124,7 +1124,52 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #99: the guards of #59 in the loop; the "reaches Done" forms of #59's mutants.
+    Mutant {
+        name: "mutant_loop_skip_guards",
+        issue: 99,
+        breaks: "the loop skips the guards of #59: the protected-path item reaches Done",
+        package: "bosund",
+        check: Check::Test(SCENARIO_99),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_ignored_is_warning",
+        issue: 99,
+        breaks: "an item that leaves a new ignored file its verdict needs reaches Done",
+        package: "bosund",
+        check: Check::Test(SCENARIO_99),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_skip_protected_paths",
+        issue: 99,
+        breaks: "an item whose commits touch a protected path reaches Done",
+        package: "bosund",
+        check: Check::Test(SCENARIO_99),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_skip_config_snapshot",
+        issue: 99,
+        breaks: "an item that plants a hook reaches Done",
+        package: "bosund",
+        check: Check::Test(SCENARIO_99),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_trailer_all_commits",
+        issue: 99,
+        breaks: "a run's commit made with the trailer marker off gets the trailers and leaves the report",
+        package: "bosund",
+        check: Check::Test(SCENARIO_99),
+        platform: None,
+    },
 ];
+
+/// The guard and trailer scenario of #99, which hosts several mutants.
+const SCENARIO_99: &str =
+    "executor::tests::the_git_guards_refuse_before_the_verdict_and_the_trailers_reach_the_report";
 
 /// The agent.* scenario of #63, which hosts two mutants.
 const SCENARIO_63: &str = "executor::tests::agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_session";

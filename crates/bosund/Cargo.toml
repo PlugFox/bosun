@@ -40,5 +40,9 @@ tokio = { workspace = true, features = [
   "time",
 ] }
 
+[dev-dependencies]
+# The fake GitHub of the Projects v2 backend, for the loop's scenarios on a board (#99).
+bosun-queue = { path = "../bosun-queue", features = ["testsuite"] }
+
 [lints]
 workspace = true

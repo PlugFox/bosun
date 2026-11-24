@@ -172,6 +172,9 @@ pub enum Reason {
     /// The session's MCP server (`bosun-mcp`) did not say hello in time, again after one
     /// uncounted retry (#64): the agent would run without its tools.
     Handshake,
+    /// The identity checks before a session refused (#2, rule 2; #99): the remote's owner,
+    /// the token's login or the resolved author is not the identity's. Retrying cannot help.
+    Identity,
 }
 
 /// The state of an item.
@@ -324,6 +327,14 @@ pub enum Event {
         /// The session's number.
         spawn: u32,
     },
+    /// The fail-closed identity checks refused the session before its spawn (#2, rule 2;
+    /// #99): nothing ran. Needs you at once, not a failed attempt.
+    IdentityRefused {
+        /// The attempt it belonged to.
+        attempt: u32,
+        /// The session's number.
+        spawn: u32,
+    },
     /// A blocking `ask_question` call (agent).
     Question {
         /// The attempt of the session that asked.
@@ -398,6 +409,7 @@ impl Event {
             Self::Exited { .. } => "exited",
             Self::ResumeFailed { .. } => "resume_failed",
             Self::NoHandshake { .. } => "no_handshake",
+            Self::IdentityRefused { .. } => "identity_refused",
             Self::Question { .. } => "question",
             Self::Summary { .. } => "summary",
             Self::Note { .. } => "note",
@@ -740,6 +752,12 @@ impl Draft {
                 self.expect(&[State::Running])?;
                 self.session(*attempt, *spawn)?;
                 self.no_handshake();
+            }
+            Event::IdentityRefused { attempt, spawn } => {
+                self.expect(&[State::Running])?;
+                self.session(*attempt, *spawn)?;
+                self.attempt_mut().state = AttemptState::Exited;
+                self.needs_you(Reason::Identity);
             }
             Event::Question { attempt } => {
                 self.expect(&[State::Running, State::Verifying])?;
@@ -1442,6 +1460,17 @@ mod tests {
     }
 
     #[test]
+    fn an_identity_refusal_is_needs_you_at_once_and_counts_nothing() {
+        let item = running();
+        let (attempt, spawn, _) = cur(&item);
+        let next = go(&item, &Event::IdentityRefused { attempt, spawn }, &ctx());
+        assert_eq!(next.transition.cause, "identity_refused");
+        let next = next.item;
+        assert_eq!(next.state, State::NeedsYou(Reason::Identity));
+        assert_eq!((next.failed, next.uncounted), (0, 0));
+    }
+
+    #[test]
     fn expired_auth_is_needs_you_at_once() {
         let item = running();
         let next = go(&item, &exit(&item, Exit::Auth), &ctx()).item;
@@ -1613,6 +1642,7 @@ mod tests {
                 exited(Exit::Limit { reset_ms: None }, ""),
                 exited(Exit::Crash, "done"),
                 Event::ResumeFailed { attempt, spawn },
+                Event::IdentityRefused { attempt, spawn },
                 Event::KillSwitch,
             ]),
             State::Verifying => events.extend([

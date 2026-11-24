@@ -19,7 +19,9 @@ use bosun_config::{Config, DiskProbe, SystemProbe};
 use bosun_core::{Outcome, ParkReason, Reason, SpawnMode, State};
 use bosun_identity::{Bundle, ProbeError, TokenLogin};
 use bosun_proc::{ChildSpec, NativeSpawner, Spawned, Spawner};
-use bosun_queue::{Card, Column, LocalFile, Queue};
+use bosun_queue::projects_v2::fake::{FakeComment, FakeGitHub, FakeItem};
+use bosun_queue::projects_v2::{Binding, ProjectRef};
+use bosun_queue::{Card, Column, LocalFile, ProjectsV2, Queue};
 use bosun_store::{Options as StoreOptions, Store};
 use tokio::sync::watch;
 
@@ -30,8 +32,11 @@ use crate::events::{Events, Options as EventOptions};
 /// How long a session that asked a blocking question may go on in these scenarios.
 const GRACE: Duration = Duration::from_secs(2);
 
-/// The login every identity check sees.
+/// The login every identity check sees, and the viewer of the fake GitHub.
 const LOGIN: &str = "synthetic-login";
+
+/// The repository whose issues are the cards of the fake Projects v2 board.
+const BOARD_REPO: &str = "synthetic-owner/demo";
 
 /// `fake-agent` and `bosun-mcp`, built next to this test binary.
 fn built() -> &'static (PathBuf, PathBuf) {
@@ -104,21 +109,24 @@ fn sh_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// The token's login: [`LOGIN`], unless the file `login` of the scene says otherwise (a
+/// verdict can write it, so the login changes between two checks).
 #[derive(Debug)]
-struct FixedLogin;
+struct FixedLogin(PathBuf);
 
 impl TokenLogin for FixedLogin {
     fn login(&self, _host: &str) -> Result<String, ProbeError> {
-        Ok(LOGIN.to_owned())
+        Ok(std::fs::read_to_string(&self.0)
+            .map_or_else(|_| LOGIN.to_owned(), |text| text.trim().to_owned()))
     }
 }
 
 #[derive(Debug)]
-struct FixedLogins;
+struct FixedLogins(PathBuf);
 
 impl Logins for FixedLogins {
     fn probe(&self, _bundle: &Bundle) -> Box<dyn TokenLogin> {
-        Box::new(FixedLogin)
+        Box::new(FixedLogin(self.0.clone()))
     }
 }
 
@@ -196,6 +204,8 @@ struct Scene {
     /// The control state of #67, and the loop's events.
     control: crate::control::Control,
     events: Events,
+    /// The fake GitHub of a scene on a Projects v2 board; `None` on the local file.
+    projects: Option<Arc<FakeGitHub>>,
 }
 
 impl Scene {
@@ -227,12 +237,13 @@ impl Scene {
              gh_config_dir = '{gh}'\n\
              git_config = '{gitconfig}'\n\
              remote_allowlist = ['synthetic-owner']\n\
-             author_allowlist = ['local']\n\n\
+             author_allowlist = ['local', '{LOGIN}']\n\n\
              [repo.demo]\n\
              path = '{repo}'\n\
              identity = 'test'\n\
              queue = {{ kind = 'local_file', file = '{board}' }}\n\
-             verdict = {{ timeout = '60s' }}\n\n\
+             verdict = {{ timeout = '60s' }}\n\
+             build_dirs = ['target']\n\n\
              [repo.demo.policy]\n\
              protected = [{protected}]\n",
             claude = d.join("claude").display(),
@@ -245,6 +256,23 @@ impl Scene {
     }
 
     async fn new() -> Self {
+        Self::on(None).await
+    }
+
+    /// A scene whose board is a fake Projects v2 board: one project with the six columns,
+    /// holding issues of [`BOARD_REPO`] written by an allowed author.
+    async fn on_projects() -> Self {
+        let fake = FakeGitHub::new();
+        fake.set_viewer(LOGIN);
+        fake.add_project(
+            "synthetic-owner",
+            1,
+            &Column::ALL.map(bosun_queue::Column::name),
+        );
+        Self::on(Some(Arc::new(fake))).await
+    }
+
+    async fn on(projects: Option<Arc<FakeGitHub>>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         for sub in ["claude", "db", "gh", "repo", "scripts", "bin", "work"] {
@@ -292,6 +320,7 @@ impl Scene {
             handshake: Duration::from_secs(30),
             control,
             events: Events::new("test", EventOptions::default()),
+            projects,
             dir,
         };
         scene.git(&["init", "-q", "-b", "main"]);
@@ -351,12 +380,63 @@ impl Scene {
         std::fs::write(self.scripts.join(format!("demo_{card}.script")), text).unwrap();
     }
 
+    /// The board holds `cards`, in this order: the local file rewritten, or the fake's issues
+    /// edited (only what changed moves their `updatedAt`) and its project's items set.
     fn write_board(&self, cards: &[Card]) {
-        std::fs::write(&self.board, LocalFile::render(cards)).unwrap();
+        let Some(fake) = &self.projects else {
+            std::fs::write(&self.board, LocalFile::render(cards)).unwrap();
+            return;
+        };
+        for card in cards {
+            fake.issue(BOARD_REPO, card.id.0, |issue| {
+                issue.title.clone_from(&card.title);
+                issue.body.clone_from(&card.body);
+                issue.author = Some("local".to_owned());
+            });
+        }
+        let items: Vec<FakeItem<'_>> = cards
+            .iter()
+            .map(|c| FakeItem::Issue(BOARD_REPO, c.id.0, Some(c.column.name())))
+            .collect();
+        fake.set_items(0, &items);
+    }
+
+    /// The fake's binding, as the loop's backend connects with it.
+    fn binding() -> Binding {
+        Binding::new(
+            BOARD_REPO,
+            [ProjectRef::new("synthetic-owner", 1)],
+            ["local", LOGIN],
+        )
     }
 
     fn cards(&self) -> Vec<Card> {
-        LocalFile::new(&self.board).poll(None).unwrap().cards
+        match &self.projects {
+            None => LocalFile::new(&self.board).poll(None).unwrap().cards,
+            Some(fake) => {
+                ProjectsV2::connect(fake.clone(), Self::binding())
+                    .unwrap()
+                    .poll(None)
+                    .unwrap()
+                    .cards
+            }
+        }
+    }
+
+    /// The loop's board: the local file, or the fake connected at the loop's first poll.
+    fn queue(&self) -> board::Shared {
+        match &self.projects {
+            None => Arc::new(LocalFile::new(&self.board)),
+            Some(fake) => {
+                let fake = fake.clone();
+                Arc::new(board::Lazy::new(Box::new(move || {
+                    Ok(
+                        Arc::new(ProjectsV2::connect(fake.clone(), Self::binding())?)
+                            as board::Shared,
+                    )
+                })))
+            }
+        }
     }
 
     fn config(&self) -> Config {
@@ -391,10 +471,10 @@ impl Scene {
             reader: self.store.reader().clone(),
             writer: self.store.writer().clone(),
             events: self.events.clone(),
-            queue: Arc::new(LocalFile::new(&self.board)),
+            queue: self.queue(),
             spawner: self.spawner.clone(),
             power: Arc::new(bosun_proc::FakePower::default()),
-            logins: Arc::new(FixedLogins),
+            logins: Arc::new(FixedLogins(self.path("login"))),
             credentials: self.credentials.clone(),
             clock: self.clock.clone(),
             alive: {
@@ -494,9 +574,32 @@ fn terminal(state: Option<State>) -> bool {
 /// During item 1's session card 4 is edited, card 7 added and cards 4 and 5 swapped; all take
 /// effect with no restart. The checkout ends clean on the claim branch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines)]
 async fn seven_items_end_done_or_needs_you_and_board_edits_take_effect() {
-    let scene = Scene::new().await;
+    seven_items(Scene::new().await).await;
+}
+
+/// #99: the same run on a fake Projects v2 board, connected at the loop's first poll: every
+/// item ends as it does on the local file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn seven_items_on_a_projects_v2_board_end_as_on_the_local_file() {
+    let scene = Scene::on_projects().await;
+    let fake = scene.projects.clone().unwrap();
+    seven_items(scene).await;
+    // The claims went through the board: each claimed card got this daemon's marker.
+    for n in 1..=7 {
+        let issue = fake.issue_now(BOARD_REPO, n);
+        assert!(
+            issue
+                .comments
+                .iter()
+                .any(|c| c.body.contains("test-host/test-user")),
+            "card {n} carries no claim marker: {issue:?}"
+        );
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn seven_items(scene: Scene) {
     let flag = |name: &str| scene.path(name);
     let p = |name: &str| flag(name).display().to_string();
     let count1 = sh_path(&flag("count1"));
@@ -1469,6 +1572,294 @@ async fn a_session_whose_mcp_server_cannot_start_is_retried_once_then_needs_you(
     }
     task.abort();
     watcher.abort();
+}
+
+/// A card whose contract allows the protected path `allowed`.
+fn card_allowing(id: u64, title: &str, verdict: &str, allowed: &str) -> Card {
+    let mut card = card(id, title, verdict, title);
+    card.body = card.body.replace(
+        "verdict = ",
+        &format!("allow-protected = [\"{allowed}\"]\nverdict = "),
+    );
+    card
+}
+
+/// The values of trailer `key` on commit `rev` of the scene's repository.
+fn trailer(scene: &Scene, rev: &str, key: &str) -> Vec<String> {
+    let out = scene.git(&[
+        "log",
+        "-1",
+        &format!("--format=%(trailers:key={key},valueonly)"),
+        rev,
+    ]);
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// #99: the guards of #59 and the trailers in the loop. Six items on a repository that ignores
+/// `*.log`, whose policy protects `docs/frozen`:
+///
+/// 1. leaves a new ignored `hidden.log` its verdict needs: Needs you (`guard_ignored_file`),
+///    and the file is not deleted (`mutant_git_ignored_is_warning` lets it reach Done);
+/// 2. the same inside the build directory `target`: Done;
+/// 3. commits a file under `docs/frozen`: Needs you (`guard_protected_path`), the verdict never
+///    runs (`mutant_git_skip_protected_paths` and `mutant_loop_skip_guards` let it reach Done);
+/// 4. the same with `allow-protected = ["docs/frozen"]` in its contract: Done;
+/// 5. plants a hook in `.git/hooks`: Needs you (`guard_git_config`)
+///    (`mutant_git_skip_config_snapshot` lets it reach Done);
+/// 6. commits twice, the second time with the trailer marker turned off: Done. The first
+///    commit carries `Item:`, `Run:` and `Session:` equal to the attempt's and the report lists
+///    no `trailer_missing` for it; the second carries none and is the report's one
+///    `trailer_missing` line (`mutant_git_trailer_all_commits` puts the trailers on it too).
+///
+/// Each attempt's guard snapshots are stored on its row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)]
+async fn the_git_guards_refuse_before_the_verdict_and_the_trailers_reach_the_report() {
+    let scene = Scene::new().await;
+    std::fs::write(scene.repo.join(".gitignore"), "*.log\n").unwrap();
+    scene.git(&["add", ".gitignore"]);
+    scene.git(&["commit", "-q", "-m", "Ignore logs"]);
+    scene.write_board(&[
+        card(1, "Hidden", "test -f hidden.log", "Item one."),
+        card(
+            2,
+            "Build output",
+            "test -f target/out.log && test -f two.txt",
+            "Item two.",
+        ),
+        card(3, "Protected", "test -f docs/frozen/a.md", "Item three."),
+        card_allowing(4, "Allowed", "test -f docs/frozen/b.md", "docs/frozen"),
+        card(5, "Planted hook", "test -f five.txt", "Item five."),
+        card(6, "Trailers", "test -f six-b.txt", "Item six."),
+    ]);
+    scene.script(
+        1,
+        &[
+            "write hidden.log x".to_owned(),
+            "commit one.txt one".to_owned(),
+        ],
+    );
+    scene.script(
+        2,
+        &[
+            "write target/out.log x".to_owned(),
+            "commit two.txt two".to_owned(),
+        ],
+    );
+    scene.script(3, &["commit docs/frozen/a.md a".to_owned()]);
+    scene.script(4, &["commit docs/frozen/b.md b".to_owned()]);
+    scene.script(
+        5,
+        &[
+            "write .git/hooks/pre-push x".to_owned(),
+            "commit five.txt five".to_owned(),
+        ],
+    );
+    scene.script(
+        6,
+        &[
+            "commit six.txt six".to_owned(),
+            format!("unset {}", bosun_git::MARKER_VAR),
+            "commit six-b.txt six-b".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let mut states = BTreeMap::new();
+    for n in 1..=6 {
+        states.insert(n, ended(&scene, n, Duration::from_secs(120)).await);
+    }
+    task.abort();
+    watcher.abort();
+
+    let guard = |g| State::NeedsYou(Reason::Guard(g));
+    assert_eq!(states[&1], guard(bosun_core::Guard::IgnoredFile), "item 1");
+    assert!(
+        matches!(states[&2], State::Done(_)),
+        "item 2: {:?}",
+        states[&2]
+    );
+    assert_eq!(
+        states[&3],
+        guard(bosun_core::Guard::ProtectedPath),
+        "item 3"
+    );
+    assert!(
+        matches!(states[&4], State::Done(_)),
+        "item 4: {:?}",
+        states[&4]
+    );
+    assert_eq!(states[&5], guard(bosun_core::Guard::GitConfig), "item 5");
+    assert!(
+        matches!(states[&6], State::Done(_)),
+        "item 6: {:?}",
+        states[&6]
+    );
+
+    let id = |n: u64| ItemId::new(format!("demo#{n}"));
+    let reader = scene.store.reader();
+    // Refused before the verdict: no verdict ran for the refused items.
+    for n in [1, 3, 5] {
+        assert_eq!(
+            reader.verdict_runs(&id(n)).await.unwrap().len(),
+            0,
+            "item {n}"
+        );
+    }
+    // Nothing is deleted: the hidden file is still there.
+    assert!(scene.repo.join("hidden.log").exists());
+    // The guard snapshots are stored with the attempt: item 3's lists what items 1 and 2 left.
+    let (ignored, git_config) = reader.attempt_guards(&id(3), 1).await.unwrap().unwrap();
+    let ignored: Vec<String> = serde_json::from_str(&ignored).unwrap();
+    assert_eq!(ignored, ["hidden.log", "target/out.log"]);
+    let git_config: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&git_config).unwrap();
+    assert!(
+        git_config.keys().any(|k| k.ends_with("config")),
+        "{git_config:?}"
+    );
+
+    // Item 6's commits: the first with the attempt's trailers, the second with none.
+    let runs = reader.runs(&id(6)).await.unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let session = runs[0].session_key.clone();
+    assert_eq!(trailer(&scene, "HEAD~1", "Item"), ["demo#6"]);
+    assert_eq!(trailer(&scene, "HEAD~1", "Run"), ["a1s1"]);
+    assert_eq!(trailer(&scene, "HEAD~1", "Session"), [session]);
+    for key in ["Item", "Run", "Session"] {
+        assert_eq!(trailer(&scene, "HEAD", key), Vec::<String>::new(), "{key}");
+    }
+
+    // The report: the commits of item 6 linked to its run, the one without trailers listed.
+    let repo_key = scene.config().repos["demo"].key.clone();
+    bosun_ingest::git::refresh(reader, scene.store.writer(), &scene.repo)
+        .await
+        .unwrap();
+    let report = bosun_heat::exact(
+        reader,
+        "test",
+        bosun_heat::Scope {
+            from_ms: 0,
+            to_ms: now_ms() + 60_000,
+            repo: Some(&repo_key),
+        },
+        |key| bosun_api::RepoRef {
+            name: Some("demo".to_owned()),
+            path: key.to_owned(),
+        },
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let head = scene.git(&["rev-parse", "HEAD"]);
+    let first = scene.git(&["rev-parse", "HEAD~1"]);
+    let linked: Vec<&str> = report
+        .items
+        .commits
+        .iter()
+        .filter(|c| c.item == "demo#6")
+        .map(|c| c.sha.as_str())
+        .collect();
+    assert!(
+        linked.contains(&first.as_str()) && linked.contains(&head.as_str()),
+        "{linked:?}"
+    );
+    let missing: Vec<(&str, &str)> = report
+        .items
+        .trailer_missing
+        .iter()
+        .map(|t| (t.item.as_str(), t.sha.as_str()))
+        .collect();
+    assert_eq!(missing, [("demo#6", head.as_str())]);
+}
+
+/// #99: a second daemon on the same board. Card 1 carries the claim marker of another daemon id
+/// (of the same identity, so its login wrote it): the repository is refused, card 1 is not
+/// claimed (nothing written to the board, no snapshot, no session) and neither is card 2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_daemon_on_the_board_is_refused_and_claims_nothing() {
+    let scene = Scene::on_projects().await;
+    let fake = scene.projects.clone().unwrap();
+    scene.write_board(&[
+        card(1, "One", "test -f one.txt", "Item one."),
+        card(2, "Two", "test -f two.txt", "Item two."),
+    ]);
+    fake.issue(BOARD_REPO, 1, |issue| {
+        issue.comments.push(FakeComment::by(
+            LOGIN,
+            &bosun_queue::marker::embed(
+                &bosun_queue::claim::claim_key("other-host/other-user"),
+                "bosun: claimed by the daemon `other-host/other-user`.",
+            ),
+        ));
+    });
+    scene.script(1, &["commit one.txt one".to_owned()]);
+    scene.script(2, &["commit two.txt two".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    // Long enough for many polls: the refusal holds every claim.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    task.abort();
+    watcher.abort();
+
+    assert_eq!(fake.count("UpdateStatus"), 0, "{:?}", fake.requests());
+    assert_eq!(fake.count("AddComment"), 0, "{:?}", fake.requests());
+    for n in [1, 2] {
+        let id = ItemId::new(format!("demo#{n}"));
+        let state = scene.state(n).await;
+        assert!(
+            matches!(state, None | Some(State::Ready)),
+            "card {n}: {state:?}"
+        );
+        assert!(scene.store.reader().snapshot(&id).await.unwrap().is_none());
+        assert_eq!(fake.status_of(0, BOARD_REPO, n).as_deref(), Some("Ready"));
+    }
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
+}
+
+/// #99: a board that does not match the configuration (no `Needs you` column) fails the
+/// connection at the loop's first poll with a setup error: the repository is paused, claims
+/// nothing, and is not asked again within the pause.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_board_that_does_not_match_pauses_the_repository() {
+    let scene = Scene::on_projects().await;
+    let fake = scene.projects.clone().unwrap();
+    scene.write_board(&[card(1, "One", "test -f one.txt", "Item one.")]);
+    fake.set_options(0, &["Backlog", "Ready", "In progress", "Verify", "Done"]);
+    let (task, watcher) = scene.start(None);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(fake.count("Resolve"), 1, "{:?}", fake.requests());
+    assert_eq!(fake.count("Items"), 0, "{:?}", fake.requests());
+    assert_eq!(scene.state(1).await, None);
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
+}
+
+/// #99: the identity checks pass before the claim and refuse at the session (the token's
+/// login changed in between, here during the verdict on the base commit): Needs you as
+/// `identity`, nothing spawned, no attempt failed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_identity_refused_at_the_session_is_needs_you_as_identity() {
+    let scene = Scene::new().await;
+    let login = sh_path(&scene.path("login"));
+    scene.write_board(&[card(
+        1,
+        "Login changes",
+        &format!("echo someone-else > {login}; test -f one.txt"),
+        "Item one.",
+    )]);
+    scene.script(1, &["commit one.txt one".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, Duration::from_secs(60)).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(state, State::NeedsYou(Reason::Identity));
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
+    let item = scene.item(1).await.unwrap();
+    assert_eq!(item.failed, 0, "{item:?}");
 }
 
 #[path = "control_tests.rs"]

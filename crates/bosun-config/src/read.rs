@@ -11,7 +11,9 @@ use toml_edit::{Document, Item, TableLike};
 
 use crate::error::{Location, Notice, Problem};
 use crate::policy::{Policy, relative_entry};
-use crate::{Budget, Daemon, Landing, LandingMode, McpServer, Queue, Resource, Verdict};
+use crate::{
+    Budget, Daemon, Landing, LandingMode, McpServer, PullRequest, Queue, Resource, Verdict,
+};
 
 /// Sections of #4 that this version accepts and does not read.
 const LATER_SECTIONS: &[&str] = &["notify"];
@@ -78,9 +80,18 @@ pub(crate) struct DraftRepo {
     pub(crate) verdict: Verdict,
     pub(crate) policy: Policy,
     pub(crate) build_dirs: BTreeSet<String>,
-    pub(crate) landing: Landing,
+    pub(crate) landing: DraftLanding,
     pub(crate) mcp_servers: BTreeMap<String, McpServer>,
     pub(crate) worktree: Option<DraftWorktree>,
+}
+
+/// `repo.<name>.landing`, with where its mode and `merge.push` are written, for the checks
+/// against the worktree and the modes of this version.
+#[derive(Debug, Default)]
+pub(crate) struct DraftLanding {
+    pub(crate) landing: Landing,
+    pub(crate) mode_at: Option<Location>,
+    pub(crate) push_at: Option<Location>,
 }
 
 /// `repo.<name>.worktree`, its root kept with its key and position for the cross-check against
@@ -91,6 +102,16 @@ pub(crate) struct DraftWorktree {
     pub(crate) setup: Option<String>,
     pub(crate) teardown: Option<String>,
     pub(crate) disk_floor: Option<u64>,
+    pub(crate) shared_build: Option<DraftSharedBuild>,
+}
+
+/// `repo.<name>.worktree.shared_build`, its directory and resource kept with their positions
+/// for the cross-checks against the paths and `[resource.<name>]`.
+#[derive(Debug)]
+pub(crate) struct DraftSharedBuild {
+    pub(crate) dir: Option<PathValue>,
+    pub(crate) resource: Option<(String, Option<Location>)>,
+    pub(crate) env: String,
 }
 
 /// What the document says, in file order, before cross-checks.
@@ -370,7 +391,7 @@ impl Reader<'_> {
             verdict: Verdict::default(),
             policy: Policy::default(),
             build_dirs: BTreeSet::new(),
-            landing: Landing::default(),
+            landing: DraftLanding::default(),
             mcp_servers: BTreeMap::new(),
             worktree: None,
         };
@@ -402,7 +423,7 @@ impl Reader<'_> {
                 "build_dirs" => repo.build_dirs = self.entries(item, &what).unwrap_or_default(),
                 "landing" => {
                     if let Some(table) = self.table(item, &what, key_at) {
-                        self.landing(table, &what);
+                        repo.landing = self.landing(table, &what);
                     }
                 }
                 "mcp_servers" => repo.mcp_servers = self.mcp_servers(item, &what, key_at),
@@ -526,32 +547,112 @@ impl Reader<'_> {
         Policy::new(protected, push)
     }
 
-    /// Reads `landing`; stage 1 lands `local` only (#7), so every other mode is refused.
-    fn landing(&mut self, table: &dyn TableLike, what: &str) {
+    /// Reads `landing` (#8). The checks against the worktree and the modes of this version are
+    /// in validation; here a `merge` table with `local` is refused, since only `merge` reads it.
+    fn landing(&mut self, table: &dyn TableLike, what: &str) -> DraftLanding {
+        let mut draft = DraftLanding::default();
+        let mut mode_read = true;
+        let mut merge_at = None;
         for (key, item) in table.iter() {
             let key_at = self.key_at(table, key, item);
             let path = format!("{what}.{key}");
-            if key != "mode" {
-                self.ignored(key_at, &path);
-                continue;
+            match key {
+                "mode" => {
+                    let Some((mode, at)) = self.string(item, &path) else {
+                        mode_read = false;
+                        continue;
+                    };
+                    draft.mode_at = at;
+                    if let Some(mode) = LandingMode::parse(mode) {
+                        draft.landing.mode = mode;
+                    } else {
+                        mode_read = false;
+                        self.problem(
+                            at,
+                            format!("`{path}` is {mode:?}; it is \"local\", \"merge\" or \"pr\""),
+                        );
+                    }
+                }
+                "target" => draft.landing.target = self.branch(item, &path),
+                "merge" => {
+                    merge_at = key_at;
+                    if let Some(table) = self.table(item, &path, key_at) {
+                        self.merge(table, &path, &mut draft);
+                    }
+                }
+                "pr" => {
+                    if let Some(table) = self.table(item, &path, key_at) {
+                        self.pull_request(table, &path, &mut draft.landing.pr);
+                    }
+                }
+                _ => self.ignored(key_at, &path),
             }
-            let Some((mode, at)) = self.string(item, &path) else {
-                continue;
-            };
-            match LandingMode::parse(mode) {
-                Some(LandingMode::Local) => {}
-                None if matches!(mode, "merge" | "pr") => self.problem(
-                    at,
-                    format!(
-                        "`{path}` is {mode:?}; this version lands \"local\" only: the \
-                         \"merge\" and \"pr\" modes come with #8"
-                    ),
+        }
+        if mode_read && draft.landing.mode == LandingMode::Local && table.get("merge").is_some() {
+            self.problem(
+                merge_at,
+                format!(
+                    "`{what}.merge` is set with the mode \"local\", which always fast-forwards \
+                     without a push; it is read with `mode = \"merge\"` only"
                 ),
-                None => self.problem(
-                    at,
+            );
+        }
+        draft
+    }
+
+    /// Reads `landing.merge`. An unknown key is refused.
+    fn merge(&mut self, table: &dyn TableLike, what: &str, draft: &mut DraftLanding) {
+        let merge = &mut draft.landing.merge;
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let path = format!("{what}.{key}");
+            match key {
+                "method" => {
+                    let Some((text, at)) = self.string(item, &path) else {
+                        continue;
+                    };
+                    match crate::MergeMethod::parse(text) {
+                        Some(method) => merge.method = method,
+                        None => self.problem(
+                            at,
+                            format!("`{path}` is {text:?}; it is \"ff\", \"squash\" or \"no-ff\""),
+                        ),
+                    }
+                }
+                "push" => {
+                    draft.push_at = self.at(item.span());
+                    set(&mut merge.push, self.bool(item, &path));
+                }
+                other => self.problem(
+                    key_at,
+                    format!("unknown key `{what}.{other}`; a merge has `method` and `push`"),
+                ),
+            }
+        }
+    }
+
+    /// Reads `landing.pr`. `title` and `describe_session` are a later card's and are ignored
+    /// with a notice; any other unknown key is refused.
+    fn pull_request(&mut self, table: &dyn TableLike, what: &str, pr: &mut PullRequest) {
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let path = format!("{what}.{key}");
+            match key {
+                "draft" => set(&mut pr.draft, self.bool(item, &path)),
+                "reviewers" => {
+                    pr.reviewers = self
+                        .words(item, &path)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
+                }
+                "labels" => pr.labels = self.labels(item, &path).unwrap_or_default(),
+                "title" | "describe_session" => self.ignored(key_at, &path),
+                other => self.problem(
+                    key_at,
                     format!(
-                        "`{path}` is {mode:?}; it is \"local\" (\"merge\" and \"pr\" come \
-                         with #8)"
+                        "unknown key `{what}.{other}`; a pull request has `draft`, `reviewers` \
+                         and `labels`"
                     ),
                 ),
             }
@@ -571,6 +672,7 @@ impl Reader<'_> {
             setup: None,
             teardown: None,
             disk_floor: None,
+            shared_build: None,
         };
         for (key, item) in table.iter() {
             let key_at = self.key_at(table, key, item);
@@ -580,11 +682,16 @@ impl Reader<'_> {
                 "setup" => worktree.setup = self.command(item, &path),
                 "teardown" => worktree.teardown = self.command(item, &path),
                 "disk_floor" => worktree.disk_floor = self.size(item, &path),
+                "shared_build" => {
+                    if let Some(table) = self.table(item, &path, key_at) {
+                        worktree.shared_build = Some(self.shared_build(table, &path, key_at));
+                    }
+                }
                 other => self.problem(
                     key_at,
                     format!(
                         "unknown key `{what}.{other}`; a worktree has `root`, `setup`, \
-                         `teardown` and `disk_floor`"
+                         `teardown`, `disk_floor` and `shared_build`"
                     ),
                 ),
             }
@@ -593,6 +700,62 @@ impl Reader<'_> {
             self.problem(at, format!("`{what}` has no `root`"));
         }
         worktree
+    }
+
+    /// Reads `worktree.shared_build` (#8, E1). An unknown key is refused; `dir` and `resource`
+    /// are required.
+    fn shared_build(
+        &mut self,
+        table: &dyn TableLike,
+        what: &str,
+        at: Option<Location>,
+    ) -> DraftSharedBuild {
+        let mut shared = DraftSharedBuild {
+            dir: None,
+            resource: None,
+            env: crate::DEFAULT_SHARED_BUILD_ENV.to_owned(),
+        };
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let path = format!("{what}.{key}");
+            match key {
+                "dir" => shared.dir = self.path(item, &path),
+                "resource" => {
+                    if let Some((name, at)) = self.string(item, &path) {
+                        shared.resource = Some((name.to_owned(), at));
+                    }
+                }
+                "env" => {
+                    let Some((name, at)) = self.string(item, &path) else {
+                        continue;
+                    };
+                    if env_name(name) {
+                        name.clone_into(&mut shared.env);
+                    } else {
+                        self.problem(
+                            at,
+                            format!(
+                                "`{path}` is {name:?}; a variable name is ASCII letters, digits \
+                                 and `_`, and does not start with a digit"
+                            ),
+                        );
+                    }
+                }
+                other => self.problem(
+                    key_at,
+                    format!(
+                        "unknown key `{what}.{other}`; a shared build has `dir`, `resource` and \
+                         `env`"
+                    ),
+                ),
+            }
+        }
+        for key in ["dir", "resource"] {
+            if table.get(key).is_none() {
+                self.problem(at, format!("`{what}` has no `{key}`"));
+            }
+        }
+        shared
     }
 
     /// Reads `[resource.<name>]` (#8). An unknown key is refused.
@@ -744,6 +907,42 @@ impl Reader<'_> {
             return None;
         }
         Some(text.to_owned())
+    }
+
+    /// A branch name, bare: not empty, no whitespace, no leading `-`, no `refs/heads/`.
+    fn branch(&mut self, item: &Item, what: &str) -> Option<String> {
+        let (text, at) = self.string(item, what)?;
+        let why = if text.is_empty() || text.chars().any(char::is_whitespace) {
+            "it must be non-empty, with no whitespace"
+        } else if text.starts_with('-') {
+            "it must not start with `-`"
+        } else if text.starts_with("refs/") {
+            "write the bare branch name, without `refs/heads/`"
+        } else {
+            return Some(text.to_owned());
+        };
+        self.problem(at, format!("`{what}` is {text:?}; {why}"));
+        None
+    }
+
+    /// A list of labels: each non-empty, with no surrounding spaces; inner spaces are allowed.
+    fn labels(&mut self, item: &Item, what: &str) -> Option<Vec<String>> {
+        let array = self.string_array(item, what)?;
+        let mut out = Vec::new();
+        for (text, at) in array {
+            if text.is_empty() || text.trim() != text {
+                self.problem(
+                    at,
+                    format!(
+                        "`{what}` holds {text:?}; an entry is non-empty, with no surrounding \
+                         spaces"
+                    ),
+                );
+            } else {
+                out.push(text.to_owned());
+            }
+        }
+        Some(out)
     }
 
     /// A shell command; an empty one is none.
@@ -933,6 +1132,14 @@ fn valid_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// An environment variable name: an ASCII identifier.
+fn env_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Parses `<n><unit>` with `n > 0` and the unit one of `units` (its letter and its seconds).

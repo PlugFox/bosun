@@ -54,8 +54,8 @@
 //! queue = { kind = "projects", owner = "me", number = 7 }  # or kind = "local_file", file = '...'
 //! model = "opus"                # the sessions' default model; required with a queue (#133)
 //! verdict = { timeout = "30m" } # and `shell`, default `sh` (from Git on Windows)
-//! landing = { mode = "local" }  # the only mode of this version; merge and pr are #8
-//! worktree = { root = 'C:\wt\bosun', setup = "cargo fetch", disk_floor = "20GB" }  # #8
+//! landing = { mode = "merge", target = "main", merge = { method = "squash", push = false } }
+//! worktree = { root = 'C:\wt\bosun', setup = "cargo fetch", disk_floor = "20GB", shared_build = { dir = 'C:\wt\bosun-target', resource = "target", env = "CARGO_TARGET_DIR" } }
 //!
 //! [repo.bosun.policy]
 //! protected = ["tests/harness", "xtask/src/lint.rs"]  # `.gitignore` is always added
@@ -86,20 +86,38 @@
 //!   without wildcards ([`Policy::protected`]).
 //! - Durations are a positive whole number and one of `s`, `m`, `h`, `d`, `w`.
 //! - Identity, repository and MCP server names are ASCII letters, digits, `-` and `_`.
-//! - `landing.mode` other than `local` is refused. An unknown key of a `policy` is refused, so
-//!   that a misspelt `protected` cannot leave paths unprotected; so is an unknown key of a
-//!   `resource` or of a `worktree`.
+//! - An unknown key of a `policy` is refused, so that a misspelt `protected` cannot leave paths
+//!   unprotected; so is an unknown key of a `resource`, a `worktree`, a
+//!   `worktree.shared_build`, a `landing.merge` or a `landing.pr`.
+//! - `repo.<name>.landing` (#8): how an item's commits land. `mode` is `local` (the default),
+//!   `merge` or `pr`. `local` is not "stage 1 only": it is the dogfood mode, `merge` with the
+//!   method `ff` and no push onto the branch the item was claimed from (E6, E20); without a
+//!   worktree the commits stay on the current branch, as in stage 1. `merge` and `pr` need
+//!   `repo.<name>.worktree` (E19: every new path is gated on it, and without it stage 1 is
+//!   unchanged); `pr` is read but refused, it is not available yet.
+//!   - `target`: the branch landed on, a bare name (no `refs/heads/`, no whitespace, no leading
+//!     `-`); default: the branch the item was claimed from.
+//!   - `merge.method`: `ff` (default), `squash` or `no-ff`; `merge.push`: default false, and
+//!     `true` is not available yet. A `merge` table with `mode = "local"` is refused.
+//!   - `pr.draft` (default true), `pr.reviewers` and `pr.labels` (default empty) are read for
+//!     the `pr` mode; `pr.title` and `pr.describe_session` are a later card's, ignored with a
+//!     [`Notice`].
 //! - `repo.<name>.worktree` (#8): where the repository's item worktrees go. `root` is required
 //!   and lies outside the repository's `path`; `setup` and `teardown` are shell commands run in a
 //!   new worktree and before one is removed; `disk_floor` is the free space below which no new
 //!   worktree is made. Sizes are a positive whole number and one of `B`, `KB`, `MB`, `GB`, `TB`
-//!   (powers of 1000) or `KiB`, `MiB`, `GiB`, `TiB` (powers of 1024). Nothing acts on these keys
-//!   yet: items still run in the main checkout.
+//!   (powers of 1000) or `KiB`, `MiB`, `GiB`, `TiB` (powers of 1024).
+//!   - `shared_build` (E1): the one build directory the repository's worktrees share, behind an
+//!     exclusive lease held from the session through the landing re-verdict, and injected as
+//!     `env` (default `CARGO_TARGET_DIR`, an ASCII identifier). `dir` is absolute and `resource`
+//!     names a `[resource.<name>]`; both are required. It is the default for Rust: per-worktree
+//!     targets cost 12-15 GB each, and are the opt-in (no `shared_build`) of a repository that
+//!     raises concurrency.
 //! - `[resource.<name>]` (#8): a resource items may name in `needs`. `kind` is required. Nothing
 //!   leases them yet: a card that needs one keeps being refused until the lease manager exists.
 //! - `notify`, and every other key of #4 that a later stage reads (`repo.<name>.report`,
-//!   `landing.target`, `daemon.http_port`, ...), is accepted and ignored with a [`Notice`]. Any
-//!   other section is an error.
+//!   `daemon.http_port`, ...), is accepted and ignored with a [`Notice`]. Any other section is
+//!   an error.
 //!
 //! # Validation
 //!
@@ -110,6 +128,10 @@
 //!   are compared by their canonical key ([`bosun_core::canonical_path`]), so on Windows case
 //!   and separators do not matter. Links and junctions are not resolved for this comparison.
 //! - A repository's `worktree.root` is neither its `path` nor under it, compared the same way.
+//! - A `worktree.shared_build.dir` is neither the repository's `path` nor under it, nor under
+//!   `worktree.root`, compared the same way; its `resource` exists and has `capacity = 1`.
+//! - A `landing.mode` of `merge` or `pr` has a `worktree`; `pr` and `merge.push = true` are
+//!   refused as not available yet.
 //! - The directory of each database is on a local disk, as a [`DiskProbe`] sees it.
 //! - `budget.reserve_eqv` is less than `budget.daily_eqv` when both are set.
 //!
@@ -248,6 +270,9 @@ pub struct Worktree {
     /// `disk_floor`: in bytes, the free space below which no new worktree is made. Default
     /// `None`: no floor.
     pub disk_floor: Option<u64>,
+    /// `shared_build`: the build directory the worktrees share. Default `None`: each worktree
+    /// builds in its own.
+    pub shared_build: Option<SharedBuild>,
 }
 
 /// `[resource.<name>]`: a resource items lease (#8).
@@ -300,27 +325,120 @@ impl Default for Verdict {
     }
 }
 
+/// `repo.<name>.worktree.shared_build` (#8, E1): the one build directory the repository's
+/// worktrees share, behind an exclusive lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SharedBuild {
+    /// `dir`: the directory; never the repository's path, under it, or under the worktree
+    /// root.
+    pub dir: PathBuf,
+    /// `resource`: the name of the `[resource.<name>]` that guards it; it exists and has
+    /// `capacity = 1`.
+    pub resource: String,
+    /// `env`: the variable the directory is injected as. Default [`DEFAULT_SHARED_BUILD_ENV`].
+    pub env: String,
+}
+
+/// The default of `repo.<name>.worktree.shared_build.env`.
+pub const DEFAULT_SHARED_BUILD_ENV: &str = "CARGO_TARGET_DIR";
+
 /// `repo.<name>.landing` (#8).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Landing {
     /// `mode`. Default `local`.
     pub mode: LandingMode,
+    /// `target`: the branch the item lands on, a bare name (no `refs/heads/`). Default `None`:
+    /// the branch the item was claimed from.
+    pub target: Option<String>,
+    /// `merge`: how `mode = "merge"` lands.
+    pub merge: Merge,
+    /// `pr`: the pull request `mode = "pr"` opens.
+    pub pr: PullRequest,
 }
 
 /// `repo.<name>.landing.mode`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LandingMode {
-    /// Commits stay on the current branch; nothing is pushed. The only mode of this version:
-    /// `merge` and `pr` are refused until #8.
+    /// `local`: the dogfood mode (E6, E20): `merge` with the method `ff` and no push, onto the
+    /// branch the item was claimed from. Without a worktree the commits stay on the current
+    /// branch, as in stage 1.
     #[default]
     Local,
+    /// `merge`: the run branch is merged into the target with [`Merge::method`]. Needs
+    /// `repo.<name>.worktree`.
+    Merge,
+    /// `pr`: a pull request is opened. Needs `repo.<name>.worktree`; refused in this version.
+    Pr,
 }
 
 impl LandingMode {
     fn parse(text: &str) -> Option<Self> {
-        (text == "local").then_some(Self::Local)
+        match text {
+            "local" => Some(Self::Local),
+            "merge" => Some(Self::Merge),
+            "pr" => Some(Self::Pr),
+            _ => None,
+        }
+    }
+}
+
+/// `repo.<name>.landing.merge`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Merge {
+    /// `method`. Default `ff`.
+    pub method: MergeMethod,
+    /// `push`: push the target after the merge. Default false; `true` is refused in this
+    /// version.
+    pub push: bool,
+}
+
+/// `repo.<name>.landing.merge.method`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MergeMethod {
+    /// `ff`: the target is fast-forwarded to the run branch.
+    #[default]
+    Ff,
+    /// `squash`: the run branch becomes one commit on the target.
+    Squash,
+    /// `no-ff`: a merge commit, even when a fast-forward is possible.
+    NoFf,
+}
+
+impl MergeMethod {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "ff" => Some(Self::Ff),
+            "squash" => Some(Self::Squash),
+            "no-ff" => Some(Self::NoFf),
+            _ => None,
+        }
+    }
+}
+
+/// `repo.<name>.landing.pr`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PullRequest {
+    /// `draft`: open the pull request as a draft. Default true.
+    pub draft: bool,
+    /// `reviewers`: logins asked for a review. Default empty.
+    pub reviewers: Vec<String>,
+    /// `labels`: labels put on it. Default empty.
+    pub labels: Vec<String>,
+}
+
+impl Default for PullRequest {
+    fn default() -> Self {
+        Self {
+            draft: true,
+            reviewers: Vec::new(),
+            labels: Vec::new(),
+        }
     }
 }
 
@@ -454,7 +572,7 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
                     verdict: r.verdict,
                     policy: r.policy,
                     build_dirs: r.build_dirs,
-                    landing: r.landing,
+                    landing: r.landing.landing,
                     mcp_servers: r.mcp_servers,
                     worktree: r.worktree.and_then(|w| {
                         Some(Worktree {
@@ -462,6 +580,13 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
                             setup: w.setup,
                             teardown: w.teardown,
                             disk_floor: w.disk_floor,
+                            shared_build: w.shared_build.and_then(|s| {
+                                Some(SharedBuild {
+                                    dir: s.dir?.path,
+                                    resource: s.resource?.0,
+                                    env: s.env,
+                                })
+                            }),
                         })
                     }),
                 },

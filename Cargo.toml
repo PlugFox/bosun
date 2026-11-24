@@ -273,6 +273,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_git_worktree_remove_any_branch)",
   "cfg(mutant_git_ff_skip_descendant_check)",
   "cfg(mutant_git_ff_checked_out_by_ref)",
+  # #149: landing modes, merge and pull request keys, shared build directories.
+  "cfg(mutant_config_landing_without_worktree)",
+  "cfg(mutant_config_shared_build_any_resource)",
 ] }
 
 [workspace.lints.clippy]

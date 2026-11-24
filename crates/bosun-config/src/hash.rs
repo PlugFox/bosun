@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::{Budget, Config, Daemon, Identity, Landing, LandingMode, Policy, Queue, Repo};
+use crate::{
+    Budget, Config, Daemon, Identity, Landing, LandingMode, MergeMethod, Policy, Queue, Repo,
+    Worktree,
+};
 
 /// The canonical encoding being built.
 struct Canon(Vec<u8>);
@@ -121,7 +124,7 @@ impl Config {
     pub fn repo_hash(&self, name: &str) -> Option<String> {
         let repo = self.repos.get(name)?;
         let identity = self.identities.get(&repo.identity)?;
-        let mut canon = Canon::new("bosun-config/repo/1");
+        let mut canon = Canon::new("bosun-config/repo/2");
         canon.str(name);
         self::repo(&mut canon, repo);
         canon.str(&repo.identity);
@@ -164,11 +167,46 @@ fn repo(canon: &mut Canon, repo: &Repo) {
             .strs(server.args.iter().map(String::as_str))
             .map(&server.env);
     }
+    worktree(canon, repo.worktree.as_ref());
 }
 
 fn landing(canon: &mut Canon, landing: &Landing) {
-    match landing.mode {
-        LandingMode::Local => canon.str("local"),
+    canon.str(match landing.mode {
+        LandingMode::Local => "local",
+        LandingMode::Merge => "merge",
+        LandingMode::Pr => "pr",
+    });
+    canon.opt_str(landing.target.as_deref());
+    canon.str(match landing.merge.method {
+        MergeMethod::Ff => "ff",
+        MergeMethod::Squash => "squash",
+        MergeMethod::NoFf => "no-ff",
+    });
+    canon
+        .bool(landing.merge.push)
+        .bool(landing.pr.draft)
+        .strs(landing.pr.reviewers.iter().map(String::as_str))
+        .strs(landing.pr.labels.iter().map(String::as_str));
+}
+
+fn worktree(canon: &mut Canon, worktree: Option<&Worktree>) {
+    let Some(worktree) = worktree else {
+        canon.bool(false);
+        return;
+    };
+    canon
+        .bool(true)
+        .path(&worktree.root)
+        .opt_str(worktree.setup.as_deref())
+        .opt_str(worktree.teardown.as_deref())
+        .opt_u64(worktree.disk_floor);
+    match &worktree.shared_build {
+        None => canon.bool(false),
+        Some(shared) => canon
+            .bool(true)
+            .path(&shared.dir)
+            .str(&shared.resource)
+            .str(&shared.env),
     };
 }
 

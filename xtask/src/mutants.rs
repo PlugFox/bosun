@@ -1124,6 +1124,14 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_control_keep_operator_token",
+        issue: 67,
+        breaks: "a clean shutdown keeps the operator token's file: the token outlives its daemon",
+        package: "bosund",
+        check: Check::Test("control::tests::a_clean_shutdown_removes_the_operator_token"),
+        platform: None,
+    },
     // #99: the guards of #59 in the loop; the "reaches Done" forms of #59's mutants.
     Mutant {
         name: "mutant_loop_skip_guards",

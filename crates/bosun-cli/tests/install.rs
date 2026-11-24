@@ -66,7 +66,14 @@ fn endpoint(dir: &Path) -> Endpoint {
     }
 }
 
-/// Runs `bosun` with `args` against `config` and `endpoint`, with neither variable set.
+/// The operator token's file of a test whose configuration is `config`: beside it, in the
+/// test's temp dir, so no daemon of a test writes into the user's operator directory.
+fn operator_file(config: &Path) -> PathBuf {
+    config.with_file_name("operator.token")
+}
+
+/// Runs `bosun` with `args` against `config` and `endpoint`, with neither variable set but
+/// the operator token's file, which is the test's own ([`operator_file`]).
 fn bosun(config: &Path, endpoint: &Endpoint, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_bosun"))
         .args(args)
@@ -76,6 +83,7 @@ fn bosun(config: &Path, endpoint: &Endpoint, args: &[&str]) -> Output {
         .arg(endpoint.path())
         .env_remove("BOSUN_CONFIG")
         .env_remove("BOSUN_ENDPOINT")
+        .env("BOSUN_OPERATOR_FILE", operator_file(config))
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -401,6 +409,7 @@ fn doctor_on(
         .arg(endpoint.path())
         .env_remove("BOSUN_CONFIG")
         .env_remove("BOSUN_ENDPOINT")
+        .env("BOSUN_OPERATOR_FILE", operator_file(config))
         .env("PATH", path)
         .stdin(Stdio::null());
     for (key, value) in env {

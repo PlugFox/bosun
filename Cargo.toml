@@ -198,6 +198,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_budget_ignore_item_cap)",
   "cfg(mutant_control_autopause_own_sessions)",
   "cfg(mutant_control_no_operator_token)",
+  "cfg(mutant_control_keep_operator_token)",
   # #99: the git guards and the Projects v2 backend in the loop.
   "cfg(mutant_loop_skip_guards)",
   # #70: the stage-1 read methods and CLI commands.

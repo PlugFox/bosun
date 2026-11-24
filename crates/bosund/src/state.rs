@@ -154,6 +154,7 @@ pub(crate) async fn run(
     config: Config,
     config_path: PathBuf,
     endpoint: Endpoint,
+    operator_file: Option<PathBuf>,
     stop: impl Future<Output = ()>,
 ) -> Result<(), Failure> {
     let listener = listen::claim(&endpoint).await.map_err(|e| match e {
@@ -165,7 +166,7 @@ pub(crate) async fn run(
     })?;
 
     // A fresh operator token at every start, outside every checkout (#67).
-    let operator = match operator_token(&config, &endpoint) {
+    let operator = match operator_token(&config, &endpoint, operator_file) {
         Ok(operator) => operator,
         Err(e) => {
             listener.close();
@@ -218,6 +219,8 @@ pub(crate) async fn run(
     let _ = progress.await;
     budget.abort();
     let _ = budget.await;
+    // Nothing answers now: the token is no longer any daemon's to give out.
+    state.control.remove_operator_file();
     match Arc::try_unwrap(state) {
         Ok(state) => shut_down(state.identities).await,
         Err(_) => eprintln!("bosund: a connection outlived shutdown; stores left to the OS"),
@@ -227,8 +230,16 @@ pub(crate) async fn run(
 }
 
 /// Writes a fresh operator token for `endpoint` and returns the control state that admits it.
-fn operator_token(config: &Config, endpoint: &Endpoint) -> Result<Control, String> {
-    let file = bosun_client::operator::path(endpoint)?;
+/// The file is `file` when the logon registration named one, else the client's default.
+fn operator_token(
+    config: &Config,
+    endpoint: &Endpoint,
+    file: Option<PathBuf>,
+) -> Result<Control, String> {
+    let file = match file {
+        Some(file) => file,
+        None => bosun_client::operator::path(endpoint)?,
+    };
     let checkouts: Vec<&std::path::Path> =
         config.repos.values().map(|r| r.path.as_path()).collect();
     let token = control::issue(&file, &checkouts)?;

@@ -289,6 +289,24 @@ impl Control {
         }
     }
 
+    /// Removes the operator token's file on a clean shutdown, when it still holds this daemon's
+    /// token. A file another daemon wrote since is left alone: it is that daemon's token.
+    pub(crate) fn remove_operator_file(&self) {
+        let Some(file) = &self.inner.operator_file else {
+            return;
+        };
+        if cfg!(mutant_control_keep_operator_token) {
+            // Mutant: the token outlives the daemon that wrote it.
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(file) else {
+            return;
+        };
+        if digest(text.trim()) == self.inner.operator {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
     /// The agent CLI's deny rules for the operator token's file: read and edit refused. A rule
     /// list is not a boundary (see the module documentation), but it keeps the file out of a
     /// session that is only wandering.
@@ -447,6 +465,38 @@ mod tests {
         assert!(control.authorize(&token).is_ok());
         assert!(control.authorize("bosun-operator-forged").is_err());
         assert!(control.authorize("").is_err());
+    }
+
+    #[test]
+    fn a_clean_shutdown_removes_the_operator_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bosun-test.token");
+        let token = issue(&file, &[]).unwrap();
+        let control = Control::with_token(&token, Some(file.clone()));
+        assert!(file.is_file());
+        control.remove_operator_file();
+        assert!(
+            !file.exists(),
+            "the token outlived the daemon that wrote it"
+        );
+    }
+
+    #[test]
+    fn a_token_another_daemon_wrote_is_not_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bosun-test.token");
+        let ours = issue(&file, &[]).unwrap();
+        let control = Control::with_token(&ours, Some(file.clone()));
+        // A second daemon at the same endpoint writes its own token over ours.
+        let theirs = issue(&file, &[]).unwrap();
+        control.remove_operator_file();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap().trim(),
+            theirs,
+            "another daemon's token was removed"
+        );
+        // A daemon without a file has nothing to remove.
+        Control::default().remove_operator_file();
     }
 
     #[test]

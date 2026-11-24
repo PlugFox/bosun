@@ -55,8 +55,8 @@
 //!   `--identity`, only the identity that owns it is asked.
 //! - `install`: registers the logon process that starts `bosund` for the current user, and
 //!   starts it now (`install.rs`). `bosund` is the one next to `bosun` unless `--daemon` names
-//!   another; `--config` and `--endpoint` (or `BOSUN_CONFIG` and `BOSUN_ENDPOINT`), when set,
-//!   are passed to it. Idempotent. When the daemon does not answer after the start, install
+//!   another; `--config` and `--endpoint` (or `BOSUN_CONFIG` and `BOSUN_ENDPOINT`), and the
+//!   operator token's file (`BOSUN_OPERATOR_FILE`), when set, are passed to it. Idempotent. When the daemon does not answer after the start, install
 //!   still succeeds and says so on stderr: the registration is in place.
 //! - `uninstall`: stops that daemon and removes everything install created.
 //! - `doctor`: checks the registration, the configuration, each identity's directories,

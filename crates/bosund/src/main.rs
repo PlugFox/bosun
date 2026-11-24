@@ -9,12 +9,15 @@
 //! checkpoints and truncates its WAL.
 //!
 //! ```text
-//! bosund [--config <file>] [--endpoint <socket or pipe>]
+//! bosund [--config <file>] [--endpoint <socket or pipe>] [--operator-file <file>]
 //! ```
 //!
 //! At start it writes a fresh operator token, the credential of the control switches (#67), to
-//! the file `bosun_client::operator::path` names (`BOSUN_OPERATOR_FILE`, else per endpoint); a
-//! file inside a configured repository's checkout is refused (exit code 1).
+//! the file `--operator-file` names, else `bosun_client::operator::path` (`BOSUN_OPERATOR_FILE`,
+//! else per endpoint); a file inside a configured repository's checkout is refused (exit code
+//! 1). A clean shutdown removes that file again, when it still holds this daemon's token.
+//! `--operator-file` is how a logon registration names the file: the logon process sees no
+//! environment.
 //!
 //! The configuration is `--config`, else `bosun_config::default_path` (`BOSUN_CONFIG`, else
 //! the platform's location). The endpoint is `--endpoint`, else `bosun_client::Endpoint::resolve`
@@ -69,7 +72,7 @@ mod exit {
 }
 
 const USAGE: &str = "\
-usage: bosund [--config <file>] [--endpoint <socket or pipe>]
+usage: bosund [--config <file>] [--endpoint <socket or pipe>] [--operator-file <file>]
 
 The bosun daemon: ingests each identity's transcripts and serves the local API.
 
@@ -80,6 +83,7 @@ exit codes: 0 stopped cleanly, 1 failed, 2 bad arguments, 3 bad configuration,
 struct Args {
     config: Option<PathBuf>,
     endpoint: Option<String>,
+    operator_file: Option<PathBuf>,
 }
 
 fn parse(args: &[String]) -> Result<Option<Args>, String> {
@@ -92,6 +96,10 @@ fn parse(args: &[String]) -> Result<Option<Args>, String> {
             }
             "--endpoint" => {
                 parsed.endpoint = Some(args.next().ok_or("--endpoint needs a name")?.clone());
+            }
+            "--operator-file" => {
+                parsed.operator_file =
+                    Some(args.next().ok_or("--operator-file needs a file")?.into());
             }
             "-h" | "--help" => return Ok(None),
             "-V" | "--version" => {
@@ -156,7 +164,14 @@ fn main() -> ExitCode {
             return ExitCode::from(exit::FAILED);
         }
     };
-    match runtime.block_on(state::run(config, config_path, endpoint, stop_signal())) {
+    let run = state::run(
+        config,
+        config_path,
+        endpoint,
+        args.operator_file,
+        stop_signal(),
+    );
+    match runtime.block_on(run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Running { endpoint, pid }) => {
             let pid = pid.map_or_default(|pid| format!(" (pid {pid})"));

@@ -86,6 +86,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_fixture_lint_off)",
   "cfg(mutant_config_shared_dir)",
   "cfg(mutant_config_skip_disk_probe)",
+  "cfg(mutant_config_resource_any_capacity)",
+  "cfg(mutant_config_worktree_root_inside_repo)",
   "cfg(mutant_store_commit_per_row)",
   "cfg(mutant_store_accept_newer)",
   "cfg(mutant_store_default_perms)",

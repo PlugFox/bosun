@@ -6,12 +6,12 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bosun_core::{PathStyle, canonical_path};
+use bosun_core::{PathStyle, Scope, canonical_path};
 use toml_edit::{Document, Item, TableLike};
 
 use crate::error::{Location, Notice, Problem};
 use crate::policy::{Policy, relative_entry};
-use crate::{Budget, Daemon, Landing, LandingMode, McpServer, Queue, Verdict};
+use crate::{Budget, Daemon, Landing, LandingMode, McpServer, Queue, Resource, Verdict};
 
 /// Sections of #4 that this version accepts and does not read.
 const LATER_SECTIONS: &[&str] = &["notify"];
@@ -22,6 +22,15 @@ pub(crate) const DEFAULT_REINGEST_WINDOW: Duration = Duration::from_hours(30 * 2
 
 /// Units of `retention.reingest_window`: whole hours, days or weeks.
 const WINDOW_UNITS: &[(char, u64)] = &[('h', 3600), ('d', 86_400), ('w', 604_800)];
+
+/// Units of `worktree.disk_floor`, each a power of 1024.
+const SIZE_UNITS: &[(&str, u64)] = &[
+    ("B", 1),
+    ("KB", 1 << 10),
+    ("MB", 1 << 20),
+    ("GB", 1 << 30),
+    ("TB", 1 << 40),
+];
 
 /// Units of every other duration: seconds to weeks.
 const DURATION_UNITS: &[(char, u64)] = &[
@@ -66,6 +75,16 @@ pub(crate) struct DraftRepo {
     pub(crate) build_dirs: BTreeSet<String>,
     pub(crate) landing: Landing,
     pub(crate) mcp_servers: BTreeMap<String, McpServer>,
+    pub(crate) worktree: Option<DraftWorktree>,
+}
+
+/// `repo.<name>.worktree`, as read: its root keeps its canonical key for the inside check.
+#[derive(Debug)]
+pub(crate) struct DraftWorktree {
+    pub(crate) root: PathValue,
+    pub(crate) setup: Option<String>,
+    pub(crate) teardown: Option<String>,
+    pub(crate) disk_floor: Option<u64>,
 }
 
 /// What the document says, in file order, before cross-checks.
@@ -78,6 +97,7 @@ pub(crate) struct Draft {
     /// Where `budget.reserve_eqv` is written, for the cross-check against the daily cap.
     pub(crate) reserve_at: Option<Location>,
     pub(crate) daemon: Daemon,
+    pub(crate) resources: BTreeMap<String, Resource>,
     pub(crate) notices: Vec<Notice>,
 }
 
@@ -111,6 +131,7 @@ pub(crate) fn read(text: &str, problems: &mut Vec<Problem>) -> Option<Draft> {
         budget: Budget::default(),
         reserve_at: None,
         daemon: Daemon::default(),
+        resources: BTreeMap::new(),
         notices: Vec::new(),
     };
 
@@ -133,6 +154,13 @@ pub(crate) fn read(text: &str, problems: &mut Vec<Problem>) -> Option<Draft> {
                     draft.repos.push(reader.repo(name, item, at));
                 }
             }
+            "resource" => {
+                for (name, item, at) in reader.named_tables(item, "resource", at) {
+                    if let Some(resource) = reader.resource(name, item, at) {
+                        draft.resources.insert(name.to_owned(), resource);
+                    }
+                }
+            }
             "retention" => {
                 if let Some(window) = reader.retention(item, at) {
                     draft.reingest_window = window;
@@ -151,7 +179,7 @@ pub(crate) fn read(text: &str, problems: &mut Vec<Problem>) -> Option<Draft> {
                 at,
                 format!(
                     "unknown section `{unknown}`; the sections are daemon, identity, repo, \
-                     retention, budget and notify"
+                     resource, retention, budget and notify"
                 ),
             ),
         }
@@ -337,6 +365,7 @@ impl Reader<'_> {
             build_dirs: BTreeSet::new(),
             landing: Landing::default(),
             mcp_servers: BTreeMap::new(),
+            worktree: None,
         };
         let Some(table) = item.as_table_like() else {
             return repo;
@@ -369,6 +398,7 @@ impl Reader<'_> {
                     }
                 }
                 "mcp_servers" => repo.mcp_servers = self.mcp_servers(item, &what, key_at),
+                "worktree" => repo.worktree = self.worktree(item, &what, key_at),
                 _ => self.ignored(key_at, &what),
             }
         }
@@ -548,6 +578,132 @@ impl Reader<'_> {
             }
         }
         servers
+    }
+
+    /// Reads `[resource.<name>]`. An unknown key is a problem: a misspelt `capacity` must not
+    /// silently leave one holder.
+    fn resource(&mut self, name: &str, item: &Item, at: Option<Location>) -> Option<Resource> {
+        let table = item.as_table_like()?;
+        let path = format!("resource.{name}");
+        let mut kind = None;
+        let mut capacity = 1;
+        let mut scope = Scope::Machine;
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let what = format!("{path}.{key}");
+            match key {
+                "kind" => {
+                    if let Some((text, at)) = self.string(item, &what) {
+                        if text.trim().is_empty() {
+                            self.problem(at, format!("`{what}` is empty; it names the resource"));
+                        } else {
+                            kind = Some(text.to_owned());
+                        }
+                    }
+                }
+                "capacity" => {
+                    // Mutant (`mutant_config_resource_any_capacity`): a capacity of 0 is taken.
+                    let min = i64::from(!cfg!(mutant_config_resource_any_capacity));
+                    if let Some(n) = self.integer(item, &what, min) {
+                        if let Ok(n) = u32::try_from(n) {
+                            capacity = n;
+                        } else {
+                            let at = self.at(item.span());
+                            self.problem(at, format!("`{what}` is too large"));
+                        }
+                    }
+                }
+                "scope" => {
+                    if let Some((text, at)) = self.string(item, &what) {
+                        match parse_scope(text) {
+                            Some(parsed) => scope = parsed,
+                            None => self.problem(
+                                at,
+                                format!(
+                                    "`{what}` is {text:?}; it is \"machine\", \"identity\" or \
+                                     \"repository\""
+                                ),
+                            ),
+                        }
+                    }
+                }
+                other => self.problem(
+                    key_at,
+                    format!(
+                        "unknown key `{path}.{other}`; a resource has `kind`, `capacity` and \
+                         `scope`"
+                    ),
+                ),
+            }
+        }
+        if kind.is_none() && table.get("kind").is_none() {
+            self.problem(at, format!("`{path}` has no `kind`"));
+        }
+        Some(Resource {
+            kind: kind?,
+            capacity,
+            scope,
+        })
+    }
+
+    /// Reads `repo.<name>.worktree`. An unknown key is a problem, as in a policy.
+    fn worktree(&mut self, item: &Item, what: &str, at: Option<Location>) -> Option<DraftWorktree> {
+        let table = self.table(item, what, at)?;
+        let mut root = None;
+        let mut setup = None;
+        let mut teardown = None;
+        let mut disk_floor = None;
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let path = format!("{what}.{key}");
+            match key {
+                "root" => root = self.path(item, &path),
+                "setup" => setup = self.command(item, &path),
+                "teardown" => teardown = self.command(item, &path),
+                "disk_floor" => disk_floor = self.size(item, &path),
+                other => self.problem(
+                    key_at,
+                    format!(
+                        "unknown key `{path}`; a worktree has `root`, `setup`, `teardown` and \
+                         `disk_floor` (`{other}` is not one)"
+                    ),
+                ),
+            }
+        }
+        if root.is_none() && table.get("root").is_none() {
+            self.problem(at, format!("`{what}` has no `root`"));
+        }
+        Some(DraftWorktree {
+            root: root?,
+            setup,
+            teardown,
+            disk_floor,
+        })
+    }
+
+    /// A shell command: a non-empty string.
+    fn command(&mut self, item: &Item, what: &str) -> Option<String> {
+        let (text, at) = self.string(item, what)?;
+        if text.trim().is_empty() {
+            self.problem(at, format!("`{what}` is empty; it is a shell command"));
+            return None;
+        }
+        Some(text.to_owned())
+    }
+
+    fn size(&mut self, item: &Item, what: &str) -> Option<u64> {
+        let (text, at) = self.string(item, what)?;
+        let value = parse_size(text);
+        if value.is_none() {
+            self.problem(
+                at,
+                format!(
+                    "`{what}` is {text:?}; expected a positive whole number of B, KB, MB, GB \
+                     or TB, such as \"20GB\""
+                ),
+            );
+        }
+        value
     }
 
     fn retention(&mut self, item: &Item, at: Option<Location>) -> Option<Duration> {
@@ -755,11 +911,30 @@ fn set<T>(target: &mut T, value: Option<T>) {
     }
 }
 
+/// The scope names of `resource.<name>.scope`.
+fn parse_scope(text: &str) -> Option<Scope> {
+    match text {
+        "machine" => Some(Scope::Machine),
+        "identity" => Some(Scope::Identity),
+        "repository" => Some(Scope::Repository),
+        _ => None,
+    }
+}
+
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Parses `<n><unit>` with `n > 0` and a unit of [`SIZE_UNITS`], as a number of bytes.
+fn parse_size(text: &str) -> Option<u64> {
+    let split = text.find(|c: char| !c.is_ascii_digit())?;
+    let (count, unit) = text.split_at(split);
+    let &(_, bytes) = SIZE_UNITS.iter().find(|(letter, _)| *letter == unit)?;
+    let count: u64 = count.parse().ok().filter(|&n| n > 0)?;
+    count.checked_mul(bytes)
 }
 
 /// Parses `<n><unit>` with `n > 0` and the unit one of `units` (its letter and its seconds).
@@ -808,6 +983,28 @@ mod tests {
         assert_eq!(duration("2h"), Some(Duration::from_hours(2)));
         for bad in ["", "s", "0s", "1.5h", "30", "30y", "5 m", "й"] {
             assert_eq!(duration(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("20GB"), Some(20 << 30));
+        assert_eq!(parse_size("512MB"), Some(512 << 20));
+        assert_eq!(parse_size("1TB"), Some(1 << 40));
+        assert_eq!(parse_size("7B"), Some(7));
+        for bad in [
+            "",
+            "GB",
+            "0GB",
+            "-1GB",
+            "1.5GB",
+            "20",
+            "20gb",
+            "20 GB",
+            "20PB",
+            "99999999999999TB",
+        ] {
+            assert_eq!(parse_size(bad), None, "{bad:?}");
         }
     }
 

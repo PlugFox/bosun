@@ -387,6 +387,72 @@ fn a_landing_mode_other_than_local_is_refused_naming_8() {
 }
 
 #[test]
+fn a_resource_needs_a_positive_capacity_and_a_known_scope() {
+    let with_resource = |rest: &str| with_repo(&format!("[resource.gpu]\n{rest}"));
+
+    let found = problems(&with_resource("kind = 'gpu'\ncapacity = 0\n"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("`resource.gpu.capacity`"), "{found:?}");
+
+    let found = problems(&with_resource("kind = 'gpu'\nscope = 'shared'\n"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("`resource.gpu.scope`"), "{found:?}");
+
+    let found = problems(&with_resource("capacity = 2\n"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("`resource.gpu` has no `kind`"),
+        "{found:?}"
+    );
+
+    let found = problems(&with_resource("kind = 'gpu'\ncapcity = 2\n"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("`resource.gpu.capcity`"), "{found:?}");
+
+    let config = parse(&with_resource("kind = 'gpu'\n"), &Local).unwrap();
+    let gpu = &config.resources["gpu"];
+    assert_eq!(gpu.kind, "gpu");
+    assert_eq!(gpu.capacity, 1);
+    assert_eq!(gpu.scope, Scope::Machine);
+
+    let config = parse(
+        &with_resource("kind = 'build-dir'\ncapacity = 4\nscope = 'repository'\n"),
+        &Local,
+    )
+    .unwrap();
+    let build = &config.resources["gpu"];
+    assert_eq!(build.kind, "build-dir");
+    assert_eq!(build.capacity, 4);
+    assert_eq!(build.scope, Scope::Repository);
+}
+
+#[test]
+fn a_worktree_root_inside_the_repository_is_refused() {
+    let root = |dir: &str| with_repo(&format!("worktree = {{ root = '{}' }}\n", abs(dir)));
+
+    for inside in ["git/bosun", "git/bosun/worktrees"] {
+        let found = problems(&root(inside));
+        assert_eq!(found.len(), 1, "{inside}: {found:?}");
+        assert!(found[0].contains("`repo.bosun.worktree.root`"), "{found:?}");
+    }
+    if cfg!(windows) {
+        let found = problems(&root("GIT/Bosun/worktrees"));
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    let text = with_repo(&format!(
+        "worktree = {{ root = '{}', setup = 'cargo fetch', disk_floor = '20GB' }}\n",
+        abs("git/bosun-worktrees"),
+    ));
+    let config = parse(&text, &Local).unwrap();
+    let worktree = config.repos["bosun"].worktree.as_ref().unwrap();
+    assert_eq!(worktree.root, PathBuf::from(abs("git/bosun-worktrees")));
+    assert_eq!(worktree.setup.as_deref(), Some("cargo fetch"));
+    assert_eq!(worktree.teardown, None);
+    assert_eq!(worktree.disk_floor, Some(20 << 30));
+}
+
+#[test]
 fn a_policy_that_omits_gitignore_still_protects_it() {
     for rest in [
         "",

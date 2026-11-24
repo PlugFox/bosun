@@ -64,6 +64,17 @@
 //! args = ["--stdio"]
 //! env = { LEVEL = "info" }
 //!
+//! [repo.bosun.worktree]         # the repository's worktrees (#8); parsed, not read yet
+//! root = 'C:\git\bosun-worktrees' # outside the repository's path
+//! setup = "..."                 # optional shell command, run in a new worktree
+//! teardown = "..."              # optional shell command, run before it is removed
+//! disk_floor = "20GB"           # free space the worktree's disk keeps; optional
+//!
+//! [resource.gpu]                # a leasable resource (#8); parsed, not read yet
+//! kind = "gpu"                  # free text: build-dir, gpu, device, ...
+//! capacity = 1                  # holders at once; default 1
+//! scope = "machine"             # default; or "identity" or "repository"
+//!
 //! [budget]                      # every cap is off by default
 //! item_eqv = 5_000_000          # input-equivalent tokens per item
 //! item_wall_clock = "2h"
@@ -78,6 +89,10 @@
 //!   Protected paths and build directories are relative to the repository, `/`-separated,
 //!   without wildcards ([`Policy::protected`]).
 //! - Durations are a positive whole number and one of `s`, `m`, `h`, `d`, `w`.
+//! - Sizes are a positive whole number and one of `B`, `KB`, `MB`, `GB`, `TB`, each a power of
+//!   1024 (`"20GB"` is 20 GiB).
+//! - A resource's `kind` is required and free text; `capacity` is a positive whole number.
+//!   `scope` is one of `machine`, `identity`, `repository` ([`Scope`]).
 //! - Identity, repository and MCP server names are ASCII letters, digits, `-` and `_`.
 //! - `landing.mode` other than `local` is refused. An unknown key of a `policy` is refused, so
 //!   that a misspelt `protected` cannot leave paths unprotected.
@@ -95,6 +110,8 @@
 //!   and separators do not matter. Links and junctions are not resolved for this comparison.
 //! - The directory of each database is on a local disk, as a [`DiskProbe`] sees it.
 //! - `budget.reserve_eqv` is less than `budget.daily_eqv` when both are set.
+//! - A repository's `worktree.root` is not inside the repository's path. Both are compared by
+//!   canonical key, so a sibling whose name starts with the repository's name is not inside it.
 //!
 //! Every problem carries its line and column when it has a place in the file.
 //!
@@ -125,6 +142,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub use bosun_core::Scope;
 pub use disk::{Disk, DiskProbe, SystemProbe};
 pub use error::{Error, Location, Notice, Problem};
 pub use policy::{ALWAYS_PROTECTED, Policy};
@@ -149,8 +167,37 @@ pub struct Config {
     pub budget: Budget,
     /// `[daemon]`.
     pub daemon: Daemon,
+    /// `[resource.<name>]`: leasable resources by name (#8). Parsed only; nothing leases them yet.
+    pub resources: BTreeMap<String, Resource>,
     /// What the file holds that this version does not read, in file order.
     pub notices: Vec<Notice>,
+}
+
+/// `[resource.<name>]` (#8): something a holder leases, such as a build directory or a GPU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Resource {
+    /// `kind`: free text naming what the resource is. Required.
+    pub kind: String,
+    /// `capacity`: how many holders it serves at once. Default 1; at least 1.
+    pub capacity: u32,
+    /// `scope`: what the resource guards, as the lease model takes it (#8). Default `machine`.
+    pub scope: Scope,
+}
+
+/// `repo.<name>.worktree` (#8): where the repository's worktrees live and how they are prepared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Worktree {
+    /// `root`: the directory worktrees are created in. Absolute, and never inside the
+    /// repository's path.
+    pub root: PathBuf,
+    /// `setup`: a shell command run in a new worktree. Default `None`.
+    pub setup: Option<String>,
+    /// `teardown`: a shell command run before a worktree is removed. Default `None`.
+    pub teardown: Option<String>,
+    /// `disk_floor`: free bytes the worktree's disk keeps. Default `None`: no floor.
+    pub disk_floor: Option<u64>,
 }
 
 /// `[identity.<name>]`: an identity bundle (#2). Only the Claude configuration directory and
@@ -206,6 +253,8 @@ pub struct Repo {
     pub landing: Landing,
     /// `mcp_servers.<name>`: servers merged into the per-session MCP configuration (#7).
     pub mcp_servers: BTreeMap<String, McpServer>,
+    /// `worktree`: where the repository's worktrees live (#8); `None` when not configured.
+    pub worktree: Option<Worktree>,
 }
 
 /// `repo.<name>.queue`: where the repository's items come from (#5).
@@ -401,6 +450,12 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
                     build_dirs: r.build_dirs,
                     landing: r.landing,
                     mcp_servers: r.mcp_servers,
+                    worktree: r.worktree.map(|w| Worktree {
+                        root: w.root.path,
+                        setup: w.setup,
+                        teardown: w.teardown,
+                        disk_floor: w.disk_floor,
+                    }),
                 },
             ))
         })
@@ -413,6 +468,7 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
         },
         budget: draft.budget,
         daemon: draft.daemon,
+        resources: draft.resources,
         notices: draft.notices,
     })
 }
@@ -463,6 +519,7 @@ pub fn reload(previous: Config, text: &str, probe: &dyn DiskProbe) -> Reload {
                     },
                     budget: Budget::default(),
                     daemon: Daemon::default(),
+                    resources: BTreeMap::new(),
                     notices: Vec::new(),
                 }
             } else {

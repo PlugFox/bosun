@@ -49,6 +49,27 @@ pub(crate) fn validate(draft: &Draft, probe: &dyn DiskProbe, problems: &mut Vec<
         problems,
     );
 
+    for repo in &draft.repos {
+        let (Some(path), Some(worktree)) = (&repo.path, &repo.worktree) else {
+            continue;
+        };
+        // Mutant (`mutant_config_worktree_root_inside_repo`): the inside check is skipped.
+        if !cfg!(mutant_config_worktree_root_inside_repo)
+            && Path::new(&worktree.root.key).starts_with(&path.key)
+        {
+            problems.push(Problem {
+                location: worktree.root.at,
+                message: format!(
+                    "`repo.{}.worktree.root` is {}, inside the repository's path {}; \
+                     worktrees are created outside the repository",
+                    repo.name,
+                    worktree.root.path.display(),
+                    path.path.display()
+                ),
+            });
+        }
+    }
+
     if !cfg!(mutant_config_shared_dir) {
         for (what, field) in BUNDLE_PATHS {
             distinct(

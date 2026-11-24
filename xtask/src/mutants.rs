@@ -738,6 +738,22 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_config_resource_any_capacity",
+        issue: 8,
+        breaks: "a resource with capacity 0 is accepted",
+        package: "bosun-config",
+        check: Check::Test("tests::a_resource_needs_a_positive_capacity_and_a_known_scope"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_worktree_root_inside_repo",
+        issue: 8,
+        breaks: "a worktree root inside the repository's path is accepted",
+        package: "bosun-config",
+        check: Check::Test("tests::a_worktree_root_inside_the_repository_is_refused"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_queue_no_author_filter",
         issue: 60,
         breaks: "comments and bodies from logins off the author allowlist reach the card",

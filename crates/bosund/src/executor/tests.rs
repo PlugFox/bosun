@@ -208,6 +208,8 @@ struct Scene {
     events: Events,
     /// The fake GitHub of a scene on a Projects v2 board; `None` on the local file.
     projects: Option<Arc<FakeGitHub>>,
+    /// Whether [`LOGIN`] is on the identity's author allowlist (#106).
+    login_listed: bool,
 }
 
 impl Scene {
@@ -239,7 +241,7 @@ impl Scene {
              gh_config_dir = '{gh}'\n\
              git_config = '{gitconfig}'\n\
              remote_allowlist = ['synthetic-owner']\n\
-             author_allowlist = ['local', '{LOGIN}']\n\n\
+             author_allowlist = [{authors}]\n\n\
              [repo.demo]\n\
              path = '{repo}'\n\
              identity = 'test'\n\
@@ -254,6 +256,12 @@ impl Scene {
             gitconfig = self.gitconfig.display(),
             repo = self.repo.display(),
             board = self.board.display(),
+            authors = self
+                .authors()
+                .iter()
+                .map(|a| format!("'{a}'"))
+                .collect::<Vec<_>>()
+                .join(", "),
         )
     }
 
@@ -323,6 +331,7 @@ impl Scene {
             control,
             events: Events::new("test", EventOptions::default()),
             projects,
+            login_listed: true,
             dir,
         };
         scene.git(&["init", "-q", "-b", "main"]);
@@ -412,12 +421,28 @@ impl Scene {
         fake.set_items(0, &items);
     }
 
+    /// Takes [`LOGIN`] off the identity's author allowlist (#106), in the configuration and the
+    /// board's binding; before [`Scene::start`].
+    fn unlist_login(&mut self) {
+        self.login_listed = false;
+        std::fs::write(&self.config_path, self.config_text("'docs/frozen'")).unwrap();
+    }
+
+    /// The identity's author allowlist.
+    fn authors(&self) -> Vec<&'static str> {
+        if self.login_listed {
+            vec!["local", LOGIN]
+        } else {
+            vec!["local"]
+        }
+    }
+
     /// The fake's binding, as the loop's backend connects with it.
-    fn binding() -> Binding {
+    fn binding(&self) -> Binding {
         Binding::new(
             BOARD_REPO,
             [ProjectRef::new("synthetic-owner", 1)],
-            ["local", LOGIN],
+            self.authors(),
         )
     }
 
@@ -425,7 +450,7 @@ impl Scene {
         match &self.projects {
             None => LocalFile::new(&self.board).poll(None).unwrap().cards,
             Some(fake) => {
-                ProjectsV2::connect(fake.clone(), Self::binding())
+                ProjectsV2::connect(fake.clone(), self.binding())
                     .unwrap()
                     .poll(None)
                     .unwrap()
@@ -439,10 +464,10 @@ impl Scene {
         match &self.projects {
             None => Arc::new(LocalFile::new(&self.board)),
             Some(fake) => {
-                let fake = fake.clone();
+                let (fake, binding) = (fake.clone(), self.binding());
                 Arc::new(board::Lazy::new(Box::new(move || {
                     Ok(
-                        Arc::new(ProjectsV2::connect(fake.clone(), Self::binding())?)
+                        Arc::new(ProjectsV2::connect(fake.clone(), binding.clone())?)
                             as board::Shared,
                     )
                 })))
@@ -480,6 +505,7 @@ impl Scene {
             agent: Some(self.agent()),
             work_dir: self.path("work"),
             poll: Duration::from_millis(50),
+            idle_backoff: false,
             recheck: Duration::from_hours(1),
             question_grace: GRACE,
             mcp: self.mcp.clone(),
@@ -1884,3 +1910,6 @@ async fn an_identity_refused_at_the_session_is_needs_you_as_identity() {
 
 #[path = "control_tests.rs"]
 mod control;
+
+#[path = "board_tests.rs"]
+mod board_scenes;

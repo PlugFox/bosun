@@ -461,7 +461,9 @@ fn start_loops(
             continue;
         };
         // The board: a local file, or a Projects v2 board connected at the loop's first poll
-        // (#99), polled at the backend's active pace rather than the local file's.
+        // (#99), polled at the backend's active pace rather than the local file's, backing
+        // off while idle (#106).
+        let idle_backoff = matches!(repo.queue, Some(Queue::Projects { .. }));
         let (queue, poll): (executor::board::Shared, Duration) = match &repo.queue {
             Some(Queue::LocalFile { file }) => (Arc::new(LocalFile::new(file)), LOOP_POLL),
             Some(Queue::Projects { owner, number }) => {
@@ -491,6 +493,7 @@ fn start_loops(
             agent: agent.clone(),
             work_dir,
             poll,
+            idle_backoff,
             recheck: Duration::from_mins(1),
             question_grace: executor::QUESTION_GRACE,
             mcp: mcp.clone(),

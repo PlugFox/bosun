@@ -1235,6 +1235,46 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("feed::tests::the_view_survives_a_daemon_restart"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_queue_markers_through_allowlist",
+        issue: 106,
+        breaks: "the identity's own markers go through the author allowlist: a second daemon is not seen",
+        package: "bosun-queue",
+        check: Check::Test(
+            "projects_v2::tests::a_second_daemons_marker_is_seen_with_the_login_off_the_allowlist",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_markers_through_allowlist",
+        issue: 106,
+        breaks: "with the login off the allowlist, the loop claims a card another daemon marked",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::board_scenes::a_second_daemon_is_refused_with_the_login_off_the_allowlist",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_no_midrun_poll",
+        issue: 106,
+        breaks: "the board is not read while an item is in flight: an item whose issue is deleted runs on",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::board_scenes::an_issue_deleted_mid_session_cancels_the_item_and_kills_the_session",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_no_idle_backoff",
+        issue: 106,
+        breaks: "an idle Projects v2 board is read at every tick",
+        package: "bosund",
+        check: Check::Test(
+            "executor::board::tests::an_idle_board_is_read_less_often_than_an_active_one",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

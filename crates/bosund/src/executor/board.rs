@@ -5,18 +5,69 @@
 //! [`bosun_queue::ProjectsV2::connect`] (its project, Status field and columns), which talks to
 //! GitHub; that runs in the loop's first poll, not at daemon start, so a board that does not
 //! match the configuration pauses its repository ([`QueueError::Setup`]) and nothing else.
+//!
+//! # While an item is in flight (#106)
+//!
+//! The loop keeps polling the board while an item is in flight, at the board's active pace
+//! (the user's commands of #65 come from the same poll, [`super::commands`]). An issue
+//! deleted, transferred or converted mid-run leaves the board's listing, and a card missing
+//! from two polls cancels the item and kills its session, not only at claim.
+//!
+//! # The pace (#60, #106)
+//!
+//! [`Pace`] says when the board is read next. A local file is read every tick. A Projects v2
+//! board follows [`Pacer`]: every 30 s while an item is in flight or the last poll found a
+//! change, backing off to five minutes while the board stays idle.
 
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use bosun_config::{Identity, Repo};
 use bosun_git::Git;
 use bosun_identity::{Env, inherited};
-use bosun_queue::projects_v2::{Binding, GhCli, ProjectRef};
+use bosun_queue::projects_v2::{Binding, GhCli, Pacer, ProjectRef};
 use bosun_queue::{Card, Changes, Cursor, ItemId, Owned, ProjectsV2, Queue, QueueError};
 
 use super::identity;
+
+/// When the board is read next, on the loop's monotonic clock.
+#[derive(Debug, Clone)]
+pub(crate) struct Pace {
+    /// `None`: every tick.
+    pacer: Option<Pacer>,
+    /// How early a read may come: half a tick, so a tick that lands just short of the due
+    /// time does not wait a whole tick more.
+    slack: Duration,
+    /// No read before this; `None` before the first.
+    due: Option<Duration>,
+}
+
+impl Pace {
+    /// A pace that backs off while idle (`idle_backoff`), or reads at every tick of `tick`.
+    pub(crate) fn new(idle_backoff: bool, tick: Duration) -> Self {
+        Self {
+            // Mutant (`mutant_loop_no_idle_backoff`): an idle board is read at every tick.
+            pacer: (idle_backoff && !cfg!(mutant_loop_no_idle_backoff)).then(Pacer::new),
+            slack: tick / 2,
+            due: None,
+        }
+    }
+
+    /// Whether the board may be read at `now`.
+    pub(crate) fn due(&self, now: Duration) -> bool {
+        self.due.is_none_or(|due| now + self.slack >= due)
+    }
+
+    /// The board was read at `now`; `active`: an item is in flight, `changed`: the read found
+    /// a change.
+    pub(crate) fn polled(&mut self, now: Duration, active: bool, changed: bool) {
+        if let Some(pacer) = &mut self.pacer {
+            self.due = Some(now + pacer.next(active, changed, None, 0));
+        }
+    }
+}
 
 /// A queue backend, shared by the loop and its tasks.
 pub(crate) type Shared = Arc<dyn Queue + Send + Sync>;
@@ -141,7 +192,66 @@ fn origin_repository(path: &Path) -> Result<String, QueueError> {
 
 #[cfg(test)]
 mod tests {
-    use super::repository_of;
+    use std::time::Duration;
+
+    use bosun_queue::projects_v2::{ACTIVE, IDLE_MAX};
+
+    use super::{Pace, repository_of};
+
+    /// The reads of `pace` over `span` of a fake clock ticking every `tick`, each reporting
+    /// `active` and no change.
+    fn reads(pace: &mut Pace, tick: Duration, span: Duration, active: bool) -> Vec<u64> {
+        let mut at = Vec::new();
+        let mut now = Duration::ZERO;
+        while now <= span {
+            if pace.due(now) {
+                at.push(now.as_secs());
+                pace.polled(now, active, false);
+            }
+            now += tick;
+        }
+        at
+    }
+
+    #[test]
+    fn an_idle_board_is_read_less_often_than_an_active_one() {
+        let hour = Duration::from_hours(1);
+        let active = reads(&mut Pace::new(true, ACTIVE), ACTIVE, hour, true);
+        let idle = reads(&mut Pace::new(true, ACTIVE), ACTIVE, hour, false);
+        // Every 30 s tick while active.
+        assert_eq!(active.len(), 121, "{active:?}");
+        assert!(active.windows(2).all(|w| w[1] - w[0] == 30), "{active:?}");
+        // Idle: 60 s, 120 s, 240 s, then the cap.
+        assert_eq!(&idle[..5], [0, 60, 180, 420, 720], "{idle:?}");
+        assert!(
+            idle.windows(2)
+                .skip(4)
+                .all(|w| w[1] - w[0] == IDLE_MAX.as_secs()),
+            "{idle:?}"
+        );
+        assert!(
+            idle.len() * 5 < active.len(),
+            "{} vs {}",
+            idle.len(),
+            active.len()
+        );
+
+        // A change, or an item in flight, brings the board back to every tick.
+        let mut pace = Pace::new(true, ACTIVE);
+        reads(&mut pace, ACTIVE, hour, false);
+        let resumed = hour + IDLE_MAX;
+        assert!(pace.due(resumed));
+        pace.polled(resumed, true, false);
+        assert!(pace.due(resumed + ACTIVE));
+    }
+
+    #[test]
+    fn a_local_file_is_read_at_every_tick() {
+        let tick = Duration::from_secs(2);
+        let mut pace = Pace::new(false, tick);
+        let at = reads(&mut pace, tick, Duration::from_mins(1), false);
+        assert_eq!(at.len(), 31, "{at:?}");
+    }
 
     #[test]
     fn the_repository_of_a_remote_url() {

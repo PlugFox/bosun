@@ -212,6 +212,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #73: the TUI's confirmations and reconnect.
   "cfg(mutant_tui_no_confirm)",
   "cfg(mutant_tui_no_reconnect)",
+  # #106: the daemon's own markers past the allowlist.
+  "cfg(mutant_queue_markers_through_allowlist)",
+  "cfg(mutant_loop_no_midrun_poll)",
+  "cfg(mutant_loop_no_idle_backoff)",
 ] }
 
 [workspace.lints.clippy]

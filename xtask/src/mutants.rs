@@ -1463,6 +1463,62 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::a_worktree_root_inside_the_repository_is_refused"),
         platform: None,
     },
+    // #127: free disk space.
+    Mutant {
+        name: "mutant_proc_free_space_missing_is_unlimited",
+        issue: 127,
+        breaks: "a missing path reports unlimited free space",
+        package: "bosun-proc",
+        check: Check::Test(
+            "disk::tests::free_space_is_reported_for_a_directory_and_refused_for_a_missing_one",
+        ),
+        platform: None,
+    },
+    // #128: escape attempts and the members of a container.
+    Mutant {
+        name: "mutant_proc_allow_breakaway",
+        issue: 128,
+        breaks: "the Job Object allows breakaway; a grandchild leaves it and outlives the tree",
+        package: "bosun-proc",
+        check: Check::Test("spawn::tests::a_grandchild_that_tries_to_escape_dies_with_the_tree"),
+        // Job Objects exist on Windows only.
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_proc_members_child_only",
+        issue: 128,
+        breaks: "members lists the direct child only, not the descendants left in the container",
+        package: "bosun-proc",
+        check: Check::Test("spawn::tests::members_lists_the_processes_left_in_the_container"),
+        platform: None,
+    },
+    // #129: the session shim.
+    Mutant {
+        name: "mutant_shim_no_exit_record",
+        issue: 129,
+        breaks: "the shim never writes the child's exit into its record",
+        package: "bosun-proc",
+        check: Check::Test("the_exit_of_a_child_nobody_waited_for_is_in_the_record"),
+        platform: None,
+    },
+    // #130: the shim spawner and re-attach.
+    Mutant {
+        name: "mutant_shim_attach_by_pid",
+        issue: 130,
+        breaks: "attach takes a live pid for the shim whatever its start time",
+        package: "bosun-proc",
+        check: Check::Test("attach_refuses_a_record_whose_pid_changed_hands"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_shim_child_shares_the_group",
+        issue: 130,
+        breaks: "the shim's child stays in the shim's process group; a kill misses its descendants",
+        package: "bosun-proc",
+        check: Check::Test("a_session_lists_its_container_and_kill_tree_ends_it"),
+        // Process groups are Unix; the test reads the groups from `/proc`.
+        platform: Some(Platform::Linux),
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

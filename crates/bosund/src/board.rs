@@ -108,7 +108,8 @@ pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Valu
                 })?;
                 let on_board: BTreeSet<u64> = cards.iter().map(|c| c.id.0).collect();
                 let repo = repo.clone();
-                let lint = blocking(move || static_lint(&card, &repo, &on_board)).await;
+                let resources = crate::executor::lint_resources(&repo, &served.resources);
+                let lint = blocking(move || static_lint(&card, &repo, &on_board, &resources)).await;
                 Ok(LintResult {
                     repo: name.clone(),
                     card: p.card,
@@ -184,13 +185,14 @@ async fn repo_queue(served: &Served, (name, repo): &NamedRepo, items: &[StoredIt
         .cloned()
         .collect();
     let lint_repo = repo.clone();
+    let resources = crate::executor::lint_resources(repo, &served.resources);
     let lints: BTreeMap<u64, Vec<LintFinding>> = blocking(move || {
         ready
             .iter()
             .map(|card| {
                 (
                     card.id.0,
-                    findings(&static_lint(card, &lint_repo, &on_board)),
+                    findings(&static_lint(card, &lint_repo, &on_board, &resources)),
                 )
             })
             .collect()
@@ -242,18 +244,23 @@ fn edit_pending(served: &Served, card: &Card, item: &StoredItem) -> bool {
     now.map_or(true, |snapshot| snapshot.hash != stored)
 }
 
-/// The static lint of `card`, as the loop runs it before a claim.
-fn static_lint(card: &Card, repo: &Repo, on_board: &BTreeSet<u64>) -> Lint {
+/// The static lint of `card`, as the loop runs it before a claim: `resources` are the names a
+/// card may need ([`crate::executor::lint_resources`]).
+fn static_lint(
+    card: &Card,
+    repo: &Repo,
+    on_board: &BTreeSet<u64>,
+    resources: &BTreeSet<String>,
+) -> Lint {
     let shell =
         verdict_shell(repo.verdict.shell.as_deref().map(Path::new)).unwrap_or_else(|| "sh".into());
     let resolver = ShellResolver::new(shell, &repo.path);
-    let resources = BTreeSet::new();
     let exists = |id: bosun_queue::ItemId| on_board.contains(&id.0);
     bosun_queue::lint(
         card,
         &LintContext {
             resolver: &resolver,
-            resources: &resources,
+            resources,
             item_exists: &exists,
         },
     )

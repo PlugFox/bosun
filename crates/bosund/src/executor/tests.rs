@@ -29,6 +29,7 @@ use super::*;
 use crate::config_watch;
 use crate::events::{Events, Options as EventOptions};
 
+mod leases;
 mod recovery;
 mod sticky;
 mod worktrees;
@@ -262,6 +263,15 @@ struct Scene {
     worktrees: bool,
     /// The worktree's `setup` command, in worktree mode.
     setup: Option<String>,
+    /// The repository's name in the configuration: `demo` unless a scenario of two
+    /// repositories names the second otherwise.
+    name: String,
+    /// More of `repo.<name>.worktree`, after its root and setup (`, shared_build = {...}`).
+    worktree_more: String,
+    /// More configuration after the repository's (`[resource.<name>]` sections).
+    config_more: String,
+    /// The lease manager the loop gets; `None`: one of its own, built from the configuration.
+    leases: Option<Arc<crate::leases::Leases>>,
 }
 
 impl Scene {
@@ -294,7 +304,7 @@ impl Scene {
              git_config = '{gitconfig}'\n\
              remote_allowlist = ['synthetic-owner']\n\
              author_allowlist = [{authors}]\n\n\
-             [repo.demo]\n\
+             [repo.{name}]\n\
              path = '{repo}'\n\
              identity = 'test'\n\
              queue = {{ kind = 'local_file', file = '{board}' }}\n\
@@ -302,8 +312,11 @@ impl Scene {
              verdict = {{ timeout = '60s' }}\n\
              build_dirs = ['target']\n\
              {worktree}\n\
-             [repo.demo.policy]\n\
-             protected = [{protected}]\n",
+             [repo.{name}.policy]\n\
+             protected = [{protected}]\n\
+             {more}",
+            name = self.name,
+            more = self.config_more,
             claude = d.join("claude").display(),
             db = d.join("db").join("bosun.db").display(),
             gh = d.join("gh").display(),
@@ -330,8 +343,9 @@ impl Scene {
             .as_deref()
             .map_or_else(String::new, |s| format!(", setup = '{s}'"));
         format!(
-            "worktree = {{ root = '{}'{setup} }}\n",
-            self.worktree_root().display()
+            "worktree = {{ root = '{}'{setup}{} }}\n",
+            self.worktree_root().display(),
+            self.worktree_more
         )
     }
 
@@ -440,6 +454,10 @@ impl Scene {
             login_listed: true,
             worktrees: false,
             setup: None,
+            name: "demo".to_owned(),
+            worktree_more: String::new(),
+            config_more: String::new(),
+            leases: None,
             dir,
         }
     }
@@ -484,7 +502,11 @@ impl Scene {
             .join("../../fixtures/claude-stream/normal-end.jsonl");
         let mut text = lines.join("\n");
         let _ = writeln!(text, "\nreplay {}", replay.display());
-        std::fs::write(self.scripts.join(format!("demo_{card}.script")), text).unwrap();
+        std::fs::write(
+            self.scripts.join(format!("{}_{card}.script", self.name)),
+            text,
+        )
+        .unwrap();
     }
 
     /// The board holds `cards`, in this order: the local file rewritten (atomically, as an
@@ -611,7 +633,7 @@ impl Scene {
             config_watch::Reported::default(),
         );
         let options = Options {
-            repo: "demo".to_owned(),
+            repo: self.name.clone(),
             daemon_id: "test-host/test-user".to_owned(),
             agent: Some(self.agent()),
             work_dir: self.path("work"),
@@ -644,6 +666,9 @@ impl Scene {
                 })
             },
             control: self.control.clone(),
+            leases: self.leases.clone().unwrap_or_else(|| {
+                Arc::new(crate::leases::Leases::new(&self.config(), &self.path("state")).unwrap())
+            }),
         };
         let task = tokio::spawn(Loop::new(options, deps, rx).run());
         (task, watcher)
@@ -656,7 +681,7 @@ impl Scene {
     async fn item(&self, card: u64) -> Option<Item> {
         self.store
             .reader()
-            .item(&ItemId::new(format!("demo#{card}")))
+            .item(&ItemId::new(format!("{}#{card}", self.name)))
             .await
             .unwrap()
             .map(|s| s.item)
@@ -665,7 +690,7 @@ impl Scene {
     async fn runs(&self, card: u64) -> Vec<bosun_store::RunRow> {
         self.store
             .reader()
-            .runs(&ItemId::new(format!("demo#{card}")))
+            .runs(&ItemId::new(format!("{}#{card}", self.name)))
             .await
             .unwrap()
     }

@@ -75,7 +75,7 @@
 //! [retention]
 //! reingest_window = "30d"       # whole hours, days or weeks: "12h", "30d", "6w"; default 30d
 //!
-//! [resource.target]             # a leasable resource (#8); read, not yet leased
+//! [resource.target]             # a leasable resource (#8), leased in worktree mode
 //! kind = "build-dir"            # free text: "build-dir", "gpu", "device", ...
 //! capacity = 1                  # holders at once, at least 1; default 1 (exclusive)
 //! scope = "machine"             # "machine", "identity" or "repository"; default "machine"
@@ -113,8 +113,11 @@
 //!     names a `[resource.<name>]`; both are required. It is the default for Rust: per-worktree
 //!     targets cost 12-15 GB each, and are the opt-in (no `shared_build`) of a repository that
 //!     raises concurrency.
-//! - `[resource.<name>]` (#8): a resource items may name in `needs`. `kind` is required. Nothing
-//!   leases them yet: a card that needs one keeps being refused until the lease manager exists.
+//! - `[resource.<name>]` (#8): a resource items may name in `needs`. `kind` is required. They
+//!   are read at daemon start (an edit takes effect at the next start) and leased in worktree
+//!   mode: a card of a repository with `repo.<name>.worktree` may need them, and holds them from
+//!   before its first session until it leaves the loop. Without `repo.<name>.worktree` a card
+//!   that needs one is refused by lint, as in stage 1 (E19).
 //! - `notify`, and every other key of #4 that a later stage reads (`repo.<name>.report`,
 //!   `daemon.http_port`, ...), is accepted and ignored with a [`Notice`]. Any other section is
 //!   an error.

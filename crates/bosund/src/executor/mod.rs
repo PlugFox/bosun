@@ -48,6 +48,17 @@
 //! before every verdict ([`checkout`], E4 as amended by E21). Every item, Done or not, ends
 //! with its worktree closed and its work kept in the clone under `refs/bosun/items/<item>`.
 //!
+//! # Leases (#8)
+//!
+//! In worktree mode an item leases what its snapshot `needs`, plus the shared build's resource
+//! (`worktree.shared_build`, E1), from the daemon's one [`crate::leases::Leases`]: inside the
+//! session task, before its first session spawns, so the loop stays responsive while it waits
+//! and a kill withdraws the request ([`hold_leases`]). It holds them through its verdicts and
+//! its landing, until it leaves the loop ([`Loop::finish`]); a later session asks again and is
+//! granted at once. Lint admits the configured resources only in worktree mode
+//! ([`lint_resources`]). Under a shared build every process started in a worktree gets the
+//! directory, and the worktree's tracked files are touched first ([`workspace::enter`]).
+//!
 //! # Guards and trailers (#59, #99)
 //!
 //! Git's own configuration is recorded at claim, the ignored files before each attempt's first
@@ -234,6 +245,8 @@ pub(crate) struct Deps {
     pub(crate) alive: Alive,
     /// Pauses, the kill switch and the daily cap (#67).
     pub(crate) control: crate::control::Control,
+    /// The daemon's lease manager, shared by every repository's loop (#8).
+    pub(crate) leases: Arc<crate::leases::Leases>,
 }
 
 impl fmt::Debug for Deps {
@@ -1130,6 +1143,14 @@ impl Loop {
             }
         }
         let done = matches!(cur.item.state, State::Done(_));
+        // Its leases are held through its verdicts and its landing (#8, E1): until now.
+        if cur.claimed.as_ref().is_some_and(|c| c.worktree.is_some()) {
+            self.shared
+                .deps
+                .leases
+                .release(&crate::leases::Holder::Item(cur.item.id.clone()))
+                .await;
+        }
         if let Some(claimed) = &cur.claimed
             && let Some(wt) = &claimed.worktree
         {
@@ -1268,6 +1289,8 @@ impl Loop {
             self.revalidate(gap).await;
         }
         self.watch_tick().await;
+        // A lease whose holder is gone (E16): one of a `bosun with` command that ended.
+        self.shared.deps.leases.release_stale();
         if let Some(cur) = self.current.as_ref() {
             if matches!(cur.item.state, State::Parked(_)) {
                 self.apply(Event::Tick).await;
@@ -1509,9 +1532,11 @@ impl Loop {
             return cached.clone();
         }
         let card_owned = card.clone();
+        let resources = lint_resources(repo, &self.shared.deps.leases.names());
         let repo = repo.clone();
         let on_board = on_board.clone();
-        let lint = blocking(move || claim::static_lint(&card_owned, &repo, &on_board)).await;
+        let lint =
+            blocking(move || claim::static_lint(&card_owned, &repo, &on_board, &resources)).await;
         let linted = Linted {
             body: card.body.clone(),
             claimable: lint.claimable(),
@@ -1562,6 +1587,59 @@ impl Loop {
         .await;
         self.checked = Some((Instant::now(), result.clone()));
         result
+    }
+}
+
+/// The resource names the lint of `repo`'s cards admits in `needs` (#8): `configured` (the
+/// lease manager's, read at daemon start) in worktree mode; none without
+/// `repo.<name>.worktree` (E19), where a card that needs anything is refused as in stage 1.
+pub(crate) fn lint_resources(repo: &Repo, configured: &BTreeSet<String>) -> BTreeSet<String> {
+    if repo.worktree.is_some() {
+        configured.clone()
+    } else {
+        BTreeSet::new()
+    }
+}
+
+/// What the item of `claimed` leases (#8): its snapshot's `needs`, plus the shared build's
+/// resource when `repo` has `worktree.shared_build` (E1). Nothing outside worktree mode (E19).
+pub(crate) fn lease_names(claimed: &Claimed, repo: &Repo) -> Vec<String> {
+    if claimed.worktree.is_none() {
+        return Vec::new();
+    }
+    let mut names = claimed.snapshot.contract.needs.clone();
+    if let Some(build) = repo.worktree.as_ref().and_then(|w| w.shared_build.as_ref()) {
+        names.push(build.resource.clone());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Holds the leases of `item` (#8) before one of its processes starts: resolves at once when
+/// it needs nothing or holds them already, else when they are granted. `Err(None)`: killed
+/// while waiting, its request withdrawn; `Err(Some(_))`: the request was refused.
+pub(crate) async fn hold_leases(
+    shared: &Shared,
+    repo: &Repo,
+    claimed: &Claimed,
+    item: &ItemId,
+    kill: &mut watch::Receiver<bool>,
+) -> Result<(), Option<String>> {
+    let names = lease_names(claimed, repo);
+    if names.is_empty() {
+        return Ok(());
+    }
+    let request = crate::leases::Request {
+        holder: crate::leases::Holder::Item(item.clone()),
+        names,
+        repo: shared.options.repo.clone(),
+        identity: repo.identity.clone(),
+        writer: Some(shared.deps.writer.clone()),
+    };
+    tokio::select! {
+        held = shared.deps.leases.acquire(request) => held.map_err(Some),
+        () = verdict::killed(kill) => Err(None),
     }
 }
 

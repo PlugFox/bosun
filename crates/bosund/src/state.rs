@@ -50,6 +50,9 @@ pub(crate) struct Served {
     /// The logins whose card text the snapshot inlines (`author_allowlist`), lowercased: what
     /// `queue.get` needs to tell an edit waiting for the next claim (#70).
     pub(crate) author_allowlist: Vec<String>,
+    /// The names of `[resource.<name>]` as read at start (#8): what the lint of a repository
+    /// in worktree mode admits in `needs`.
+    pub(crate) resources: std::collections::BTreeSet<String>,
     pub(crate) store: Store,
     pub(crate) ingest: Handle,
     /// The commit reader of the repositories.
@@ -165,6 +168,10 @@ pub(crate) async fn run(
         ClaimError::Io(e) => Failure::Other(format!("cannot listen: {e}")),
     })?;
 
+    // The daemon's own directory: the operator token's, where the lease journal goes (E15).
+    let lease_dir = operator_file
+        .parent()
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_owned);
     // A fresh operator token at every start, outside every checkout (#67).
     let operator = match operator_token(&config, operator_file) {
         Ok(operator) => operator,
@@ -209,7 +216,20 @@ pub(crate) async fn run(
         config_watch::Reported::default(),
     );
     let budget = tokio::spawn(follow_budget(state.clone(), config_rx.clone()));
-    let loops = start_loops(&config, &state, &config_rx, &endpoint);
+    // The lease manager (#8, E15): one for every loop, journalled next to the operator token.
+    let leases = match crate::leases::Leases::new(&config, &lease_dir) {
+        Ok(leases) => Arc::new(leases),
+        Err(e) => {
+            crate::log::log!("bosund: the resources cannot be leased: {e}");
+            let mut empty = config.clone();
+            empty.resources.clear();
+            Arc::new(
+                crate::leases::Leases::new(&empty, &lease_dir)
+                    .expect("a table without resources is always valid"),
+            )
+        }
+    };
+    let loops = start_loops(&config, &state, &config_rx, &endpoint, &leases);
     drop(config_rx);
     serve(listener, &state, stop).await;
     // The watcher holds the sender: without it every loop ends, killing its child first.
@@ -317,6 +337,7 @@ pub(crate) async fn open(
                 repos,
                 boards,
                 author_allowlist,
+                resources: config.resources.keys().cloned().collect(),
                 store,
                 ingest: bosun_ingest::spawn(ingest),
                 commits,
@@ -510,6 +531,7 @@ fn start_loops(
     state: &State,
     config_rx: &watch::Receiver<Arc<Config>>,
     endpoint: &Endpoint,
+    leases: &Arc<crate::leases::Leases>,
 ) -> Vec<JoinHandle<()>> {
     let agent = bosun_config::tools::find_program("claude", std::env::var_os("PATH").as_deref());
     let mcp = executor::find_mcp();
@@ -570,6 +592,7 @@ fn start_loops(
             clock: Arc::new(executor::SystemClock::new()),
             alive: Arc::new(bosun_proc::is_running),
             control: state.control.clone(),
+            leases: leases.clone(),
         };
         crate::log::log!("bosund: repository {name}: the loop runs");
         loops.push(tokio::spawn(

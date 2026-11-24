@@ -41,7 +41,7 @@ use tokio::sync::watch;
 
 use super::park::ChildSlot;
 use super::verdict::killed;
-use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms};
+use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms, workspace};
 use crate::agent::Binding;
 use crate::events;
 
@@ -387,6 +387,19 @@ pub(crate) async fn session(
         shared.trouble("the agent CLI `claude` was not found on PATH");
         return crash;
     };
+    // Its leases (#8), before its first session: the loop stays responsive meanwhile, and a
+    // kill withdraws the request. A later session holds them already and goes on at once.
+    // Mutant (`mutant_loop_skip_leases`): the session starts without waiting for its lease.
+    if !cfg!(mutant_loop_skip_leases) {
+        match super::hold_leases(shared, repo, claimed, &run.item, &mut kill).await {
+            Ok(()) => {}
+            Err(None) => return crash,
+            Err(Some(e)) => {
+                shared.trouble(format!("{}: its leases: {e}", run.item));
+                return crash;
+            }
+        }
+    }
     // Fail closed before spawn (#2, rule 2): a refusal here is Needs you as `identity`, with
     // the refusal logged (#99).
     let bundle = {
@@ -541,6 +554,11 @@ pub(crate) async fn session(
     let mut vars: Vec<(OsString, OsString)> =
         env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect();
     vars.extend(command.env.iter().cloned());
+    // The shared build directory (E1), and the worktree's files made newer than its last build.
+    if let Err(e) = workspace::shared_build(repo, &command.cwd, &mut vars, true).await {
+        shared.trouble(format!("{}: {e}", run.item));
+        return crash;
+    }
 
     let start_head = {
         let git_repo = git_repo.clone();

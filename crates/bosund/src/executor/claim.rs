@@ -49,18 +49,23 @@ pub(crate) fn hashes(config: &Config, repo: &str) -> Option<(String, String)> {
 }
 
 /// The static lint of `card` (#5): programs resolve through the repository's verdict shell in
-/// its checkout; `blocked-by` targets must be on the board.
-pub(crate) fn static_lint(card: &Card, repo: &Repo, on_board: &BTreeSet<u64>) -> Lint {
+/// its checkout; `blocked-by` targets must be on the board; `needs` names `resources`
+/// ([`super::lint_resources`]).
+pub(crate) fn static_lint(
+    card: &Card,
+    repo: &Repo,
+    on_board: &BTreeSet<u64>,
+    resources: &BTreeSet<String>,
+) -> Lint {
     let shell =
         verdict_shell(repo.verdict.shell.as_deref().map(Path::new)).unwrap_or_else(|| "sh".into());
     let resolver = ShellResolver::new(shell, &repo.path);
-    let resources = BTreeSet::new();
     let exists = |id: bosun_queue::ItemId| on_board.contains(&id.0);
     bosun_queue::lint(
         card,
         &LintContext {
             resolver: &resolver,
-            resources: &resources,
+            resources,
             item_exists: &exists,
         },
     )
@@ -134,12 +139,13 @@ pub(crate) async fn claim(
     };
     let on_board = BTreeSet::from([card.id.0]);
     let (lint_card, lint_repo) = (card.clone(), repo.clone());
+    let resources = super::lint_resources(repo, &shared.deps.leases.names());
     let lint = blocking(move || {
         // The re-read card's blockers were checked against the whole board before the claim;
         // here only the card itself is linted again.
         let mut card = lint_card;
         card.blocked_by.clear();
-        let mut lint = static_lint(&card, &lint_repo, &on_board);
+        let mut lint = static_lint(&card, &lint_repo, &on_board, &resources);
         lint.findings
             .retain(|f| !matches!(f.code, bosun_queue::Code::UnknownBlocker(_)));
         lint
@@ -363,10 +369,14 @@ async fn base_verdict(
     let Some(shell) = verdict_shell(repo.verdict.shell.as_deref().map(Path::new)) else {
         return Err("the verdict shell cannot be found".to_owned());
     };
+    let mut vars: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+        env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect();
+    // The shared build directory (E1), and the worktree's files made newer than its last build.
+    super::workspace::shared_build(repo, workdir, &mut vars, true).await?;
     let spec = VerdictSpec {
         shell,
         command: snapshot.contract.verdict.clone(),
-        env: env.iter().map(|(k, v)| (k.into(), v.to_owned())).collect(),
+        env: vars,
         cwd: workdir.to_owned(),
         timeout: snapshot
             .contract

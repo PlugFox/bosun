@@ -1359,6 +1359,24 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("view::tests::the_speedometer_labels_its_reference_configured"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_runner_no_default_model",
+        issue: 133,
+        breaks: "a card without `model` spawns its session with no `--model`: the repository's default is not passed",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::a_session_asks_for_the_card_model_else_the_repository_default",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_queue_without_model",
+        issue: 133,
+        breaks: "a repository with a queue and no `model` is accepted at load",
+        package: "bosun-config",
+        check: Check::Test("tests::a_repository_with_a_queue_and_no_model_is_refused"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

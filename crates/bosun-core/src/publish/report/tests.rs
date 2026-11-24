@@ -29,6 +29,7 @@ fn facts() -> ReportFacts {
         state: State::NeedsYou(Reason::AttemptsExhausted),
         detail: None,
         verdict: "cargo test -p widget".into(),
+        model: Some("opus".into()),
         attempts: vec![attempt(1, AttemptState::Fail, "error: one\nerror: two")],
         flaky_tests: vec![],
         parked: vec![ParkedFacts {
@@ -115,6 +116,7 @@ fn the_body_starts_with_the_hidden_key() {
         "{body}"
     );
     assert!(body.contains("eqv 1,234,567"), "{body}");
+    assert!(body.contains("- Model asked: `opus`"), "{body}");
     assert!(body.contains("eqv per commit 617,284"), "{body}");
     assert!(body.contains("1h 02m 03s"), "{body}");
     assert!(body.contains("verdict fail, then fail in 12.3 s"), "{body}");
@@ -200,6 +202,7 @@ fn maximal_facts_stay_under_the_cap() {
         }),
         detail: Some(lines.clone()),
         verdict: big.clone(),
+        model: Some(big.clone()),
         attempts: (1..=30)
             .map(|i| AttemptFacts {
                 number: i,

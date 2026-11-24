@@ -614,6 +614,9 @@ pub(crate) async fn report_facts(
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s.contract_json).ok())
         .and_then(|c| c["verdict"].as_str().map(str::to_owned))
         .unwrap_or_default();
+    let model = snapshot
+        .as_ref()
+        .and_then(|s| crate::item::session_model(&s.contract_json));
     let attempts_facts = attempts
         .iter()
         .map(|row| {
@@ -752,6 +755,7 @@ pub(crate) async fn report_facts(
         state: stored.item.state,
         detail,
         verdict,
+        model,
         attempts: attempts_facts,
         flaky_tests: flaky.into_iter().map(|(_, name)| name).collect(),
         parked,

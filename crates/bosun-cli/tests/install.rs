@@ -424,7 +424,8 @@ fn queued_config(dir: &Path, identity_extra: &str) -> PathBuf {
         format!(
             "[identity.work]\nclaude_config_dir = '{}'\ndatabase = '{}'\n{identity_extra}\
              [repo.app]\npath = '{}'\nidentity = 'work'\n\
-             queue = {{ kind = \"local_file\", file = '{}' }}\n",
+             queue = {{ kind = \"local_file\", file = '{}' }}\n\
+             model = 'opus'\n",
             claude.display(),
             dir.join("work.db").display(),
             repo.display(),

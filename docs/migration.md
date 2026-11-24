@@ -73,6 +73,7 @@ path = 'C:\src\app'
 identity = 'personal'
 build_dirs = ["target"]
 queue = { kind = "projects", owner = "me", number = 1 }
+model = "opus"                # required with a queue: the sessions' default model
 landing = { mode = "local" }
 
 [repo.app.policy]
@@ -87,6 +88,9 @@ push = false
   diff stat.
 - `allow-protected` in a card's `bosun` block lets that one item change listed protected paths.
   It is part of the card's snapshot at claim, so only you can grant it.
+- `model`: the model a session asks for when its card names none (a card's `model` overrides
+  it). It is required with a `queue`: unattended sessions do not read your own Claude Code
+  settings, so without it a session would run on whatever the CLI defaults to that day.
 - `build_dirs`: where new ignored files are expected. A new ignored file anywhere else sends the
   item to Needs you, so an agent cannot hide the file that makes the verdict pass behind a new
   `.gitignore` line. Nothing is deleted.
@@ -103,8 +107,8 @@ session sends the item to Needs you.
 1. Finish or stop the old run.
 2. Delete the Stop hook entry and its script, the supervisor scripts, the lock and the hook's
    state files. Commit the deletion.
-3. Add the repository to the configuration with its queue, `build_dirs` and policy; move the
-   freeze list into `policy.protected`.
+3. Add the repository to the configuration with its queue, `model`, `build_dirs` and policy;
+   move the freeze list into `policy.protected`.
 4. Turn each queue-file item into a card with a `bosun` block, run `bosun lint` on it, and move it
    to Ready.
 5. Run `bosun doctor`: `stop_hook` is `ok` for the repository, and no check fails.

@@ -61,6 +61,7 @@ pub(crate) struct DraftRepo {
     pub(crate) path: Option<PathValue>,
     pub(crate) identity: Option<(String, Option<Location>)>,
     pub(crate) queue: Option<Queue>,
+    pub(crate) model: Option<String>,
     pub(crate) verdict: Verdict,
     pub(crate) policy: Policy,
     pub(crate) build_dirs: BTreeSet<String>,
@@ -332,6 +333,7 @@ impl Reader<'_> {
             path: None,
             identity: None,
             queue: None,
+            model: None,
             verdict: Verdict::default(),
             policy: Policy::default(),
             build_dirs: BTreeSet::new(),
@@ -352,6 +354,7 @@ impl Reader<'_> {
                         .map(|(value, at)| (value.to_owned(), at));
                 }
                 "queue" => repo.queue = self.queue(item, &what, key_at),
+                "model" => repo.model = self.word(item, &what),
                 "verdict" => {
                     if let Some(table) = self.table(item, &what, key_at) {
                         self.verdict(table, &what, &mut repo.verdict);
@@ -376,6 +379,17 @@ impl Reader<'_> {
             if table.get(key).is_none() {
                 self.problem(at, format!("`{path}` has no `{key}`"));
             }
+        }
+        // Fail closed (#133): with no model of its own, a session runs on whatever the agent
+        // CLI defaults to that day. An ingest-only repository spawns nothing and needs none.
+        let unchecked = cfg!(mutant_config_queue_without_model);
+        if !unchecked && table.get("queue").is_some() && table.get("model").is_none() {
+            self.problem(
+                at,
+                format!(
+                    "`{path}` has a `queue` and no `model`: the default model of its sessions,                      e.g. `model = \"opus\"`"
+                ),
+            );
         }
         repo
     }

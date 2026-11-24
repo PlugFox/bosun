@@ -52,6 +52,7 @@
 //! identity = 'personal'
 //! build_dirs = ["target"]       # new ignored files are expected here only
 //! queue = { kind = "projects", owner = "me", number = 7 }  # or kind = "local_file", file = '...'
+//! model = "opus"                # the sessions' default model; required with a queue (#133)
 //! verdict = { timeout = "30m" } # and `shell`, default `sh` (from Git on Windows)
 //! landing = { mode = "local" }  # the only mode of this version; merge and pr are #8
 //!
@@ -195,6 +196,10 @@ pub struct Repo {
     /// `queue`: the board the repository's items come from; `None` for a repository whose
     /// sessions are only ingested.
     pub queue: Option<Queue>,
+    /// `model`: the model a session of the repository asks for (`--model`) when its card names
+    /// none (#5, #133): a name or an alias the runner accepts, e.g. `opus`. Required when
+    /// `queue` is set, so no session runs on whatever the agent CLI defaults to.
+    pub model: Option<String>,
     /// `verdict`: the defaults of the item contract's verdict.
     pub verdict: Verdict,
     /// `policy`: the permission policy, effective.
@@ -396,6 +401,7 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
                     key: path.key,
                     identity: r.identity?.0,
                     queue: r.queue,
+                    model: r.model,
                     verdict: r.verdict,
                     policy: r.policy,
                     build_dirs: r.build_dirs,

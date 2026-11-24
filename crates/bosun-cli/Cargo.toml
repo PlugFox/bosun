@@ -12,12 +12,13 @@ publish.workspace = true
 name = "bosun"
 path = "src/main.rs"
 
-# A client (#12): bosun-client, bosun-api and bosun-config only; `cargo xtask check-deps`
-# enforces it.
+# A client (#12): bosun-client, bosun-api and bosun-config only, plus bosun-tui for `bosun tui`
+# (#73), itself a client under the same rule; `cargo xtask check-deps` enforces it.
 [dependencies]
 bosun-api = { path = "../bosun-api" }
 bosun-client = { path = "../bosun-client" }
 bosun-config = { path = "../bosun-config" }
+bosun-tui = { path = "../bosun-tui" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

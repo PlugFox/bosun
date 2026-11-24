@@ -1,0 +1,24 @@
+ bosun  [1 Overview]   2 Queue                                     bosund 0.0.0
+  REPO         STATE     ITEM         ATT IN STATE  LAST VERDICT     HOLD
+personal: running
+  alpha        running   alpha#3        2  12m44s  fail alpha#3 a1  -
+  beta         idle      -              -       -  pass beta#7 a1   pause
+
+
+
+
+
+
+
+
+
+
+
+
+ repository ────────────────────────────────────────────────────────────────────
+alpha (personal)  /work/alpha
+queue local_file  state working
+alpha#3 running, attempt 2
+events: epoch 1-1 at 41, 1 subscriber(s)
+
+ 1/2 tab  j/k move  p pause  r resume  K kill switch  R restart item  q quit

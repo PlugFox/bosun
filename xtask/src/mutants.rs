@@ -1219,6 +1219,22 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("doctor_reports_a_leftover_stop_hook_by_path"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_tui_no_confirm",
+        issue: 73,
+        breaks: "an action key of the TUI sends its action at once, without its confirmation",
+        package: "bosun-tui",
+        check: Check::Test("feed::tests::a_key_without_its_confirmation_sends_nothing"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_tui_no_reconnect",
+        issue: 73,
+        breaks: "the TUI never opens its request connection again once it broke",
+        package: "bosun-tui",
+        check: Check::Test("feed::tests::the_view_survives_a_daemon_restart"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

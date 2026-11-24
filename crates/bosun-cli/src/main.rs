@@ -17,6 +17,7 @@
 //! bosun item <repo>#<card>
 //! bosun lint <repo>#<card> | bosun lint --repo <name> <card>
 //! bosun session tail <repo>#<card> | <session id>
+//! bosun tui [--identity <name>]
 //! ```
 //!
 //! Every command also takes `--format text|json` (default `text`; `report` also takes `md`,
@@ -81,6 +82,10 @@
 //!   the daemon (`queue.lint`); a card that is not claimable exits 1 with its findings on
 //!   stdout. `session tail`: follows a session's output lines until it ends (`session.get`,
 //!   then the event stream's live tail). See `work.rs`.
+//! - `tui`: the terminal client (`bosun-tui`): the Overview and the Queue of each identity,
+//!   kept current by the event stream across daemon restarts, with the actions of the shared
+//!   table behind their confirmations. It refuses a daemon that is down at start (4) and an
+//!   unknown API version (6); later it waits for the daemon. It ignores `--format`.
 //!
 //! `--name` names the registration (default `bosun`): a second daemon, or a test.
 //!
@@ -275,6 +280,10 @@ enum Command {
     /// The sessions bosun spawned.
     #[command(subcommand, after_help = EXIT_CODES)]
     Session(work::SessionCommand),
+    /// The terminal client: the Overview and the Queue, and the actions behind their
+    /// confirmations.
+    #[command(after_help = EXIT_CODES)]
+    Tui,
 }
 
 #[derive(Debug, Args)]
@@ -632,8 +641,29 @@ async fn own_terms(global: &Global, command: &Command) -> Option<Result<String, 
         Command::Item(args) => work::item(global, args).await,
         Command::Lint(args) => work::lint(global, args).await,
         Command::Session(work::SessionCommand::Tail(args)) => work::tail(global, args).await,
+        Command::Tui => tui(global).await,
         _ => return None,
     })
+}
+
+/// `tui`: every identity of the configuration (or `--identity`), each in a section of its own.
+async fn tui(global: &Global) -> Result<String, Failure> {
+    let identities = identities(global, None)?;
+    if identities.is_empty() {
+        return Err(Failure::new(
+            exit::CONFIG,
+            "the configuration names no identity",
+        ));
+    }
+    let options = bosun_tui::Options {
+        endpoint: control::endpoint(global)?,
+        identities,
+    };
+    match bosun_tui::run(options).await {
+        Ok(()) => Ok(String::new()),
+        Err(bosun_tui::Error::Client(e)) => Err(e.into()),
+        Err(e) => Err(Failure::new(exit::FAILED, e.to_string())),
+    }
 }
 
 /// Runs the command; the text to print on stdout.

@@ -327,6 +327,17 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// Where the session's MCP configuration goes: its directory, outside the working tree.
+/// The model a session of `repo` asks for (`--model`, #5, #133): the card's `model`, else the
+/// repository's default. The configuration refuses a repository with a queue and no model, so a
+/// spawned session always names one rather than running on the agent CLI's default of the day.
+pub(crate) fn session_model(contract: &bosun_queue::Contract, repo: &Repo) -> Option<String> {
+    if cfg!(mutant_runner_no_default_model) {
+        // Mutant: the repository's default is not passed.
+        return contract.model.clone();
+    }
+    contract.model.clone().or_else(|| repo.model.clone())
+}
+
 fn mcp_path(dir: &Path, repo: &Repo) -> PathBuf {
     if cfg!(mutant_mcp_config_in_tree) {
         // Mutant: the configuration, credential and all, lands in the working tree.
@@ -474,7 +485,7 @@ pub(crate) async fn session(
             deny: shared.deps.control.deny_rules(),
             ..ToolPolicy::default()
         },
-        model: claimed.snapshot.contract.model.clone(),
+        model: session_model(&claimed.snapshot.contract, repo),
     };
     let command = match run.mode {
         SpawnMode::Resume => runner.resume_command(&session_id, &ctx),

@@ -129,6 +129,7 @@ impl World {
              path = '{repo}'\n\
              identity = 'personal'\n\
              queue = {{ kind = 'local_file', file = '{board}' }}\n\
+             model = 'opus'\n\
              verdict = {{ timeout = '60s' }}\n",
             claude = slashed(&d.join("claude")),
             db = slashed(&d.join("db").join("bosun.db")),

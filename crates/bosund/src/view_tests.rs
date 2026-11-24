@@ -59,7 +59,8 @@ impl World {
                 "[identity.{identity}]\nclaude_config_dir = '{}'\ndatabase = '{}'\n\
                  author_allowlist = ['me']\n\n\
                  [repo.{repo}]\npath = '{}'\nidentity = '{identity}'\n\
-                 queue = {{ kind = 'local_file', file = '{}' }}\n\n",
+                 queue = {{ kind = 'local_file', file = '{}' }}\n\
+                 model = 'opus'\n\n",
                 claude.display(),
                 d.join(identity).join("bosun.db").display(),
                 d.join(repo).display(),

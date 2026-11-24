@@ -183,7 +183,12 @@ pub(crate) async fn claim(
     if let Err(e) = shared
         .deps
         .writer
-        .write(vec![snapshot_row(item, key, &claimed)])
+        .write(vec![snapshot_row(
+            item,
+            key,
+            &claimed,
+            super::session::session_model(&claimed.snapshot.contract, repo).as_deref(),
+        )])
         .await
     {
         return ClaimOutcome::Failed(format!("the snapshot cannot be stored: {e}"));
@@ -191,8 +196,9 @@ pub(crate) async fn claim(
     ClaimOutcome::Confirmed(Box::new(claimed))
 }
 
-/// The snapshot row of `claimed`, keyed by the claim effect's `key`.
-fn snapshot_row(item: &ItemId, key: &str, claimed: &Claimed) -> Write {
+/// The snapshot row of `claimed`, keyed by the claim effect's `key`; `model` is the model its
+/// sessions ask for, recorded for the item report and `bosun item` (#133).
+fn snapshot_row(item: &ItemId, key: &str, claimed: &Claimed, model: Option<&str>) -> Write {
     let snapshot = &claimed.snapshot;
     Write::Snapshot(bosun_store::Snapshot {
         item: item.clone(),
@@ -200,7 +206,7 @@ fn snapshot_row(item: &ItemId, key: &str, claimed: &Claimed) -> Write {
         taken_ms: now_ms(),
         hash: snapshot.hash.clone(),
         body: snapshot.body.clone(),
-        contract_json: contract_json(&snapshot.contract),
+        contract_json: contract_json(&snapshot.contract, model),
         comments_json: serde_json::Value::from(
             snapshot
                 .comments
@@ -256,8 +262,11 @@ async fn base_verdict(
     }
 }
 
-/// The parsed contract as the snapshot row stores it.
-fn contract_json(contract: &bosun_queue::Contract) -> String {
+/// The parsed contract as the snapshot row stores it, with `session_model`: the model its
+/// sessions ask for, the card's `model` or else the repository's default (#133). A change of
+/// the repository's default after the claim changes its configuration hash, so no session of
+/// the claim runs on another model.
+fn contract_json(contract: &bosun_queue::Contract, session_model: Option<&str>) -> String {
     serde_json::json!({
         "verdict": contract.verdict,
         "verdict_timeout_s": contract.verdict_timeout.map(|d| d.as_secs()),
@@ -269,6 +278,7 @@ fn contract_json(contract: &bosun_queue::Contract) -> String {
         },
         "runner": contract.runner,
         "model": contract.model,
+        "session_model": session_model,
         "allow_protected": contract.allow_protected,
     })
     .to_string()

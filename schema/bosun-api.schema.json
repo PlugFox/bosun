@@ -3903,6 +3903,13 @@
         "hash": {
           "type": "string"
         },
+        "model": {
+          "description": "The model its sessions ask for (`--model`): the card's, else the repository's default\n(#133). Absent from a snapshot taken before it was recorded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "taken_ms": {
           "format": "int64",
           "type": "integer"

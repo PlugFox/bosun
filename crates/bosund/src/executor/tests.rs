@@ -275,6 +275,7 @@ impl Scene {
              path = '{repo}'\n\
              identity = 'test'\n\
              queue = {{ kind = 'local_file', file = '{board}' }}\n\
+             model = 'opus'\n\
              verdict = {{ timeout = '60s' }}\n\
              build_dirs = ['target']\n\n\
              [repo.demo.policy]\n\
@@ -1980,6 +1981,65 @@ async fn an_identity_refused_at_the_session_is_needs_you_as_identity() {
     assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
     let item = scene.item(1).await.unwrap();
     assert_eq!(item.failed, 0, "{item:?}");
+}
+
+/// #133: a card without `model` asks for the repository's default (`model = 'opus'` in the
+/// scene's configuration); a card's `model` overrides it. The item report names the model
+/// asked for. `mutant_runner_no_default_model` leaves the repository's default out, and the
+/// first session gets no `--model`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_asks_for_the_cards_model_else_the_repositorys_default() {
+    let scene = Scene::new().await;
+    let p = |name: &str| scene.path(name).display().to_string();
+    let mut haiku = card(2, "Overrides", "test -f two.txt", "Item two.");
+    haiku.body = haiku
+        .body
+        .replace("verdict = ", "model = \"haiku\"\nverdict = ");
+    scene.write_board(&[card(1, "Defaults", "test -f one.txt", "Item one."), haiku]);
+    for (n, file) in [(1, "one.txt"), (2, "two.txt")] {
+        scene.script(
+            n,
+            &[
+                format!("argv {}", p(&format!("argv{n}"))),
+                format!("commit {file} x"),
+            ],
+        );
+    }
+    let (task, watcher) = scene.start(None);
+    for n in [1, 2] {
+        let state = ended(&scene, n, Duration::from_secs(60)).await;
+        assert_eq!(state, State::Done(Outcome::Pass), "item {n}");
+    }
+    drained(&scene).await;
+    task.abort();
+    watcher.abort();
+
+    let model_of = |n: u64| {
+        let argv = std::fs::read_to_string(scene.path(&format!("argv{n}"))).unwrap();
+        let argv: Vec<&str> = argv.lines().collect();
+        argv.iter()
+            .position(|a| *a == "--model")
+            .map(|i| argv[i + 1].to_owned())
+    };
+    assert_eq!(
+        model_of(1).as_deref(),
+        Some("opus"),
+        "the repository's default"
+    );
+    assert_eq!(model_of(2).as_deref(), Some("haiku"), "the card's override");
+
+    let cards = scene.cards();
+    for (n, want) in [(1, "opus"), (2, "haiku")] {
+        let card = cards.iter().find(|c| c.id.0 == n).unwrap();
+        let report = card
+            .comments
+            .iter()
+            .find(|c| c.key.as_deref() == Some(&*format!("report:demo#{n}")))
+            .map(|c| c.body.clone())
+            .expect("the sticky report");
+        let want = format!("- Model asked: `{want}`");
+        assert!(report.contains(&want), "{want:?} missing from {report}");
+    }
 }
 
 #[path = "control_tests.rs"]

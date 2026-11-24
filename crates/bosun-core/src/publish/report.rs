@@ -62,6 +62,9 @@ pub struct ReportFacts {
     pub detail: Option<String>,
     /// The verdict command, from the snapshot.
     pub verdict: String,
+    /// The model its sessions asked for (`--model`): the card's, else the repository's default,
+    /// from the snapshot (#133). What they ran is each attempt's [`AttemptFacts::model`].
+    pub model: Option<String>,
     /// The attempts, in order.
     pub attempts: Vec<AttemptFacts>,
     /// Tests that failed and then passed on the re-run.
@@ -244,9 +247,12 @@ pub fn render_report(facts: &ReportFacts, options: ReportOptions) -> String {
     body
 }
 
-/// The bullet list of facts: verdict, flaky tests, landing, diff, time parked, cost.
+/// The bullet list of facts: verdict, model asked, flaky tests, landing, diff, time parked, cost.
 fn facts_list(body: &mut String, facts: &ReportFacts) {
     let _ = write!(body, "- Verdict: {}", name(&facts.verdict, COMMAND_CAP));
+    if let Some(model) = &facts.model {
+        let _ = write!(body, "\n- Model asked: {}", name(model, ID_CAP));
+    }
     if !facts.flaky_tests.is_empty() {
         let _ = write!(
             body,

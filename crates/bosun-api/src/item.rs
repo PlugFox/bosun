@@ -61,6 +61,10 @@ pub struct SnapshotView {
     /// The branch HEAD was on at claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The model its sessions ask for (`--model`): the card's, else the repository's default
+    /// (#133). Absent from a snapshot taken before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// One arrow of an item.

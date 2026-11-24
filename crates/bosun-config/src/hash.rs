@@ -149,6 +149,7 @@ fn repo(canon: &mut Canon, repo: &Repo) {
         Some(Queue::LocalFile { file }) => canon.str("local_file").path(file),
         Some(Queue::Projects { owner, number }) => canon.str("projects").str(owner).u64(*number),
     };
+    canon.opt_str(repo.model.as_deref());
     canon
         .duration(repo.verdict.timeout)
         .opt_str(repo.verdict.shell.as_deref());

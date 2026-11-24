@@ -263,9 +263,13 @@ fn render_item(d: &ItemDetail, out: &mut String) {
         d.failed
     );
     if let Some(s) = &d.snapshot {
+        let model = s
+            .model
+            .as_deref()
+            .map_or_else(String::new, |m| format!(", model {m}"));
         let _ = writeln!(
             out,
-            "snapshot {} taken {}",
+            "snapshot {} taken {}{model}",
             s.hash,
             time::format(s.taken_ms)
         );

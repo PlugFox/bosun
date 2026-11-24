@@ -159,6 +159,16 @@ async fn stored(served: &Served, id: &str) -> Result<StoredItem, ErrorObject> {
         })
 }
 
+/// The model the sessions of a snapshot ask for, from its stored contract (#133): the claim
+/// records it as `session_model`; a snapshot taken before that has only the card's `model`.
+pub(crate) fn session_model(contract_json: &str) -> Option<String> {
+    let contract = serde_json::from_str::<Value>(contract_json).ok()?;
+    contract["session_model"]
+        .as_str()
+        .or_else(|| contract["model"].as_str())
+        .map(str::to_owned)
+}
+
 fn mode_name(mode: SpawnMode) -> &'static str {
     match mode {
         SpawnMode::Fresh => "fresh",
@@ -204,6 +214,7 @@ async fn detail(served: &Served, item: &StoredItem) -> Result<ItemDetail, ErrorO
         created_ms: item.created_ms,
         updated_ms: item.updated_ms,
         snapshot: snapshot.map(|s| SnapshotView {
+            model: session_model(&s.contract_json),
             hash: s.hash,
             taken_ms: s.taken_ms,
             body: s.body,

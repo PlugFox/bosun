@@ -138,6 +138,7 @@ fn the_stage_1_keys_are_read() {
          identity = 'personal'\n\
          build_dirs = ['target/', 'out']\n\
          queue = {{ kind = 'projects', owner = 'someone', number = 7 }}\n\
+         model = 'opus'\n\
          verdict = {{ timeout = '10m', shell = 'bash' }}\n\
          landing = {{ mode = 'local' }}\n\
          [repo.bosun.policy]\n\
@@ -151,6 +152,7 @@ fn the_stage_1_keys_are_read() {
          path = '{}'\n\
          identity = 'personal'\n\
          queue = {{ kind = 'local_file', file = '{}' }}\n\
+         model = 'claude-sonnet-4-5'\n\
          [budget]\n\
          item_eqv = 5_000_000\n\
          item_wall_clock = '2h'\n\
@@ -209,6 +211,7 @@ fn the_stage_1_keys_are_read() {
             number: 7
         })
     );
+    assert_eq!(repo.model.as_deref(), Some("opus"));
     assert_eq!(repo.verdict.timeout, Duration::from_mins(10));
     assert_eq!(repo.verdict.shell.as_deref(), Some("bash"));
     assert_eq!(
@@ -312,6 +315,7 @@ fn stage_1_shapes_are_checked() {
     let found = problems(&with_repo(
         "build_dirs = ['C:/abs', 'a\\b']\n\
          queue = { kind = 'jira' }\n\
+         model = 'opus'\n\
          verdict = { timeout = '0s' }\n\
          [repo.bosun.policy]\n\
          protect = ['tests']\n\
@@ -384,6 +388,33 @@ fn a_landing_mode_other_than_local_is_refused_naming_8() {
         );
         assert!(found[0].contains("#8"), "{found:?}");
     }
+}
+
+/// #133: a repository with a queue and no `model` is refused at load, the error naming the
+/// key; an ingest-only repository needs none; a model must be a non-empty word.
+/// `mutant_config_queue_without_model` accepts the missing model.
+#[test]
+fn a_repository_with_a_queue_and_no_model_is_refused() {
+    let queue = "queue = { kind = 'projects', owner = 'someone', number = 7 }\n";
+    let found = problems(&with_repo(queue));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("`repo.bosun` has a `queue` and no `model`"),
+        "{found:?}"
+    );
+    assert!(found[0].starts_with("line "), "{found:?} has no location");
+
+    let config = parse(&with_repo(&format!("{queue}model = 'opus'\n")), &Local).unwrap();
+    assert_eq!(config.repos["bosun"].model.as_deref(), Some("opus"));
+    let ingest_only = parse(&with_repo(""), &Local).unwrap();
+    assert_eq!(ingest_only.repos["bosun"].model, None);
+
+    let found = problems(&with_repo(&format!("{queue}model = ' '\n")));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("`repo.bosun.model` is \" \""),
+        "{found:?}"
+    );
 }
 
 #[test]
@@ -481,7 +512,11 @@ fn the_repository_hash_covers_what_governs_its_items() {
         base.replace(
             "identity = 'personal'\n[repo.other]",
             "identity = 'personal'\nqueue = { kind = 'projects', owner = 'o', number = 1 }\n\
-             [repo.other]",
+             model = 'opus'\n[repo.other]",
+        ),
+        base.replace(
+            "identity = 'personal'\n[repo.other]",
+            "identity = 'personal'\nmodel = 'haiku'\n[repo.other]",
         ),
         base.replace("[repo.bosun]", "github_login = 'x'\n[repo.bosun]"),
         base.clone() + "[budget]\nitem_eqv = 1\n",

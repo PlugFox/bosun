@@ -12,9 +12,13 @@
 //! The daemon's own comments carry a hidden key ([`marker`]) on their first line: the backend
 //! finds a comment to edit by it (#5) and the prompt builder skips the daemon's comments by it
 //! (#2). The sanitiser strips every imitation of it from agent text.
+//!
+//! [`pr`] builds the texts of the item's pull request: its body, the update of an edited body,
+//! the squash message.
 
 use std::fmt::Write as _;
 
+pub mod pr;
 mod redact;
 mod report;
 mod sanitise;

@@ -1393,6 +1393,24 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("lease::tests::a_lease_whose_holder_is_gone_is_released"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_publish_pr_body_overwrite",
+        issue: 122,
+        breaks: "updating a pull request body replaces all of it, not only the daemon's region",
+        package: "bosun-core",
+        check: Check::Test("publish::pr::tests::an_update_rewrites_only_the_daemon_region"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_publish_pr_raw_summary",
+        issue: 122,
+        breaks: "the agent's summary goes into the pull request body unsanitised",
+        package: "bosun-core",
+        check: Check::Test(
+            "publish::pr::tests::the_hostile_corpus_stays_inert_in_a_pull_request_body",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

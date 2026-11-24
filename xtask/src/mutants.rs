@@ -1211,6 +1211,14 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_doctor_skip_stop_hook",
+        issue: 75,
+        breaks: "doctor does not look for a Stop hook left in a configured repository's agent settings",
+        package: "bosun-cli",
+        check: Check::Test("doctor_reports_a_leftover_stop_hook_by_path"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

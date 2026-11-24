@@ -101,6 +101,13 @@ pub enum Write {
         ignored_json: String,
         git_config_json: String,
     },
+    /// Why the daemon refused an attempt before its verdict (#137): the failed preconditions or
+    /// the guard refusals, in the daemon's words. Writing it again replaces them.
+    AttemptRefusal {
+        item: ItemId,
+        attempt: u32,
+        reasons: Vec<String>,
+    },
     /// A session ended; clears the attempt's child process.
     RunEnded(RunEnd),
     /// The commit range of a session that ended: each commit of it is linked to the session
@@ -359,6 +366,11 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             ignored_json,
             git_config_json,
         } => work::attempt_guards(conn, &item, attempt, &ignored_json, &git_config_json).await,
+        Write::AttemptRefusal {
+            item,
+            attempt,
+            reasons,
+        } => work::attempt_refusal(conn, &item, attempt, &reasons).await,
         Write::RunEnded(end) => work::end_run(conn, &end).await,
         Write::RunCommits(range) => work::run_commits(conn, &range).await,
         Write::VerdictStarted(start) => work::start_verdict(conn, &start).await,

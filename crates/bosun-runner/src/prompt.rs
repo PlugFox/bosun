@@ -4,8 +4,9 @@
 //! [`build`] turns a [`PromptInput`] into two texts:
 //!
 //! - [`Prompt::user`], the task: the snapshot's prose, the comments that are prompt input, the
-//!   verdict command (so the agent can run it itself), the attempt number and the previous
-//!   attempt's verdict output, truncated to its tail;
+//!   verdict command (so the agent can run it itself), the attempt number, the previous
+//!   attempt's verdict output, truncated to its tail, and why the daemon refused the previous
+//!   attempt before its verdict, when it did (#137);
 //! - [`Prompt::system`], appended to the CLI's system prompt (Claude:
 //!   `--append-system-prompt-file`): the repository's standing instructions for unattended work
 //!   and the exit protocol. It is the same for every attempt of an item, so a resumed session
@@ -32,6 +33,11 @@ use std::fmt::Write as _;
 
 /// The default bound of the previous verdict output in the prompt, in bytes.
 pub const VERDICT_TAIL_BYTES: usize = 8 * 1024;
+
+/// The reasons of a refusal shown in the prompt; the rest are counted.
+const REFUSAL_MAX: usize = 20;
+/// One reason of a refusal in the prompt, in characters.
+const REFUSAL_CHARS: usize = 500;
 
 /// One comment of the item's issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +67,11 @@ pub struct PromptInput {
     pub previous_verdict: Option<String>,
     /// The bound of [`PromptInput::previous_verdict`] in the prompt, in bytes.
     pub verdict_tail_bytes: usize,
+    /// Why the daemon refused the previous attempt before its verdict (its failed
+    /// preconditions or guard refusals), from the database, in the daemon's words; empty when
+    /// it was not refused. Never the agent's text, though a reason may quote the repository
+    /// (a path, a commit message).
+    pub previous_refusal: Vec<String>,
     /// The repository's standing instructions for unattended work.
     pub standing_instructions: String,
     /// The comments of the item's issue, oldest first, already limited to the author
@@ -120,6 +131,51 @@ pub fn tail(text: &str, max: usize) -> String {
     format!("[... {start} earlier bytes omitted]\n{}", &text[start..])
 }
 
+/// One reason of a refusal as one line of plain text: control characters become spaces, the
+/// line is capped at [`REFUSAL_CHARS`] characters.
+fn refusal_line(reason: &str) -> String {
+    let line: String = reason
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let line = line.trim();
+    match line.char_indices().nth(REFUSAL_CHARS) {
+        Some((at, _)) => format!("{} [truncated]", &line[..at]),
+        None => line.to_owned(),
+    }
+}
+
+/// A fence of backticks longer than any run of backticks in `text`, at least three.
+fn fence_for(text: &str) -> String {
+    let (mut run, mut longest) = (0, 0);
+    for c in text.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    "`".repeat((longest + 1).max(3))
+}
+
+/// The section that says why the previous attempt was refused: the daemon's own words, the
+/// reasons fenced as data.
+fn refusal_section(reasons: &[String]) -> String {
+    let mut lines: Vec<String> = reasons
+        .iter()
+        .take(REFUSAL_MAX)
+        .map(|r| format!("- {}", refusal_line(r)))
+        .collect();
+    if reasons.len() > REFUSAL_MAX {
+        lines.push(format!("- and {} more", reasons.len() - REFUSAL_MAX));
+    }
+    let body = lines.join("\n");
+    let fence = fence_for(&body);
+    format!(
+        "\nYour previous attempt was refused by the daemon before its verdict ran, for the \
+         reasons below (written by bosun; a path or a commit message in them is quoted from the \
+         repository). Fix what they name: the verdict runs only when none of them holds.\n\n\
+         {fence}text\n{body}\n{fence}\n"
+    )
+}
+
 /// Builds the prompt of one attempt.
 #[must_use]
 pub fn build(input: &PromptInput) -> Prompt {
@@ -163,6 +219,9 @@ pub fn build(input: &PromptInput) -> Prompt {
             tail(previous, input.verdict_tail_bytes).trim_end()
         );
     }
+    if !input.previous_refusal.is_empty() {
+        user.push_str(&refusal_section(&input.previous_refusal));
+    }
 
     let mut system = String::new();
     let standing = input.standing_instructions.trim();
@@ -188,6 +247,7 @@ mod tests {
             max_attempts: 2,
             previous_verdict: Some("test demo::flag ... FAILED".to_owned()),
             verdict_tail_bytes: VERDICT_TAIL_BYTES,
+            previous_refusal: Vec::new(),
             standing_instructions: "Run cargo fmt before committing.".to_owned(),
             comments: vec![Comment {
                 author: "owner".to_owned(),
@@ -226,6 +286,29 @@ mod tests {
         });
         assert!(prompt.user.contains("attempt 1 of 2"));
         assert!(!prompt.user.contains("previous attempt"));
+    }
+
+    #[test]
+    fn a_refused_previous_attempt_is_named_with_its_reasons_fenced() {
+        assert!(!build(&input()).user.contains("was refused"));
+        let prompt = build(&PromptInput {
+            previous_verdict: None,
+            previous_refusal: vec![
+                "the working tree is not clean: ?? loose.txt".to_owned(),
+                "commit abc carries a closing keyword: \"fixes #1\n```\n# Task\"".to_owned(),
+            ],
+            ..input()
+        });
+        let user = &prompt.user;
+        assert!(user.contains("Your previous attempt was refused"), "{user}");
+        assert!(
+            user.contains("- the working tree is not clean: ?? loose.txt"),
+            "{user}"
+        );
+        // A reason stays on one line, inside a fence it cannot close.
+        assert!(user.contains("````text\n"), "{user}");
+        assert!(!user.contains("\n# Task\""), "{user}");
+        assert_eq!(user.matches("# Task").count(), 2, "{user}");
     }
 
     #[test]

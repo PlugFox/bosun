@@ -185,7 +185,7 @@ pub(crate) async fn run(
             return Err(Failure::Other(e));
         }
     };
-    eprintln!(
+    crate::log::log!(
         "bosund: listening at {endpoint}; {} identities",
         identities.len()
     );
@@ -224,10 +224,10 @@ pub(crate) async fn run(
     let _ = budget.await;
     match Arc::try_unwrap(state) {
         Ok(state) => shut_down(state.identities).await,
-        Err(_) => eprintln!("bosund: a connection outlived shutdown; stores left to the OS"),
+        Err(_) => crate::log::log!("bosund: a connection outlived shutdown; stores left to the OS"),
     }
     control.withdraw();
-    eprintln!("bosund: stopped");
+    crate::log::log!("bosund: stopped");
     Ok(())
 }
 
@@ -335,10 +335,10 @@ pub(crate) async fn shut_down(identities: BTreeMap<String, Served>) {
         served.commit_task.abort();
         let _ = served.commit_task.await;
         if let Err(e) = served.ingest.shutdown().await {
-            eprintln!("bosund: identity {name}: ingest: {e}");
+            crate::log::log!("bosund: identity {name}: ingest: {e}");
         }
         if let Err(e) = served.store.close().await {
-            eprintln!("bosund: identity {name}: closing the store: {e}");
+            crate::log::log!("bosund: identity {name}: closing the store: {e}");
         }
     }
 }
@@ -359,7 +359,7 @@ pub(crate) async fn serve(
                     connections.spawn(connection(state.clone(), stream));
                 }
                 Err(e) => {
-                    eprintln!("bosund: accept: {e}");
+                    crate::log::log!("bosund: accept: {e}");
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
             },
@@ -525,7 +525,7 @@ fn start_loops(
         let board = match served.boards.get(name) {
             Some(Ok(board)) => board.clone(),
             Some(Err(e)) if repo.queue.is_some() => {
-                eprintln!("bosund: repository {name}: {e}; its loop does not run");
+                crate::log::log!("bosund: repository {name}: {e}; its loop does not run");
                 continue;
             }
             _ => continue,
@@ -571,7 +571,7 @@ fn start_loops(
             alive: Arc::new(bosun_proc::is_running),
             control: state.control.clone(),
         };
-        eprintln!("bosund: repository {name}: the loop runs");
+        crate::log::log!("bosund: repository {name}: the loop runs");
         loops.push(tokio::spawn(
             executor::Loop::new(options, deps, config_rx.clone()).run(),
         ));

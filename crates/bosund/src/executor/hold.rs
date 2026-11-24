@@ -210,7 +210,7 @@ impl Loop {
         }
         if control.set_auto(&repo_name, until) {
             let state = if until.is_some() { "paused" } else { "running" };
-            eprintln!(
+            crate::log::log!(
                 "bosund: repository {repo_name}: {}",
                 if until.is_some() {
                     "an interactive session works in the checkout: paused"
@@ -257,7 +257,7 @@ impl Loop {
         if control.set_daily(&identity, until)
             && let Some(until) = until
         {
-            eprintln!(
+            crate::log::log!(
                 "bosund: identity {identity}: the daily cap is reached ({used} of {cap} eqv); \
                  the queue parks until local midnight"
             );

@@ -10,6 +10,7 @@
 //!
 //! ```text
 //! bosund [--config <file>] [--endpoint <socket or pipe>] [--operator-file <file>]
+//!        [--log-file <file>]
 //! ```
 //!
 //! At start it writes a fresh operator token, the credential of the control switches (#67), to
@@ -17,6 +18,10 @@
 //! else per endpoint); a file inside a configured repository's checkout is refused (exit code
 //! 1). A clean stop removes the file, unless another daemon has since written its own token
 //! there.
+//!
+//! Every log line goes to stderr and to the log file (#137): `--log-file`, else the file
+//! `bosun_client::log::path` names (`BOSUN_LOG_FILE`, else per endpoint beside the
+//! configuration), rotated by size. A file that cannot be opened leaves stderr only.
 //!
 //! The configuration is `--config`, else `bosun_config::default_path` (`BOSUN_CONFIG`, else
 //! the platform's location). The endpoint is `--endpoint`, else `bosun_client::Endpoint::resolve`
@@ -46,6 +51,7 @@ mod events;
 mod executor;
 mod item;
 mod listen;
+mod log;
 mod overview;
 mod pace;
 mod state;
@@ -72,6 +78,7 @@ mod exit {
 
 const USAGE: &str = "\
 usage: bosund [--config <file>] [--endpoint <socket or pipe>] [--operator-file <file>]
+              [--log-file <file>]
 
 The bosun daemon: ingests each identity's transcripts and serves the local API.
 
@@ -83,6 +90,7 @@ struct Args {
     config: Option<PathBuf>,
     endpoint: Option<String>,
     operator_file: Option<PathBuf>,
+    log_file: Option<PathBuf>,
 }
 
 fn parse(args: &[String]) -> Result<Option<Args>, String> {
@@ -99,6 +107,9 @@ fn parse(args: &[String]) -> Result<Option<Args>, String> {
             "--operator-file" => {
                 parsed.operator_file =
                     Some(args.next().ok_or("--operator-file needs a file")?.into());
+            }
+            "--log-file" => {
+                parsed.log_file = Some(args.next().ok_or("--log-file needs a file")?.into());
             }
             "-h" | "--help" => return Ok(None),
             "-V" | "--version" => {
@@ -122,25 +133,15 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(e) => {
-            eprintln!("bosund: {e}\n{USAGE}");
+            crate::log::log!("bosund: {e}\n{USAGE}");
             return ExitCode::from(exit::USAGE);
         }
     };
 
     let Some(config_path) = args.config.or_else(bosun_config::default_path) else {
-        eprintln!("bosund: no configuration file: pass --config or set BOSUN_CONFIG");
+        crate::log::log!("bosund: no configuration file: pass --config or set BOSUN_CONFIG");
         return ExitCode::from(exit::CONFIG);
     };
-    let config = match bosun_config::load(&config_path, &SystemProbe::new()) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("bosund: {}: {e}", config_path.display());
-            return ExitCode::from(exit::CONFIG);
-        }
-    };
-    for notice in &config.notices {
-        eprintln!("bosund: {}: {notice}", config_path.display());
-    }
     let endpoint = match args
         .endpoint
         .map(Endpoint::new)
@@ -148,10 +149,29 @@ fn main() -> ExitCode {
     {
         Ok(endpoint) => endpoint,
         Err(e) => {
-            eprintln!("bosund: {e}");
+            crate::log::log!("bosund: {e}");
             return ExitCode::from(exit::FAILED);
         }
     };
+    // The log file first, so a configuration that fails to load is in it too.
+    let log_file = args
+        .log_file
+        .unwrap_or_else(|| bosun_client::log::path(&config_path, &endpoint));
+    match log::init(&log_file) {
+        Ok(()) => log::log!("bosund: logging to {}", log_file.display()),
+        Err(e) => log::log!("bosund: no log file ({e}); logging to stderr only"),
+    }
+
+    let config = match bosun_config::load(&config_path, &SystemProbe::new()) {
+        Ok(config) => config,
+        Err(e) => {
+            crate::log::log!("bosund: {}: {e}", config_path.display());
+            return ExitCode::from(exit::CONFIG);
+        }
+    };
+    for notice in &config.notices {
+        crate::log::log!("bosund: {}: {notice}", config_path.display());
+    }
 
     let operator_file = match args
         .operator_file
@@ -159,7 +179,7 @@ fn main() -> ExitCode {
     {
         Ok(file) => file,
         Err(e) => {
-            eprintln!("bosund: {e}");
+            crate::log::log!("bosund: {e}");
             return ExitCode::from(exit::FAILED);
         }
     };
@@ -170,7 +190,7 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(e) => {
-            eprintln!("bosund: cannot start the runtime: {e}");
+            crate::log::log!("bosund: cannot start the runtime: {e}");
             return ExitCode::from(exit::FAILED);
         }
     };
@@ -184,11 +204,11 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Running { endpoint, pid }) => {
             let pid = pid.map_or_default(|pid| format!(" (pid {pid})"));
-            eprintln!("bosund: another instance is already running at {endpoint}{pid}");
+            crate::log::log!("bosund: another instance is already running at {endpoint}{pid}");
             ExitCode::from(exit::RUNNING)
         }
         Err(Failure::Other(e)) => {
-            eprintln!("bosund: {e}");
+            crate::log::log!("bosund: {e}");
             ExitCode::from(exit::FAILED)
         }
     }

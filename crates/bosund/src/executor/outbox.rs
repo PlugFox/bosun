@@ -366,9 +366,10 @@ impl Drainer {
         Ok(match result {
             Ok(()) => Sent::Done,
             Err(e) if e.is_cancel() => {
-                eprintln!(
+                crate::log::log!(
                     "bosund: repository {}: {e}; the board write {} is dropped",
-                    self.shared.options.repo, row.effect_key
+                    self.shared.options.repo,
+                    row.effect_key
                 );
                 Sent::Done
             }
@@ -648,6 +649,7 @@ pub(crate) async fn report_facts(
                 sessions,
                 crash_retries: row.attempt.crash_retries,
                 verdict,
+                refusal: row.refusal.clone(),
             }
         })
         .collect();

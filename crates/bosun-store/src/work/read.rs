@@ -49,6 +49,9 @@ pub struct AttemptRow {
     pub head_sha: Option<String>,
     pub started_ms: i64,
     pub ended_ms: Option<i64>,
+    /// Why the daemon refused it before its verdict ([`crate::Write::AttemptRefusal`]), in the
+    /// daemon's words; empty when nothing refused it.
+    pub refusal: Vec<String>,
 }
 
 /// One session bosun spawned.
@@ -317,7 +320,8 @@ impl Reader {
     pub async fn attempts(&self, item: &ItemId) -> Result<Vec<AttemptRow>, Error> {
         let rows = sqlx::query!(
             r#"SELECT a.number, a.spawn, a.run, a.state, a.first_run, a.crash_retries,
-                      a.head_sha, a.started_ms, a.ended_ms, s.hash AS "snapshot_hash?: String"
+                      a.head_sha, a.started_ms, a.ended_ms, a.refusal,
+                      s.hash AS "snapshot_hash?: String"
                FROM attempt a
                JOIN item i ON i.id = a.item_id
                LEFT JOIN snapshot s ON s.id = a.snapshot_id
@@ -345,6 +349,11 @@ impl Reader {
                     head_sha: row.head_sha,
                     started_ms: row.started_ms,
                     ended_ms: row.ended_ms,
+                    refusal: match row.refusal {
+                        Some(json) => serde_json::from_str(&json)
+                            .map_err(|_| Error::Corrupt(format!("attempt refusal {json:?}")))?,
+                        None => Vec::new(),
+                    },
                 })
             })
             .collect()

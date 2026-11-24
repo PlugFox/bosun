@@ -250,9 +250,10 @@ impl Loop {
                 // Mutant: the children a previous daemon left running are not killed.
             } else {
                 match blocking(move || bosun_proc::reap(key)).await {
-                    Ok(true) => eprintln!(
+                    Ok(true) => crate::log::log!(
                         "bosund: repository {}: {item}: reaped pid {} of the previous daemon",
-                        self.shared.options.repo, child.pid
+                        self.shared.options.repo,
+                        child.pid
                     ),
                     Ok(false) => {}
                     Err(e) => self
@@ -284,7 +285,7 @@ impl Loop {
     ) {
         let item = stored.item;
         let id = item.id.clone();
-        eprintln!(
+        crate::log::log!(
             "bosund: repository {}: recovering {id} from state {}",
             self.shared.options.repo,
             item.state.as_str()

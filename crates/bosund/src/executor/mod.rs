@@ -244,7 +244,7 @@ impl Shared {
     /// Logs a problem of the repository and publishes it as `board_sync_error`.
     fn trouble(&self, error: impl Into<String>) {
         let error = error.into();
-        eprintln!("bosund: repository {}: {error}", self.options.repo);
+        crate::log::log!("bosund: repository {}: {error}", self.options.repo);
         self.publish(EventBody::BoardSyncError {
             repo: self.options.repo.clone(),
             error,
@@ -902,10 +902,9 @@ impl Loop {
             self.shared.trouble(format!(
                 "attempt {attempt} has no ignored-file snapshot; it fails its preconditions"
             ));
-            return Event::Preconditions {
-                attempt,
-                passed: false,
-            };
+            let item = cur.item.id.clone();
+            let why = "the ignored files were not recorded before the session".to_owned();
+            return self.unchecked(&item, attempt, why).await;
         };
         let item = cur.item.id.clone();
 
@@ -915,24 +914,20 @@ impl Loop {
         match refused {
             Ok(refusals) => {
                 if let Some((guard, _)) = refusals.first() {
+                    let guard = *guard;
                     let text: Vec<String> = refusals.iter().map(|(_, r)| r.to_string()).collect();
                     self.shared.trouble(format!(
                         "{item}: attempt {attempt} is refused before its verdict: {}",
                         text.join("; ")
                     ));
-                    return Event::Refused {
-                        attempt,
-                        guard: *guard,
-                    };
+                    self.refused(&item, attempt, text).await;
+                    return Event::Refused { attempt, guard };
                 }
             }
             Err(e) => {
-                self.shared
-                    .trouble(format!("the guards could not be checked: {e}"));
-                return Event::Preconditions {
-                    attempt,
-                    passed: false,
-                };
+                let why = format!("the guards could not be checked: {e}");
+                self.shared.trouble(why.clone());
+                return self.unchecked(&item, attempt, why).await;
             }
         }
 
@@ -944,8 +939,10 @@ impl Loop {
             .runs(&item)
             .await
             .unwrap_or_default();
-        let checked =
-            blocking(move || git::preconditions(&path, &claimed.base, &item, &runs)).await;
+        let checked = {
+            let item = item.clone();
+            blocking(move || git::preconditions(&path, &claimed.base, &item, &runs)).await
+        };
         match checked {
             Ok(reasons) if reasons.is_empty() => Event::Preconditions {
                 attempt,
@@ -953,24 +950,51 @@ impl Loop {
             },
             Ok(reasons) => {
                 let text: Vec<String> = reasons.iter().map(ToString::to_string).collect();
-                eprintln!(
-                    "bosund: repository {}: attempt {attempt} fails its preconditions: {}",
+                crate::log::log!(
+                    "bosund: repository {}: {item}: attempt {attempt} fails its preconditions: {}",
                     self.shared.options.repo,
                     text.join("; ")
                 );
+                self.refused(&item, attempt, text).await;
                 Event::Preconditions {
                     attempt,
                     passed: false,
                 }
             }
             Err(e) => {
-                self.shared
-                    .trouble(format!("the preconditions could not be checked: {e}"));
-                Event::Preconditions {
-                    attempt,
-                    passed: false,
-                }
+                let why = format!("the preconditions could not be checked: {e}");
+                self.shared.trouble(why.clone());
+                self.unchecked(&item, attempt, why).await
             }
+        }
+    }
+
+    /// Stores why `attempt` was refused before its verdict (#137), in the daemon's words, before
+    /// the event that fails it: the report, `bosun item` and the next attempt's prompt read
+    /// them from the attempt's row.
+    async fn refused(&self, item: &ItemId, attempt: u32, reasons: Vec<String>) {
+        if cfg!(mutant_executor_drop_precondition_reasons) {
+            // Mutant: the reasons go to the log only.
+            return;
+        }
+        let write = Write::AttemptRefusal {
+            item: item.clone(),
+            attempt,
+            reasons,
+        };
+        if let Err(e) = self.shared.deps.writer.write(vec![write]).await {
+            self.shared
+                .trouble(format!("the reasons of the refusal cannot be stored: {e}"));
+        }
+    }
+
+    /// `attempt` fails its preconditions because they could not be checked: `why` is stored as
+    /// its reason.
+    async fn unchecked(&self, item: &ItemId, attempt: u32, why: String) -> Event {
+        self.refused(item, attempt, vec![why]).await;
+        Event::Preconditions {
+            attempt,
+            passed: false,
         }
     }
 
@@ -1164,7 +1188,7 @@ impl Loop {
         let (number, spawn) = (attempt.number, attempt.spawn);
         let alive = self.shared.deps.alive.clone();
         if blocking(move || alive(key)).await {
-            eprintln!(
+            crate::log::log!(
                 "bosund: repository {}: woke after {} s; the session of {} still runs",
                 self.shared.options.repo,
                 gap.as_secs(),

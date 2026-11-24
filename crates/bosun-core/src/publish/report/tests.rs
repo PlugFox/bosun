@@ -19,6 +19,7 @@ fn attempt(number: u32, state: AttemptState, tail: &str) -> AttemptFacts {
             line: "test result: FAILED. 1 failed".into(),
             tail: tail.into(),
         }),
+        refusal: Vec::new(),
     }
 }
 
@@ -124,6 +125,37 @@ fn the_body_starts_with_the_hidden_key() {
         code_blocks(&body).iter().any(|b| b.contains("error: two")),
         "{body}"
     );
+}
+
+#[test]
+fn an_attempt_refused_before_its_verdict_lists_the_reasons() {
+    let mut facts = facts();
+    facts.attempts = vec![AttemptFacts {
+        verdict: None,
+        refusal: vec![
+            "the working tree is not clean: ?? loose.txt".into(),
+            "commit 0123abc carries a closing keyword: \"Fixes #3\"".into(),
+        ],
+        ..attempt(1, AttemptState::Fail, "")
+    }];
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(
+        body.contains(
+            "- Attempt 1: fail, refused before its verdict: the working tree is not clean"
+        ),
+        "{body}"
+    );
+    assert!(body.contains("loose.txt"), "{body}");
+    // The quoted commit message is inert: the closing verb and its reference are a code span.
+    assert!(body.contains("\"`Fixes #3`\""), "{body}");
+
+    // A public repository gets that there was a refusal, not what it names.
+    let body = render_report(&facts, ReportOptions::for_repository(true));
+    assert!(
+        body.contains("- Attempt 1: fail, refused before its verdict (the reasons are in"),
+        "{body}"
+    );
+    assert!(!body.contains("loose.txt"), "{body}");
 }
 
 #[test]
@@ -253,6 +285,7 @@ fn maximal_facts_stay_under_the_cap() {
                     line: lines.clone(),
                     tail: lines.clone(),
                 }),
+                refusal: many(&lines),
             })
             .collect(),
         flaky_tests: many(&big),
@@ -344,6 +377,7 @@ fn the_agents_summary_is_quoted_marked_and_inert() {
             line: CORPUS.join(" "),
             tail: CORPUS.join("\n"),
         }),
+        refusal: corpus.clone(),
         ..attempt(1, AttemptState::Fail, "")
     }];
     facts.summary = Some(AgentSummary {

@@ -103,6 +103,10 @@ pub struct AttemptView {
     pub sessions: Vec<SessionInfo>,
     /// Its verdict runs, in order.
     pub verdicts: Vec<VerdictView>,
+    /// Why the daemon refused it before its verdict (#137): its failed preconditions or guard
+    /// refusals, in the daemon's words; empty when nothing refused it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refusal: Vec<String>,
 }
 
 /// One verdict run.

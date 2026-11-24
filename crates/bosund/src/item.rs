@@ -265,6 +265,7 @@ async fn detail(served: &Served, item: &StoredItem) -> Result<ItemDetail, ErrorO
                             verdict_line: v.verdict_line.clone(),
                         })
                         .collect(),
+                    refusal: a.refusal,
                 }
             })
             .collect(),
@@ -351,7 +352,7 @@ async fn restart(state: &State, served: &Served, id: &str) -> Result<RestartResu
         .await
         .map_err(|e| ErrorObject::new(code::INTERNAL_ERROR, e.to_string()))?
         .map_err(failed)?;
-    eprintln!("bosund: {id}: restart asked for; the `{RESTART_LABEL}` label is on its card");
+    crate::log::log!("bosund: {id}: restart asked for; the `{RESTART_LABEL}` label is on its card");
     Ok(RestartResult {
         item: id.to_owned(),
         label: RESTART_LABEL.to_owned(),

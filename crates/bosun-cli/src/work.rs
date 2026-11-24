@@ -288,6 +288,14 @@ fn render_item(d: &ItemDetail, out: &mut String) {
             let result = v.result.as_deref().unwrap_or("running");
             let _ = writeln!(out, "  verdict run {}: {result}", v.run);
         }
+        for reason in &a.refusal {
+            // The daemon's words; a quoted path or commit message stays on its line.
+            let reason: String = reason
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            let _ = writeln!(out, "  refused before its verdict: {reason}");
+        }
     }
     for c in &d.calls {
         let refused = if c.refused { " (refused)" } else { "" };
@@ -489,5 +497,40 @@ mod tests {
         assert_eq!(split_item("#3"), None);
         assert_eq!(split_item("demo"), None);
         assert_eq!(split_item("demo#x"), None);
+    }
+
+    #[test]
+    fn an_attempt_refused_before_its_verdict_shows_the_reasons() {
+        let detail: ItemDetail = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "item": "demo#4",
+            "repo": { "name": "demo", "path": "/repos/demo" },
+            "state": "needs_you",
+            "detail": "attempts_exhausted",
+            "attempt": 1,
+            "failed": 1,
+            "created_ms": 0,
+            "updated_ms": 0,
+            "transitions": [],
+            "attempts": [{
+                "number": 1,
+                "state": "fail",
+                "started_ms": 0,
+                "sessions": [],
+                "verdicts": [],
+                "refusal": ["the working tree is not clean: ?? loose.txt\nsecond line"],
+            }],
+            "calls": [],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render_item(&detail, &mut out);
+        assert!(
+            out.contains(
+                "attempt 1: fail\n  refused before its verdict: the working tree is not clean: \
+                 ?? loose.txt second line\n"
+            ),
+            "{out}"
+        );
     }
 }

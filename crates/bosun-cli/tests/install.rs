@@ -227,6 +227,15 @@ fn doctor_reports_each_check() {
     assert_eq!(status("git").len(), 1, "{report}");
     assert_eq!(status("endpoint"), ["fail"], "{report}");
     assert_eq!(status("daemon"), ["skip"], "{report}");
+    // No daemon wrote its log file beside this configuration (#137): named, skipped.
+    assert_eq!(status("log"), ["skip"], "{report}");
+    assert!(
+        checks(&report, "log")[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&dir.path().join("log").display().to_string()),
+        "{report}"
+    );
     if cfg!(any(windows, target_os = "macos", target_os = "linux")) {
         assert_eq!(status("registration"), ["fail"], "{report}");
     }
@@ -360,6 +369,24 @@ async fn logon_registration_registers_queries_and_unregisters() {
                 operator_file(&config).is_file(),
                 "the registered daemon wrote no token at {}",
                 operator_file(&config).display()
+            );
+            // Its log lines survive in the file beside the configuration (#137), which doctor
+            // names; the logon task discards its standard error.
+            let log = bosun_client::log::path(&config, &endpoint);
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            assert!(
+                text.contains("bosund: logging to"),
+                "{}: {text:?}",
+                log.display()
+            );
+            let check = checks(&report, "log");
+            assert_eq!(check[0]["status"], "ok", "{report}");
+            assert!(
+                check[0]["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&log.display().to_string()),
+                "{report}"
             );
         }
     }

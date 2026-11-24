@@ -585,6 +585,16 @@ const MUTANTS: &[Mutant] = &[
         platform: Some(Platform::Windows),
     },
     Mutant {
+        name: "mutant_proc_free_space_missing_is_unlimited",
+        issue: 8,
+        breaks: "a missing path answers u64::MAX free bytes instead of an error",
+        package: "bosun-proc",
+        check: Check::Test(
+            "disk::tests::free_space_is_reported_for_a_directory_and_refused_for_a_missing_one",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_runner_inline_daemon_comments",
         issue: 52,
         breaks: "the prompt builder inlines the daemon's own comments",

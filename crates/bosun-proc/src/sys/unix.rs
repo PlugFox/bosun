@@ -1,6 +1,9 @@
 //! Unix: process groups, the Linux parent-death signal and process start times through `libc`.
 
+use std::ffi::CString;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 /// A process group led by the child: its pgid is the child's pid.
 #[derive(Debug)]
@@ -175,6 +178,23 @@ impl PowerRequest {
     pub(crate) fn acquire(_reason: &str) -> io::Result<Self> {
         Ok(Self)
     }
+}
+
+/// `statvfs` of the volume holding `path`: the blocks available to an unprivileged user, times
+/// the fragment size.
+pub(crate) fn free_space(path: &Path) -> io::Result<u64> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: `statvfs` is plain C data; all zeros is a valid value.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is NUL-terminated and lives across the call; `stat` is writable.
+    if unsafe { libc::statvfs(c_path.as_ptr(), &raw mut stat) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let overflow = || io::Error::other("the free space of the volume overflows u64");
+    let blocks = u64::try_from(stat.f_bavail).map_err(|_| overflow())?;
+    let fragment = u64::try_from(stat.f_frsize).map_err(|_| overflow())?;
+    blocks.checked_mul(fragment).ok_or_else(overflow)
 }
 
 #[cfg(test)]

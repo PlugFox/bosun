@@ -282,6 +282,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #150: the worktree, process, lease-wait and landing tables.
   "cfg(mutant_store_process_offsets_overwrite)",
   "cfg(mutant_store_lease_wait_duplicates)",
+  # #152: the daemon's clone and its item worktrees.
+  "cfg(mutant_loop_worktree_in_user_repo)",
+  "cfg(mutant_loop_setup_failure_ignored)",
+  "cfg(mutant_loop_quarantine_unrecorded)",
 ] }
 
 [workspace.lints.clippy]

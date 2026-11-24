@@ -99,6 +99,9 @@ mod session;
 #[cfg(test)]
 mod tests;
 mod verdict;
+// The loop does not call the workspace yet: the next card of #8 does, and removes this.
+#[allow(dead_code)]
+mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;

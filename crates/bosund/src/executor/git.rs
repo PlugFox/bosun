@@ -131,6 +131,22 @@ pub(crate) fn set_aside(repo: &Path, base: &Base, item: &ItemId) -> Result<(), E
     reset_to(&git, &base.head)
 }
 
+/// Keeps the work of the checkout at `dir` under [`aside_ref`] of `item`: its HEAD, with
+/// uncommitted changes (untracked files too) as one more commit. In a linked worktree the ref
+/// is written to the repository the worktree hangs off (refs are shared). Nothing in the
+/// checkout changes. Returns the commit kept.
+pub(crate) fn keep_work(dir: &Path, item: &ItemId) -> Result<String, Error> {
+    let git = Git::new(dir);
+    let head = head(&git)?;
+    let tip = if bosun_git::clean_tree(&git)?.is_empty() {
+        head
+    } else {
+        snapshot_commit(&git, &head, item)?
+    };
+    git.run(&["update-ref", &aside_ref(item), &tip], None)?;
+    Ok(tip)
+}
+
 /// A commit on top of `head` holding the working tree as it is (untracked files too, ignored
 /// ones not), made through a temporary index so the checkout's own index is untouched.
 fn snapshot_commit(git: &Git, head: &str, item: &ItemId) -> Result<String, Error> {

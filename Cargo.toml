@@ -163,6 +163,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #122: the pull request body and squash message.
   "cfg(mutant_publish_pr_body_overwrite)",
   "cfg(mutant_publish_pr_raw_summary)",
+  # #138: cleaning before redacting.
+  "cfg(mutant_publish_redact_before_clean)",
   "cfg(mutant_api_default_pipe_acl)",
   "cfg(mutant_doctor_skip_tool_paths)",
   "cfg(mutant_report_item_last_attempt)",

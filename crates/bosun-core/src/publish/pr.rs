@@ -18,10 +18,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::redact::redact;
 use super::sanitise::{sanitise, sanitise_inline};
 use super::text::{chars, clean, first_chars};
-use super::{BODY_CAP, marker};
+use super::{BODY_CAP, marker, scrub};
 
 /// The key of the marker that opens the daemon's region of the body.
 const REGION_START_KEY: &str = "pr:facts:start";
@@ -89,7 +88,7 @@ fn description(summary: &str) -> String {
     #[cfg(not(mutant_publish_pr_raw_summary))]
     {
         let head = first_chars(summary, SUMMARY_CAP.saturating_mul(4).saturating_add(4096));
-        sanitise(&redact(head), SUMMARY_CAP)
+        sanitise(&scrub(head), SUMMARY_CAP)
     }
 }
 
@@ -138,7 +137,7 @@ fn region(facts: &[(&str, &str)]) -> String {
     out.push_str("\n\n");
     for (label, value) in facts.iter().take(FACTS_MAX) {
         let label = sanitise_inline(label, FACT_LABEL_CAP);
-        let value = sanitise_inline(&redact(first_chars(value, FACT_CAP * 4)), FACT_CAP);
+        let value = sanitise_inline(&scrub(first_chars(value, FACT_CAP * 4)), FACT_CAP);
         let _ = writeln!(out, "- {label}: {value}");
     }
     if facts.len() > FACTS_MAX {
@@ -181,7 +180,7 @@ static SKIP_CI: LazyLock<Regex> = LazyLock::new(|| {
 /// `summary` as plain text, then the daemon's `trailers`.
 #[must_use]
 pub fn squash_message(title: &str, summary: &str, trailers: &Trailers) -> String {
-    let subject = clean(&redact(first_chars(title, SUBJECT_CAP * 4))).replace('\n', " ");
+    let subject = scrub(first_chars(title, SUBJECT_CAP * 4)).replace('\n', " ");
     let subject = first_chars(subject.trim(), SUBJECT_CAP).trim().to_owned();
     let subject = if subject.is_empty() {
         "Untitled change".to_owned()
@@ -211,11 +210,11 @@ pub fn squash_message(title: &str, summary: &str, trailers: &Trailers) -> String
     out
 }
 
-/// The agent's summary as plain text for a commit message: redacted, cleaned and capped, its
+/// The agent's summary as plain text for a commit message: cleaned, redacted and capped, its
 /// lines trimmed at the end and blank lines at either end dropped.
 fn summary_text(text: &str) -> String {
     let head = first_chars(text, MESSAGE_CAP.saturating_mul(4).saturating_add(4096));
-    let cleaned = clean(&redact(head));
+    let cleaned = scrub(head);
     let cut = first_chars(&cleaned, MESSAGE_CAP);
     let lines: Vec<&str> = cut.lines().map(str::trim_end).collect();
     // Blank lines at either end would read as an extra paragraph; runs inside are kept.
@@ -443,6 +442,27 @@ mod tests {
             assert!(!text.to_lowercase().contains("bosun:key"), "{message}");
             assert!(!text.lines().next().unwrap_or("").is_empty(), "{message}");
             assert!(!text.lines().next().unwrap_or("").contains('\n'));
+        }
+    }
+
+    #[test]
+    fn a_secret_split_by_an_invisible_character_is_redacted() {
+        // Joined at run time, so the source holds no token-shaped literal.
+        let (head, rest) = ("ghp_ABCDEFGHIJKLMNO", "PQRSTUVWXYZabcdefghij");
+        let whole = format!("{head}{rest}");
+        for split in ['\u{200B}', '\u{202E}'] {
+            let secret = format!("{head}{split}{rest}");
+            let message = squash_message(
+                &format!("Use {secret}"),
+                &format!("The token is {secret} here."),
+                &trailers(),
+            );
+            assert!(!message.contains(&whole), "{message}");
+            assert!(!message.contains(head), "{message}");
+            assert_eq!(message.matches("[redacted]").count(), 2, "{message}");
+            let out = body(&format!("Token {secret}."), &[("Fact", &secret)], 1);
+            assert!(!out.contains(head), "{out}");
+            assert_eq!(out.matches("\\[redacted\\]").count(), 2, "{out}");
         }
     }
 

@@ -1421,6 +1421,16 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_publish_redact_before_clean",
+        issue: 138,
+        breaks: "the report redacts text before cleaning it, so a secret split by an invisible character is published",
+        package: "bosun-core",
+        check: Check::Test(
+            "publish::report::tests::a_secret_split_by_an_invisible_character_is_redacted",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

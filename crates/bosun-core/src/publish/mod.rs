@@ -3,9 +3,9 @@
 //!
 //! GitHub acts on text: a closing verb closes an issue, a reference creates a cross-reference
 //! event in another repository, a mention notifies, a bot command runs under the user's login.
-//! Everything the agent influenced (its summary, verdict output) therefore passes
-//! [`redact`] and then [`sanitise`] (Markdown) or [`sanitise_inline`] (literal text) before it
-//! reaches a comment, and verdict tails go into code fences that outrun every backtick run in
+//! Everything the agent influenced (its summary, verdict output) therefore passes [`scrub`]
+//! (cleaned, then [`redact`]ed) and then [`sanitise`] (Markdown) or [`sanitise_inline`]
+//! (literal text) before it reaches a comment, and verdict tails go into code fences that outrun every backtick run in
 //! them. [`render_report`] composes those pieces into the body of the sticky comment, under
 //! GitHub's 65,536-character cap ([`BODY_CAP`]).
 //!
@@ -30,6 +30,17 @@ pub use report::{
     ReportFacts, ReportOptions, VerdictFacts, render_report, report_key,
 };
 pub use sanitise::{sanitise, sanitise_inline};
+
+/// `text` the agent influenced with its invisible characters and hidden-marker imitations
+/// removed, then its secrets redacted.
+///
+/// Cleaning comes first (#138): a secret split by a zero-width or bidirectional character has
+/// no token shape for [`redact`] until the character is gone, and once published GitHub shows
+/// it whole.
+#[must_use]
+pub fn scrub(text: &str) -> String {
+    redact(&text::clean(text))
+}
 
 /// The opening of the hidden key marker; the key follows, then [`MARKER_CLOSE`].
 const MARKER_OPEN: &str = "<!-- bosun:key=";

@@ -29,7 +29,7 @@ const TRUNCATED_INLINE: &str = " *(truncated)*";
 /// `markdown` (text the agent influenced) as inert Markdown of at most `cap` characters.
 ///
 /// Inert: GitHub renders it as paragraphs, lists, emphasis, headings and code, and acts on
-/// nothing in it (#8). The caller redacts secrets first ([`super::redact`]).
+/// nothing in it (#8). The caller redacts secrets first ([`super::scrub`]).
 #[must_use]
 pub fn sanitise(markdown: &str, cap: usize) -> String {
     #[cfg(mutant_publish_passthrough)]

@@ -241,6 +241,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_lease_one_by_one)",
   "cfg(mutant_lease_keep_dead_holder)",
   "cfg(mutant_lease_hold_and_wait)",
+  # #123: resources and worktrees in the configuration.
+  "cfg(mutant_config_resource_any_capacity)",
+  "cfg(mutant_config_worktree_root_inside_repo)",
 ] }
 
 [workspace.lints.clippy]

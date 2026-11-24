@@ -1447,6 +1447,22 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_config_resource_any_capacity",
+        issue: 123,
+        breaks: "a resource with a capacity of 0, which no one can ever hold, is accepted",
+        package: "bosun-config",
+        check: Check::Test("tests::a_resource_needs_a_positive_capacity_and_a_known_scope"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_worktree_root_inside_repo",
+        issue: 123,
+        breaks: "a worktree root inside the repository's own checkout is accepted",
+        package: "bosun-config",
+        check: Check::Test("tests::a_worktree_root_inside_the_repository_is_refused"),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

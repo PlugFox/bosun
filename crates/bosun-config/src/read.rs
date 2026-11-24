@@ -6,12 +6,12 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bosun_core::{PathStyle, canonical_path};
+use bosun_core::{PathStyle, Scope, canonical_path};
 use toml_edit::{Document, Item, TableLike};
 
 use crate::error::{Location, Notice, Problem};
 use crate::policy::{Policy, relative_entry};
-use crate::{Budget, Daemon, Landing, LandingMode, McpServer, Queue, Verdict};
+use crate::{Budget, Daemon, Landing, LandingMode, McpServer, Queue, Resource, Verdict};
 
 /// Sections of #4 that this version accepts and does not read.
 const LATER_SECTIONS: &[&str] = &["notify"];
@@ -30,6 +30,19 @@ const DURATION_UNITS: &[(char, u64)] = &[
     ('h', 3600),
     ('d', 86_400),
     ('w', 604_800),
+];
+
+/// Units of a size (`worktree.disk_floor`): decimal and binary multiples of a byte.
+const SIZE_UNITS: &[(&str, u64)] = &[
+    ("B", 1),
+    ("KB", 1_000),
+    ("MB", 1_000_000),
+    ("GB", 1_000_000_000),
+    ("TB", 1_000_000_000_000),
+    ("KiB", 1 << 10),
+    ("MiB", 1 << 20),
+    ("GiB", 1 << 30),
+    ("TiB", 1 << 40),
 ];
 
 /// A path value: as written, its canonical key (#17) and where it is.
@@ -67,6 +80,17 @@ pub(crate) struct DraftRepo {
     pub(crate) build_dirs: BTreeSet<String>,
     pub(crate) landing: Landing,
     pub(crate) mcp_servers: BTreeMap<String, McpServer>,
+    pub(crate) worktree: Option<DraftWorktree>,
+}
+
+/// `repo.<name>.worktree`, its root kept with its key and position for the cross-check against
+/// the repository's path.
+#[derive(Debug)]
+pub(crate) struct DraftWorktree {
+    pub(crate) root: Option<PathValue>,
+    pub(crate) setup: Option<String>,
+    pub(crate) teardown: Option<String>,
+    pub(crate) disk_floor: Option<u64>,
 }
 
 /// What the document says, in file order, before cross-checks.
@@ -79,6 +103,7 @@ pub(crate) struct Draft {
     /// Where `budget.reserve_eqv` is written, for the cross-check against the daily cap.
     pub(crate) reserve_at: Option<Location>,
     pub(crate) daemon: Daemon,
+    pub(crate) resources: BTreeMap<String, Resource>,
     pub(crate) notices: Vec<Notice>,
 }
 
@@ -112,6 +137,7 @@ pub(crate) fn read(text: &str, problems: &mut Vec<Problem>) -> Option<Draft> {
         budget: Budget::default(),
         reserve_at: None,
         daemon: Daemon::default(),
+        resources: BTreeMap::new(),
         notices: Vec::new(),
     };
 
@@ -144,6 +170,13 @@ pub(crate) fn read(text: &str, problems: &mut Vec<Problem>) -> Option<Draft> {
                     draft.reserve_at = reader.budget(table, &mut draft.budget);
                 }
             }
+            "resource" => {
+                for (name, item, at) in reader.named_tables(item, "resource", at) {
+                    if let Some(resource) = reader.resource(name, item, at) {
+                        draft.resources.insert(name.to_owned(), resource);
+                    }
+                }
+            }
             later if LATER_SECTIONS.contains(&later) => reader.notice(
                 at,
                 format!("section `{later}` is not read in this version; ignored"),
@@ -152,7 +185,7 @@ pub(crate) fn read(text: &str, problems: &mut Vec<Problem>) -> Option<Draft> {
                 at,
                 format!(
                     "unknown section `{unknown}`; the sections are daemon, identity, repo, \
-                     retention, budget and notify"
+                     retention, budget, resource and notify"
                 ),
             ),
         }
@@ -339,6 +372,7 @@ impl Reader<'_> {
             build_dirs: BTreeSet::new(),
             landing: Landing::default(),
             mcp_servers: BTreeMap::new(),
+            worktree: None,
         };
         let Some(table) = item.as_table_like() else {
             return repo;
@@ -372,6 +406,11 @@ impl Reader<'_> {
                     }
                 }
                 "mcp_servers" => repo.mcp_servers = self.mcp_servers(item, &what, key_at),
+                "worktree" => {
+                    if let Some(table) = self.table(item, &what, key_at) {
+                        repo.worktree = Some(self.worktree(table, &what, key_at));
+                    }
+                }
                 _ => self.ignored(key_at, &what),
             }
         }
@@ -519,6 +558,103 @@ impl Reader<'_> {
         }
     }
 
+    /// Reads `worktree` (#8). An unknown key is refused, as in a policy: a misspelt `root` must
+    /// not go unnoticed.
+    fn worktree(
+        &mut self,
+        table: &dyn TableLike,
+        what: &str,
+        at: Option<Location>,
+    ) -> DraftWorktree {
+        let mut worktree = DraftWorktree {
+            root: None,
+            setup: None,
+            teardown: None,
+            disk_floor: None,
+        };
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let path = format!("{what}.{key}");
+            match key {
+                "root" => worktree.root = self.path(item, &path),
+                "setup" => worktree.setup = self.command(item, &path),
+                "teardown" => worktree.teardown = self.command(item, &path),
+                "disk_floor" => worktree.disk_floor = self.size(item, &path),
+                other => self.problem(
+                    key_at,
+                    format!(
+                        "unknown key `{what}.{other}`; a worktree has `root`, `setup`, \
+                         `teardown` and `disk_floor`"
+                    ),
+                ),
+            }
+        }
+        if table.get("root").is_none() {
+            self.problem(at, format!("`{what}` has no `root`"));
+        }
+        worktree
+    }
+
+    /// Reads `[resource.<name>]` (#8). An unknown key is refused.
+    fn resource(&mut self, name: &str, item: &Item, at: Option<Location>) -> Option<Resource> {
+        let path = format!("resource.{name}");
+        let table = item.as_table_like()?;
+        let mut kind = None;
+        let mut resource = Resource {
+            kind: String::new(),
+            capacity: 1,
+            scope: Scope::Machine,
+        };
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let what = format!("{path}.{key}");
+            match key {
+                "kind" => kind = self.word(item, &what),
+                "capacity" => {
+                    let capacity = if cfg!(mutant_config_resource_any_capacity) {
+                        // Mutant (`mutant_config_resource_any_capacity`): a capacity of 0 is
+                        // accepted, a resource no one can ever hold.
+                        self.non_negative(item, &what)
+                            .and_then(|n| u32::try_from(n).ok())
+                    } else {
+                        self.count(item, &what)
+                    };
+                    set(&mut resource.capacity, capacity);
+                }
+                "scope" => set(&mut resource.scope, self.scope(item, &what)),
+                other => self.problem(
+                    key_at,
+                    format!(
+                        "unknown key `{path}.{other}`; a resource has `kind`, `capacity` and \
+                         `scope`"
+                    ),
+                ),
+            }
+        }
+        if kind.is_none() && table.get("kind").is_none() {
+            self.problem(at, format!("`{path}` has no `kind`"));
+        }
+        resource.kind = kind?;
+        Some(resource)
+    }
+
+    fn scope(&mut self, item: &Item, what: &str) -> Option<Scope> {
+        let (text, at) = self.string(item, what)?;
+        let scope = match text {
+            "machine" => Some(Scope::Machine),
+            "identity" => Some(Scope::Identity),
+            "repository" => Some(Scope::Repository),
+            _ => None,
+        };
+        if scope.is_none() {
+            self.problem(
+                at,
+                format!("`{what}` is {text:?}; it is \"machine\", \"identity\" or \"repository\""),
+            );
+        }
+        scope
+    }
+
     fn mcp_servers(
         &mut self,
         item: &Item,
@@ -608,6 +744,29 @@ impl Reader<'_> {
             return None;
         }
         Some(text.to_owned())
+    }
+
+    /// A shell command; an empty one is none.
+    fn command(&mut self, item: &Item, what: &str) -> Option<String> {
+        self.string(item, what)
+            .map(|(value, _)| value.to_owned())
+            .filter(|command| !command.trim().is_empty())
+    }
+
+    /// A size in bytes, such as `"20GB"` ([`SIZE_UNITS`]).
+    fn size(&mut self, item: &Item, what: &str) -> Option<u64> {
+        let (text, at) = self.string(item, what)?;
+        let value = parse_size(text);
+        if value.is_none() {
+            self.problem(
+                at,
+                format!(
+                    "`{what}` is {text:?}; expected a positive whole number and a unit (B, KB, \
+                     MB, GB, TB, KiB, MiB, GiB, TiB), such as \"20GB\""
+                ),
+            );
+        }
+        value
     }
 
     fn bool(&mut self, item: &Item, what: &str) -> Option<bool> {
@@ -788,9 +947,38 @@ fn parse_duration(text: &str, units: &[(char, u64)]) -> Option<Duration> {
     Some(Duration::from_secs(count.checked_mul(seconds)?))
 }
 
+/// Parses `<n><unit>` with `n > 0` and the unit one of [`SIZE_UNITS`], into bytes.
+fn parse_size(text: &str) -> Option<u64> {
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let (count, unit) = text.split_at(digits);
+    let &(_, bytes) = SIZE_UNITS.iter().find(|(name, _)| *name == unit)?;
+    let count: u64 = count.parse().ok().filter(|&n| n > 0)?;
+    count.checked_mul(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("20GB"), Some(20_000_000_000));
+        assert_eq!(parse_size("512MiB"), Some(512 << 20));
+        assert_eq!(parse_size("1B"), Some(1));
+        for bad in [
+            "",
+            "GB",
+            "0GB",
+            "20",
+            "20 GB",
+            "20gb",
+            "1.5GB",
+            "-1GB",
+            "99999999999TB",
+        ] {
+            assert_eq!(parse_size(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn reingest_windows() {

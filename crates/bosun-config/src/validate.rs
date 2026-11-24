@@ -1,8 +1,10 @@
-//! Cross-checks of a draft: identity isolation (#2), the local-disk rule for databases and the
-//! budget's reserve.
+//! Cross-checks of a draft: identity isolation (#2), the local-disk rule for databases, the
+//! budget's reserve and worktree roots outside their repository (#8).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+use bosun_core::{PathStyle, strip_root};
 
 use crate::disk::{Disk, DiskProbe};
 use crate::error::Problem;
@@ -48,6 +50,12 @@ pub(crate) fn validate(draft: &Draft, probe: &dyn DiskProbe, problems: &mut Vec<
         "path",
         problems,
     );
+    for repo in &draft.repos {
+        let root = repo.worktree.as_ref().and_then(|w| w.root.as_ref());
+        if let (Some(path), Some(root)) = (&repo.path, root) {
+            worktree_root_outside(&repo.name, path, root, problems);
+        }
+    }
 
     if !cfg!(mutant_config_shared_dir) {
         for (what, field) in BUNDLE_PATHS {
@@ -103,6 +111,31 @@ pub(crate) fn validate(draft: &Draft, probe: &dyn DiskProbe, problems: &mut Vec<
                 "the database of identity `{}` must be on a local disk, not synced or \
                  shared: {why}",
                 identity.name
+            ),
+        });
+    }
+}
+
+/// Refuses a worktree root that is the repository's path or under it (#8): worktrees made
+/// there would be files of the main checkout. Canonical keys are compared, so on Windows case
+/// and separators do not matter.
+fn worktree_root_outside(
+    repo: &str,
+    path: &PathValue,
+    root: &PathValue,
+    problems: &mut Vec<Problem>,
+) {
+    // Mutant (`mutant_config_worktree_root_inside_repo`): the inside check is skipped.
+    let inside = !cfg!(mutant_config_worktree_root_inside_repo)
+        && strip_root(&root.key, &path.key, PathStyle::host()).is_some();
+    if inside {
+        problems.push(Problem {
+            location: root.at,
+            message: format!(
+                "`repo.{repo}.worktree.root` {} is inside the repository's path {}; worktrees \
+                 go outside the checkout",
+                root.path.display(),
+                path.path.display()
             ),
         });
     }

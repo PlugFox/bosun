@@ -23,6 +23,7 @@ use crate::agent::Credentials;
 use crate::api::{self, Answer};
 use crate::commits::Commits;
 use crate::config_watch;
+use crate::control::{self, Control};
 use crate::events::{self, Batch, Events, Subscriber};
 use crate::executor;
 use crate::listen::{self, ClaimError, Listener};
@@ -61,6 +62,8 @@ pub(crate) struct State {
     pub(crate) identities: BTreeMap<String, Served>,
     /// The live agent credentials of every identity's sessions (#63).
     pub(crate) credentials: Credentials,
+    /// Pauses, the kill switch, the daily cap and the operator token (#67).
+    pub(crate) control: Control,
 }
 
 impl State {
@@ -70,6 +73,7 @@ impl State {
             started_ms: 0,
             identities: BTreeMap::new(),
             credentials: Credentials::default(),
+            control: Control::default(),
         }
     }
 
@@ -126,6 +130,15 @@ pub(crate) async fn run(
         ClaimError::Io(e) => Failure::Other(format!("cannot listen: {e}")),
     })?;
 
+    // A fresh operator token at every start, outside every checkout (#67).
+    let operator = match operator_token(&config, &endpoint) {
+        Ok(operator) => operator,
+        Err(e) => {
+            listener.close();
+            return Err(Failure::Other(e));
+        }
+    };
+
     // A restart starts a new epoch, so a client's old sequence is never taken for a new one.
     let epoch = format!("{}-{}", now_ms(), std::process::id());
     let identities = match open(&config, &epoch, events::Options::default()).await {
@@ -144,6 +157,7 @@ pub(crate) async fn run(
         started_ms: now_ms(),
         identities,
         credentials: Credentials::default(),
+        control: operator,
     });
 
     let progress = tokio::spawn(watch_ingest(state.clone()));
@@ -173,6 +187,15 @@ pub(crate) async fn run(
     }
     eprintln!("bosund: stopped");
     Ok(())
+}
+
+/// Writes a fresh operator token for `endpoint` and returns the control state that admits it.
+fn operator_token(config: &Config, endpoint: &Endpoint) -> Result<Control, String> {
+    let file = bosun_client::operator::path(endpoint)?;
+    let checkouts: Vec<&std::path::Path> =
+        config.repos.values().map(|r| r.path.as_path()).collect();
+    let token = control::issue(&file, &checkouts)?;
+    Ok(Control::with_token(&token, Some(file)))
 }
 
 /// Opens each identity's store and starts its ingest. On failure, what was opened is returned
@@ -465,6 +488,7 @@ fn start_loops(
             credentials: state.credentials.clone(),
             clock: Arc::new(executor::SystemClock::new()),
             alive: Arc::new(bosun_proc::is_running),
+            control: state.control.clone(),
         };
         eprintln!("bosund: repository {name}: the loop runs");
         loops.push(tokio::spawn(

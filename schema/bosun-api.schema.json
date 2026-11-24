@@ -535,6 +535,44 @@
       ],
       "type": "object"
     },
+    "ControlStatus": {
+      "description": "The control state of one identity: result of `control.status`, `control.pause` and\n`control.resume`.",
+      "properties": {
+        "daily_cap_until_ms": {
+          "description": "The daily cap parks the identity's queue until this time (local midnight).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "identity": {
+          "type": "string"
+        },
+        "killed": {
+          "description": "The kill switch is thrown (daemon-wide).",
+          "type": "boolean"
+        },
+        "paused": {
+          "description": "Every repository of the identity is paused by hand.",
+          "type": "boolean"
+        },
+        "repos": {
+          "description": "Each repository of the identity, by name.",
+          "items": {
+            "$ref": "#/$defs/RepoControl"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "killed",
+        "paused",
+        "repos"
+      ],
+      "type": "object"
+    },
     "DaemonStatus": {
       "description": "Result of `status.daemon`.",
       "properties": {
@@ -1108,6 +1146,49 @@
           "required": [
             "type",
             "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A budget cap was reached (#7, #67): an item's eqv or wall-clock cap (the item is killed\nand goes to Needs you), or the identity's daily eqv cap (the queue parks until\n`until_ms`, local midnight).",
+          "properties": {
+            "cap": {
+              "description": "`item_eqv`, `item_wall_clock` or `daily_eqv`.",
+              "type": "string"
+            },
+            "item": {
+              "description": "The item, for a per-item cap.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "limit": {
+              "$ref": "#/$defs/Wide",
+              "description": "The cap, in the same unit."
+            },
+            "type": {
+              "const": "budget_exceeded",
+              "type": "string"
+            },
+            "until_ms": {
+              "description": "When the daily cap releases the queue.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "used": {
+              "$ref": "#/$defs/Wide",
+              "description": "What was used: eqv tokens, or milliseconds for the wall-clock cap."
+            }
+          },
+          "required": [
+            "type",
+            "cap",
+            "used",
+            "limit"
           ],
           "type": "object"
         },
@@ -1771,6 +1852,35 @@
       ],
       "type": "object"
     },
+    "KillParams": {
+      "description": "Params of `control.kill`.",
+      "properties": {
+        "operator": {
+          "default": "",
+          "description": "The operator token the daemon wrote at start. Missing, it is refused like a wrong one.",
+          "type": "string"
+        },
+        "release": {
+          "default": false,
+          "description": "Release the kill switch instead of throwing it: parked items resume on their next tick.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "KillResult": {
+      "description": "Result of `control.kill`.",
+      "properties": {
+        "killed": {
+          "description": "The kill switch is thrown.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "killed"
+      ],
+      "type": "object"
+    },
     "KindRow": {
       "description": "One session kind of [`Report::by_kind`].",
       "properties": {
@@ -1997,6 +2107,31 @@
       ],
       "type": "object"
     },
+    "PauseParams": {
+      "description": "Params of `control.pause` and `control.resume`.",
+      "properties": {
+        "identity": {
+          "description": "The identity whose repositories are paused or resumed.",
+          "type": "string"
+        },
+        "operator": {
+          "default": "",
+          "description": "The operator token the daemon wrote at start. Missing, it is refused like a wrong one.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "One repository of the identity, by its name in the configuration; every repository of\nthe identity when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity"
+      ],
+      "type": "object"
+    },
     "PerCommit": {
       "description": "Eqv per commit: the eqv of the messages attributed to a repository divided by the number\nof its commits, both in one period. Both operands are exact; no message is linked to a\ncommit (that link is an estimate).\n\nCommits are those the commit reader stored: reachable from the repository's local and\nremote-tracking branches, counted by committer time.",
       "properties": {
@@ -2159,6 +2294,39 @@
         "within",
         "across",
         "rows"
+      ],
+      "type": "object"
+    },
+    "RepoControl": {
+      "description": "The control state of one repository.",
+      "properties": {
+        "auto_paused_until_ms": {
+          "description": "Paused automatically by an interactive session in its checkout, until this time unless\nthe session goes on.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hold": {
+          "description": "The hold in force now, strongest first: `kill`, `pause`, `daily_cap`; absent when none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paused": {
+          "description": "Paused by hand.",
+          "type": "boolean"
+        },
+        "repo": {
+          "description": "The repository's name in the configuration.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "paused"
       ],
       "type": "object"
     },
@@ -3293,6 +3461,42 @@
       },
       "result": {
         "$ref": "#/$defs/AgentAck"
+      }
+    },
+    "control.kill": {
+      "description": "The kill switch: every child is killed now, every item parks, and no further board      write is made until it is released (`release`). Daemon-wide. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/KillParams"
+      },
+      "result": {
+        "$ref": "#/$defs/KillResult"
+      }
+    },
+    "control.pause": {
+      "description": "Pauses one repository of the identity, or all of them: the current attempt finishes      and no new session starts until resume. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/PauseParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ControlStatus"
+      }
+    },
+    "control.resume": {
+      "description": "Lifts a pause by hand of one repository or of the identity; for a repository, also its      automatic pause until the next interactive activity. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/PauseParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ControlStatus"
+      }
+    },
+    "control.status": {
+      "description": "The control state of the identity and its repositories: the kill switch, pauses by hand      and automatic ones, the daily cap, and the hold in force on each repository.",
+      "params": {
+        "$ref": "#/$defs/IdentityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ControlStatus"
       }
     },
     "events.subscribe": {

@@ -1074,6 +1074,56 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_control_pause_kills",
+        issue: 67,
+        breaks: "a pause kills the session like the kill switch: the attempt in flight never finishes",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::control::a_pause_lets_the_attempt_finish_and_starts_nothing_until_resume",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_control_kill_keeps_writing",
+        issue: 67,
+        breaks: "the kill switch leaves board writes going: the claim and the outbox write on",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::control::the_kill_switch_leaves_no_child_and_writes_no_board",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_budget_ignore_item_cap",
+        issue: 67,
+        breaks: "an item over its eqv or wall-clock cap runs on",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::control::an_item_over_its_eqv_or_wall_clock_cap_is_killed_and_needs_you",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_control_autopause_own_sessions",
+        issue: 67,
+        breaks: "a session bosun spawned pauses its own repository as if it were interactive",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::control::an_interactive_session_pauses_its_repository_and_a_run_session_does_not",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_control_no_operator_token",
+        issue: 67,
+        breaks: "the control switches skip the operator token: an agent's own connection pauses the daemon",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::control::a_pause_lets_the_attempt_finish_and_starts_nothing_until_resume",
+        ),
+        platform: None,
+    },
 ];
 
 /// The agent.* scenario of #63, which hosts two mutants.

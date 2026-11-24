@@ -143,6 +143,7 @@ impl Home {
         let mut child = Command::new(exe("bosund"))
             .env("BOSUN_CONFIG", self.path("config.toml"))
             .env("BOSUN_ENDPOINT", self.endpoint.path())
+            .env("BOSUN_OPERATOR_FILE", self.path("operator.token"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -202,6 +203,10 @@ fn bosun(config: &Path, endpoint: &Endpoint, args: &[&str]) -> Output {
         .args(args)
         .env("BOSUN_CONFIG", config)
         .env("BOSUN_ENDPOINT", endpoint.path())
+        .env(
+            "BOSUN_OPERATOR_FILE",
+            config.with_file_name("operator.token"),
+        )
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -619,4 +624,64 @@ async fn the_report_through_the_daemon() {
             "{bad:?}: {output:?}"
         );
     }
+}
+
+/// #67: `bosun pause`, `resume` and `kill` send the operator token the daemon wrote; without
+/// the file (an agent's environment does not name it) the daemon is never asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_control_switches_take_the_operator_token() {
+    let home = Home::new(&[("personal", "cache-and-models")]);
+    let demo = home.path("demo");
+    std::fs::create_dir_all(&demo).unwrap();
+    let mut config = std::fs::read_to_string(home.path("config.toml")).unwrap();
+    let _ = write!(
+        config,
+        "[repo.demo]
+path = '{}'
+identity = 'personal'
+",
+        demo.display()
+    );
+    std::fs::write(home.path("config.toml"), config).unwrap();
+    let _daemon = home.start().await;
+    let token = std::fs::read_to_string(home.path("operator.token")).unwrap();
+    assert!(token.starts_with("bosun-operator-"), "{token}");
+
+    let paused = home.ok(&["pause", "--repo", "demo", "--format", "json"]);
+    let value: Value = serde_json::from_str(&paused).unwrap();
+    let demo_row = value["personal"]["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["repo"] == "demo")
+        .cloned()
+        .unwrap();
+    assert_eq!(demo_row["hold"], "pause", "{paused}");
+    let resumed = home.ok(&["resume", "--repo", "demo"]);
+    assert!(resumed.contains("repo demo: hold none"), "{resumed}");
+    let all = home.ok(&["pause"]);
+    assert!(all.contains("every repository is paused by hand"), "{all}");
+
+    let killed = home.ok(&["kill", "--format", "json"]);
+    assert_eq!(
+        serde_json::from_str::<Value>(&killed).unwrap()["killed"],
+        true
+    );
+    let released = home.ok(&["kill", "--release"]);
+    assert!(released.contains("released"), "{released}");
+
+    // Without the token's file the switches fail before they reach the daemon.
+    let output = Command::new(env!("CARGO_BIN_EXE_bosun"))
+        .args(["kill"])
+        .env("BOSUN_CONFIG", home.path("config.toml"))
+        .env("BOSUN_ENDPOINT", home.endpoint.path())
+        .env("BOSUN_OPERATOR_FILE", home.path("missing.token"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("operator token"),
+        "{output:?}"
+    );
 }

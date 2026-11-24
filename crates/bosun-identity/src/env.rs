@@ -70,6 +70,9 @@ pub const CREDENTIALS: &[&str] = &[
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
     "AZURE_CLIENT_SECRET",
+    // The file of the daemon's operator token (`bosun_client::operator`, #67): the credential
+    // of the control switches, never an agent's.
+    "BOSUN_OPERATOR_FILE",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "GEMINI_API_KEY",
     "GH_ENTERPRISE_TOKEN",

@@ -231,6 +231,23 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo: Option<String>,
     },
+    /// A budget cap was reached (#7, #67): an item's eqv or wall-clock cap (the item is killed
+    /// and goes to Needs you), or the identity's daily eqv cap (the queue parks until
+    /// `until_ms`, local midnight).
+    BudgetExceeded {
+        /// `item_eqv`, `item_wall_clock` or `daily_eqv`.
+        cap: String,
+        /// The item, for a per-item cap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+        /// What was used: eqv tokens, or milliseconds for the wall-clock cap.
+        used: Wide,
+        /// The cap, in the same unit.
+        limit: Wide,
+        /// When the daily cap releases the queue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until_ms: Option<i64>,
+    },
     /// The ingest parsed more bytes.
     IngestProgress {
         /// Bytes of complete lines parsed since the daemon started.
@@ -259,6 +276,7 @@ impl EventBody {
         "lint_findings",
         "board_sync_error",
         "control_changed",
+        "budget_exceeded",
         "ingest_progress",
         "ingest_pass",
         "ingest_failed",
@@ -281,6 +299,7 @@ impl EventBody {
             Self::LintFindings { .. } => "lint_findings",
             Self::BoardSyncError { .. } => "board_sync_error",
             Self::ControlChanged { .. } => "control_changed",
+            Self::BudgetExceeded { .. } => "budget_exceeded",
             Self::IngestProgress { .. } => "ingest_progress",
             Self::IngestPass { .. } => "ingest_pass",
             Self::IngestFailed { .. } => "ingest_failed",

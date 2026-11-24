@@ -11,6 +11,8 @@
 //!   still match, so a reused pid is never killed.
 //! - [`Power`] holds the machine awake while work runs: [`PowerGuard`] issues one request on
 //!   acquire and one release on drop. [`SystemPower`] is the platform's, [`FakePower`] counts.
+//! - [`next_local_midnight`] and [`last_local_midnight`] read the machine's time zone, which
+//!   the standard library does not: the daily cap parks until local midnight (#67).
 //! - `pipe` (Windows): `pipe::OwnerOnly` creates the daemon's named pipe with a DACL that admits
 //!   only the user it runs as, and `pipe::dacl` reads a handle's DACL back.
 //!
@@ -37,6 +39,7 @@
 #![allow(unsafe_code)]
 
 mod key;
+mod local_time;
 #[cfg(windows)]
 pub mod pipe;
 mod power;
@@ -47,5 +50,6 @@ mod sys;
 mod helper;
 
 pub use key::{ProcessKey, StartTime, is_running, reap, start_time};
+pub use local_time::{last_local_midnight, next_local_midnight, utc_offset_ms};
 pub use power::{FakePower, Power, PowerGuard, SystemPower};
 pub use spawn::{ChildSpec, Input, NativeSpawner, Output, Spawned, Spawner, Tree, WaitFuture};

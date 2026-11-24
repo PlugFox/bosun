@@ -193,6 +193,9 @@ struct Scene {
     mcp: PathBuf,
     /// How long after spawn `bosun-mcp` has to say hello.
     handshake: Duration,
+    /// The control state of #67, and the loop's events.
+    control: crate::control::Control,
+    events: Events,
 }
 
 impl Scene {
@@ -260,10 +263,12 @@ impl Scene {
         let credentials = crate::agent::Credentials::default();
         let endpoint = scene_endpoint(d);
         let listener = crate::listen::claim(&endpoint).await.unwrap();
+        let control = crate::control::Control::with_token(control::TOKEN, None);
         let api = Arc::new(crate::state::State {
             started_ms: 0,
             identities: BTreeMap::new(),
             credentials: credentials.clone(),
+            control: control.clone(),
         });
         tokio::spawn(async move {
             crate::state::serve(listener, &api, std::future::pending()).await;
@@ -285,6 +290,8 @@ impl Scene {
             endpoint,
             mcp: bosun_mcp().to_owned(),
             handshake: Duration::from_secs(30),
+            control,
+            events: Events::new("test", EventOptions::default()),
             dir,
         };
         scene.git(&["init", "-q", "-b", "main"]);
@@ -383,7 +390,7 @@ impl Scene {
         let deps = Deps {
             reader: self.store.reader().clone(),
             writer: self.store.writer().clone(),
-            events: Events::new("test", EventOptions::default()),
+            events: self.events.clone(),
             queue: Arc::new(LocalFile::new(&self.board)),
             spawner: self.spawner.clone(),
             power: Arc::new(bosun_proc::FakePower::default()),
@@ -397,6 +404,7 @@ impl Scene {
                     !probe.dead.load(Ordering::SeqCst) && bosun_proc::is_running(key)
                 })
             },
+            control: self.control.clone(),
         };
         let task = tokio::spawn(Loop::new(options, deps, rx).run());
         (task, watcher)
@@ -831,6 +839,7 @@ async fn agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_
         started_ms: 0,
         identities: BTreeMap::new(),
         credentials: scene.credentials.clone(),
+        control: scene.control.clone(),
     };
     let mut conn = crate::api::Connection::default();
     let own = |extra: serde_json::Value| {
@@ -1461,3 +1470,6 @@ async fn a_session_whose_mcp_server_cannot_start_is_retried_once_then_needs_you(
     task.abort();
     watcher.abort();
 }
+
+#[path = "control_tests.rs"]
+mod control;

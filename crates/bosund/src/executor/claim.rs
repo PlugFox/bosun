@@ -69,6 +69,10 @@ pub(crate) async fn claim(
     let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
         return ClaimOutcome::Failed("the repository is no longer configured".to_owned());
     };
+    if shared.deps.control.board_writes_stopped() {
+        // The kill switch: nothing further is written to any board (#67).
+        return ClaimOutcome::Failed("the kill switch is thrown".to_owned());
+    }
     let queue = shared.deps.queue.clone();
     let daemon = shared.options.daemon_id.clone();
     let card = match blocking(move || bosun_queue::claim(queue.as_ref(), &card, &daemon)).await {

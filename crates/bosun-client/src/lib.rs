@@ -10,6 +10,7 @@
 
 pub mod endpoint;
 pub mod framing;
+pub mod operator;
 mod subscribe;
 
 use std::fmt;

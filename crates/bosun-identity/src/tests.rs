@@ -224,6 +224,19 @@ fn a_repository_asking_for_gh_token_does_not_get_it() {
     );
 }
 
+/// #67: the operator token's file is the control switches' credential; a repository cannot
+/// hand it to its sessions.
+#[test]
+fn a_repository_asking_for_the_operator_token_file_does_not_get_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = bundle(dir.path());
+    let inherited = os(&[("PATH", "/usr/bin"), ("BOSUN_OPERATOR_FILE", SENTINEL)]);
+    let declared = names(&["BOSUN_OPERATOR_FILE"]);
+    let env = Env::agent(&bundle, &inherited, &declared, &dir.path().join("empty"));
+    assert_eq!(env.get("BOSUN_OPERATOR_FILE"), None);
+    assert_eq!(env.denied(), &declared[..]);
+}
+
 #[test]
 fn the_identity_supplies_its_runner_credentials_but_never_a_github_one() {
     let dir = tempfile::tempdir().unwrap();

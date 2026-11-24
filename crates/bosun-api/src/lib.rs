@@ -37,10 +37,17 @@
 //! | `agent.ask_question` | [`AskQuestionParams`] | [`AgentAck`] |
 //! | `agent.submit_summary` | [`SubmitSummaryParams`] | [`AgentAck`] |
 //! | `agent.note` | [`NoteParams`] | [`AgentAck`] |
+//! | `control.status` | [`IdentityParams`] | [`ControlStatus`] |
+//! | `control.pause` | [`PauseParams`] | [`ControlStatus`] |
+//! | `control.resume` | [`PauseParams`] | [`ControlStatus`] |
+//! | `control.kill` | [`KillParams`] | [`KillResult`] |
 //!
-//! The `agent.*` methods name no identity: their credential does ([`agent`]).
+//! The `agent.*` methods name no identity: their credential does ([`agent`]). `control.kill`
+//! names none either: the kill switch is daemon-wide. The `control.*` methods that change
+//! anything take the operator token ([`control`]).
 
 pub mod agent;
+pub mod control;
 mod estimates;
 pub mod event;
 mod items;
@@ -58,6 +65,7 @@ pub use agent::{
     AgentAck, AgentHelloParams, AgentHelloResult, AskQuestionParams, NoteParams,
     SubmitSummaryParams,
 };
+pub use control::{ControlStatus, KillParams, KillResult, PauseParams, RepoControl};
 pub use estimates::{
     ByFile, ByTool, Estimates, FileRow, Finding, FindingRow, RepeatedRead, RepeatedReads,
     ResultCost, ToolRow,
@@ -220,6 +228,34 @@ pub mod method {
         crate::AgentAck,
         "Records a note of the agent with its attempt and HEAD; it changes no state."
     );
+    method!(
+        ControlStatus,
+        "control.status",
+        crate::IdentityParams,
+        crate::ControlStatus,
+        "The control state of the identity and its repositories: the kill switch, pauses by hand      and automatic ones, the daily cap, and the hold in force on each repository."
+    );
+    method!(
+        ControlPause,
+        "control.pause",
+        crate::PauseParams,
+        crate::ControlStatus,
+        "Pauses one repository of the identity, or all of them: the current attempt finishes      and no new session starts until resume. Takes the operator token."
+    );
+    method!(
+        ControlResume,
+        "control.resume",
+        crate::PauseParams,
+        crate::ControlStatus,
+        "Lifts a pause by hand of one repository or of the identity; for a repository, also its      automatic pause until the next interactive activity. Takes the operator token."
+    );
+    method!(
+        ControlKill,
+        "control.kill",
+        crate::KillParams,
+        crate::KillResult,
+        "The kill switch: every child is killed now, every item parks, and no further board      write is made until it is released (`release`). Daemon-wide. Takes the operator token."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -238,6 +274,10 @@ pub const METHODS: &[&str] = &[
     method::AgentAskQuestion::NAME,
     method::AgentSubmitSummary::NAME,
     method::AgentNote::NAME,
+    method::ControlStatus::NAME,
+    method::ControlPause::NAME,
+    method::ControlResume::NAME,
+    method::ControlKill::NAME,
 ];
 
 /// The prefix of the `agent.*` group: the only methods an agent credential admits.
@@ -487,6 +527,10 @@ pub fn schema() -> Value {
     add_method::<method::AgentAskQuestion>(&mut generator, &mut methods);
     add_method::<method::AgentSubmitSummary>(&mut generator, &mut methods);
     add_method::<method::AgentNote>(&mut generator, &mut methods);
+    add_method::<method::ControlStatus>(&mut generator, &mut methods);
+    add_method::<method::ControlPause>(&mut generator, &mut methods);
+    add_method::<method::ControlResume>(&mut generator, &mut methods);
+    add_method::<method::ControlKill>(&mut generator, &mut methods);
     let notifications = json!({
         event::EVENT: {
             "description": "One event of the subscribed identity, in sequence order.",

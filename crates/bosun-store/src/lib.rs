@@ -29,6 +29,7 @@
 //! `Administrators` group and nothing to other users. A database placed in a directory with a
 //! wider ACL gets that ACL.
 
+mod activity;
 mod error;
 mod link;
 mod open;
@@ -37,6 +38,7 @@ mod report;
 mod work;
 mod writer;
 
+pub use activity::RecentSession;
 pub use error::Error;
 pub use link::{CommitLink, Link, LinkedSession};
 pub use read::{Bill, By, Group, Reader};

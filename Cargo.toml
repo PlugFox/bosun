@@ -358,6 +358,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_guard_compares_remotes)",
   "cfg(mutant_loop_clone_without_longpaths)",
   "cfg(mutant_loop_mode_from_config)",
+  # #8: an item's leases cover its setup, base verdict and teardown; a halted loop frees them.
+  "cfg(mutant_loop_lease_after_setup)",
+  "cfg(mutant_loop_release_before_teardown)",
+  "cfg(mutant_loop_halt_keeps_leases)",
 ] }
 
 [workspace.lints.clippy]

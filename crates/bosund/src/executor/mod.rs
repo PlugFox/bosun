@@ -60,10 +60,13 @@
 //!
 //! In worktree mode an item leases what its snapshot `needs`, plus the shared build's resource
 //! (`worktree.shared_build`, E1), from the daemon's one [`crate::leases::Leases`]: inside the
-//! session task, before its first session spawns, so the loop stays responsive while it waits
-//! and a kill withdraws the request ([`hold_leases`]). It holds them through its verdicts and
-//! its landing, until it leaves the loop ([`Loop::finish`]); a later session asks again and is
-//! granted at once. Lint admits the configured resources only in worktree mode
+//! claim task, before its worktree is opened and set up, so the setup and the verdict on the
+//! base commit run under them, the loop stays responsive while it waits, and a kill withdraws
+//! the request ([`hold_names`]). A claim that does not confirm releases them after its
+//! worktree is closed. A confirmed item holds them through its sessions, verdicts, landing and
+//! teardown, until it leaves the loop ([`Loop::finish`]); each session asks again
+//! ([`hold_leases`]) and is granted at once. A loop the store halts frees its item's leases; a
+//! graceful stop keeps them journalled for the next daemon (E22). Lint admits the configured resources only in worktree mode
 //! ([`lint_resources`]). Under a shared build every process started in a worktree gets the
 //! directory, and the worktree's tracked files are touched first ([`workspace::enter`]).
 //!
@@ -658,6 +661,18 @@ impl Loop {
                 running
             });
             let _ = (&mut task.handle).await;
+        }
+        // A halted loop runs nothing more for its item, so it frees what the item holds: its
+        // journal entry, this daemon's, would otherwise keep the leases while the daemon runs.
+        // A graceful stop keeps them journalled for the next daemon (E22). A claim still in
+        // flight released its own when it was killed.
+        // Mutant (`mutant_loop_halt_keeps_leases`): a halted loop keeps them.
+        if self.halted
+            && !cfg!(mutant_loop_halt_keeps_leases)
+            && let Some(cur) = &self.current
+            && cur.claimed.as_ref().is_some_and(|c| c.worktree.is_some())
+        {
+            self.release_leases(&cur.item.id).await;
         }
     }
 
@@ -1423,13 +1438,12 @@ impl Loop {
             }
         }
         let done = matches!(cur.item.state, State::Done(_));
-        // Its leases are held through its verdicts and its landing (#8, E1): until now.
-        if cur.claimed.as_ref().is_some_and(|c| c.worktree.is_some()) {
-            self.shared
-                .deps
-                .leases
-                .release(&crate::leases::Holder::Item(cur.item.id.clone()))
-                .await;
+        // Mutant (`mutant_loop_release_before_teardown`): the leases go before the worktree's
+        // teardown, which then runs under the shared build without them.
+        if cfg!(mutant_loop_release_before_teardown)
+            && cur.claimed.as_ref().is_some_and(|c| c.worktree.is_some())
+        {
+            self.release_leases(&cur.item.id).await;
         }
         if let Some(claimed) = &cur.claimed
             && let Some(wt) = &claimed.worktree
@@ -1453,6 +1467,11 @@ impl Loop {
                 }
             }
             self.close_worktree(wt, aside).await;
+            // Its leases are held through its verdicts, its landing and its teardown (#8, E1):
+            // until now.
+            if !cfg!(mutant_loop_release_before_teardown) {
+                self.release_leases(&cur.item.id).await;
+            }
         } else if !done && let Some(claimed) = &cur.claimed {
             let config = self.config();
             if let Some((repo, _)) = lookup(&config, &self.shared.options.repo) {
@@ -1466,6 +1485,16 @@ impl Loop {
             }
         }
         drop(cur.power.take());
+    }
+
+    /// Releases what `item` holds of the lease manager (#8); nothing happens when it holds
+    /// nothing.
+    async fn release_leases(&self, item: &ItemId) {
+        self.shared
+            .deps
+            .leases
+            .release(&crate::leases::Holder::Item(item.clone()))
+            .await;
     }
 
     /// Closes the worktree of the item in flight (#8); `aside`: its work is kept first. What
@@ -1499,6 +1528,8 @@ impl Loop {
                 && let Some(wt) = &claimed.worktree
             {
                 self.close_worktree(wt, Some(&item)).await;
+                // The claim's leases, kept for a first session that never comes.
+                self.release_leases(&item).await;
             }
             return;
         }
@@ -1919,7 +1950,13 @@ pub(crate) fn lease_names(claimed: &Claimed, repo: &Repo) -> Vec<String> {
     if claimed.worktree.is_none() {
         return Vec::new();
     }
-    let mut names = claimed.snapshot.contract.needs.clone();
+    lease_names_of(&claimed.snapshot, repo)
+}
+
+/// What an item with `snapshot` leases in worktree mode (#8): its `needs`, plus the shared
+/// build's resource when `repo` has `worktree.shared_build` (E1); sorted, without duplicates.
+pub(crate) fn lease_names_of(snapshot: &bosun_queue::Snapshot, repo: &Repo) -> Vec<String> {
+    let mut names = snapshot.contract.needs.clone();
     if let Some(build) = repo.worktree.as_ref().and_then(|w| w.shared_build.as_ref()) {
         names.push(build.resource.clone());
     }
@@ -1938,7 +1975,19 @@ pub(crate) async fn hold_leases(
     item: &ItemId,
     kill: &mut watch::Receiver<Signal>,
 ) -> Result<(), Option<String>> {
-    let names = lease_names(claimed, repo);
+    hold_names(shared, repo, lease_names(claimed, repo), item, kill).await
+}
+
+/// Holds `names` for `item` (#8), as [`hold_leases`] does: at once when `names` is empty (the
+/// manager is not asked) or `item` holds exactly them already; `Err(None)` when killed while
+/// waiting (the request withdrawn); `Err(Some(_))` when refused.
+pub(crate) async fn hold_names(
+    shared: &Shared,
+    repo: &Repo,
+    names: Vec<String>,
+    item: &ItemId,
+    kill: &mut watch::Receiver<Signal>,
+) -> Result<(), Option<String>> {
     if names.is_empty() {
         return Ok(());
     }

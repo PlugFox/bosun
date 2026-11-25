@@ -285,6 +285,48 @@ async fn a_user_commit_and_a_dirty_file_during_the_run_do_not_stop_the_item() {
     assert!(seen.iter().any(|t| t.contains("notes.txt")), "{seen:#?}");
 }
 
+/// The session commits `a.txt` and leaves an untracked `left.txt`; the verdict never passes.
+/// The item ends Needs you, and its work is kept in the daemon's clone under its aside ref: a
+/// commit holding `left.txt` whose author and committer are the repository identity's (E26),
+/// not a fixed one (`mutant_loop_aside_commit_fixed_identity` makes it as
+/// `bosun <bosun@localhost>`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_set_aside_work_carries_the_repository_identity() {
+    let scene = Scene::with_worktrees(None).await;
+    scene.write_board(&[card(1, "Set aside", "test -f never", "Item one.")]);
+    let marker = sh_path(&scene.path("session-1"));
+    scene.script(
+        1,
+        &[
+            format!("once {marker} commit a.txt a"),
+            "write left.txt left".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::NeedsYou(_)), "{state:?}");
+    let clone = scene.worktree_root().join(workspace::CLONE);
+    let aside = git::aside_ref(&item(1));
+    let files = git_in(&scene, &clone, &["ls-tree", "-r", "--name-only", &aside]);
+    assert!(files.lines().any(|f| f == "left.txt"), "{files}");
+    assert!(files.lines().any(|f| f == "a.txt"), "{files}");
+    for format in ["%an <%ae>", "%cn <%ce>"] {
+        assert_eq!(
+            git_in(
+                &scene,
+                &clone,
+                &["log", "-1", &format!("--format={format}"), &aside]
+            ),
+            "Synthetic Agent <agent@example.com>",
+            "{format}"
+        );
+    }
+}
+
 /// With `setup = "exit 3"` the item ends Needs you (`setup`), no session is started and no
 /// worktree directory is left (`mutant_loop_setup_failure_is_claim_failure` sends the item back
 /// to Ready: it never reaches Needs you).

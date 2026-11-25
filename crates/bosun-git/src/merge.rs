@@ -16,7 +16,8 @@
 //! trailers (one of each, replacing any the message had); a fast-forward lands the item's own
 //! commits, which already carry them.
 //!
-//! The new commits are never signed, whatever the repository's `commit.gpgSign` says (decided
+//! The new commits carry the repository identity given as an [`Ident`] (E26 of #8), never the
+//! process's global git identity. They are never signed, whatever the repository's `commit.gpgSign` says (decided
 //! on #126): an unattended landing must not depend on a signing agent or a pinentry prompt.
 //!
 //! Every git command goes through [`Git::command`], so no repository hook runs.
@@ -24,7 +25,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::{Git, Trailers};
+use crate::{Git, Ident, Trailers};
 
 /// How an item lands on its target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,13 +145,15 @@ impl From<crate::Error> for Error {
 /// documentation); returns its sha. No ref moves and nothing is checked out.
 ///
 /// `message` is the message of a squash or a merge commit, which gets `trailers`; a
-/// fast-forward ignores both.
+/// fast-forward ignores both. A new commit has `ident` as its author and committer, whatever
+/// the process's global git identity is (E26 of #8).
 ///
 /// # Errors
 ///
 /// [`Error::StaleTarget`] when `item_head` does not descend from `target_head`,
 /// [`Error::TreeMismatch`] when the commit's tree would not be `verified_tree`, or git fails
 /// (a name that is not a commit or a tree included).
+#[allow(clippy::too_many_arguments)]
 pub fn merge_commit(
     repo: &Git,
     method: Method,
@@ -159,6 +162,7 @@ pub fn merge_commit(
     verified_tree: &str,
     message: &str,
     trailers: &Trailers,
+    ident: &Ident,
 ) -> Result<String, Error> {
     let target = resolve(repo, target_head, "commit")?;
     let item = resolve(repo, item_head, "commit")?;
@@ -190,7 +194,16 @@ pub fn merge_commit(
         args.extend(["-p", parent]);
     }
     args.extend(["-F", "-"]);
-    Ok(repo.run(&args, Some(&message))?.trim().to_owned())
+    let mut command = repo.command();
+    // Mutant (`mutant_loop_ambient_commit_identity`): the commit gets the process's global git
+    // identity as its author and committer.
+    if !cfg!(mutant_loop_ambient_commit_identity) {
+        ident.author_and_committer(&mut command);
+    }
+    Ok(repo
+        .run_in(command, &args, Some(&message))?
+        .trim()
+        .to_owned())
 }
 
 /// `message` with the `Item:`, `Run:` and `Session:` trailers, one of each.
@@ -287,6 +300,14 @@ mod tests {
         }
     }
 
+    /// The identity the daemon's commits carry: not the repository's own `Test`.
+    fn ident() -> Ident {
+        Ident {
+            name: "Repository Identity".to_owned(),
+            email: "identity@example.invalid".to_owned(),
+        }
+    }
+
     /// The trailers of [`trailers`] as the hook writes them.
     const TRAILERS: &str = "Item: owner/repo#126\nRun: run-1\nSession: session-1";
 
@@ -341,6 +362,7 @@ mod tests {
                 &verified,
                 "Land the item\n\nWhat it does.\n",
                 &trailers(),
+                &ident(),
             )
             .unwrap_or_else(|e| panic!("{method}: {e}"));
             assert_eq!(
@@ -371,6 +393,16 @@ mod tests {
                     "{body}"
                 );
                 assert_eq!(trailer_lines(&body), expected, "{method}: {body}");
+                for format in ["%an <%ae>", "%cn <%ce>"] {
+                    assert_eq!(
+                        git(
+                            &repo,
+                            &["log", "-1", &format!("--format={format}"), &landed]
+                        ),
+                        "Repository Identity <identity@example.invalid>",
+                        "{method}: {format}"
+                    );
+                }
             }
         }
         // No ref moved and nothing was checked out.
@@ -400,6 +432,7 @@ mod tests {
             &verified,
             "Land the item\n",
             &trailers(),
+            &ident(),
         )
         .unwrap_err();
         let Error::TreeMismatch {
@@ -424,6 +457,7 @@ mod tests {
             &verified,
             "Land the item\n",
             &trailers(),
+            &ident(),
         )
         .unwrap_err();
         assert!(matches!(stale, Error::StaleTarget { .. }), "{stale:?}");
@@ -449,6 +483,7 @@ mod tests {
                 &verified,
                 "Land the item\n",
                 &trailers(),
+                &ident(),
             )
             .unwrap_or_else(|e| panic!("{method}: {e}"));
             let raw = git(&repo, &["cat-file", "commit", &landed]);

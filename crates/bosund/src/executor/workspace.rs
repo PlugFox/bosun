@@ -517,7 +517,16 @@ impl Workspace {
     ) -> Closed {
         if let Some(item) = aside {
             let (dir, owned) = (worktree.path.clone(), item.clone());
-            if let Err(e) = blocking(move || super::git::keep_work(&dir, &owned)).await {
+            // The set-aside commit carries the repository identity (E26).
+            let author = identity::bundle(&self.identity, identity, &dir)
+                .map(|b| super::git::ident(&b.author));
+            let kept = match author {
+                Ok(author) => blocking(move || super::git::keep_work(&dir, &owned, &author))
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = kept {
                 let error = format!(
                     "the work of {item} in {} cannot be kept, so the worktree is not removed: {e}",
                     worktree.path.display()

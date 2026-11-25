@@ -320,6 +320,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_runner_prompt_without_conflict)",
   "cfg(mutant_runner_conflict_files_raw)",
   "cfg(mutant_loop_conflict_note_unread)",
+  # #8 (E26): the daemon's commits carry the repository identity.
+  "cfg(mutant_loop_ambient_commit_identity)",
+  "cfg(mutant_loop_aside_commit_fixed_identity)",
 ] }
 
 [workspace.lints.clippy]

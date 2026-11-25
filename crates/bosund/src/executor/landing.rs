@@ -21,6 +21,10 @@
 //! 5. The commit to land is [`bosun_git::merge::merge_commit`] of the verified tree; for
 //!    `squash` and `no-ff` its message is the card's title and the attempt's summary, with the
 //!    `Item:`, `Run:` and `Session:` trailers of the attempt's last session.
+//!
+//! The rebase of step 3 and the commit of step 5 carry the repository identity's author (E26,
+//! #2), read from its git configuration file, never the daemon process's global git identity;
+//! an identity whose author cannot be read refuses the landing.
 //! 6. The clone offers it under [`git::landing_ref`]; the user's repository fetches it (objects
 //!    only, E14) and [`bosun_git::land::fast_forward`] moves the target there (E2): by ref when
 //!    no checkout has it, by `merge --ff-only` in a clean checkout. A dirty or busy checkout
@@ -34,14 +38,14 @@ use std::sync::Arc;
 
 use bosun_config::{Config, LandingMode, MergeMethod, Repo};
 use bosun_core::{Event, ItemId};
-use bosun_git::Git;
 use bosun_git::land::{self, FastForward, Rebase};
 use bosun_git::merge::{self, Method};
+use bosun_git::{Git, Ident};
 use bosun_store::{LandingRow, Write};
 use tokio::sync::watch;
 
 use super::workspace::Workspace;
-use super::{Claimed, ItemWorktree, Shared, blocking, git, lookup, now_ms, verdict};
+use super::{Claimed, ItemWorktree, Shared, blocking, git, identity, lookup, now_ms, verdict};
 
 /// The kind of the item note a conflicting rebase leaves (`Write::ItemNote`).
 pub(crate) const NOTE_CONFLICT: &str = "conflict";
@@ -112,8 +116,15 @@ enum Pass {
 
 impl Task<'_> {
     async fn run(&mut self, config: &Config) -> Option<Event> {
-        let Some((repo, _)) = lookup(config, &self.shared.options.repo) else {
+        let Some((repo, identity)) = lookup(config, &self.shared.options.repo) else {
             return Some(self.refused("the repository is no longer configured".to_owned()));
+        };
+        // The author and committer of the commits the landing makes (E26).
+        let ident = match identity::bundle(&repo.identity, identity, &repo.path) {
+            Ok(bundle) => git::ident(&bundle.author),
+            Err(e) => {
+                return Some(self.refused(format!("the repository identity's author: {e}")));
+            }
         };
         let Some(wt) = self.claimed.worktree.clone() else {
             return Some(self.refused("the item has no worktree".to_owned()));
@@ -124,7 +135,7 @@ impl Task<'_> {
         };
         let mut restarts = 0;
         loop {
-            match self.pass(repo, &wt, method).await {
+            match self.pass(repo, &wt, method, &ident).await {
                 Pass::Done(event) => return event,
                 Pass::Again if restarts < RESTARTS => restarts += 1,
                 Pass::Again => {
@@ -140,7 +151,13 @@ impl Task<'_> {
 
     /// Steps 2 to 6, once.
     #[allow(clippy::too_many_lines)]
-    async fn pass(&mut self, repo: &Repo, wt: &ItemWorktree, method: Method) -> Pass {
+    async fn pass(
+        &mut self,
+        repo: &Repo,
+        wt: &ItemWorktree,
+        method: Method,
+        ident: &Ident,
+    ) -> Pass {
         let item = &self.spec.item;
         let attempt = self.spec.attempt;
         let target = wt.target.clone();
@@ -166,7 +183,7 @@ impl Task<'_> {
 
         // 3. The head of the item's worktree, rebased onto the target unless it descends.
         let dir = self.claimed.workdir.clone();
-        let at = t.clone();
+        let (at, committer) = (t.clone(), ident.clone());
         let rebased = blocking(move || -> Result<Result<String, Vec<String>>, String> {
             let git = Git::new(&dir);
             let head = git::head(&git).map_err(|e| e.to_string())?;
@@ -176,7 +193,7 @@ impl Task<'_> {
             if descends {
                 return Ok(Ok(head));
             }
-            match land::rebase_onto(&git, &at).map_err(|e| e.to_string())? {
+            match land::rebase_onto(&git, &at, &committer).map_err(|e| e.to_string())? {
                 Rebase::Rebased { head } => Ok(Ok(head)),
                 Rebase::Conflict { files } => Ok(Err(files)),
             }
@@ -212,7 +229,7 @@ impl Task<'_> {
             Err(e) => return self.refuse(e),
         };
         let clone = wt.workspace.clone_path();
-        let (at, head) = (t.clone(), h.clone());
+        let (at, head, ident) = (t.clone(), h.clone(), ident.clone());
         let made = blocking(move || {
             merge::merge_commit(
                 &Git::new(clone),
@@ -222,6 +239,7 @@ impl Task<'_> {
                 &verified_tree,
                 &message,
                 &trailers,
+                &ident,
             )
         })
         .await;

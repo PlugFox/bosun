@@ -45,6 +45,43 @@ pub struct Items {
     /// The commits of the range, in the report's repositories, that no run's range holds:
     /// made outside the runs.
     pub outside_runs: u64,
+    /// The granted lease requests filed in the range, per resource instance, longest wait
+    /// first (#8: the waiting time is the measured cost of contention). With a repository
+    /// given, its items' requests only.
+    #[serde(default)]
+    pub lease_waits: Vec<LeaseWaits>,
+    /// The worktrees on disk or quarantined now, whatever the range (of the report's
+    /// repository when it names one), in the order they were made.
+    #[serde(default)]
+    pub worktrees: Vec<WorktreeUse>,
+}
+
+/// The granted waits for one resource instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LeaseWaits {
+    /// The instance: `<name>`, `<name>/<identity>` or `<name>/<repo>`.
+    pub resource: String,
+    /// Granted requests.
+    pub requests: u64,
+    /// `granted_ms - filed_ms`, summed.
+    pub total_ms: u64,
+    /// The longest of them.
+    pub longest_ms: u64,
+}
+
+/// A worktree on disk or quarantined, with its size.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeUse {
+    pub item: String,
+    pub path: String,
+    /// `item` or `verdict`.
+    pub kind: String,
+    /// `created` or `quarantined`.
+    pub state: String,
+    /// Its size on disk when it was last measured; `null` when it was never measured.
+    pub bytes: Option<u64>,
+    /// A quarantined worktree: the file that blocked its removal.
+    pub blocking: Option<String>,
 }
 
 /// One item.

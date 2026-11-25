@@ -128,6 +128,24 @@ Trailers missing:
 
 - 040404040404 (a, local:demo#2): Run, Session
 
+## Lease waits
+
+Per resource, the requests filed in the range and granted, and how long they waited from their filing to their grant; longest wait first. Exact.
+
+| resource | requests | total wait | longest wait |
+| --- | ---: | ---: | ---: |
+| rig | 2 | 31.0 s | 30.0 s |
+
+## Worktree disk use
+
+The worktrees on disk now, whatever the range, with their sizes when last measured; a quarantined one is kept because a file blocked its removal.
+
+| item | kind | state | size | path |
+| --- | --- | --- | ---: | --- |
+| local:demo#1 | item | created | 3.0 MiB | /synthetic/worktrees/demo-1 |
+| local:demo#2 | item | quarantined (blocked by target/lock) | 512 B | /synthetic/worktrees/demo-2 |
+| total of 2 |  |  | 3.0 MiB |  |
+
 ---
 
 ## Estimates

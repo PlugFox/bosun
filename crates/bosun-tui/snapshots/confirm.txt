@@ -1,4 +1,4 @@
- bosun [1 Overview] 2 Queue 3 Session 4 Tokens                     bosund 0.0.0
+ bosun [1 Overview] 2 Queue 3 Session 4 Tokens 5 Resources         bosund 0.0.0
   REPO         STATE     ITEM         ATT IN STATE  LAST VERDICT     HOLD
 personal: running
   alpha        running   alpha#3        2  12m34s  fail alpha#3 a1  -
@@ -21,4 +21,4 @@ queue local_file  state working
 alpha#3 running, attempt 2
 events: epoch 1-1 at 41, 1 subscriber(s)
 
- 1-4 tab  arrows  p pause  r resume  K kill switch  k release  R restart  q quit
+ 1-5 tab  arrows  p pause  r resume  K kill switch  k release  R restart  q quit

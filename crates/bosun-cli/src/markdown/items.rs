@@ -270,6 +270,100 @@ fn commits(items: &Items, out: &mut String) {
     }
 }
 
+/// A duration in seconds with one decimal: lease waits are often shorter than a second.
+fn seconds(ms: u64) -> String {
+    format!("{}.{} s", ms / 1000, ms % 1000 / 100)
+}
+
+/// A size on disk in human units: bytes below 1 KiB, else KiB, MiB or GiB with one decimal.
+pub(crate) fn size(bytes: u64) -> String {
+    const UNITS: [&str; 3] = ["KiB", "MiB", "GiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    #[expect(clippy::cast_precision_loss, reason = "a size shown to one decimal")]
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// The waits for leased resources in the range (#8): the measured cost of contention.
+/// Omitted when no request was granted in the range.
+pub(crate) fn lease_waits(items: &Items, out: &mut String) {
+    if items.lease_waits.is_empty() || cfg!(mutant_report_drop_lease_waits) {
+        // Mutant (`mutant_report_drop_lease_waits`): the section is never printed.
+        return;
+    }
+    out.push_str("## Lease waits\n\n");
+    out.push_str(
+        "Per resource, the requests filed in the range and granted, and how long they waited \
+         from their filing to their grant; longest wait first. Exact.\n\n",
+    );
+    let mut table = Table::new(&[
+        ("resource", false),
+        ("requests", true),
+        ("total wait", true),
+        ("longest wait", true),
+    ]);
+    for row in &items.lease_waits {
+        table.row(vec![
+            row.resource.clone(),
+            row.requests.to_string(),
+            seconds(row.total_ms),
+            seconds(row.longest_ms),
+        ]);
+    }
+    table.render(out);
+}
+
+/// The worktrees on disk or quarantined now, with their sizes when last measured (#8).
+/// Omitted when there is none.
+pub(crate) fn worktrees(items: &Items, out: &mut String) {
+    if items.worktrees.is_empty() {
+        return;
+    }
+    out.push_str("## Worktree disk use\n\n");
+    out.push_str(
+        "The worktrees on disk now, whatever the range, with their sizes when last measured; \
+         a quarantined one is kept because a file blocked its removal.\n\n",
+    );
+    let mut table = Table::new(&[
+        ("item", false),
+        ("kind", false),
+        ("state", false),
+        ("size", true),
+        ("path", false),
+    ]);
+    for row in items.worktrees.iter().take(super::LIMIT) {
+        let state = match &row.blocking {
+            Some(file) => format!("{} (blocked by {file})", row.state),
+            None => row.state.clone(),
+        };
+        table.row(vec![
+            row.item.clone(),
+            row.kind.clone(),
+            state,
+            row.bytes.map_or_else(|| "not measured".to_owned(), size),
+            row.path.clone(),
+        ]);
+    }
+    let total: u64 = items.worktrees.iter().filter_map(|w| w.bytes).sum();
+    let count = items.worktrees.len();
+    table.row(vec![
+        format!("total of {count}"),
+        String::new(),
+        String::new(),
+        size(total),
+        String::new(),
+    ]);
+    table.render(out);
+    more(count, out);
+}
+
 /// The inferred sessions of items, among the estimates.
 pub(crate) fn inferred(items: &InferredItems, out: &mut String) {
     out.push_str("### Items: inferred sessions (estimate)\n\n");

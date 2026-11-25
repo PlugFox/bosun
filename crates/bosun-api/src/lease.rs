@@ -27,6 +27,22 @@
 //! Both methods take the operator token, as `control.pause` does ([`crate::control`]): an
 //! agent session, which does not have it, cannot take a lease this way. Without the current
 //! token a call is refused with [`crate::rpc::code::UNAUTHORIZED`].
+//!
+//! # `lease.list`
+//!
+//! What the Resources tab shows (#8): every resource instance the identity can lease (the
+//! machine-scope ones, its own identity-scope ones, those of its repositories) with its
+//! holders and how many requests wait for it, and the identity's worktrees that are on disk or
+//! quarantined. It reads only and takes no token.
+//!
+//! A holder is shown as `item <id>` or `bosun with <pid>` only when it is an item of one of
+//! the identity's repositories or a command that named the identity; any other holder is the
+//! word [`BUSY`] and nothing else (machine-scope resources are shared across identities, and
+//! "busy" is all one identity learns of another through them). The same holds for
+//! [`WaitingFor::holders`] in `status.overview` and `item.get`.
+
+/// What another identity's holder is shown as.
+pub const BUSY: &str = "busy";
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -72,4 +88,58 @@ pub struct ReleaseParams {
 pub struct ReleaseResult {
     /// The process held or waited for something; releasing nothing is not an error.
     pub released: bool,
+}
+
+/// Result of `lease.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Resources {
+    pub identity: String,
+    /// Every resource instance the identity can lease, by instance name.
+    pub resources: Vec<ResourceView>,
+    /// The identity's worktrees that are `created` or `quarantined`, in the order they were
+    /// made.
+    pub worktrees: Vec<WorktreeView>,
+}
+
+/// One resource instance and who holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResourceView {
+    /// The instance: `<name>` for the machine scope, `<name>/<identity>`, `<name>/<repo>`.
+    pub name: String,
+    /// `[resource.<name>] kind`.
+    pub kind: String,
+    /// How many holders may hold it at once.
+    pub capacity: u64,
+    /// `machine`, `identity` or `repository`.
+    pub scope: String,
+    /// Its holders: `item <id>`, `bosun with <pid>`, or [`BUSY`] for another identity's.
+    pub holders: Vec<String>,
+    /// The requests waiting for it.
+    pub waiting: u64,
+}
+
+/// A worktree on disk, or quarantined.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorktreeView {
+    pub item: String,
+    pub path: String,
+    /// `item` (the item's checkout) or `verdict` (a verdict's throwaway checkout).
+    pub kind: String,
+    /// `created` or `quarantined`.
+    pub state: String,
+    /// Its size on disk when it was last measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// A quarantined worktree: the file that blocked its removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking: Option<String>,
+}
+
+/// A full resource instance an item's request waits for, in `status.overview` and `item.get`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WaitingFor {
+    /// The instance, as in [`ResourceView::name`].
+    pub resource: String,
+    /// Its holders, as in [`ResourceView::holders`].
+    pub holders: Vec<String>,
 }

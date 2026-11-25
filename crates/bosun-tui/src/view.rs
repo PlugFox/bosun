@@ -1,5 +1,5 @@
-//! Drawing the frame, the Overview and the Queue (#4) from an [`App`]; the Session and Tokens
-//! tabs are drawn by `session.rs` and `tokens.rs`.
+//! Drawing the frame, the Overview, the Queue (#4) and the Resources tab (#8) from an [`App`];
+//! the Session and Tokens tabs are drawn by `session.rs` and `tokens.rs`.
 //!
 //! The frame is the tab bar on the first line, the tab's body, a message line and the key
 //! line; a pending question is drawn over the body. The key line is built from the shared
@@ -46,6 +46,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
             crate::session::draw(frame, session, body, daemon_now);
         }
         Tab::Tokens => crate::tokens::draw(frame, app, body),
+        Tab::Resources => resources(frame, app, body),
     }
     let said = app.message.as_deref().unwrap_or("");
     frame.render_widget(Paragraph::new(clip(said, message.width)), message);
@@ -59,27 +60,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now_ms: i64) {
     }
 }
 
-/// `bosun  [1 Overview]  2 Queue` on the left, the link on the right.
+/// `bosun  [1 Overview]  2 Queue` on the left, the link on the right. When the link does not
+/// fit beside every tab's title, the tabs not shown are drawn by their number only.
 fn tab_bar(app: &App, width: u16) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        " bosun",
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    let mut used = 6;
-    for (n, tab) in Tab::ALL.into_iter().enumerate() {
-        let label = if tab == app.tab {
-            format!(" [{} {}]", n + 1, tab.title())
-        } else {
-            format!(" {} {}", n + 1, tab.title())
-        };
-        used += label.len();
-        let style = if tab == app.tab {
-            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(label, style));
-    }
     let link = match &app.link {
         Link::Connecting => "connecting".to_owned(),
         Link::Up => match &app.daemon {
@@ -88,6 +71,35 @@ fn tab_bar(app: &App, width: u16) -> Line<'static> {
         },
         Link::Down(_) => "daemon unreachable: reconnecting".to_owned(),
     };
+    let labels = |short: bool| -> Vec<String> {
+        Tab::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(n, tab)| match (tab == app.tab, short) {
+                (true, _) => format!(" [{} {}]", n + 1, tab.title()),
+                (false, false) => format!(" {} {}", n + 1, tab.title()),
+                (false, true) => format!(" {}", n + 1),
+            })
+            .collect()
+    };
+    let mut tabs = labels(false);
+    let length = |tabs: &[String]| 6 + tabs.iter().map(String::len).sum::<usize>();
+    if length(&tabs) + link.len() + 2 > usize::from(width) {
+        tabs = labels(true);
+    }
+    let used = length(&tabs);
+    let mut spans = vec![Span::styled(
+        " bosun",
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    for (label, tab) in tabs.into_iter().zip(Tab::ALL) {
+        let style = if tab == app.tab {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(label, style));
+    }
     let room = usize::from(width).saturating_sub(used + 1);
     spans.push(Span::raw(format!("{:>room$} ", clip(&link, room))));
     Line::from(spans)
@@ -96,8 +108,8 @@ fn tab_bar(app: &App, width: u16) -> Line<'static> {
 /// The key line, from the shared table and the view's own keys.
 pub(crate) fn key_line(tab: Tab) -> String {
     let mut out = String::from(match tab {
-        Tab::Overview | Tab::Queue => " 1-4 tab  arrows",
-        Tab::Session | Tab::Tokens => " 1-4 tab",
+        Tab::Overview | Tab::Queue => " 1-5 tab  arrows",
+        Tab::Session | Tab::Tokens | Tab::Resources => " 1-5 tab",
     });
     for spec in ACTIONS {
         let _ = write!(out, "  {} {}", spec.key, spec.label);
@@ -133,7 +145,25 @@ pub(crate) fn duration(ms: i64) -> String {
     }
 }
 
+/// A size on disk in human units: bytes below 1 KiB, else KiB, MiB or GiB with one decimal.
+pub(crate) fn size(bytes: u64) -> String {
+    const UNITS: [&str; 3] = ["KiB", "MiB", "GiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    #[expect(clippy::cast_precision_loss, reason = "a size shown to one decimal")]
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
 const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
+
+const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
 
 /// Lines with the `selected` one kept in view: the paragraph's scroll offset.
 fn scroll(selected: Option<usize>, height: u16) -> u16 {
@@ -385,6 +415,83 @@ fn queue(frame: &mut Frame<'_>, app: &App, area: Rect) {
     detail_block(frame, detail, " card ", &text);
 }
 
+/// The Resources tab (#8): per identity, its resource instances (name, kind, held out of the
+/// capacity, waiting requests, holders) and its worktrees on disk or quarantined (item, state,
+/// size, path). Read-only: no key acts on a row.
+fn resources(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let mut lines = Vec::new();
+    for (name, view) in &app.identities {
+        let heading = match (&view.resources, &view.resources_error) {
+            (_, Some(error)) => format!("{name}: {error}"),
+            (Some(_), None) => format!("{name}: resources"),
+            (None, None) => format!("{name}: waiting for the daemon"),
+        };
+        lines.push(Line::styled(clip(&heading, area.width), BOLD));
+        let Some(list) = &view.resources else {
+            continue;
+        };
+        // Mutant (`mutant_tui_resources_tab_blank`): the tab draws no rows.
+        let blank = cfg!(mutant_tui_resources_tab_blank);
+        lines.push(Line::styled(
+            format!(
+                "  {} {} {:>5} {:>7}  {}",
+                cell("RESOURCE", 18),
+                cell("KIND", 10),
+                "HELD",
+                "WAITING",
+                "HOLDERS"
+            ),
+            BOLD,
+        ));
+        if list.resources.is_empty() {
+            lines.push(Line::raw("  no resource is configured"));
+        }
+        for r in list.resources.iter().filter(|_| !blank) {
+            let holders = if r.holders.is_empty() {
+                "-".to_owned()
+            } else {
+                r.holders.join(", ")
+            };
+            let held = format!("{}/{}", r.holders.len(), r.capacity);
+            let text = format!(
+                "  {} {} {held:>5} {:>7}  {holders}",
+                cell(&r.name, 18),
+                cell(&r.kind, 10),
+                r.waiting,
+            );
+            lines.push(Line::raw(clip(&text, area.width)));
+        }
+        lines.push(Line::styled(
+            format!(
+                "  {} {} {:>10}  {}",
+                cell("WORKTREE OF", 14),
+                cell("STATE", 11),
+                "SIZE",
+                "PATH"
+            ),
+            BOLD,
+        ));
+        if list.worktrees.is_empty() {
+            lines.push(Line::raw("  no worktree on disk"));
+        }
+        for w in list.worktrees.iter().filter(|_| !blank) {
+            let blocked = w
+                .blocking
+                .as_deref()
+                .map_or_else(String::new, |b| format!("  (blocked by {b})"));
+            let text = format!(
+                "  {} {} {:>10}  {}{blocked}",
+                cell(&w.item, 14),
+                cell(&w.state, 11),
+                w.bytes.map_or_else(|| "-".to_owned(), size),
+                w.path,
+            );
+            lines.push(Line::raw(clip(&text, area.width)));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 /// The question of a pending action, over the body.
 fn question(frame: &mut Frame<'_>, body: Rect, text: &str) {
     let width = body.width.saturating_sub(8).max(20).min(body.width);
@@ -580,6 +687,81 @@ pub(crate) mod tests {
         assert!(text.contains("today "), "{text}");
         assert!(text.contains("run "), "{text}");
         snapshot("tokens", &text);
+    }
+
+    /// A `lease.list` answer: `rig` held by alpha#3 with one request waiting, a free `cache`,
+    /// and a quarantined worktree.
+    fn resources(identity: &str) -> bosun_api::Resources {
+        bosun_api::Resources {
+            identity: identity.to_owned(),
+            resources: vec![
+                bosun_api::ResourceView {
+                    name: "cache".to_owned(),
+                    kind: "build-dir".to_owned(),
+                    capacity: 2,
+                    scope: "machine".to_owned(),
+                    holders: Vec::new(),
+                    waiting: 0,
+                },
+                bosun_api::ResourceView {
+                    name: "rig".to_owned(),
+                    kind: "device".to_owned(),
+                    capacity: 1,
+                    scope: "machine".to_owned(),
+                    holders: vec!["item alpha#3".to_owned()],
+                    waiting: 1,
+                },
+            ],
+            worktrees: vec![bosun_api::WorktreeView {
+                item: "alpha#2".to_owned(),
+                path: "/work/worktrees/alpha-2".to_owned(),
+                kind: "item".to_owned(),
+                state: "quarantined".to_owned(),
+                bytes: Some(5 * 1024 * 1024 + 300 * 1024),
+                blocking: Some("target/lock".to_owned()),
+            }],
+        }
+    }
+
+    /// #8: key `5` shows the Resources tab; it draws the held resource with its holder and
+    /// waiting count, and the quarantined worktree with its item and state.
+    /// `mutant_tui_resources_tab_blank` draws no rows.
+    #[test]
+    fn the_resources_tab_lists_holders_waits_and_worktrees() {
+        let mut app = app();
+        app.identities[0].1.resources = Some(resources("personal"));
+        assert_eq!(app.on_key(Key::Char('5')), None);
+        assert_eq!(app.tab, Tab::Resources);
+        let text = screen(&app, NOW);
+        let rig = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("rig "))
+            .unwrap_or_else(|| panic!("no row of rig:\n{text}"));
+        assert!(rig.contains("item alpha#3"), "{rig}");
+        let cells: Vec<&str> = rig.split_whitespace().collect();
+        assert_eq!(
+            cells.get(2..4),
+            Some(&["1/1", "1"][..]),
+            "held and waiting: {rig}"
+        );
+        let worktree = text
+            .lines()
+            .find(|l| l.contains("alpha#2"))
+            .unwrap_or_else(|| panic!("no row of alpha#2:\n{text}"));
+        assert!(worktree.contains("quarantined"), "{worktree}");
+        assert!(worktree.contains("5.3 MiB"), "{worktree}");
+        snapshot("resources", &text);
+    }
+
+    #[test]
+    fn sizes_are_in_human_units() {
+        assert_eq!(size(0), "0 B");
+        assert_eq!(size(1023), "1023 B");
+        assert_eq!(size(1024), "1.0 KiB");
+        assert_eq!(size(1536), "1.5 KiB");
+        assert_eq!(size(5 * 1024 * 1024 + 300 * 1024), "5.3 MiB");
+        assert_eq!(size(3 * 1024 * 1024 * 1024), "3.0 GiB");
+        assert_eq!(size(2048 * 1024 * 1024 * 1024), "2048.0 GiB");
     }
 
     #[test]

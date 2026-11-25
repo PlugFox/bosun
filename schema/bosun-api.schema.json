@@ -871,6 +871,13 @@
         "state": {
           "description": "Its state (`claimed`, `running`, `parked`, `verifying`, `landing`).",
           "type": "string"
+        },
+        "waiting": {
+          "description": "While its lease request is not granted: the full resource instances it waits for, each\nwith its holders (another identity's holder is `busy`, see [`crate::lease`]). Absent\nwhen it waits for nothing.",
+          "items": {
+            "$ref": "#/$defs/WaitingFor"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -2100,6 +2107,13 @@
           "description": "When it entered its state.",
           "format": "int64",
           "type": "integer"
+        },
+        "waiting": {
+          "description": "While its lease request is not granted: the full resource instances it waits for, as\nin [`crate::CurrentItem::waiting`]. Absent when it waits for nothing.",
+          "items": {
+            "$ref": "#/$defs/WaitingFor"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -2222,6 +2236,14 @@
           },
           "type": "array"
         },
+        "lease_waits": {
+          "default": [],
+          "description": "The granted lease requests filed in the range, per resource instance, longest wait\nfirst (#8: the waiting time is the measured cost of contention). With a repository\ngiven, its items' requests only.",
+          "items": {
+            "$ref": "#/$defs/LeaseWaits"
+          },
+          "type": "array"
+        },
         "outside_runs": {
           "description": "The commits of the range, in the report's repositories, that no run's range holds:\nmade outside the runs.",
           "format": "uint64",
@@ -2260,6 +2282,14 @@
           "description": "The commits of `commits` that lack one of the trailers `Item:`, `Run:`, `Session:`, in\nthe same order. The link above stays exact without them.",
           "items": {
             "$ref": "#/$defs/TrailerMissing"
+          },
+          "type": "array"
+        },
+        "worktrees": {
+          "default": [],
+          "description": "The worktrees on disk or quarantined now, whatever the range (of the report's\nrepository when it names one), in the order they were made.",
+          "items": {
+            "$ref": "#/$defs/WorktreeUse"
           },
           "type": "array"
         }
@@ -2409,6 +2439,40 @@
         "run",
         "result",
         "ended_ms"
+      ],
+      "type": "object"
+    },
+    "LeaseWaits": {
+      "description": "The granted waits for one resource instance.",
+      "properties": {
+        "longest_ms": {
+          "description": "The longest of them.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requests": {
+          "description": "Granted requests.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resource": {
+          "description": "The instance: `<name>`, `<name>/<identity>` or `<name>/<repo>`.",
+          "type": "string"
+        },
+        "total_ms": {
+          "description": "`granted_ms - filed_ms`, summed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "resource",
+        "requests",
+        "total_ms",
+        "longest_ms"
       ],
       "type": "object"
     },
@@ -3312,12 +3376,14 @@
           "default": {
             "commits": [],
             "flaky": [],
+            "lease_waits": [],
             "outside_runs": 0,
             "parked": [],
             "refused_edits": [],
             "retried": [],
             "rows": [],
-            "trailer_missing": []
+            "trailer_missing": [],
+            "worktrees": []
           },
           "description": "The loop's sections (#72): items and attempts with their runs' exact cost, retries,\nflaky verdicts, refused edits, time parked and the runs' commits. Their scope is said\nin [`crate::Items`]; no other section includes them or is included in them."
         },
@@ -3405,6 +3471,79 @@
         "identity",
         "from_ms",
         "to_ms"
+      ],
+      "type": "object"
+    },
+    "ResourceView": {
+      "description": "One resource instance and who holds it.",
+      "properties": {
+        "capacity": {
+          "description": "How many holders may hold it at once.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "holders": {
+          "description": "Its holders: `item <id>`, `bosun with <pid>`, or [`BUSY`] for another identity's.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "`[resource.<name>] kind`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The instance: `<name>` for the machine scope, `<name>/<identity>`, `<name>/<repo>`.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "`machine`, `identity` or `repository`.",
+          "type": "string"
+        },
+        "waiting": {
+          "description": "The requests waiting for it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "capacity",
+        "scope",
+        "holders",
+        "waiting"
+      ],
+      "type": "object"
+    },
+    "Resources": {
+      "description": "Result of `lease.list`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "resources": {
+          "description": "Every resource instance the identity can lease, by instance name.",
+          "items": {
+            "$ref": "#/$defs/ResourceView"
+          },
+          "type": "array"
+        },
+        "worktrees": {
+          "description": "The identity's worktrees that are `created` or `quarantined`, in the order they were\nmade.",
+          "items": {
+            "$ref": "#/$defs/WorktreeView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "resources",
+        "worktrees"
       ],
       "type": "object"
     },
@@ -4665,6 +4804,27 @@
       ],
       "type": "object"
     },
+    "WaitingFor": {
+      "description": "A full resource instance an item's request waits for, in `status.overview` and `item.get`.",
+      "properties": {
+        "holders": {
+          "description": "Its holders, as in [`ResourceView::holders`].",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "resource": {
+          "description": "The instance, as in [`ResourceView::name`].",
+          "type": "string"
+        }
+      },
+      "required": [
+        "resource",
+        "holders"
+      ],
+      "type": "object"
+    },
     "Wide": {
       "description": "A 64-bit unsigned count that may exceed 2^53, as a decimal string.",
       "pattern": "^(0|[1-9][0-9]*)$",
@@ -4714,6 +4874,90 @@
         "start",
         "peak",
         "compactions"
+      ],
+      "type": "object"
+    },
+    "WorktreeUse": {
+      "description": "A worktree on disk or quarantined, with its size.",
+      "properties": {
+        "blocking": {
+          "description": "A quarantined worktree: the file that blocked its removal.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bytes": {
+          "description": "Its size on disk when it was last measured; `null` when it was never measured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "item": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`item` or `verdict`.",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "state": {
+          "description": "`created` or `quarantined`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "path",
+        "kind",
+        "state"
+      ],
+      "type": "object"
+    },
+    "WorktreeView": {
+      "description": "A worktree on disk, or quarantined.",
+      "properties": {
+        "blocking": {
+          "description": "A quarantined worktree: the file that blocked its removal.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bytes": {
+          "description": "Its size on disk when it was last measured.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "item": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`item` (the item's checkout) or `verdict` (a verdict's throwaway checkout).",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "state": {
+          "description": "`created` or `quarantined`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "path",
+        "kind",
+        "state"
       ],
       "type": "object"
     }
@@ -4856,6 +5100,15 @@
       },
       "result": {
         "$ref": "#/$defs/AcquireResult"
+      }
+    },
+    "lease.list": {
+      "description": "The resource instances the identity can lease, with their holders and waiting requests,      and its worktrees on disk or quarantined. Another identity's holder is shown only as      `busy`.",
+      "params": {
+        "$ref": "#/$defs/IdentityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Resources"
       }
     },
     "lease.release": {

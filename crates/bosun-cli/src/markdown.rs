@@ -167,6 +167,8 @@ pub(crate) fn report(report: &Report, out: &mut String) {
     health(report, out);
     unpriced(report, out);
     items::items(&report.items, out);
+    items::lease_waits(&report.items, out);
+    items::worktrees(&report.items, out);
 }
 
 fn total(report: &Report, out: &mut String) {
@@ -779,6 +781,82 @@ mod tests {
             text == expected,
             "the Markdown differs from {}; rerun with BOSUN_BLESS=1 and review the diff:\n{text}",
             snapshot.display()
+        );
+    }
+
+    /// #8: the waits for two resources, longest first, with their counts and waits, and two
+    /// worktrees with their sizes, the quarantined one's blocking file and the total; a report
+    /// with neither prints neither heading. `mutant_report_drop_lease_waits` drops the waits.
+    #[test]
+    fn the_report_has_lease_waits_and_worktree_disk_use() {
+        let read = std::fs::read_to_string(golden("../bosun-heat/tests/golden/report.json"));
+        let mut report: Report = serde_json::from_str(&read.unwrap()).unwrap();
+        report.items.lease_waits.clear();
+        report.items.worktrees.clear();
+        let mut text = String::new();
+        super::report(&report, &mut text);
+        assert!(!text.contains("## Lease waits"), "{text}");
+        assert!(!text.contains("## Worktree disk use"), "{text}");
+
+        report.items.lease_waits = vec![
+            bosun_api::LeaseWaits {
+                resource: "rig".to_owned(),
+                requests: 3,
+                total_ms: 95_400,
+                longest_ms: 61_250,
+            },
+            bosun_api::LeaseWaits {
+                resource: "cache/alpha".to_owned(),
+                requests: 1,
+                total_ms: 800,
+                longest_ms: 800,
+            },
+        ];
+        report.items.worktrees = vec![
+            bosun_api::WorktreeUse {
+                item: "alpha#3".to_owned(),
+                path: "/work/worktrees/alpha-3".to_owned(),
+                kind: "item".to_owned(),
+                state: "created".to_owned(),
+                bytes: Some(3 * 1024 * 1024),
+                blocking: None,
+            },
+            bosun_api::WorktreeUse {
+                item: "alpha#2".to_owned(),
+                path: "/work/worktrees/alpha-2".to_owned(),
+                kind: "verdict".to_owned(),
+                state: "quarantined".to_owned(),
+                bytes: Some(512 * 1024),
+                blocking: Some("target/lock".to_owned()),
+            },
+        ];
+        let mut text = String::new();
+        super::report(&report, &mut text);
+        let waits = text
+            .split("## Lease waits\n\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no lease waits:\n{text}"));
+        let rig = waits.find("| rig | 3 | 95.4 s | 61.2 s |");
+        let cache = waits.find("| cache/alpha | 1 | 0.8 s | 0.8 s |");
+        assert!(
+            rig.is_some() && cache.is_some() && rig < cache,
+            "the waits, longest first:\n{waits}"
+        );
+        let disk = text
+            .split("## Worktree disk use\n\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no worktree disk use:\n{text}"));
+        for row in [
+            "| alpha#3 | item | created | 3.0 MiB | /work/worktrees/alpha-3 |",
+            "| alpha#2 | verdict | quarantined (blocked by target/lock) | 512.0 KiB | \
+             /work/worktrees/alpha-2 |",
+            "| total of 2 |  |  | 3.5 MiB |  |",
+        ] {
+            assert!(disk.contains(row), "{row}\n{disk}");
+        }
+        assert!(
+            text.find("## Lease waits") > text.find("### Commits of the runs"),
+            "after the existing sections"
         );
     }
 

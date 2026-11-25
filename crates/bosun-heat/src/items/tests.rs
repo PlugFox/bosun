@@ -378,6 +378,60 @@ fn seed() -> Vec<Write> {
     ];
     writes.extend(a.writes);
     writes.extend(b.writes);
+    writes.extend(leases_and_worktrees());
+    writes
+}
+
+/// Two waits for `rig` (30 s and 1 s) and one for `cache` (never granted), and two worktrees:
+/// one on disk and one quarantined.
+fn leases_and_worktrees() -> Vec<Write> {
+    let wait = |item: ItemId, resource: &str, filed: i64, granted: Option<i64>| {
+        let holder = format!("item {item}");
+        let mut writes = vec![Write::LeaseFiled {
+            item: Some(item),
+            holder: holder.clone(),
+            resource: resource.to_owned(),
+            filed_ms: at(filed),
+        }];
+        if let Some(granted) = granted {
+            writes.push(Write::LeaseGranted {
+                holder,
+                resource: resource.to_owned(),
+                filed_ms: at(filed),
+                at_ms: at(granted),
+            });
+        }
+        writes
+    };
+    let worktree = |item: ItemId, path: &str, second: i64| {
+        Write::Worktree(bosun_store::NewWorktree {
+            item,
+            path: path.to_owned(),
+            branch: "bosun/synthetic".to_owned(),
+            base_sha: sha(1),
+            kind: bosun_store::WorktreeKind::Item,
+            user_base_json: None,
+            created_ms: at(second),
+        })
+    };
+    let mut writes = Vec::new();
+    writes.extend(wait(item_a(), "rig", 0, Some(30)));
+    writes.extend(wait(item_b(), "rig", 3000, Some(3001)));
+    writes.extend(wait(item_b(), "cache", 3002, None));
+    writes.push(worktree(item_a(), "/synthetic/worktrees/demo-1", 1));
+    writes.push(Write::WorktreeBytes {
+        path: "/synthetic/worktrees/demo-1".to_owned(),
+        bytes: 3 * 1024 * 1024,
+    });
+    writes.push(worktree(item_b(), "/synthetic/worktrees/demo-2", 3001));
+    writes.push(Write::WorktreeEnded {
+        path: "/synthetic/worktrees/demo-2".to_owned(),
+        state: bosun_store::WorktreeState::Quarantined,
+        blocking: Some("target/lock".to_owned()),
+        error: Some("synthetic: the file is in use".to_owned()),
+        bytes: Some(512),
+        at_ms: at(3200),
+    });
     writes
 }
 
@@ -557,6 +611,49 @@ async fn every_commit_of_the_runs_maps_to_one_session_and_item() {
         [(sha(4), vec!["Run".to_owned(), "Session".to_owned()])]
     );
     assert!(report.items.commits[0].trailers.item && report.items.commits[0].trailers.session);
+    seeded.store.close().await.unwrap();
+}
+
+/// The granted waits per resource, longest first (a wait never granted is not counted), and
+/// the worktrees on disk or quarantined with their sizes and the quarantined one's blocking
+/// file.
+#[tokio::test]
+async fn lease_waits_and_worktrees_are_listed() {
+    let seeded = Seeded::new().await;
+    let items = seeded.report().await.items;
+    assert_eq!(
+        items.lease_waits,
+        [bosun_api::LeaseWaits {
+            resource: "rig".to_owned(),
+            requests: 2,
+            total_ms: 31_000,
+            longest_ms: 30_000,
+        }]
+    );
+    let worktrees: Vec<(&str, &str, Option<u64>, Option<&str>)> = items
+        .worktrees
+        .iter()
+        .map(|w| {
+            (
+                w.item.as_str(),
+                w.state.as_str(),
+                w.bytes,
+                w.blocking.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        worktrees,
+        [
+            ("local:demo#1", "created", Some(3 * 1024 * 1024), None),
+            (
+                "local:demo#2",
+                "quarantined",
+                Some(512),
+                Some("target/lock")
+            ),
+        ]
+    );
     seeded.store.close().await.unwrap();
 }
 

@@ -184,6 +184,30 @@ impl Feed {
         }
     }
 
+    /// Refetches every identity's `lease.list` into `app`, for the Resources tab.
+    pub(crate) async fn resources(&mut self, app: &mut App) {
+        for i in 0..app.identities.len() {
+            let ask = IdentityParams {
+                identity: app.identities[i].0.clone(),
+            };
+            let answer = self.call::<method::LeaseList>(&ask).await;
+            let view = &mut app.identities[i].1;
+            match answer {
+                Ok(resources) => {
+                    view.resources = Some(resources);
+                    view.resources_error = None;
+                }
+                Err(e) => {
+                    view.resources_error = Some(e.to_string());
+                    if broken(&e) {
+                        app.link = Link::Down(e.to_string());
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     /// Fetches the tail of the item the Session tab follows: in full, replacing what it shows,
     /// or from the line after the last it has.
     pub(crate) async fn tail(&mut self, app: &mut App, full: bool) {

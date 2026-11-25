@@ -1,4 +1,4 @@
- bosun 1 Overview [2 Queue] 3 Session 4 Tokens                     bosund 0.0.0
+ bosun 1 Overview [2 Queue] 3 Session 4 Tokens 5 Resources         bosund 0.0.0
 beta (personal)  local_file  board -  [2/2]
   the board was not read: the board file cannot be read
 
@@ -21,4 +21,4 @@ beta (personal)  local_file  board -  [2/2]
 
 
 
- 1-4 tab  arrows  p pause  r resume  K kill switch  k release  R restart  q quit
+ 1-5 tab  arrows  p pause  r resume  K kill switch  k release  R restart  q quit

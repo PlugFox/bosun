@@ -1,0 +1,24 @@
+ bosun 1 Overview 2 Queue 3 Session 4 Tokens [5 Resources]         bosund 0.0.0
+personal: resources
+  RESOURCE           KIND        HELD WAITING  HOLDERS
+  cache              build-dir    0/2       0  -
+  rig                device       1/1       1  item alpha#3
+  WORKTREE OF    STATE             SIZE  PATH
+  alpha#2        quarantined    5.3 MiB  /work/worktrees/alpha-2  (blocked by t~
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 1-5 tab  p pause  r resume  K kill switch  k release  R restart  q quit

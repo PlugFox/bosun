@@ -37,6 +37,10 @@ pub struct ItemDetail {
     pub created_ms: i64,
     /// When it entered its state.
     pub updated_ms: i64,
+    /// While its lease request is not granted: the full resource instances it waits for, as
+    /// in [`crate::CurrentItem::waiting`]. Absent when it waits for nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<crate::WaitingFor>,
     /// The snapshot its next attempt runs from, once claimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<SnapshotView>,

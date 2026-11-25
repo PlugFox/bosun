@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bosun_api::rpc::{ErrorObject, code};
-use bosun_api::{AcquireResult, Method, ReleaseResult, method};
+use bosun_api::{AcquireResult, Method, ReleaseResult, WaitingFor, method};
 use bosun_config::Config;
 use bosun_core::{ItemId, Scope};
 use bosun_proc::{ProcessKey, StartTime};
@@ -54,7 +54,7 @@ use tokio::sync::oneshot;
 
 use crate::api::{call, failed};
 use crate::executor::now_ms;
-use crate::state::State;
+use crate::state::{Served, State};
 
 /// The lease journal of the daemon whose operator token is `operator_file` (E25): the token's
 /// name with its extension replaced by `leases.json`, in the token's directory. The token is
@@ -129,6 +129,9 @@ struct Entry {
     granted_ms: i64,
     /// Where its release is written; `None` for an entry loaded from the journal.
     writer: Option<Writer>,
+    /// The identity that asked for it: the only one shown who holds it ([`Leases::seen_by`]).
+    /// `None` for an entry of a journal written before it was recorded: `busy` to everyone.
+    identity: Option<String>,
 }
 
 /// A request the model has not granted yet.
@@ -137,6 +140,8 @@ struct Waiter {
     holder: Holder,
     resources: Vec<String>,
     writer: Option<Writer>,
+    /// The identity that asked.
+    identity: String,
     grant: oneshot::Sender<i64>,
 }
 
@@ -153,10 +158,37 @@ pub(crate) struct Leases {
     inner: Mutex<Inner>,
     /// `[resource.<name>]`: each resource's scope, by name.
     scopes: std::collections::BTreeMap<String, Scope>,
+    /// Every resource instance, in the global order.
+    instances: Vec<Instance>,
     /// The journal file.
     journal: PathBuf,
     /// This daemon's process.
     daemon: ProcessKey,
+}
+
+/// One resource instance of the table.
+#[derive(Debug, Clone)]
+struct Instance {
+    /// `<name>`, `<name>/<identity>` or `<name>/<repo>`.
+    name: String,
+    scope: Scope,
+    /// `[resource.<name>] kind`.
+    kind: String,
+    capacity: usize,
+    /// The identity or repository it is of; `None` for the machine scope.
+    of: Option<String>,
+}
+
+/// The resource instances one identity can lease and who holds them, as it may see them
+/// ([`Leases::seen_by`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Seen {
+    /// The machine-scope instances, the identity's own and its repositories'.
+    pub(crate) resources: Vec<bosun_api::ResourceView>,
+    /// Each item of the identity whose request is not granted, with the instances it waits
+    /// for that are full (every one it asks for when none is: it queues behind another
+    /// request).
+    pub(crate) waiting: Vec<(ItemId, Vec<bosun_api::WaitingFor>)>,
 }
 
 /// A journal entry as it is stored.
@@ -168,6 +200,10 @@ pub(crate) struct Stored {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) shim: Option<StoredKey>,
     pub(crate) granted_ms: i64,
+    /// The identity that asked; absent from a journal written before it was recorded, so such
+    /// an entry is `busy` to every identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<String>,
 }
 
 /// A holder as the journal stores it.
@@ -229,6 +265,7 @@ impl Leases {
     /// The resources do not make a lease table (a duplicate instance, a capacity of 0).
     pub(crate) fn new(config: &Config, journal: &Path) -> Result<Self, String> {
         let mut instances = Vec::new();
+        let mut table = Vec::new();
         let mut scopes = std::collections::BTreeMap::new();
         for (name, resource) in &config.resources {
             let capacity = usize::try_from(resource.capacity).unwrap_or(usize::MAX);
@@ -240,6 +277,13 @@ impl Leases {
             };
             for suffix in suffixes {
                 let instance = suffix.map_or_else(|| name.clone(), |s| format!("{name}/{s}"));
+                table.push(Instance {
+                    name: instance.clone(),
+                    scope: resource.scope,
+                    kind: resource.kind.clone(),
+                    capacity,
+                    of: suffix.cloned(),
+                });
                 instances.push(bosun_core::Resource::new(
                     instance,
                     capacity,
@@ -248,6 +292,7 @@ impl Leases {
             }
         }
         let model = bosun_core::Leases::new(instances).map_err(|e| e.to_string())?;
+        table.sort_by(|a, b| a.name.cmp(&b.name));
         let this = Self {
             inner: Mutex::new(Inner {
                 model,
@@ -255,6 +300,7 @@ impl Leases {
                 waiting: Vec::new(),
             }),
             scopes,
+            instances: table,
             journal: journal.to_owned(),
             daemon: own_key(),
         };
@@ -272,6 +318,7 @@ impl Leases {
                 waiting: Vec::new(),
             }),
             scopes: std::collections::BTreeMap::new(),
+            instances: Vec::new(),
             journal: PathBuf::new(),
             daemon: own_key(),
         }
@@ -340,6 +387,7 @@ impl Leases {
                 shim: stored.shim.map(Into::into),
                 granted_ms: stored.granted_ms,
                 writer: None,
+                identity: stored.identity.clone(),
             };
             // Mutant (`mutant_loop_keep_stale_leases`): every entry loaded is kept.
             if !cfg!(mutant_loop_keep_stale_leases) && !self.lives(&entry, true) {
@@ -447,7 +495,10 @@ impl Leases {
                     if let Some(writer) = &request.writer {
                         entry.writer = Some(writer.clone());
                     }
-                    // Only the daemon is journalled; the store is not.
+                    let identity = Some(request.identity.clone());
+                    let changed = changed || entry.identity != identity;
+                    entry.identity = identity;
+                    // The daemon and the identity are journalled; the store is not.
                     if changed {
                         self.save(&inner);
                     }
@@ -468,6 +519,7 @@ impl Leases {
             holder,
             resources: resources.clone(),
             writer: request.writer.clone(),
+            identity: request.identity.clone(),
             grant,
         });
         self.serve(&mut inner);
@@ -563,6 +615,7 @@ impl Leases {
                 shim: None,
                 granted_ms: now,
                 writer: waiter.writer,
+                identity: Some(waiter.identity),
             });
             let _ = waiter.grant.send(now);
         }
@@ -652,6 +705,68 @@ impl Leases {
         dead
     }
 
+    /// What `identity`, whose repositories are `repos`, may see of the leases, read under the
+    /// lock: its instances with their holders and waiting counts, and its items' requests that
+    /// wait. A holder is named only to the identity that asked for its lease; to any other it
+    /// is `busy` (#8: "busy" is all one identity learns of another).
+    pub(crate) fn seen_by(&self, identity: &str, repos: &[String]) -> Seen {
+        let inner = self.lock();
+        let holders = |instance: &str| -> Vec<String> {
+            inner
+                .granted
+                .iter()
+                .filter(|e| e.resources.iter().any(|r| r == instance))
+                .map(|e| shown(e, identity))
+                .collect()
+        };
+        let resources = self
+            .instances
+            .iter()
+            .filter(|i| match (i.scope, &i.of) {
+                (Scope::Machine, _) => true,
+                (Scope::Identity, Some(of)) => of == identity,
+                (Scope::Repository, Some(of)) => repos.contains(of),
+                (_, None) => false,
+            })
+            .map(|i| bosun_api::ResourceView {
+                name: i.name.clone(),
+                kind: i.kind.clone(),
+                capacity: i.capacity as u64,
+                scope: scope_name(i.scope).to_owned(),
+                holders: holders(&i.name),
+                waiting: inner.model.queue(&i.name).count() as u64,
+            })
+            .collect();
+        let waiting = inner
+            .waiting
+            .iter()
+            .filter(|w| w.identity == identity)
+            .filter_map(|w| {
+                let Holder::Item(item) = &w.holder else {
+                    return None;
+                };
+                let asked: Vec<bosun_api::WaitingFor> = w
+                    .resources
+                    .iter()
+                    .map(|r| bosun_api::WaitingFor {
+                        resource: r.clone(),
+                        holders: holders(r),
+                    })
+                    .collect();
+                let full: Vec<bosun_api::WaitingFor> = asked
+                    .iter()
+                    .filter(|r| {
+                        let capacity = inner.model.resource(&r.resource).map_or(1, |x| x.capacity);
+                        r.holders.len() >= capacity
+                    })
+                    .cloned()
+                    .collect();
+                Some((item.clone(), if full.is_empty() { asked } else { full }))
+            })
+            .collect();
+        Seen { resources, waiting }
+    }
+
     /// The resource instances `holder` holds by a granted lease.
     #[cfg(test)]
     pub(crate) fn holds(&self, holder: &Holder) -> Vec<String> {
@@ -689,6 +804,7 @@ impl Leases {
                     daemon: e.daemon.into(),
                     shim: e.shim.map(Into::into),
                     granted_ms: e.granted_ms,
+                    identity: e.identity.clone(),
                 })
                 .collect(),
         };
@@ -728,6 +844,47 @@ fn write_journal(path: &Path, journal: &Journal) -> std::io::Result<()> {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// The holder of `entry` as `identity` sees it: `item <id>` or `bosun with <pid>` when that
+/// identity asked for the lease, else `busy`.
+fn shown(entry: &Entry, identity: &str) -> String {
+    // Mutant (`mutant_api_lease_holder_across_identities`): every holder is named.
+    let own = cfg!(mutant_api_lease_holder_across_identities)
+        || entry.identity.as_deref() == Some(identity);
+    if !own {
+        return bosun_api::BUSY.to_owned();
+    }
+    match &entry.holder {
+        Holder::Item(item) => format!("item {item}"),
+        Holder::Command(key) => format!("bosun with {}", key.pid),
+    }
+}
+
+fn scope_name(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Machine => "machine",
+        Scope::Identity => "identity",
+        Scope::Repository => "repository",
+    }
+}
+
+/// What item `item` of `served`'s identity waits for (`status.overview`, `item.get`): the
+/// full instances its request is not granted for, with their holders as the identity may see
+/// them; empty when it waits for nothing.
+pub(crate) fn waiting_of(state: &State, served: &Served, item: &ItemId) -> Vec<WaitingFor> {
+    if cfg!(mutant_api_wait_unnamed) {
+        // Mutant (`mutant_api_wait_unnamed`): what an item waits for is left out.
+        return Vec::new();
+    }
+    let repos: Vec<String> = served.repos.iter().map(|(n, _)| n.clone()).collect();
+    state
+        .leases
+        .seen_by(&served.name, &repos)
+        .waiting
+        .into_iter()
+        .find(|(id, _)| id == item)
+        .map_or_else(Vec::new, |(_, waits)| waits)
 }
 
 /// Where a journal that does not parse is moved: `<journal>.corrupt`.
@@ -1048,6 +1205,7 @@ mod tests {
                 daemon: other.into(),
                 shim: None,
                 granted_ms: 1,
+                identity: None,
             }],
         };
         write_journal(&journal_at(&state), &journal).unwrap();
@@ -1106,6 +1264,7 @@ mod tests {
                 daemon: gone,
                 shim: Some(me),
                 granted_ms: 1,
+                identity: None,
             }],
         };
         write_journal(&journal_at(&state), &journal).unwrap();
@@ -1248,6 +1407,7 @@ mod tests {
                     daemon: gone,
                     shim: None,
                     granted_ms: 1,
+                    identity: None,
                 },
                 Stored {
                     holder: StoredHolder::Item("demo#2".to_owned()),
@@ -1255,6 +1415,7 @@ mod tests {
                     daemon: gone,
                     shim: Some(me),
                     granted_ms: 2,
+                    identity: None,
                 },
                 Stored {
                     holder: StoredHolder::Command(gone),
@@ -1262,6 +1423,7 @@ mod tests {
                     daemon: gone,
                     shim: None,
                     granted_ms: 3,
+                    identity: None,
                 },
             ],
         };

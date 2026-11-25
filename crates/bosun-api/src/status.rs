@@ -74,6 +74,11 @@ pub struct CurrentItem {
     pub attempt: u32,
     /// When it entered its state: the time in state is `now_ms - since_ms`.
     pub since_ms: i64,
+    /// While its lease request is not granted: the full resource instances it waits for, each
+    /// with its holders (another identity's holder is `busy`, see [`crate::lease`]). Absent
+    /// when it waits for nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<crate::WaitingFor>,
 }
 
 /// A verdict run that finished.

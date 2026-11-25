@@ -9,7 +9,7 @@
 //! row of the table names it, and the question asked is that row's confirmation. An action is
 //! sent only after the question is answered `y`; any other key answers no and sends nothing.
 
-use bosun_api::{CardView, Overview, Pace, QueueView, RepoOverview, RepoQueue};
+use bosun_api::{CardView, Overview, Pace, QueueView, RepoOverview, RepoQueue, Resources};
 use bosun_client::actions::{ACTIONS, Action, Scope, Spec, Target};
 
 use crate::session::SessionView;
@@ -21,10 +21,17 @@ pub(crate) enum Tab {
     Queue,
     Session,
     Tokens,
+    Resources,
 }
 
 impl Tab {
-    pub(crate) const ALL: [Self; 4] = [Self::Overview, Self::Queue, Self::Session, Self::Tokens];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Queue,
+        Self::Session,
+        Self::Tokens,
+        Self::Resources,
+    ];
 
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -32,6 +39,7 @@ impl Tab {
             Self::Queue => "Queue",
             Self::Session => "Session",
             Self::Tokens => "Tokens",
+            Self::Resources => "Resources",
         }
     }
 
@@ -100,6 +108,10 @@ pub(crate) struct IdentityView {
     pub(crate) pace: Option<Pace>,
     /// Why the last `tokens.pace` failed.
     pub(crate) pace_error: Option<String>,
+    /// The last answer of `lease.list`, for the Resources tab.
+    pub(crate) resources: Option<Resources>,
+    /// Why the last `lease.list` failed.
+    pub(crate) resources_error: Option<String>,
 }
 
 /// The whole view.
@@ -215,6 +227,7 @@ impl App {
             Key::Char('2') => self.tab = Tab::Queue,
             Key::Char('3') => self.tab = Tab::Session,
             Key::Char('4') => self.tab = Tab::Tokens,
+            Key::Char('5') => self.tab = Tab::Resources,
             Key::Tab => self.tab = self.tab.next(false),
             Key::BackTab => self.tab = self.tab.next(true),
             // `k` is the release of the kill switch, so up is the arrow only.
@@ -243,8 +256,9 @@ impl App {
         let cursor = match self.tab {
             Tab::Overview => &mut self.overview_row,
             Tab::Queue => &mut self.card,
-            // The tail follows its end; the Tokens tab has nothing to select.
-            Tab::Session | Tab::Tokens => return,
+            // The tail follows its end; the Tokens and Resources tabs have nothing to select:
+            // no key acts on their rows.
+            Tab::Session | Tab::Tokens | Tab::Resources => return,
         };
         *cursor = if down {
             *cursor + 1
@@ -331,7 +345,7 @@ impl App {
     /// or the Queue's board.
     fn selected_repo(&self) -> Option<(&str, &str)> {
         match self.tab {
-            Tab::Overview | Tab::Session | Tab::Tokens => self
+            Tab::Overview | Tab::Session | Tab::Tokens | Tab::Resources => self
                 .overview_rows()
                 .get(self.overview_row)
                 .map(|(identity, _, repo)| (*identity, repo.repo.as_str())),
@@ -350,13 +364,12 @@ impl App {
                 .session
                 .as_ref()
                 .map(|s| (s.identity.as_str(), s.item.as_str())),
-            Tab::Overview | Tab::Tokens => {
-                self.overview_rows()
-                    .get(self.overview_row)
-                    .and_then(|(identity, _, repo)| {
-                        repo.current.as_ref().map(|c| (*identity, c.item.as_str()))
-                    })
-            }
+            Tab::Overview | Tab::Tokens | Tab::Resources => self
+                .overview_rows()
+                .get(self.overview_row)
+                .and_then(|(identity, _, repo)| {
+                    repo.current.as_ref().map(|c| (*identity, c.item.as_str()))
+                }),
             Tab::Queue => {
                 let boards = self.boards();
                 let (identity, board) = boards.get(self.board)?;
@@ -375,7 +388,7 @@ pub(crate) mod tests {
     use super::*;
 
     /// The keys the view itself takes; none of them may be an action's key.
-    const VIEW_KEYS: &[char] = &['q', '1', '2', '3', '4', 'j', 'h', 'l', 'y'];
+    const VIEW_KEYS: &[char] = &['q', '1', '2', '3', '4', '5', 'j', 'h', 'l', 'y'];
 
     /// A synthetic identity with two repositories: one working on an item, one idle.
     pub(crate) fn overview(identity: &str, now_ms: i64) -> Overview {
@@ -405,6 +418,7 @@ pub(crate) mod tests {
                         detail: None,
                         attempt: 2,
                         since_ms: now_ms - 754_000,
+                        waiting: Vec::new(),
                     }),
                     last_verdict: Some(LastVerdict {
                         item: "alpha#3".to_owned(),
@@ -519,6 +533,8 @@ pub(crate) mod tests {
             error: None,
             pace: None,
             pace_error: None,
+            resources: None,
+            resources_error: None,
         };
         app.link = Link::Up;
         app.daemon = Some("0.0.0".to_owned());

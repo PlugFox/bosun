@@ -2,7 +2,7 @@
 //!
 //! A client of the local API (#12): it depends on `bosun-client` and `bosun-api` only, and
 //! holds no state beyond the view; closing it changes nothing (#4). [`run`] connects, takes
-//! over the terminal and shows four tabs:
+//! over the terminal and shows five tabs:
 //!
 //! | Tab | Content |
 //! | --- | --- |
@@ -10,12 +10,13 @@
 //! | Queue | one board at a time: its columns as lists, the board hash, each card's state, snapshot hash, edit-pending marker and lint findings |
 //! | Session | the live tail of the item in flight (of the Overview's selected repository, else the first), tool calls collapsed, and its session's context-size gauge (#74) |
 //! | Tokens | per identity: eqv per minute against the reference pace, which is the configured budget's and says so; the odometers of today and of this run of the daemon; a sparkline of the last hour (#74) |
+//! | Resources | per identity: each resource instance it can lease with its kind, holders out of its capacity and waiting requests (another identity's holder is only `busy`), and its worktrees on disk or quarantined with their sizes (`lease.list`, #8); read-only |
 //!
 //! Identities are shown each in a section of its own, never summed (#2).
 //!
 //! # Keys
 //!
-//! `1`-`4` or Tab switch tabs, the arrows (and `j` for down) move, `h`/`l` switch boards in
+//! `1`-`5` or Tab switch tabs, the arrows (and `j` for down) move, `h`/`l` switch boards in
 //! the Queue, `q` or Esc quits. `k` is not up: it releases the kill switch. The operator
 //! actions (pause, resume, throwing and releasing the kill switch, restart-item) are the rows of the shared table `bosun_client::actions::ACTIONS`, with its
 //! keys and its confirmation texts: each key asks its question first, and only `y` sends the
@@ -32,7 +33,8 @@
 //!
 //! The Session tab subscribes to the live tail of the item it follows; after a resync it
 //! refetches the tail in full (`session.tail`), so the lines shown have no gap. The Tokens
-//! tab and the Session tab's context size are polled every few seconds while shown.
+//! tab, the Resources tab and the Session tab's context size are polled every few seconds
+//! while shown.
 
 mod app;
 mod feed;
@@ -185,10 +187,12 @@ async fn drive(terminal: &mut ratatui::DefaultTerminal, options: Options) -> Res
 }
 
 /// Refetches what the tab shown counts on between events: the usage of the Tokens tab, the
-/// session and context size of the Session tab (whose lines come as events).
+/// leases and worktrees of the Resources tab, the session and context size of the Session tab
+/// (whose lines come as events).
 async fn poll(app: &mut App, feed: &mut Feed) {
     match app.tab {
         Tab::Tokens => feed.pace(app).await,
+        Tab::Resources => feed.resources(app).await,
         Tab::Session => feed.tail(app, false).await,
         Tab::Overview | Tab::Queue => {}
     }

@@ -551,3 +551,84 @@ async fn a_conflict_gets_one_session_with_the_conflict_as_its_prompt_and_then_la
     assert!(section.contains("the target branch `main`"), "{section}");
     assert!(rest.contains("Item one."), "{rest}");
 }
+
+/// The setup script writes an untracked file into the user's checkout once, before the
+/// verdict, so the item's fast-forward is deferred and the clone offers the landed commit under
+/// its landing ref. When the deferral is reported the user moves the card to Backlog. The item
+/// ends Cancelled, the clone has no `refs/bosun/landing/` ref left, and the user's target is
+/// unchanged (`mutant_loop_keep_landing_ref` keeps the offer, with its objects, for ever).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_deferred_landing_leaves_no_landing_ref() {
+    let mut scene = Scene::with_worktrees(None).await;
+    let scratch = scene.repo.join("scratch.txt");
+    let then = format!("echo mine > '{}'", sh_path(&scratch));
+    setup_once(&mut scene, &then);
+    let mut sub = subscribe_trouble(&scene);
+    scene.write_board(&[card(1, "Cancelled", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let start = scene.git(&["rev-parse", "HEAD"]);
+    let (task, watcher) = scene.start(None);
+
+    let mut seen = Vec::new();
+    wait_for("the deferred fast-forward", LIMIT, async || {
+        seen.extend(trouble(&mut sub));
+        seen.iter().any(|t| t.contains("is deferred")) || terminal(scene.state(1).await)
+    })
+    .await;
+    assert!(seen.iter().any(|t| t.contains("is deferred")), "{seen:#?}");
+    let clone = clone_of(&scene);
+    assert!(has_ref(&scene, &clone, &git::landing_ref(&item(1))));
+
+    let mut cards = scene.cards();
+    cards[0].column = Column::Backlog;
+    scene.write_board(&cards);
+    let mut state = None;
+    wait_for("item 1 to settle", LIMIT, async || {
+        state = scene.state(1).await;
+        state.is_some_and(|s| !s.is_active())
+    })
+    .await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert_eq!(state, Some(State::Cancelled));
+    assert_eq!(
+        git_in(
+            &scene,
+            &clone,
+            &["for-each-ref", "--format=%(refname)", "refs/bosun/landing/"]
+        ),
+        ""
+    );
+    assert_eq!(scene.git(&["rev-parse", "refs/heads/main"]), start);
+    assert!(!scene.repo.join("a.txt").exists());
+}
+
+/// Before the run the user's repository has a `FETCH_HEAD` of its own. A `local` item lands;
+/// the `FETCH_HEAD` is byte for byte what it was: landing fetches objects only (E14)
+/// (`mutant_loop_landing_fetch_writes_fetch_head` lets the fetch write it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn landing_leaves_the_users_fetch_head_alone() {
+    let scene = Scene::with_worktrees(None).await;
+    let fetch_head = PathBuf::from(scene.git(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "FETCH_HEAD",
+    ]));
+    let start = scene.git(&["rev-parse", "HEAD"]);
+    let mine = format!("{start}\t\tbranch 'topic' of ../elsewhere\n");
+    std::fs::write(&fetch_head, &mine).unwrap();
+    scene.write_board(&[card(1, "Landed", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    assert_eq!(scene.git(&["rev-parse", "HEAD~1"]), start);
+    assert_eq!(std::fs::read(&fetch_head).unwrap(), mine.as_bytes());
+}

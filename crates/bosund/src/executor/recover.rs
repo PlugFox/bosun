@@ -496,6 +496,7 @@ impl Loop {
             failing: Vec::new(),
             child: park::ChildSlot::default(),
             ignored,
+            rebased: Arc::default(),
         });
         if item.state != State::Claimed && item.state.is_active() {
             self.hold_power();

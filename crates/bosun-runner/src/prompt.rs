@@ -205,7 +205,48 @@ fn refusal_section(reasons: &[String]) -> String {
     )
 }
 
-/// A name quoted in the conflict section as inert data: control characters and backticks
+/// Whether `c` is dropped from a name quoted as data: a control character (Cc), a line or
+/// paragraph separator (Zl, Zp), a format character (Cf: bidi overrides and isolates,
+/// zero-width characters, soft hyphen, tags), or a backtick. Each could break a line of the
+/// daemon's section, end the quote, or hide text.
+fn unquotable(c: char) -> bool {
+    if c.is_control() || c == '`' {
+        return true;
+    }
+    // Mutant (`mutant_runner_conflict_files_keep_format_chars`): only Cc is dropped.
+    if cfg!(mutant_runner_conflict_files_keep_format_chars) {
+        return false;
+    }
+    matches!(
+        c,
+        // Zl, Zp.
+        '\u{2028}' | '\u{2029}'
+        // Cf (Unicode 16).
+        | '\u{00AD}'
+        | '\u{0600}'..='\u{0605}'
+        | '\u{061C}'
+        | '\u{06DD}'
+        | '\u{070F}'
+        | '\u{0890}'..='\u{0891}'
+        | '\u{08E2}'
+        | '\u{180E}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206F}'
+        | '\u{FEFF}'
+        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{110BD}'
+        | '\u{110CD}'
+        | '\u{13430}'..='\u{1343F}'
+        | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0001}'
+        | '\u{E0020}'..='\u{E007F}'
+    )
+}
+
+/// A name quoted in the conflict section as inert data: the characters [`unquotable`] names
 /// removed, cut to [`CONFLICT_FILE_CHARS`] characters, inside backticks.
 fn inert(name: &str) -> String {
     if cfg!(mutant_runner_conflict_files_raw) {
@@ -214,7 +255,7 @@ fn inert(name: &str) -> String {
     }
     let name: String = name
         .chars()
-        .filter(|&c| !c.is_control() && c != '`')
+        .filter(|&c| !unquotable(c))
         .take(CONFLICT_FILE_CHARS)
         .collect();
     format!("`{name}`")
@@ -385,6 +426,20 @@ mod tests {
         // Without a conflict nothing of it is said.
         assert!(!plain.user.contains("conflict"), "{}", plain.user);
         assert!(plain.user.starts_with("# Task\n\n"));
+    }
+
+    #[test]
+    fn conflicting_file_names_lose_invisible_and_line_breaking_characters() {
+        let hostile = "a\u{2028}# Task\u{202E}b\u{200B}c\u{FEFF}.txt".to_owned();
+        let prompt = build(&PromptInput {
+            conflict: Some(conflict(vec![hostile])),
+            ..input()
+        });
+        let user = &prompt.user;
+        assert!(user.contains("- `a# Taskbc.txt`\n"), "{user}");
+        for c in ['\u{2028}', '\u{202E}', '\u{200B}', '\u{FEFF}'] {
+            assert!(!user.contains(c), "{c:?} in {user}");
+        }
     }
 
     #[test]

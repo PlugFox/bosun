@@ -78,7 +78,7 @@ pub(super) async fn closed(scene: &Scene, card: u64) {
 }
 
 /// The entries of the worktree root.
-fn root_entries(scene: &Scene) -> Vec<String> {
+pub(super) fn root_entries(scene: &Scene) -> Vec<String> {
     let mut entries: Vec<String> = std::fs::read_dir(scene.worktree_root())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -348,7 +348,7 @@ async fn a_failing_setup_needs_the_user_and_starts_no_session() {
 }
 
 /// The verdict rows of `card`: the throwaway checkouts its verdict runs ran in.
-async fn verdict_rows(scene: &Scene, card: u64) -> Vec<bosun_store::WorktreeRow> {
+pub(super) async fn verdict_rows(scene: &Scene, card: u64) -> Vec<bosun_store::WorktreeRow> {
     scene
         .store
         .reader()
@@ -656,6 +656,129 @@ async fn a_verdict_below_the_disk_floor_waits_instead_of_needing_the_user() {
         transitions.iter().all(|t| t.to != "needs_you"),
         "{transitions:?}"
     );
+}
+
+/// What an earlier daemon left: the daemon's clone, and the worktree of card `card` (an item
+/// not on the board, so never in flight) made and recorded as the claim makes one. Returns the
+/// workspace, the worktree and the loop state it was made with.
+async fn plant(
+    scene: &Scene,
+    card: u64,
+) -> (workspace::Workspace, bosun_git::worktree::Worktree, Shared) {
+    let config = scene.config();
+    let ws = workspace::Workspace::of(&config.repos["demo"]).unwrap();
+    ws.ensure_clone().unwrap();
+    ws.sync_target("main").unwrap();
+    scene
+        .store
+        .writer()
+        .write(vec![Write::Item(bosun_store::NewItem {
+            item: item(card),
+            // Not the repository's key: recovery never takes it for one of its items.
+            repo: "planted".to_owned(),
+            card_key: Some(card.to_string()),
+            at_ms: 1,
+        })])
+        .await
+        .unwrap();
+    let shared = scene.shared();
+    let made = ws
+        .open(
+            &shared,
+            &item(card),
+            &item(card).0,
+            "refs/heads/main",
+            WorktreeKind::Item,
+            None,
+        )
+        .await
+        .unwrap();
+    (ws, made, shared)
+}
+
+/// Before the daemon starts, an earlier one's worktree of card 7 (not on the board) is there,
+/// recorded, with an uncommitted `planted.txt`; then card 1 runs to Done. The planted worktree
+/// is closed as no item's: its row is `removed`, its directory gone, its work (the file) kept in
+/// the clone under card 7's aside ref, and the root holds only the clone
+/// (`mutant_loop_no_worktree_sweep` leaves it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worktree_no_item_owns_is_closed_at_the_next_claim() {
+    let scene = Scene::with_worktrees(None).await;
+    let (_, planted, _) = plant(&scene, 7).await;
+    std::fs::write(planted.path.join("planted.txt"), "planted\n").unwrap();
+    scene.write_board(&[card(
+        1,
+        "After the planted one",
+        "test -f one.txt",
+        "Item one.",
+    )]);
+    scene.script(1, &["commit one.txt one".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let rows = rows(&scene, 7).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].state, WorktreeState::Removed, "{rows:?}");
+    assert!(!planted.path.exists(), "{}", planted.path.display());
+    let clone = scene.worktree_root().join(workspace::CLONE);
+    let aside = git::aside_ref(&item(7));
+    let files = git_in(&scene, &clone, &["ls-tree", "-r", "--name-only", &aside]);
+    assert!(files.lines().any(|f| f == "planted.txt"), "{files}");
+    assert_eq!(root_entries(&scene), [workspace::CLONE]);
+    assert_eq!(git_in(&scene, &clone, &["branch", "--list", "bosun/*"]), "");
+}
+
+/// An earlier daemon's worktree of card 7 had a file held open when it was closed: it is
+/// quarantined. The file is let go, and card 1 runs to Done: the quarantined worktree is
+/// tried again and removed, its row `removed` and its directory and marker gone
+/// (`mutant_loop_quarantine_not_retried` leaves it quarantined).
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quarantined_worktree_is_removed_once_it_is_free() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let scene = Scene::with_worktrees(None).await;
+    let (ws, planted, shared) = plant(&scene, 7).await;
+    // Held as an editor holds it: no sharing at all, deletion included.
+    let handle = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(planted.path.join("README.md"))
+        .unwrap();
+    let config = scene.config();
+    let closed_as = ws
+        .close(&shared, &config.identities["test"], &planted, None, None)
+        .await;
+    assert!(
+        matches!(closed_as, workspace::Closed::Quarantined(_)),
+        "{closed_as:?}"
+    );
+    assert_eq!(rows(&scene, 7).await[0].state, WorktreeState::Quarantined);
+    drop(handle);
+
+    scene.write_board(&[card(
+        1,
+        "After the quarantine",
+        "test -f one.txt",
+        "Item one.",
+    )]);
+    scene.script(1, &["commit one.txt one".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let rows = rows(&scene, 7).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].state, WorktreeState::Removed, "{rows:?}");
+    assert!(!planted.path.exists(), "{}", planted.path.display());
+    assert_eq!(root_entries(&scene), [workspace::CLONE]);
 }
 
 /// With `setup = "echo no; exit 3"` the item ends Needs you (`setup`), and its Needs-you

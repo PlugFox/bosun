@@ -23,6 +23,15 @@
 //!   [`super::git::aside_ref`]), runs `teardown`, measures it, and removes it with its branch;
 //!   one that cannot be removed is quarantined, recorded with the file that blocked, and
 //!   reported once: never left behind silently, and its path is never used again.
+//! - The child of a running `setup` or `teardown` is recorded on the worktree's row while it
+//!   runs (E3), so a daemon that dies meanwhile leaves it to be reaped.
+//! - The sweep ([`Workspace::sweep`]), at the end of crash recovery and before every claim,
+//!   finds what no item in flight owns: it reaps a recorded `setup` or `teardown` child the
+//!   loop did not start itself, closes every `created` worktree no item owns (an item's with
+//!   its work kept), retries every quarantined one ([`worktree::retry_quarantine`]), and
+//!   removes a worktree git lists on a `bosun/` branch with no row at all (a daemon that died
+//!   between making it and recording it), its work kept under the item's aside ref or else
+//!   under [`super::git::orphan_ref`]. What it closes is reported once.
 //!
 //! - With `worktree.shared_build` (E1), every process the daemon starts in one of the
 //!   repository's worktrees (setup and teardown, sessions, verdict runs) gets the shared build
@@ -34,23 +43,78 @@
 //! The git work is blocking and synchronous; the functions that also write to the store or run
 //! a command are async and move their git work to the blocking pool ([`super::blocking`]).
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bosun_config::{Identity, Repo};
 use bosun_core::{ItemId, PathStyle, canonical_path};
 use bosun_git::Git;
 use bosun_git::worktree::{self, Floor, FreeSpace, Quarantine, Removal, Worktree};
+use bosun_proc::ProcessKey;
 use bosun_queue::lint::verdict_shell;
 use bosun_runner::verdict::{Limits, Outcome, VerdictSpec};
-use bosun_store::{NewWorktree, WorktreeKind, WorktreeState, Write};
-use tokio::sync::watch;
+use bosun_store::{NewWorktree, WorktreeKind, WorktreeRow, WorktreeState, Write};
+use tokio::sync::{oneshot, watch};
 
 use super::{Shared, Signal, blocking, identity, now_ms};
 
 /// The name of the daemon's clone under the worktree root.
 pub(crate) const CLONE: &str = ".clone";
+
+/// What one loop holds of its worktrees for the sweep: the worktrees it opened and has not
+/// closed, the `setup` and `teardown` children it runs, and the lock a sweep holds (and
+/// [`Workspace::open`] from making a worktree to recording it, so a sweep never takes a
+/// worktree being made for one without a row).
+#[derive(Debug, Default)]
+pub(crate) struct Registry {
+    lock: tokio::sync::Mutex<()>,
+    open: Mutex<BTreeSet<PathBuf>>,
+    children: Mutex<BTreeSet<(u32, u64)>>,
+}
+
+impl Registry {
+    fn opened(&self, path: &Path) {
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_owned());
+    }
+
+    fn closed(&self, path: &Path) {
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(path);
+    }
+
+    fn open_paths(&self) -> Vec<PathBuf> {
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn child(&self, key: ProcessKey, running: bool) {
+        let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+        if running {
+            children.insert((key.pid, key.start.raw()));
+        } else {
+            children.remove(&(key.pid, key.start.raw()));
+        }
+    }
+
+    fn runs(&self, key: ProcessKey) -> bool {
+        self.children
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&(key.pid, key.start.raw()))
+    }
+}
 
 /// The worktrees of one repository configured with `repo.<name>.worktree`.
 #[derive(Debug, Clone)]
@@ -247,6 +311,11 @@ impl Workspace {
         })
     }
 
+    /// The worktree root: `repo.<name>.worktree.root`.
+    pub(crate) fn root(&self) -> &Path {
+        &self.config.root
+    }
+
     /// The path of the daemon's clone.
     pub(crate) fn clone_path(&self) -> PathBuf {
         self.config.root.join(CLONE)
@@ -404,8 +473,32 @@ impl Workspace {
         kind: WorktreeKind,
         user_base: Option<String>,
     ) -> Result<Worktree, Error> {
+        // No sweep looks between the worktree's making and its row.
+        let _sweeps = shared.worktrees.lock.lock().await;
+        // A path a row already names (a worktree removed since) is not made again: its row
+        // would not be written twice.
+        let recorded: BTreeSet<PathBuf> = shared
+            .deps
+            .reader
+            .worktrees(item)
+            .await
+            .map_err(Error::Store)?
+            .into_iter()
+            .map(|r| PathBuf::from(r.path))
+            .collect();
+        let stem = worktree::dir_name(name);
+        let name = (1..=u32::MAX)
+            .map(|n| {
+                if n == 1 {
+                    stem.clone()
+                } else {
+                    format!("{stem}-{n}")
+                }
+            })
+            .find(|n| !recorded.contains(&self.config.root.join(n)))
+            .unwrap_or(stem);
         let this = self.clone();
-        let (name, at) = (name.to_owned(), at.to_owned());
+        let at = at.to_owned();
         let space = shared.deps.free_space.clone();
         let made = blocking(move || this.create(&name, &at, space.as_ref())).await?;
         let row = Write::Worktree(NewWorktree {
@@ -429,6 +522,7 @@ impl Workspace {
             }
             return Err(Error::Store(e));
         }
+        shared.worktrees.opened(&made.path);
         Ok(made)
     }
 
@@ -534,8 +628,25 @@ impl Workspace {
 
     /// Closes `worktree`: keeps `aside`'s work in the clone first when given, runs `teardown`
     /// (a failure, or its end by `kill`, is reported and the removal goes on), measures it, and
-    /// removes it with its branch, or quarantines it. The row is ended either way.
+    /// removes it with its branch, or quarantines it. The row is ended either way. Whatever it
+    /// did, the loop no longer holds the worktree: one [`Closed::Kept`] is the sweep's to try
+    /// again.
     pub(crate) async fn close(
+        &self,
+        shared: &Shared,
+        identity: &Identity,
+        worktree: &Worktree,
+        aside: Option<&ItemId>,
+        kill: Option<&mut watch::Receiver<Signal>>,
+    ) -> Closed {
+        let closed = self
+            .close_held(shared, identity, worktree, aside, kill)
+            .await;
+        shared.worktrees.closed(&worktree.path);
+        closed
+    }
+
+    async fn close_held(
         &self,
         shared: &Shared,
         identity: &Identity,
@@ -663,6 +774,295 @@ impl Workspace {
         }
     }
 
+    /// Records `child` as the command running in the worktree at `path`, or none; a failure is
+    /// reported.
+    async fn record_child(&self, shared: &Shared, path: &str, child: Option<(u32, i64)>) {
+        let write = Write::WorktreeChild {
+            path: path.to_owned(),
+            child,
+        };
+        if let Err(e) = shared.deps.writer.write(vec![write]).await {
+            shared.trouble(format!(
+                "the command running in the worktree {path} cannot be recorded: {e}"
+            ));
+        }
+    }
+
+    /// Closes what no item in flight owns (see the module documentation): the worktrees under
+    /// this workspace's root other than `owned`, and, with `spare_open`, other than those this
+    /// loop opened and has not closed (a task of the item in flight may be using one: at
+    /// recovery). Never stops the caller: what fails is reported, and found again next time.
+    pub(crate) async fn sweep(
+        &self,
+        shared: &Shared,
+        identity: &Identity,
+        owned: &[PathBuf],
+        spare_open: bool,
+    ) {
+        // Mutant (`mutant_loop_no_worktree_sweep`): the sweep does nothing.
+        if cfg!(mutant_loop_no_worktree_sweep) {
+            return;
+        }
+        // Without the clone nothing was ever made here.
+        if !self.clone_path().is_dir() {
+            return;
+        }
+        let _sweeps = shared.worktrees.lock.lock().await;
+        let mut kept: Vec<PathBuf> = owned.to_vec();
+        if spare_open {
+            kept.extend(shared.worktrees.open_paths());
+        }
+        let reader = &shared.deps.reader;
+        let (created, quarantined) = match (
+            reader.open_worktrees().await,
+            reader.quarantined_worktrees().await,
+        ) {
+            (Ok(created), Ok(quarantined)) => (created, quarantined),
+            (Err(e), _) | (_, Err(e)) => {
+                shared.trouble(format!("the worktrees cannot be read for the sweep: {e}"));
+                return;
+            }
+        };
+        let ours = |rows: Vec<WorktreeRow>| -> Vec<WorktreeRow> {
+            rows.into_iter()
+                .filter(|r| self.holds(Path::new(&r.path)))
+                .collect()
+        };
+        let (created, quarantined) = (ours(created), ours(quarantined));
+
+        // 1. A command a dead daemon started is never resumed.
+        for row in created.iter().chain(&quarantined) {
+            self.reap_child(shared, row).await;
+        }
+        // 2. Every worktree no item owns is closed, an item's with its work kept.
+        for row in &created {
+            if kept.iter().any(|p| same_path(p, Path::new(&row.path))) {
+                continue;
+            }
+            self.close_unowned(shared, identity, row).await;
+        }
+        // 3. A quarantined worktree is removed once it is free.
+        // Mutant (`mutant_loop_quarantine_not_retried`): it is never tried again.
+        if !cfg!(mutant_loop_quarantine_not_retried) {
+            for row in &quarantined {
+                self.retry(shared, row).await;
+            }
+        }
+        // 4. A worktree made but never recorded.
+        let recorded: Vec<PathBuf> = created
+            .iter()
+            .chain(&quarantined)
+            .map(|r| PathBuf::from(&r.path))
+            .chain(kept)
+            .collect();
+        self.remove_unrecorded(shared, identity, &recorded).await;
+    }
+
+    /// Whether `path` is under this workspace's root (rows carry no repository).
+    fn holds(&self, path: &Path) -> bool {
+        let root = self.root();
+        if path.starts_with(root) {
+            return path != root;
+        }
+        match (
+            std::fs::canonicalize(root),
+            path.parent().map(std::fs::canonicalize),
+        ) {
+            (Ok(root), Some(Ok(parent))) => parent.starts_with(root),
+            _ => false,
+        }
+    }
+
+    /// Step 1: kills the child `row` records, if it still runs and this loop did not start it
+    /// (by pid and start time, as recovery reaps recorded children), and clears the record.
+    async fn reap_child(&self, shared: &Shared, row: &WorktreeRow) {
+        let Some((pid, started_ms)) = row.child else {
+            return;
+        };
+        let key = ProcessKey {
+            pid,
+            start: bosun_proc::StartTime::from_raw(started_ms.cast_unsigned()),
+        };
+        if shared.worktrees.runs(key) {
+            return;
+        }
+        let alive = shared.deps.alive.clone();
+        if blocking(move || alive(key)).await {
+            match blocking(move || bosun_proc::reap(key)).await {
+                Ok(true) => crate::log::log!(
+                    "bosund: repository {}: reaped pid {pid}, a command of a previous daemon in \
+                     the worktree {}",
+                    shared.options.repo,
+                    row.path
+                ),
+                Ok(false) => {}
+                Err(e) => {
+                    shared.trouble(format!(
+                        "pid {pid}, a command of a previous daemon in the worktree {}, cannot \
+                         be reaped: {e}",
+                        row.path
+                    ));
+                    return;
+                }
+            }
+        }
+        self.record_child(shared, &row.path, None).await;
+    }
+
+    /// Step 2: closes the worktree of `row`, which no item owns.
+    async fn close_unowned(&self, shared: &Shared, identity: &Identity, row: &WorktreeRow) {
+        let worktree = Worktree {
+            path: PathBuf::from(&row.path),
+            branch: row.branch.clone(),
+            base: row.base_sha.clone(),
+        };
+        let what = match row.kind {
+            WorktreeKind::Item => "the worktree",
+            WorktreeKind::Verdict => "the verdict checkout",
+        };
+        shared.trouble(format!(
+            "{what} {} of {} is closed: no item owns it",
+            row.path, row.item
+        ));
+        if !worktree.path.exists() {
+            // Already gone: its branch goes, and its row ends.
+            let (git, branch) = (self.clone_git(), row.branch.clone());
+            blocking(move || drop_branch(&git, &branch)).await;
+            let end = Write::WorktreeEnded {
+                path: row.path.clone(),
+                state: WorktreeState::Removed,
+                blocking: None,
+                error: None,
+                bytes: None,
+                at_ms: now_ms(),
+            };
+            if let Err(e) = shared.deps.writer.write(vec![end]).await {
+                shared.trouble(format!(
+                    "the end of the worktree {} cannot be recorded: {e}",
+                    row.path
+                ));
+            }
+            return;
+        }
+        let aside = (row.kind == WorktreeKind::Item).then_some(&row.item);
+        self.close(shared, identity, &worktree, aside, None).await;
+    }
+
+    /// Step 3: tries the quarantined worktree of `row` again; reported only once removed.
+    async fn retry(&self, shared: &Shared, row: &WorktreeRow) {
+        let (root, path) = (self.config.root.clone(), PathBuf::from(&row.path));
+        let (git, branch) = (self.clone_git(), row.branch.clone());
+        let retried = blocking(move || {
+            let retried = worktree::retry_quarantine(&root, &path);
+            if matches!(retried, Ok(Removal::Removed)) {
+                drop_branch(&git, &branch);
+            }
+            retried
+        })
+        .await;
+        match retried {
+            Ok(Removal::Removed) => {
+                let freed = Write::WorktreeFreed {
+                    path: row.path.clone(),
+                    at_ms: now_ms(),
+                };
+                if let Err(e) = shared.deps.writer.write(vec![freed]).await {
+                    shared.trouble(format!(
+                        "the removal of the quarantined worktree {} cannot be recorded: {e}",
+                        row.path
+                    ));
+                } else {
+                    shared.trouble(format!(
+                        "the quarantined worktree {} of {} is removed now",
+                        row.path, row.item
+                    ));
+                }
+            }
+            // Still blocked: it was reported when it was quarantined.
+            Ok(Removal::Quarantined(_)) => {}
+            Err(e) => crate::log::log!(
+                "bosund: repository {}: the quarantined worktree {} is not retried: {e}",
+                shared.options.repo,
+                row.path
+            ),
+        }
+    }
+
+    /// Step 4: removes every worktree directly under the root that git lists for the clone on
+    /// a `bosun/` branch and that no row in `recorded` names, its work kept first.
+    async fn remove_unrecorded(&self, shared: &Shared, identity: &Identity, recorded: &[PathBuf]) {
+        let (git, root) = (self.clone_git(), self.config.root.clone());
+        let recorded = recorded.to_vec();
+        let found = blocking(move || unrecorded(&git, &root, &recorded)).await;
+        let found = match found {
+            Ok(found) => found,
+            Err(e) => {
+                shared.trouble(format!("the clone's worktrees cannot be listed: {e}"));
+                return;
+            }
+        };
+        if found.is_empty() {
+            return;
+        }
+        let items: Vec<ItemId> = match shared.deps.reader.items(false).await {
+            Ok(items) => items.into_iter().map(|s| s.item.id).collect(),
+            Err(e) => {
+                shared.trouble(format!("the items cannot be read for the sweep: {e}"));
+                return;
+            }
+        };
+        for worktree in found {
+            shared.trouble(format!(
+                "the worktree {} on {} is closed: no item owns it (it was never recorded)",
+                worktree.path.display(),
+                worktree.branch
+            ));
+            let short = worktree
+                .branch
+                .strip_prefix(worktree::BRANCH_PREFIX)
+                .unwrap_or(&worktree.branch);
+            let owner = owner_of(short, &items);
+            let (name, label) = match owner {
+                Some(item) => (super::git::aside_ref(&item), item),
+                None => (
+                    super::git::orphan_ref(&worktree.branch),
+                    ItemId::new(worktree.branch.clone()),
+                ),
+            };
+            let author = identity::bundle(&self.identity, identity, &worktree.path)
+                .map(|b| super::git::ident(&b.author));
+            let (dir, kept_as) = (worktree.path.clone(), name.clone());
+            let kept = match author {
+                Ok(author) => {
+                    blocking(move || super::git::keep_work_at(&dir, &kept_as, &label, &author))
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = kept {
+                shared.trouble(format!(
+                    "the work in {} cannot be kept under {name}, so it is not removed: {e}",
+                    worktree.path.display()
+                ));
+                continue;
+            }
+            let (git, root, wt) = (self.clone_git(), self.config.root.clone(), worktree.clone());
+            match blocking(move || worktree::remove(&git, &root, &wt)).await {
+                Ok(Removal::Removed) => {}
+                Ok(Removal::Quarantined(q)) => shared.trouble(format!(
+                    "the unrecorded worktree {} cannot be removed and is quarantined: {}",
+                    q.path.display(),
+                    q.error
+                )),
+                Err(e) => shared.trouble(format!(
+                    "the unrecorded worktree {} is not removed: {e}",
+                    worktree.path.display()
+                )),
+            }
+        }
+    }
+
     /// Runs `command` in `dir` as a verdict command runs: the verdict shell, the agent
     /// environment, the verdict timeout, a bounded output. When `kill` is raised meanwhile the
     /// command's tree is ended ([`Unopened::Killed`]).
@@ -715,19 +1115,47 @@ impl Workspace {
             timeout: self.timeout,
             limits: Limits::default(),
         };
-        let running = bosun_runner::verdict::run(shared.deps.spawner.as_ref(), &spec);
+        // The child is recorded on the worktree's row while it runs (E3): a daemon that dies
+        // meanwhile leaves it to the next one's sweep.
+        let (key_tx, key_rx) = oneshot::channel();
+        let started = Arc::new(Mutex::new(None));
+        let reporting = super::verdict::Reporting {
+            inner: shared.deps.spawner.as_ref(),
+            key: Mutex::new(Some(key_tx)),
+            started: started.clone(),
+        };
+        let path = dir.to_string_lossy().into_owned();
+        let record = async {
+            if let Ok(key) = key_rx.await {
+                shared.worktrees.child(key, true);
+                // Mutant (`mutant_loop_setup_child_unrecorded`): the child is not recorded.
+                if !cfg!(mutant_loop_setup_child_unrecorded) {
+                    let child = Some((key.pid, key.start.raw().cast_signed()));
+                    self.record_child(shared, &path, child).await;
+                }
+            }
+        };
+        let running =
+            async { tokio::join!(bosun_runner::verdict::run(&reporting, &spec), record).0 };
         // Mutant (`mutant_loop_setup_ignores_kill`): the command runs to its end or its
         // timeout whatever the kill says.
         let kill = kill.filter(|_| !cfg!(mutant_loop_setup_ignores_kill));
         let ran = match kill {
             // The command's tree goes with the dropped future.
             Some(kill) => tokio::select! {
-                ran = running => ran,
-                () = super::verdict::killed(kill) => return Err(Unopened::Killed),
+                ran = running => Some(ran),
+                () = super::verdict::killed(kill) => None,
             },
-            None => running.await,
+            None => Some(running.await),
+        };
+        let key = *started.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(key) = key {
+            shared.worktrees.child(key, false);
+            self.record_child(shared, &path, None).await;
         }
-        .map_err(|e| failed(format!("cannot run: {e}"), String::new()))?;
+        let ran = ran
+            .ok_or(Unopened::Killed)?
+            .map_err(|e| failed(format!("cannot run: {e}"), String::new()))?;
         match ran.outcome {
             Outcome::Pass => Ok(()),
             Outcome::Fail => Err(failed(
@@ -743,6 +1171,107 @@ impl Workspace {
             )),
         }
     }
+}
+
+/// Whether `a` and `b` name the same path, links resolved when both exist.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
+/// Deletes the item branch `branch` of the clone `git` if it is still there, after dropping
+/// git's entries of worktrees that are gone (a branch checked out in one cannot be deleted). A
+/// failure leaves the branch, whose name is then never used again.
+fn drop_branch(git: &Git, branch: &str) {
+    if !branch.starts_with(worktree::BRANCH_PREFIX) {
+        return;
+    }
+    let _ = git.run(&["worktree", "prune"], None);
+    let there = git
+        .optional(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .ok()
+        .flatten()
+        .is_some();
+    if there {
+        let _ = git.run(
+            &["branch", "--quiet", "-D", "--end-of-options", branch],
+            None,
+        );
+    }
+}
+
+/// The worktrees `git worktree list` gives for the clone `git` directly under `root`, on a
+/// `bosun/` branch, other than the clone and those `recorded` names.
+fn unrecorded(git: &Git, root: &Path, recorded: &[PathBuf]) -> Result<Vec<Worktree>, Error> {
+    let list = git.run(&["worktree", "list", "--porcelain"], None)?;
+    let Ok(real_root) = std::fs::canonicalize(root) else {
+        return Ok(Vec::new());
+    };
+    let recorded: Vec<PathBuf> = recorded
+        .iter()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect();
+    let mut found = Vec::new();
+    // Entries are blank-line separated; the first is the bare clone itself.
+    for entry in list.split("\n\n").skip(1) {
+        let mut path = None;
+        let mut branch = None;
+        let mut head = String::new();
+        for line in entry.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p));
+            } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+                branch = Some(b.to_owned());
+            } else if let Some(h) = line.strip_prefix("HEAD ") {
+                h.clone_into(&mut head);
+            }
+        }
+        let (Some(path), Some(branch)) = (path, branch) else {
+            continue;
+        };
+        if !branch.starts_with(worktree::BRANCH_PREFIX) {
+            continue;
+        }
+        let Ok(real) = std::fs::canonicalize(&path) else {
+            // Gone: the next prune drops git's entry.
+            continue;
+        };
+        if real.parent() != Some(real_root.as_path())
+            || real.file_name().is_some_and(|n| n == CLONE)
+            || recorded.contains(&real)
+        {
+            continue;
+        }
+        found.push(Worktree {
+            path: root.join(real.file_name().unwrap_or_default()),
+            branch,
+            base: head,
+        });
+    }
+    Ok(found)
+}
+
+/// The item whose worktree branch `short` (the name after `bosun/`) is: the one of `items`
+/// whose directory name it is, alone or with a `-<n>` suffix. `None` unless exactly one is.
+fn owner_of(short: &str, items: &[ItemId]) -> Option<ItemId> {
+    let mut owners = items.iter().filter(|item| {
+        let stem = worktree::dir_name(&item.0);
+        short == stem
+            || short
+                .strip_prefix(stem.as_str())
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    });
+    let owner = owners.next()?;
+    owners.next().is_none().then(|| owner.clone())
 }
 
 /// The shared build directory of `repo` (E1) as the variable a process gets: `(env, dir)`;
@@ -946,7 +1475,11 @@ mod tests {
                 root,
                 gitconfig,
                 config,
-                shared: Shared { options, deps },
+                shared: Shared {
+                    options,
+                    deps,
+                    worktrees: Registry::default(),
+                },
                 _store: store,
                 item,
                 dir,

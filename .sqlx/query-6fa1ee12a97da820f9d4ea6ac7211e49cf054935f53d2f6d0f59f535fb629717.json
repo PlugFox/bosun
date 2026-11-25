@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT i.item_key, w.path, w.branch, w.base_sha, w.kind, w.state, w.blocking,\n                    w.error, w.bytes, w.user_base_json, w.created_ms, w.ended_ms\n             FROM worktree w JOIN item i ON i.id = w.item_id\n             WHERE (?1 IS NULL OR i.item_key = ?1) AND (?2 IS NULL OR w.state = ?2)\n             ORDER BY w.id",
+  "query": "SELECT i.item_key, w.path, w.branch, w.base_sha, w.kind, w.state, w.blocking,\n                    w.error, w.bytes, w.user_base_json, w.created_ms, w.ended_ms,\n                    w.child_pid, w.child_started_ms\n             FROM worktree w JOIN item i ON i.id = w.item_id\n             WHERE (?1 IS NULL OR i.item_key = ?1) AND (?2 IS NULL OR w.state = ?2)\n             ORDER BY w.id",
   "describe": {
     "columns": [
       {
@@ -134,6 +134,28 @@
             "name": "ended_ms"
           }
         }
+      },
+      {
+        "name": "child_pid",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "child_pid"
+          }
+        }
+      },
+      {
+        "name": "child_started_ms",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "worktree",
+            "name": "child_started_ms"
+          }
+        }
       }
     ],
     "parameters": {
@@ -151,8 +173,10 @@
       true,
       true,
       false,
+      true,
+      true,
       true
     ]
   },
-  "hash": "8be93a0fbd7c27500d75c80d3517905270019cac1f9db2e9c09cf1424b6c53c5"
+  "hash": "6fa1ee12a97da820f9d4ea6ac7211e49cf054935f53d2f6d0f59f535fb629717"
 }

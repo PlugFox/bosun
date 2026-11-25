@@ -160,6 +160,8 @@ pub struct WorktreeRow {
     pub created_ms: i64,
     /// When it was removed or quarantined.
     pub ended_ms: Option<i64>,
+    /// The child of its `setup` or `teardown` while one runs: pid and start time (E3).
+    pub child: Option<(u32, i64)>,
 }
 
 /// A session shim the daemon started (#8), with how far its output has been read (E18).
@@ -806,7 +808,8 @@ impl Reader {
         let state = state.map(codec::worktree_state);
         let rows = sqlx::query!(
             "SELECT i.item_key, w.path, w.branch, w.base_sha, w.kind, w.state, w.blocking,
-                    w.error, w.bytes, w.user_base_json, w.created_ms, w.ended_ms
+                    w.error, w.bytes, w.user_base_json, w.created_ms, w.ended_ms,
+                    w.child_pid, w.child_started_ms
              FROM worktree w JOIN item i ON i.id = w.item_id
              WHERE (?1 IS NULL OR i.item_key = ?1) AND (?2 IS NULL OR w.state = ?2)
              ORDER BY w.id",
@@ -830,6 +833,12 @@ impl Reader {
                     user_base_json: row.user_base_json,
                     created_ms: row.created_ms,
                     ended_ms: row.ended_ms,
+                    child: match (row.child_pid, row.child_started_ms) {
+                        (Some(pid), Some(started)) => {
+                            Some((number(pid, "worktree child pid")?, started))
+                        }
+                        _ => None,
+                    },
                 })
             })
             .collect()

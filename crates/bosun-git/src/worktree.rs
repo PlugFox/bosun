@@ -351,6 +351,72 @@ pub fn remove(repo: &Git, root: &Path, worktree: &Worktree) -> Result<Removal, E
     }))
 }
 
+/// Tries again to delete the quarantined worktree at `path`, made under `root`: its directory,
+/// file by file, then its quarantine marker. Git no longer lists a quarantined worktree, so the
+/// marker is what says it is one. Nothing is deleted under a path that is not strictly under
+/// `root` once links are resolved, that is a link itself, or that has no marker.
+///
+/// Returns [`Removal::Removed`] once both are gone (a directory already gone counts), else
+/// [`Removal::Quarantined`] with the file that still blocks; the marker then stays.
+///
+/// # Errors
+///
+/// [`Error::Refused`] (nothing touched) for a path as above; [`Error::Io`] when the paths
+/// cannot be read or the marker cannot be deleted.
+pub fn retry_quarantine(root: &Path, path: &Path) -> Result<Removal, Error> {
+    let refuse = |reason| {
+        Err(Error::Refused {
+            path: path.to_owned(),
+            reason,
+        })
+    };
+    let marker = marker(path);
+    if !marker.is_file() {
+        return refuse("it has no quarantine marker");
+    }
+    let real = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return refuse("it is a link, not a worktree directory");
+        }
+        Ok(_) => canonical(path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+                return refuse("it is not inside the worktree root");
+            };
+            canonical(parent)?.join(name)
+        }
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    // Mutant (`mutant_git_retry_quarantine_anywhere`): the root is not checked.
+    if !cfg!(mutant_git_retry_quarantine_anywhere) {
+        let root = canonical(root)?;
+        if real == root || !real.starts_with(&root) {
+            return refuse("it is not inside the worktree root");
+        }
+    }
+    if let Err((file, error)) = clear(path) {
+        return Ok(Removal::Quarantined(Quarantine {
+            path: path.to_owned(),
+            error: format!("{}: {error}", file.display()),
+            blocking: Some(file).filter(|f| f != path),
+            marker,
+        }));
+    }
+    match std::fs::remove_file(&marker) {
+        Ok(()) => Ok(Removal::Removed),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Removal::Removed),
+        Err(source) => Err(Error::Io {
+            path: marker,
+            source,
+        }),
+    }
+}
+
 /// Whether `path` may be deleted as an item worktree of `repo` under `root`: `Ok(true)` when
 /// it is a directory, not a link, strictly under `root` once links are resolved, listed by git
 /// as a worktree other than the repository's own checkout, and holding neither that checkout
@@ -440,6 +506,13 @@ fn marker(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_owned();
     name.push(QUARANTINE_SUFFIX);
     path.with_file_name(name)
+}
+
+/// The directory name [`create`] starts from for `item`, before any `-2`, `-3`, ...: also the
+/// branch name after [`BRANCH_PREFIX`].
+#[must_use]
+pub fn dir_name(item: &str) -> String {
+    name(item)
 }
 
 /// The directory name for `item`.
@@ -787,6 +860,55 @@ mod tests {
         assert_eq!(remove(&git_repo, &root, &made).unwrap(), Removal::Removed);
         assert!(!made.path.exists());
         assert_eq!(branches(), "feature/x\nmain");
+    }
+
+    #[test]
+    fn a_quarantine_is_retried_only_under_its_root_and_with_its_marker() {
+        let (dir, _repo, root) = setup();
+        let quarantined = |at: &Path| {
+            std::fs::create_dir_all(at.join("sub")).unwrap();
+            std::fs::write(at.join("sub").join("left.txt"), "left").unwrap();
+            std::fs::write(marker(at), "quarantined").unwrap();
+        };
+        let refused = |path: &Path| {
+            let error = retry_quarantine(&root, path).unwrap_err();
+            assert!(
+                matches!(error, Error::Refused { .. }),
+                "{path:?}: {error:?}"
+            );
+        };
+
+        // Outside the root, marker and all: nothing is deleted.
+        let outside = dir.path().join("elsewhere");
+        quarantined(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        refused(&outside);
+        assert!(outside.join("sub").join("left.txt").is_file());
+        assert!(marker(&outside).is_file());
+
+        // Under the root without a marker: not a quarantined worktree.
+        let unmarked = root.join("unmarked");
+        std::fs::create_dir_all(&unmarked).unwrap();
+        std::fs::write(unmarked.join("mine.txt"), "mine").unwrap();
+        refused(&unmarked);
+        assert!(unmarked.join("mine.txt").is_file());
+
+        // The root itself.
+        std::fs::write(marker(&root), "").unwrap();
+        refused(&root);
+        assert!(unmarked.join("mine.txt").is_file());
+
+        // A quarantined worktree under the root goes, its marker with it.
+        let held = root.join("repo-1");
+        quarantined(&held);
+        assert_eq!(retry_quarantine(&root, &held).unwrap(), Removal::Removed);
+        assert!(!held.exists());
+        assert!(!marker(&held).exists());
+        // Its directory already gone: the marker goes.
+        let gone = root.join("repo-2");
+        std::fs::write(marker(&gone), "").unwrap();
+        assert_eq!(retry_quarantine(&root, &gone).unwrap(), Removal::Removed);
+        assert!(!marker(&gone).exists());
     }
 
     #[test]

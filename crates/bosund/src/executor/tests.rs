@@ -722,6 +722,28 @@ impl Scene {
             Duration::from_millis(50),
             config_watch::Reported::default(),
         );
+        let (options, deps) = self.options_and_deps(failpoint, queue);
+        let task = tokio::spawn(Loop::new(options, deps, rx).run());
+        (task, watcher)
+    }
+
+    /// What a loop of the scene shares, on its own: for a test that acts as an earlier daemon
+    /// did (a worktree it made) before the loop starts.
+    fn shared(&self) -> Shared {
+        let (options, deps) = self.options_and_deps(None, self.queue());
+        Shared {
+            options,
+            deps,
+            worktrees: workspace::Registry::default(),
+        }
+    }
+
+    /// The options and dependencies of the scene's loop.
+    fn options_and_deps(
+        &self,
+        failpoint: Option<Failpoint>,
+        queue: Arc<dyn Queue + Send + Sync>,
+    ) -> (Options, Deps) {
         let options = Options {
             repo: self.name.clone(),
             daemon_id: "test-host/test-user".to_owned(),
@@ -767,8 +789,7 @@ impl Scene {
             }),
             free_space: self.free_space.clone(),
         };
-        let task = tokio::spawn(Loop::new(options, deps, rx).run());
-        (task, watcher)
+        (options, deps)
     }
 
     async fn state(&self, card: u64) -> Option<State> {

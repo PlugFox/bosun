@@ -40,10 +40,10 @@ pub(crate) struct Run {
 
 /// A spawner that reports the key of the child it starts.
 #[derive(Debug)]
-struct Reporting<'a> {
-    inner: &'a dyn Spawner,
-    key: Mutex<Option<oneshot::Sender<ProcessKey>>>,
-    started: Arc<Mutex<Option<ProcessKey>>>,
+pub(super) struct Reporting<'a> {
+    pub(super) inner: &'a dyn Spawner,
+    pub(super) key: Mutex<Option<oneshot::Sender<ProcessKey>>>,
+    pub(super) started: Arc<Mutex<Option<ProcessKey>>>,
 }
 
 impl Spawner for Reporting<'_> {

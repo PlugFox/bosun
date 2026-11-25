@@ -1251,11 +1251,29 @@ async fn a_worktree_its_process_and_its_landing_read_back() {
         user_base_json: worktree.user_base_json.clone(),
         created_ms: T0,
         ended_ms: None,
+        child: None,
     };
     assert_eq!(
         reader.worktrees(&id()).await.unwrap(),
         std::slice::from_ref(&created)
     );
+    // The child of a running setup is recorded, then cleared.
+    let child = |child| Write::WorktreeChild {
+        path: worktree.path.clone(),
+        child,
+    };
+    twice(&store, vec![child(Some((77, T0 + 1)))]).await;
+    assert_eq!(
+        reader.open_worktrees().await.unwrap()[0].child,
+        Some((77, T0 + 1))
+    );
+    twice(&store, vec![child(None)]).await;
+    assert_eq!(reader.open_worktrees().await.unwrap()[0].child, None);
+    let unknown = Write::WorktreeChild {
+        path: "/nowhere".to_owned(),
+        child: None,
+    };
+    assert!(store.writer().write(vec![unknown]).await.is_err());
     assert_eq!(
         reader.open_worktrees().await.unwrap(),
         std::slice::from_ref(&created)
@@ -1344,8 +1362,28 @@ async fn a_worktree_its_process_and_its_landing_read_back() {
         reader.quarantined_worktrees().await.unwrap(),
         std::slice::from_ref(&quarantined)
     );
-    assert_eq!(reader.worktrees(&id()).await.unwrap(), [quarantined]);
+    assert_eq!(
+        reader.worktrees(&id()).await.unwrap(),
+        std::slice::from_ref(&quarantined)
+    );
     assert_eq!(count(&store, "worktree").await, 1);
+
+    // Once free, the quarantined worktree is removed; what blocked it stays.
+    twice(
+        &store,
+        vec![Write::WorktreeFreed {
+            path: worktree.path.clone(),
+            at_ms: T0 + 6,
+        }],
+    )
+    .await;
+    let freed = WorktreeRow {
+        state: WorktreeState::Removed,
+        ended_ms: Some(T0 + 6),
+        ..quarantined
+    };
+    assert_eq!(reader.quarantined_worktrees().await.unwrap(), []);
+    assert_eq!(reader.worktrees(&id()).await.unwrap(), [freed]);
 
     let landing = LandingRow {
         item: id(),

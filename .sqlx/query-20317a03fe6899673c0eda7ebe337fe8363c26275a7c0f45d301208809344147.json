@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE worktree SET state = 'removed', ended_ms = ?\n         WHERE path = ? AND state = 'quarantined'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "20317a03fe6899673c0eda7ebe337fe8363c26275a7c0f45d301208809344147"
+}

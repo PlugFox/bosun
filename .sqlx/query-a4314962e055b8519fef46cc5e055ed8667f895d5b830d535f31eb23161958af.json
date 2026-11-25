@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE worktree SET child_pid = ?, child_started_ms = ? WHERE path = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a4314962e055b8519fef46cc5e055ed8667f895d5b830d535f31eb23161958af"
+}

@@ -224,6 +224,23 @@ pub(crate) fn set_aside(repo: &Path, base: &Base, item: &ItemId) -> Result<(), E
 /// The commit of the uncommitted changes has `author` (the repository identity's, E26) as its
 /// author and committer.
 pub(crate) fn keep_work(dir: &Path, item: &ItemId, author: &Ident) -> Result<String, Error> {
+    keep_work_at(dir, &aside_ref(item), item, author)
+}
+
+/// The ref the work of a worktree that names no item is kept under (#8): one the daemon made
+/// on `branch` but never recorded.
+pub(crate) fn orphan_ref(branch: &str) -> String {
+    format!("refs/bosun/orphans/{branch}")
+}
+
+/// [`keep_work`] under `name`; `label` names the work in the commit message.
+pub(crate) fn keep_work_at(
+    dir: &Path,
+    name: &str,
+    label: &ItemId,
+    author: &Ident,
+) -> Result<String, Error> {
+    let item = label;
     let git = Git::new(dir);
     let head = head(&git)?;
     // Mutant (`mutant_loop_aside_commit_fixed_identity`): the set-aside commit is made as
@@ -239,7 +256,7 @@ pub(crate) fn keep_work(dir: &Path, item: &ItemId, author: &Ident) -> Result<Str
     } else {
         snapshot_commit(&git, &head, item, author)?
     };
-    git.run(&["update-ref", &aside_ref(item), &tip], None)?;
+    git.run(&["update-ref", name, &tip], None)?;
     Ok(tip)
 }
 

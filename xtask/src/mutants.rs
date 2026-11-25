@@ -2251,7 +2251,55 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // The worktree sweep: what no item owns is closed, quarantines are retried, setup children
+    // are recorded and reaped.
+    Mutant {
+        name: "mutant_loop_no_worktree_sweep",
+        issue: SWEEP_CARD,
+        breaks: "a worktree no item in flight owns is never closed",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::a_worktree_no_item_owns_is_closed_at_the_next_claim",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_setup_child_unrecorded",
+        issue: SWEEP_CARD,
+        breaks: "a `setup` a dead daemon started runs on with nobody to end it",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::recovery::a_daemon_killed_during_setup_leaves_no_setup_running",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_quarantine_not_retried",
+        issue: SWEEP_CARD,
+        breaks: "a quarantined worktree stays on disk after it is free",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::a_quarantined_worktree_is_removed_once_it_is_free",
+        ),
+        // Only Windows refuses to delete a file held open.
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_git_retry_quarantine_anywhere",
+        issue: SWEEP_CARD,
+        breaks: "retrying a quarantine deletes a directory outside the worktree root",
+        package: "bosun-git",
+        check: Check::Test(
+            "worktree::tests::a_quarantine_is_retried_only_under_its_root_and_with_its_marker",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that sweeps the worktrees no item owns, retries quarantines and records the
+/// children of `setup` and `teardown` (its own number was not known when it was written; its
+/// parent's stands in).
+const SWEEP_CARD: u32 = 8;
 
 /// The card of #8 that leaves worktree-mode sessions running at a graceful stop, writes their
 /// `process` row before the spawn and records where a session's commit range starts (its own

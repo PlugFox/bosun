@@ -57,7 +57,9 @@ fn configure(scene: &Scene) {
 /// sleeps 1.5 s and marks its end. The test holds `rig` itself until both items wait for it,
 /// so the second really waits. Both end Done, their sessions never overlap, the second's store
 /// has its wait for `rig` (at least the first's session long) and its release, and the journal
-/// is empty at the end (`mutant_loop_skip_leases` lets the sessions overlap).
+/// is empty at the end. (The claim takes the leases and keeps them for the first session, so
+/// `mutant_loop_skip_leases`, which only lets a session skip its own request, does not reach
+/// this scene; `mutant_loop_lease_after_setup` and the parked scene below cover the waits.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_items_that_need_the_same_resource_never_overlap_and_the_wait_is_recorded() {
     const RIG: &str = "[resource.rig]\nkind = \"device\"\ncapacity = 1\nscope = \"machine\"\n";
@@ -651,7 +653,7 @@ fn journal_lists(path: &Path, item: &str) -> bool {
 /// test moves the clock past the park while it holds `rig`: for 2 s the item runs no session.
 /// The test lets go: the item resumes and ends Done, and its store has two grants of `rig`
 /// (the claim's and the resume's), each released (`mutant_loop_hold_leases_while_parked` keeps
-/// the lease while parked).
+/// the lease while parked; `mutant_loop_skip_leases` resumes without waiting for `rig`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_item_holds_no_lease_and_takes_it_again_to_resume() {
     let (scene, leases) = rig_scene().await;

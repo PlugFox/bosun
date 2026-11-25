@@ -665,6 +665,74 @@ mod tests {
         conn.close().await.unwrap();
     }
 
+    /// Migration 13 runs outside sqlx's transaction, so a daemon that dies after its `COMMIT`
+    /// and before sqlx records it leaves its tables without its record. The next open runs it
+    /// again: it must not stop at a table it made the first time, and every row survives.
+    #[tokio::test]
+    async fn migration_13_runs_again_when_its_record_was_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO repo (id, path) VALUES (1, '/fixture/repo');
+             INSERT INTO item (id, item_key, repo_id, card_key, state, reason, attempt_number,
+                               seq, attempts, spawns, runs, failed, created_ms, updated_ms)
+             VALUES (3, 'demo#1', 1, 'card-1', 'needs_you', 'setup', 1, 4, 1, 1, 0, 0, 10, 20);
+             INSERT INTO worktree (id, item_id, path, branch, base_sha, kind, user_base_json,
+                                   created_ms)
+             VALUES (5, 3, '/fixture/worktrees/demo-1', 'bosun/demo-1', 'abc123', 'item',
+                     '{}', 15);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        let item_columns = "SELECT id, item_key, repo_id, card_key, state, park_reason,
+                                   park_until_ms, park_next, outcome, reason, attempt_number,
+                                   snapshot_id, seq, attempts, spawns, runs, failed, uncounted,
+                                   boot, created_ms, updated_ms, conflicts
+                            FROM item ORDER BY id";
+        let worktree_columns = "SELECT id, item_id, path, branch, base_sha, kind, state, blocking,
+                                       error, bytes, user_base_json, created_ms, ended_ms
+                                FROM worktree ORDER BY id";
+        let items_before = items(&mut conn, item_columns).await;
+        let worktrees_before = items(&mut conn, worktree_columns).await;
+        assert_eq!(items_before.len(), 1);
+        assert_eq!(worktrees_before.len(), 1);
+        // As a crash between the migration's `COMMIT` and sqlx's insert leaves it.
+        sqlx::raw_sql("DELETE FROM _sqlx_migrations WHERE version = 13")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let mut conn = store.reader().pool.acquire().await.unwrap();
+        assert_eq!(items(&mut conn, item_columns).await, items_before);
+        assert_eq!(items(&mut conn, worktree_columns).await, worktrees_before);
+        let recorded: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE version = 13")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(recorded, 1);
+        let broken: Vec<(String, i64)> =
+            sqlx::query_as("SELECT \"table\", rowid FROM pragma_foreign_key_check")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert!(broken.is_empty(), "{broken:?}");
+        drop(conn);
+        store.close().await.unwrap();
+    }
+
     /// Every row of `query` as text, column by column, to compare a table before and after.
     async fn items(conn: &mut SqliteConnection, query: &'static str) -> Vec<Vec<Option<String>>> {
         use sqlx::Row;

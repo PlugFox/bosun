@@ -1368,7 +1368,7 @@ pub(crate) fn enter(dir: &Path) -> Result<(), String> {
         .run(&["ls-files", "-z"], None)
         .map_err(|e| format!("the tracked files of {}: {e}", dir.display()))?;
     let now = std::time::SystemTime::now();
-    for name in listed.split(' ').filter(|n| !n.is_empty()) {
+    for name in listed.split('\0').filter(|n| !n.is_empty()) {
         let path = dir.join(name);
         match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_file() => {}
@@ -1428,6 +1428,18 @@ mod tests {
     use super::super::{Deps, GhLogins, Options, Shared, SystemClock, board};
     use super::*;
     use crate::events::{Events, Options as EventOptions};
+
+    /// This file itself holds no raw NUL byte: one makes ripgrep and GitHub's viewer treat the
+    /// whole file as binary, so searches skip it (write the escape `'\0'` instead).
+    #[test]
+    fn the_source_has_no_raw_nul_byte() {
+        let source = include_bytes!("workspace.rs");
+        let at = source.iter().position(|&b| b == 0u8);
+        assert_eq!(
+            at, None,
+            "a raw NUL byte in workspace.rs at byte offset {at:?}"
+        );
+    }
 
     /// One test's world: the user's repository (`repo`, on `main`), the worktree root next to
     /// it (`wt`), a real store, and the daemon's shared state.

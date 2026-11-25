@@ -1,15 +1,19 @@
-//! The guard on the user's checkout in worktree mode (#8, E4 as amended by E21): the item runs
-//! in a worktree off the daemon's clone, so nothing it does should reach the user's checkout.
-//! The checkout is captured at claim ([`UserCheckout::capture`]: HEAD, its branch, every ref,
-//! the stash and `git status --porcelain`) and compared before the verdict
+//! The guard on the user's checkout in worktree mode (#8, E4 as amended by E21 and E23): the
+//! item runs in a worktree off the daemon's clone, so nothing it does should reach the user's
+//! checkout. The checkout is captured at claim ([`UserCheckout::capture`]: HEAD, its branch,
+//! every ref, the stash and `git status --porcelain`) and compared before the verdict
 //! ([`compare_checkout`]).
 //!
-//! The guard is lenient (E21): the user may be working in that checkout meanwhile.
+//! The guard is lenient (E21): the user may be working in that checkout meanwhile. It compares
+//! HEAD, `refs/heads/*` and `refs/tags/*` only (E23): `refs/remotes/*` (a `fetch --prune`, a
+//! fetch after a force-push), `refs/stash`, `refs/notes/*` and every other namespace are not
+//! compared. The filter is in the comparison, so a capture stored with every ref by an earlier
+//! daemon is read the same way.
 //!
-//! - Needs you (`guard_checkout`): HEAD switched to another branch or detached; an existing ref
-//!   deleted, or moved to a commit that does not descend from its captured value.
-//! - Tolerated: a ref moved forward (the user's own commits), a new ref, a changed
-//!   `refs/stash`.
+//! - Needs you (`guard_checkout`): HEAD switched to another branch or detached; an existing
+//!   branch or tag deleted, or moved to a commit that does not descend from its captured value.
+//! - Tolerated: a branch or tag moved forward (the user's own commits), a new one, any change
+//!   to a ref outside `refs/heads/` and `refs/tags/`.
 //! - A warning, not Needs you: changed status lines (the user editing files).
 //!
 //! The real boundary is the OS-user layout of #2; this guard is hygiene.
@@ -21,6 +25,17 @@ use bosun_git::{Base, Git};
 
 /// The stash ref, which the guard does not compare.
 const STASH: &str = "refs/stash";
+
+/// Whether the guard compares `reference` (E23): the branches and the tags only. A capture an
+/// earlier daemon stored with every ref is read the same way.
+fn compared(reference: &str) -> bool {
+    if cfg!(mutant_loop_guard_compares_remotes) {
+        // Mutant (`mutant_loop_guard_compares_remotes`): every ref but `refs/stash` is
+        // compared, as in E21 before E23.
+        return reference != STASH;
+    }
+    reference.starts_with("refs/heads/") || reference.starts_with("refs/tags/")
+}
 
 /// The user's checkout as captured: its base and its status lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +150,7 @@ pub(crate) fn compare_checkout(
         }
     }
     for (reference, old) in &before.base.refs {
-        if reference == STASH {
+        if !compared(reference) {
             continue;
         }
         match after.base.refs.get(reference) {
@@ -149,7 +164,7 @@ pub(crate) fn compare_checkout(
     }
     if strict {
         for reference in after.base.refs.keys() {
-            if !before.base.refs.contains_key(reference) {
+            if compared(reference) && !before.base.refs.contains_key(reference) {
                 diff.refusals.push(format!("{reference} was created"));
             }
         }
@@ -297,6 +312,72 @@ mod tests {
             compare_checkout(&before, &dropped, descends),
             CheckoutDiff::default()
         );
+    }
+
+    #[test]
+    fn only_heads_and_tags_are_compared() {
+        let before = checkout(
+            Some("main"),
+            "a",
+            &[
+                ("refs/heads/main", "a"),
+                ("refs/heads/feature", "a"),
+                ("refs/tags/v1", "a"),
+                ("refs/remotes/origin/x", "a"),
+                ("refs/remotes/origin/y", "b"),
+                ("refs/notes/commits", "a"),
+                ("refs/stash", "s1"),
+            ],
+            &[],
+        );
+        // A pruned and a force-fetched remote-tracking ref, rewritten notes, another stash.
+        let elsewhere = checkout(
+            Some("main"),
+            "a",
+            &[
+                ("refs/heads/main", "a"),
+                ("refs/heads/feature", "a"),
+                ("refs/tags/v1", "a"),
+                ("refs/remotes/origin/y", "c"),
+                ("refs/notes/commits", "c"),
+                ("refs/stash", "s2"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            compare_checkout(&before, &elsewhere, descends),
+            CheckoutDiff::default()
+        );
+        let with = |changes: &[(&str, Option<&str>)]| {
+            let mut after = before.clone();
+            for (reference, value) in changes {
+                match value {
+                    Some(v) => after
+                        .base
+                        .refs
+                        .insert((*reference).to_owned(), (*v).to_owned()),
+                    None => after.base.refs.remove(*reference),
+                };
+            }
+            compare_checkout(&before, &after, descends).refusals
+        };
+        assert_eq!(
+            with(&[("refs/heads/feature", None)]),
+            ["refs/heads/feature was deleted"]
+        );
+        assert_eq!(
+            with(&[("refs/tags/v1", None)]),
+            ["refs/tags/v1 was deleted"]
+        );
+        assert_eq!(
+            with(&[("refs/heads/feature", Some("c"))]),
+            ["refs/heads/feature moved from a to c, which does not descend from it"]
+        );
+        assert_eq!(
+            with(&[("refs/tags/v1", Some("c"))]),
+            ["refs/tags/v1 moved from a to c, which does not descend from it"]
+        );
+        assert_eq!(with(&[("refs/stash", Some("s3"))]), Vec::<String>::new());
     }
 
     #[test]

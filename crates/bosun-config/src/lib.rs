@@ -278,6 +278,22 @@ pub struct Worktree {
     pub shared_build: Option<SharedBuild>,
 }
 
+impl Worktree {
+    /// A worktree configuration with `root` and every other key at its default: no `setup`,
+    /// no `teardown`, no disk floor, no shared build. The daemon rebuilds one from what it
+    /// recorded when the key is gone from the configuration (#8).
+    #[must_use]
+    pub fn at(root: PathBuf) -> Self {
+        Self {
+            root,
+            setup: None,
+            teardown: None,
+            disk_floor: None,
+            shared_build: None,
+        }
+    }
+}
+
 /// `[resource.<name>]`: a resource items lease (#8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

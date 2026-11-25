@@ -722,7 +722,9 @@ impl Loop {
         let (Some(repo_hash), Some(policy_hash)) = (row.config_hash, row.policy_hash) else {
             return Err("its hashes were not recorded".to_owned());
         };
-        let (workdir, worktree) = self.worktree_from_store(&item.id).await?;
+        let (workdir, worktree) = self
+            .worktree_from_store(&item.id, base.branch.as_deref())
+            .await?;
         let git_config = self.git_config_from_store(item, &workdir).await?;
         Ok(Arc::new(Claimed {
             snapshot,
@@ -736,18 +738,24 @@ impl Loop {
     }
 
     /// The working directory of `item` and, in worktree mode, its worktree: from its `created`
-    /// row of kind `item`, with the user's checkout at claim. Without `repo.<name>.worktree`,
-    /// the repository's checkout.
+    /// row of kind `item`, with the user's checkout at claim. In stage 1, the repository's
+    /// checkout.
+    ///
+    /// The mode is the one the item was claimed in, not today's configuration's (#8): worktree
+    /// mode when the item has a row of kind `item` (in any state) or its base branch (`branch`,
+    /// the snapshot's) is a `bosun/` one; stage 1 otherwise. A worktree-mode item whose
+    /// `repo.<name>.worktree` is gone meanwhile gets [`super::workspace::Workspace::recorded`]
+    /// at its row's root, so its worktree can still be closed with its work kept in the clone;
+    /// the user's checkout is never reset or written to. Its configuration hash differs either
+    /// way, so it then goes to Needs you (`config_changed`).
     async fn worktree_from_store(
         &self,
         item: &ItemId,
+        branch: Option<&str>,
     ) -> Result<(PathBuf, Option<super::ItemWorktree>), String> {
         let config = self.config();
         let (repo, _) =
             lookup(&config, &self.shared.options.repo).ok_or("the repository is gone")?;
-        let Some(workspace) = super::workspace::Workspace::of(repo) else {
-            return Ok((repo.path.clone(), None));
-        };
         let rows = self
             .shared
             .deps
@@ -755,6 +763,18 @@ impl Loop {
             .worktrees(item)
             .await
             .map_err(|e| e.to_string())?;
+        let claimed_in_worktree = if cfg!(mutant_loop_mode_from_config) {
+            // Mutant (`mutant_loop_mode_from_config`): the mode comes from the configuration
+            // now.
+            repo.worktree.is_some()
+        } else {
+            rows.iter()
+                .any(|r| r.kind == bosun_store::WorktreeKind::Item)
+                || branch.is_some_and(|b| b.starts_with("refs/heads/bosun/"))
+        };
+        if !claimed_in_worktree {
+            return Ok((repo.path.clone(), None));
+        }
         let row = rows
             .into_iter()
             .rev()
@@ -767,6 +787,15 @@ impl Loop {
         if !path.is_dir() {
             return Err(format!("its worktree {} is gone", path.display()));
         }
+        // The key gone meanwhile: the workspace the row was made in.
+        let workspace = if let Some(workspace) = super::workspace::Workspace::of(repo) {
+            workspace
+        } else {
+            let root = path
+                .parent()
+                .ok_or_else(|| format!("its worktree {} has no parent", path.display()))?;
+            super::workspace::Workspace::recorded(repo, root.to_owned())
+        };
         let user = row
             .user_base_json
             .as_deref()

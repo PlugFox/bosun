@@ -353,6 +353,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_setup_child_unrecorded)",
   "cfg(mutant_loop_quarantine_not_retried)",
   "cfg(mutant_git_retry_quarantine_anywhere)",
+  # #175: the guard compares branches and tags only; the clone has long paths on Windows;
+  # recovery keeps the mode an item was claimed in.
+  "cfg(mutant_loop_guard_compares_remotes)",
+  "cfg(mutant_loop_clone_without_longpaths)",
+  "cfg(mutant_loop_mode_from_config)",
 ] }
 
 [workspace.lints.clippy]

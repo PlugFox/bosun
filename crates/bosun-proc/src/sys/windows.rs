@@ -12,7 +12,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
@@ -410,6 +411,61 @@ pub(crate) fn start_time(pid: u32) -> io::Result<Option<u64>> {
     }
 }
 
+/// 100 ns intervals between 1601-01-01 and the Unix epoch.
+const UNIX_EPOCH_AS_FILETIME: i64 = 116_444_736_000_000_000;
+
+/// A creation time (100 ns since 1601) as Unix milliseconds, rounded down.
+pub(crate) fn start_unix_ms(start: u64) -> i64 {
+    let start = i64::try_from(start).unwrap_or(i64::MAX);
+    (start - UNIX_EPOCH_AS_FILETIME).div_euclid(10_000)
+}
+
+/// The live processes of the current user whose executable's file name is `name`, from a
+/// Toolhelp process snapshot, each with its creation time read through a handle that is
+/// checked to belong to the user. A process that cannot be opened, or whose token cannot be
+/// read, is skipped.
+pub(crate) fn processes_named(name: &str) -> io::Result<Vec<(u32, u64)>> {
+    use std::os::windows::ffi::OsStringExt;
+
+    // SAFETY: a process snapshot of the whole system; the flags are valid and the process id
+    // is ignored for `TH32CS_SNAPPROCESS`.
+    let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    let snapshot = owned(raw).ok_or_else(io::Error::last_os_error)?;
+    let user = super::current_user_sid()?;
+    // SAFETY: `PROCESSENTRY32W` is plain C data; all zeros is a valid value.
+    let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
+    entry.dwSize = size_of_u32::<PROCESSENTRY32W>();
+    let mut found = Vec::new();
+    // SAFETY: the snapshot handle is live; `entry` is writable and its `dwSize` is set, as the
+    // call requires.
+    let mut more = unsafe { Process32FirstW(snapshot.as_raw_handle(), &raw mut entry) } != 0;
+    while more {
+        let len = entry
+            .szExeFile
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let exe = std::ffi::OsString::from_wide(&entry.szExeFile[..len]);
+        let pid = entry.th32ProcessID;
+        if pid != 0
+            && exe
+                .to_str()
+                .is_some_and(|exe| crate::named::file_name_is(exe, name))
+        {
+            // A process that exited, or that the user cannot open, is not the user's stray.
+            if let Ok(Some(process)) = open_live(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+                && super::process_user_sid(process.as_raw_handle()).is_ok_and(|sid| sid == user)
+                && let Ok(start) = creation_time(process.as_raw_handle())
+            {
+                found.push((pid, start));
+            }
+        }
+        // SAFETY: as for `Process32FirstW`.
+        more = unsafe { Process32NextW(snapshot.as_raw_handle(), &raw mut entry) } != 0;
+    }
+    Ok(found)
+}
+
 pub(crate) fn reap(pid: u32, start: u64) -> io::Result<bool> {
     let Some(process) = open_live(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE)?
     else {
@@ -492,6 +548,13 @@ pub(crate) fn free_space(path: &std::path::Path) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_creation_time_is_unix_milliseconds_rounded_down() {
+        assert_eq!(start_unix_ms(116_444_736_000_000_000), 0);
+        assert_eq!(start_unix_ms(116_444_736_000_019_999), 1);
+        assert_eq!(start_unix_ms(116_444_735_999_999_999), -1);
+    }
 
     /// A job that outgrows every buffer is an error after the bound, not an endless loop.
     #[test]

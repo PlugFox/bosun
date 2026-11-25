@@ -34,6 +34,7 @@ mod leases;
 mod recovery;
 mod shim;
 mod sticky;
+mod sweep;
 mod worktrees;
 
 /// Removes from `command` every variable it would inherit from a bosun session (#134): each

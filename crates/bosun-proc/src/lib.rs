@@ -9,6 +9,10 @@
 //!   the session shim of #8, is the second one behind the same trait.
 //! - [`reap`] kills a recorded process after a restart only if its pid and its start time both
 //!   still match, so a reused pid is never killed.
+//! - [`processes_named`] lists the running processes of the current user by executable file
+//!   name, each as a [`Named`]: its [`ProcessKey`] for [`reap`] and its start in Unix
+//!   milliseconds, for the process sweep of #8 (E12), which kills the known strays a repository
+//!   lists that started during an attempt.
 //! - [`Power`] holds the machine awake while work runs: [`PowerGuard`] issues one request on
 //!   acquire and one release on drop. [`SystemPower`] is the platform's, [`FakePower`] counts.
 //! - [`next_local_midnight`] and [`last_local_midnight`] read the machine's time zone, which
@@ -54,6 +58,7 @@
 pub mod disk;
 mod key;
 mod local_time;
+mod named;
 #[cfg(windows)]
 pub mod pipe;
 mod power;
@@ -66,5 +71,6 @@ mod helper;
 
 pub use key::{ProcessKey, StartTime, is_running, reap, start_time};
 pub use local_time::{last_local_midnight, next_local_midnight, utc_offset_ms};
+pub use named::{Named, processes_named};
 pub use power::{FakePower, Power, PowerGuard, SystemPower};
 pub use spawn::{ChildSpec, NativeSpawner, Output, Spawned, Spawner, Tree, WaitFuture};

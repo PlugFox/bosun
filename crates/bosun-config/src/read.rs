@@ -12,7 +12,7 @@ use toml_edit::{Document, Item, TableLike};
 use crate::error::{Location, Notice, Problem};
 use crate::policy::{Policy, relative_entry};
 use crate::{
-    Budget, Daemon, Landing, LandingMode, McpServer, PullRequest, Queue, Resource, Verdict,
+    Budget, Daemon, Landing, LandingMode, McpServer, PullRequest, Queue, Resource, Sweep, Verdict,
 };
 
 /// Sections of #4 that this version accepts and does not read.
@@ -83,6 +83,7 @@ pub(crate) struct DraftRepo {
     pub(crate) landing: DraftLanding,
     pub(crate) mcp_servers: BTreeMap<String, McpServer>,
     pub(crate) worktree: Option<DraftWorktree>,
+    pub(crate) sweep: Option<Sweep>,
 }
 
 /// `repo.<name>.landing`, with where its mode and `merge.push` are written, for the checks
@@ -395,6 +396,7 @@ impl Reader<'_> {
             landing: DraftLanding::default(),
             mcp_servers: BTreeMap::new(),
             worktree: None,
+            sweep: None,
         };
         let Some(table) = item.as_table_like() else {
             return repo;
@@ -431,6 +433,11 @@ impl Reader<'_> {
                 "worktree" => {
                     if let Some(table) = self.table(item, &what, key_at) {
                         repo.worktree = Some(self.worktree(table, &what, key_at));
+                    }
+                }
+                "sweep" => {
+                    if let Some(table) = self.table(item, &what, key_at) {
+                        repo.sweep = Some(self.sweep(table, &what));
                     }
                 }
                 _ => self.ignored(key_at, &what),
@@ -716,6 +723,42 @@ impl Reader<'_> {
             self.problem(at, format!("`{what}` has no `root`"));
         }
         worktree
+    }
+
+    /// Reads `sweep` (#8, E12). An unknown key is refused: a misspelt `processes` must not leave
+    /// the strays running unnoticed.
+    fn sweep(&mut self, table: &dyn TableLike, what: &str) -> Sweep {
+        let mut sweep = Sweep::default();
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let path = format!("{what}.{key}");
+            match key {
+                "processes" => {
+                    let Some(array) = self.string_array(item, &path) else {
+                        continue;
+                    };
+                    for (name, at) in array {
+                        if process_name(name) {
+                            sweep.processes.insert(name.to_owned());
+                        } else {
+                            self.problem(
+                                at,
+                                format!(
+                                    "`{path}` holds {name:?}; a process name is a file name \
+                                     without a directory: ASCII letters, digits, `.`, `-` and \
+                                     `_`, not only dots"
+                                ),
+                            );
+                        }
+                    }
+                }
+                other => self.problem(
+                    key_at,
+                    format!("unknown key `{what}.{other}`; a sweep has `processes`"),
+                ),
+            }
+        }
+        sweep
     }
 
     /// Reads `worktree.shared_build` (#8, E1). An unknown key is refused; `dir` and `resource`
@@ -1207,6 +1250,15 @@ fn valid_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The executable file name of a process the sweep may kill: ASCII letters, digits, `.`, `-`
+/// and `_`, not empty and not only dots (`.` and `..` name directories).
+fn process_name(name: &str) -> bool {
+    name.chars().any(|c| c != '.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 /// An environment variable name: an ASCII identifier.

@@ -1942,6 +1942,35 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #162: the process sweep of named strays after an attempt (E12).
+    Mutant {
+        name: "mutant_loop_sweep_ignores_start_time",
+        issue: 162,
+        breaks: "the process sweep kills a listed process that started before the attempt",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::sweep::a_named_stray_started_during_the_attempt_is_killed_and_an_older_one_is_not",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_sweep_unlogged",
+        issue: 162,
+        breaks: "the process sweep's kills are neither reported nor noted on the item",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::sweep::a_named_stray_started_during_the_attempt_is_killed_and_an_older_one_is_not",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_proc_named_matches_every_process",
+        issue: 162,
+        breaks: "processes_named lists every process of the user, whatever its name",
+        package: "bosun-proc",
+        check: Check::Test("processes_named_finds_a_copy_of_the_helper_by_its_name_only"),
+        platform: None,
+    },
     Mutant {
         name: "mutant_api_lease_acquire_always_grants",
         issue: 156,

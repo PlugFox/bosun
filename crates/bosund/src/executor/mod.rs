@@ -12,6 +12,7 @@
 //! | --- | --- |
 //! | `Claim` | the claim task ([`claim`]): claim write and re-read (#5), snapshot, static lint, base capture, the verdict on the base commit (D7), the configuration and policy hashes |
 //! | `Spawn` | the session task ([`session`]): fail-closed identity checks, the prompt, the agent environment, the run row, the spawn with the power request held, the stream, the exit, the session's commit range. In worktree mode the agent runs under a copy of the session shim (`bosun-shim`, [`find_shim`], [`session::install_shim`]) capped at the item's remaining wall-clock budget; the shim's `process` row is written before the spawn and holds its pid once it runs and how far its output has been read; the session outlives the loop that started it, and a graceful stop ([`Signal::Detach`], E22) leaves it running for the next daemon to re-attach. The run row records the head the session started from |
+//! | (after a session) | the process sweep ([`sweep`], E12): with `repo.<name>.sweep`, the listed processes that started during the attempt are killed, reported and noted on the item before the session's event is applied; nothing for a session a graceful stop left running |
 //! | `Kill` | the running task's kill signal ([`Signal::Kill`]); for a blocking question, after [`Options::question_grace`] |
 //! | `CheckPreconditions` | the guards of #59 ([`guards`]: protected paths, new ignored files, git's own configuration), then the verdict preconditions of `bosun-git` |
 //! | `RunVerdict` | the verdict task ([`verdict`]): always the snapshot's command |
@@ -136,6 +137,7 @@ mod outbox;
 mod park;
 mod recover;
 mod session;
+mod sweep;
 #[cfg(test)]
 mod tests;
 mod verdict;
@@ -1048,6 +1050,8 @@ impl Loop {
             let Some(event) = event else {
                 return;
             };
+            // The session has ended: the process sweep runs before the item's next step (E12).
+            sweep::after_session(&shared, &config, &item, attempt).await;
             let _ = done.send(Done::Event {
                 item,
                 event,

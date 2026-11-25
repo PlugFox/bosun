@@ -99,6 +99,17 @@ fn parse_stat_group(line: &str) -> Option<(char, u32)> {
 /// inspect is skipped.
 #[cfg(target_os = "macos")]
 pub(crate) fn group_members(pgid: u32) -> io::Result<Vec<u32>> {
+    Ok(bsd_infos()?
+        .into_iter()
+        .filter(|(_, info)| info.pbi_pgid == pgid)
+        .map(|(pid, _)| pid)
+        .collect())
+}
+
+/// macOS: the BSD info of every live (not zombie) pid of a `proc_listallpids` snapshot. The
+/// snapshot is sized by a first call, and a process the user cannot inspect is skipped.
+#[cfg(target_os = "macos")]
+fn bsd_infos() -> io::Result<Vec<(u32, libc::proc_bsdinfo)>> {
     // SAFETY: a null buffer of size zero asks for the number of pids only.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     let count = usize::try_from(count).map_err(|_| io::Error::last_os_error())?;
@@ -111,22 +122,146 @@ pub(crate) fn group_members(pgid: u32) -> io::Result<Vec<u32>> {
     let listed = usize::try_from(listed).map_err(|_| io::Error::last_os_error())?;
     let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
         .expect("proc_bsdinfo is small");
-    let mut members = Vec::new();
+    let mut infos = Vec::new();
     for &pid in &pids[..listed.min(pids.len())] {
-        if pid <= 0 {
+        let Some(id) = u32::try_from(pid).ok().filter(|&id| id > 0) else {
             continue;
-        }
+        };
         // SAFETY: `proc_bsdinfo` is plain C data; all zeros is a valid value.
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         // SAFETY: the buffer is `info`, writable, and `size` is its length.
         let written = unsafe {
             libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
         };
-        if written == size && info.pbi_pgid == pgid && info.pbi_status != libc::SZOMB {
-            members.extend(u32::try_from(pid).ok());
+        if written == size && info.pbi_status != libc::SZOMB {
+            infos.push((id, info));
         }
     }
-    Ok(members)
+    Ok(infos)
+}
+
+/// macOS: a NUL-terminated name of a `proc_bsdinfo`, up to its first NUL.
+#[cfg(target_os = "macos")]
+fn c_name(name: &[libc::c_char]) -> String {
+    #[expect(clippy::cast_sign_loss, reason = "a C char is a byte")]
+    let bytes: Vec<u8> = name
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// macOS: the user's live processes whose BSD name (`pbi_name`, else the shorter `pbi_comm`) is
+/// `name`, with their start times.
+#[cfg(target_os = "macos")]
+pub(crate) fn processes_named(name: &str) -> io::Result<Vec<(u32, u64)>> {
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    Ok(bsd_infos()?
+        .into_iter()
+        .filter(|(_, info)| info.pbi_uid == uid)
+        .filter(|(_, info)| {
+            let full = c_name(&info.pbi_name);
+            let file = if full.is_empty() {
+                c_name(&info.pbi_comm)
+            } else {
+                full
+            };
+            crate::named::file_name_is(&file, name)
+        })
+        .map(|(pid, info)| {
+            (
+                pid,
+                info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+            )
+        })
+        .collect())
+}
+
+/// macOS: a start time (microseconds since the Unix epoch) as Unix milliseconds, rounded down.
+#[cfg(target_os = "macos")]
+pub(crate) fn start_unix_ms(start: u64) -> i64 {
+    i64::try_from(start / 1000).unwrap_or(i64::MAX)
+}
+
+/// Linux: the user's live processes whose executable, the target of `/proc/<pid>/exe`, has the
+/// file name `name`, with their start times. A process whose link cannot be read (another
+/// user's, a kernel thread, one that exited meanwhile) is skipped.
+#[cfg(target_os = "linux")]
+pub(crate) fn processes_named(name: &str) -> io::Result<Vec<(u32, u64)>> {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let Ok(entry) = entry else { continue };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        // `/proc/<pid>` belongs to the process's effective user.
+        if !entry.metadata().is_ok_and(|m| m.uid() == uid) {
+            continue;
+        }
+        let Ok(exe) = std::fs::read_link(entry.path().join("exe")) else {
+            continue;
+        };
+        let Some(file) = exe.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        // An executable deleted since its start is shown with this suffix.
+        let file = file.strip_suffix(" (deleted)").unwrap_or(file);
+        if !crate::named::file_name_is(file, name) {
+            continue;
+        }
+        if let Ok(Some(start)) = read_start(pid, false) {
+            found.push((pid, start));
+        }
+    }
+    Ok(found)
+}
+
+/// Linux: a start time (clock ticks since boot) as Unix milliseconds, rounded down: the boot
+/// time `btime` of `/proc/stat` (whole seconds) plus the ticks over `sysconf(_SC_CLK_TCK)`.
+/// When either cannot be read, the process is taken to have started at the epoch: older than
+/// any attempt, so it is spared.
+#[cfg(target_os = "linux")]
+pub(crate) fn start_unix_ms(start: u64) -> i64 {
+    let boot = std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|stat| parse_btime(&stat));
+    // SAFETY: `sysconf` has no memory preconditions; any name is a valid argument.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    match (boot, u64::try_from(hz).ok().filter(|&hz| hz > 0)) {
+        (Some(boot), Some(hz)) => {
+            let ms = u128::from(boot) * 1000 + u128::from(start) * 1000 / u128::from(hz);
+            i64::try_from(ms).unwrap_or(i64::MAX)
+        }
+        _ => 0,
+    }
+}
+
+/// The boot time, `btime`, of the text of `/proc/stat`, in seconds since the Unix epoch.
+#[cfg(any(target_os = "linux", test))]
+fn parse_btime(stat: &str) -> Option<u64> {
+    stat.lines()
+        .find_map(|line| line.strip_prefix("btime "))
+        .and_then(|rest| rest.trim().parse().ok())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn processes_named(_name: &str) -> io::Result<Vec<(u32, u64)>> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn start_unix_ms(_start: u64) -> i64 {
+    0
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -411,7 +546,14 @@ pub(crate) fn free_space(path: &std::path::Path) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_stat, parse_stat_group};
+    use super::{parse_btime, parse_stat, parse_stat_group};
+
+    #[test]
+    fn the_boot_time_is_the_btime_line_of_proc_stat() {
+        let stat = "cpu  1 2 3\nintr 5\nbtime 1700000000\nprocesses 42\n";
+        assert_eq!(parse_btime(stat), Some(1_700_000_000));
+        assert_eq!(parse_btime("cpu 1\n"), None);
+    }
 
     #[test]
     fn the_group_is_field_five_counted_from_the_last_parenthesis() {

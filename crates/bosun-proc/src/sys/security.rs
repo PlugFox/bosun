@@ -80,10 +80,18 @@ unsafe fn sid_string(sid: PSID) -> io::Result<String> {
 
 /// The SID of the user this process runs as, in string form.
 pub(crate) fn current_user_sid() -> io::Result<String> {
+    // SAFETY: the pseudo handle of the current process is always live and needs no closing.
+    process_user_sid(unsafe { GetCurrentProcess() })
+}
+
+/// The SID of the user the process `process` runs as, in string form. `process` is a live
+/// handle with at least `PROCESS_QUERY_LIMITED_INFORMATION`; the token of another user's
+/// process is usually refused (an error).
+pub(crate) fn process_user_sid(process: RawHandle) -> io::Result<String> {
     let mut raw = ptr::null_mut();
-    // SAFETY: the pseudo handle of the current process needs no closing; `raw` receives a new
-    // token handle that `OwnedHandle` closes.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut raw) } == 0 {
+    // SAFETY: the caller holds `process` live with query access; `raw` receives a new token
+    // handle that `OwnedHandle` closes.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut raw) } == 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: the call just opened `raw` for us and nothing else owns it.

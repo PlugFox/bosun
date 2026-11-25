@@ -184,6 +184,16 @@ pub enum Write {
     },
     /// The size on disk of the worktree at `path`, in bytes, as last measured.
     WorktreeBytes { path: String, bytes: u64 },
+    /// The `setup` or `teardown` command running in the worktree at `path` (#8, E3): its
+    /// child, by pid and start time, while it runs; `None` once it ended. Replaces the record.
+    WorktreeChild {
+        path: String,
+        child: Option<(u32, i64)>,
+    },
+    /// The quarantined worktree at `path` was removed once it could be: `quarantined` becomes
+    /// `removed`, ended at `at_ms`; what blocked it stays as history. A worktree in another
+    /// state is left as it is.
+    WorktreeFreed { path: String, at_ms: i64 },
     /// A session shim the daemon started (#8). Keyed by its record's path: writing it again
     /// stores nothing.
     Process(NewProcess),
@@ -500,6 +510,8 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             work::end_worktree(conn, &end).await
         }
         Write::WorktreeBytes { path, bytes } => work::worktree_bytes(conn, &path, bytes).await,
+        Write::WorktreeChild { path, child } => work::worktree_child(conn, &path, child).await,
+        Write::WorktreeFreed { path, at_ms } => work::worktree_freed(conn, &path, at_ms).await,
         Write::Process(new) => work::insert_process(conn, &new).await,
         Write::ProcessStarted {
             record_path,

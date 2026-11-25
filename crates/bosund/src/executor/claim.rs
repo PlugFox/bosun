@@ -175,12 +175,21 @@ pub(crate) async fn claim(
     let close = opened
         .as_ref()
         .map(|o| (o.workspace.clone(), o.worktree.clone()));
-    let outcome = confirm(shared, config, repo, snapshot, item, key, &mut kill, opened).await;
+    let mut outcome = confirm(shared, config, repo, snapshot, item, key, &mut kill, opened).await;
+    // Confirmed after the kill was raised (a cancel past the base verdict): the loop let go of
+    // the item and drops this outcome, so nobody else would close its worktree.
+    let dropped = *kill.borrow() != Signal::Run
+        && close.is_some()
+        && matches!(outcome, ClaimOutcome::Confirmed(_));
+    if dropped {
+        outcome = ClaimOutcome::Lost;
+    }
     if !matches!(outcome, ClaimOutcome::Confirmed(_))
         && let Some((workspace, worktree)) = close
     {
+        let aside = dropped.then_some(item);
         workspace
-            .close(shared, identity, &worktree, None, Some(&mut kill))
+            .close(shared, identity, &worktree, aside, Some(&mut kill))
             .await;
     }
     outcome
@@ -232,6 +241,9 @@ async fn open_worktree(
     })
     .await;
     let (target, user) = prepared.map_err(ClaimOutcome::Failed)?;
+    // What no item owns goes before the item gets its worktree: nothing else of the loop runs
+    // now, and the item's own earlier worktree (a claim redone) is not its to keep.
+    workspace.sweep(shared, identity, &[], false).await;
     let at = format!("refs/heads/{target}");
     let opened = workspace
         .open_with_setup(

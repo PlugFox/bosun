@@ -13,6 +13,7 @@ use std::process::{Child as Process, Stdio};
 
 use bosun_core::publish::report_key;
 use bosun_queue::{Changes, Comment, Cursor, Owned, QueueError};
+use bosun_store::WorktreeState;
 
 use super::*;
 
@@ -434,6 +435,157 @@ async fn a_daemon_killed_mid_verdict_runs_it_again_uncounted() {
     assert_eq!(scene.runs(1).await.len(), 1, "no session after the restart");
     assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
     one_of_each(&scene, 1);
+}
+
+/// #8: as [`a_daemon_killed_mid_verdict_runs_it_again_uncounted`], in worktree mode: the lost
+/// run's checkout is closed at the restart as no item's, the verdict runs again in a new one
+/// and the item ends Done; every row of kind `verdict` is `removed` and the worktree root holds
+/// only the clone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_daemon_killed_mid_verdict_in_worktree_mode_leaves_no_checkout() {
+    let scene = Scene::with_worktrees(None).await;
+    let vflag = sh_path(&scene.path("verdict-started"));
+    let stop = sh_path(&scene.path("verdict-stop"));
+    scene.write_board(&[card(
+        1,
+        "Lost verdict in its checkout",
+        &format!(
+            "test -f one.txt || exit 1; if [ ! -f {vflag} ]; then echo x > {vflag}; \
+             while [ ! -f {stop} ]; do sleep 0.2; done; fi"
+        ),
+        "Item one.",
+    )]);
+    scene.script(1, &["commit one.txt one".to_owned()]);
+    let mut daemon = Spawned::start(&scene, Role::Daemon);
+    wait_file(&scene.path("verdict-started")).await;
+    wait_for(
+        "the verdict's child row",
+        Duration::from_secs(30),
+        async || {
+            children(&scene)
+                .await
+                .iter()
+                .any(|c| c.verdict_run.is_some())
+        },
+    )
+    .await;
+    let recorded: Vec<_> = children(&scene).await.iter().map(key_of).collect();
+    daemon.kill();
+    let lost = worktrees::verdict_rows(&scene, 1).await;
+    assert!(
+        lost.iter().any(|r| r.state == WorktreeState::Created),
+        "the lost run's checkout is left: {lost:?}"
+    );
+
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, Duration::from_secs(90)).await;
+    worktrees::closed(&scene, 1).await;
+    let mut rows = Vec::new();
+    wait_for("no checkout left", Duration::from_secs(30), async || {
+        rows = worktrees::verdict_rows(&scene, 1).await;
+        rows.iter().all(|r| r.state == WorktreeState::Removed)
+            && worktrees::root_entries(&scene) == [workspace::CLONE]
+    })
+    .await;
+    drained(&scene).await;
+    task.abort();
+    watcher.abort();
+    std::fs::write(scene.path("verdict-stop"), "").unwrap();
+    assert_eq!(state, State::Done(Outcome::Pass), "{}", child_log(&scene));
+    all_gone(&recorded).await;
+    assert!(rows.len() > lost.len(), "the verdict ran again: {rows:?}");
+    for row in &rows {
+        assert!(!Path::new(&row.path).exists(), "{}", row.path);
+    }
+    assert_eq!(worktrees::root_entries(&scene), [workspace::CLONE]);
+}
+
+/// #8 (E3): in worktree mode the item's `setup` marks its start outside the repository and
+/// sleeps for two minutes (only its first run: once the mark is there it ends at once). The
+/// daemon is killed once the mark is there and the worktree's row records the setup's child.
+/// The restarted daemon reaps that child (one planted in its place where the platform took the
+/// whole tree with the daemon), closes the worktree as no item's, and claims the item again:
+/// it ends Done, the first worktree's row is `removed` and the root holds only the clone
+/// (`mutant_loop_setup_child_unrecorded` never records the child).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_daemon_killed_during_setup_leaves_no_setup_running() {
+    let mut scene = Scene::with_worktrees(None).await;
+    let started = scene.path("setup-started");
+    let mark = sh_path(&started);
+    scene.setup = Some(format!(
+        "if [ -f {mark} ]; then exit 0; fi; echo x > {mark}; sleep 120"
+    ));
+    std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();
+    scene.write_board(&[card(1, "Killed in setup", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let mut daemon = Spawned::start(&scene, Role::Daemon);
+    wait_file(&started).await;
+    let mut first = None;
+    wait_for(
+        "the setup's child on the worktree's row",
+        Duration::from_secs(30),
+        async || {
+            first = worktrees::rows(&scene, 1)
+                .await
+                .into_iter()
+                .find(|r| r.child.is_some());
+            first.is_some()
+        },
+    )
+    .await;
+    let first = first.unwrap();
+    let (pid, started_ms) = first.child.unwrap();
+    let mut setup = bosun_proc::ProcessKey {
+        pid,
+        start: bosun_proc::StartTime::from_raw(started_ms.cast_unsigned()),
+    };
+    daemon.kill();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Where the daemon's tree went with it, a survivor stands in for the setup.
+    let mut survivor = None;
+    if !bosun_proc::is_running(setup) {
+        let planted = Spawned::start(&scene, Role::Survivor);
+        let start = bosun_proc::start_time(planted.pid())
+            .unwrap()
+            .expect("the survivor runs");
+        setup = bosun_proc::ProcessKey {
+            pid: planted.pid(),
+            start,
+        };
+        scene
+            .store
+            .writer()
+            .write(vec![Write::WorktreeChild {
+                path: first.path.clone(),
+                child: Some((setup.pid, start.raw().cast_signed())),
+            }])
+            .await
+            .unwrap();
+        survivor = Some(planted);
+    }
+
+    let (task, watcher) = scene.start(None);
+    all_gone(&[setup]).await;
+    let state = ended(&scene, 1, Duration::from_secs(90)).await;
+    worktrees::closed(&scene, 1).await;
+    wait_for(
+        "the root to hold only the clone",
+        Duration::from_secs(30),
+        async || worktrees::root_entries(&scene) == [workspace::CLONE],
+    )
+    .await;
+    drained(&scene).await;
+    task.abort();
+    watcher.abort();
+    std::fs::write(scene.path("survivors-may-go"), "").unwrap();
+    drop(survivor);
+    assert_eq!(state, State::Done(Outcome::Pass), "{}", child_log(&scene));
+    let rows = worktrees::rows(&scene, 1).await;
+    let again = rows.iter().find(|r| r.path == first.path).unwrap();
+    assert_eq!(again.state, WorktreeState::Removed, "{rows:?}");
+    assert_eq!(again.child, None, "{rows:?}");
+    assert!(rows.len() >= 2, "the item was claimed again: {rows:?}");
+    assert!(!Path::new(&first.path).exists(), "{}", first.path);
 }
 
 /// #68: the daemon dies right after a board write is carried out, before it is acknowledged

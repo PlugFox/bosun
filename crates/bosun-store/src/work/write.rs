@@ -881,6 +881,49 @@ pub(crate) async fn worktree_bytes(
     Ok(())
 }
 
+/// The child of the command running in the worktree at `path`, or none (#8, E3).
+pub(crate) async fn worktree_child(
+    conn: &mut SqliteConnection,
+    path: &str,
+    child: Option<(u32, i64)>,
+) -> Result<(), Error> {
+    let (pid, started_ms) = child.map_or((None, None), |(pid, started)| {
+        (Some(i64::from(pid)), Some(started))
+    });
+    let updated = sqlx::query!(
+        "UPDATE worktree SET child_pid = ?, child_started_ms = ? WHERE path = ?",
+        pid,
+        started_ms,
+        path
+    )
+    .execute(&mut *conn)
+    .await?;
+    if updated.rows_affected() == 0 {
+        known_worktree(conn, path).await?;
+    }
+    Ok(())
+}
+
+/// The quarantined worktree at `path` was removed after all: `quarantined` becomes `removed`.
+pub(crate) async fn worktree_freed(
+    conn: &mut SqliteConnection,
+    path: &str,
+    at_ms: i64,
+) -> Result<(), Error> {
+    let updated = sqlx::query!(
+        "UPDATE worktree SET state = 'removed', ended_ms = ?
+         WHERE path = ? AND state = 'quarantined'",
+        at_ms,
+        path
+    )
+    .execute(&mut *conn)
+    .await?;
+    if updated.rows_affected() == 0 {
+        known_worktree(conn, path).await?;
+    }
+    Ok(())
+}
+
 /// The user's checkout as captured for the worktree at `path`, captured again (#8, landing).
 pub(crate) async fn worktree_user_base(
     conn: &mut SqliteConnection,

@@ -348,6 +348,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_setup_ignores_kill)",
   "cfg(mutant_loop_floor_is_setup_failure)",
   "cfg(mutant_loop_setup_comment_without_cause)",
+  # #8: the worktree sweep, retried quarantines, recorded setup children.
+  "cfg(mutant_loop_no_worktree_sweep)",
+  "cfg(mutant_loop_setup_child_unrecorded)",
+  "cfg(mutant_loop_quarantine_not_retried)",
+  "cfg(mutant_git_retry_quarantine_anywhere)",
 ] }
 
 [workspace.lints.clippy]

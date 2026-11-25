@@ -330,6 +330,8 @@ impl fmt::Debug for Deps {
 pub(crate) struct Shared {
     pub(crate) options: Options,
     pub(crate) deps: Deps,
+    /// The worktrees and setup children of this loop's own, for the sweep (#8).
+    pub(crate) worktrees: workspace::Registry,
 }
 
 impl Shared {
@@ -581,7 +583,11 @@ impl Loop {
         let control = deps.control.subscribe();
         let pace = board::Pace::new(options.idle_backoff, options.poll);
         Self {
-            shared: Arc::new(Shared { options, deps }),
+            shared: Arc::new(Shared {
+                options,
+                deps,
+                worktrees: workspace::Registry::default(),
+            }),
             config,
             current: None,
             done_tx,
@@ -1484,12 +1490,21 @@ impl Loop {
                 item.clone()
             }
         };
+        if self.current.as_ref().is_none_or(|cur| cur.item.id != item) {
+            // A claim confirmed after its item left the loop: nobody takes its worktree.
+            if let Done::Claim {
+                outcome: ClaimOutcome::Confirmed(claimed),
+                ..
+            } = done
+                && let Some(wt) = &claimed.worktree
+            {
+                self.close_worktree(wt, Some(&item)).await;
+            }
+            return;
+        }
         let Some(cur) = self.current.as_mut() else {
             return;
         };
-        if cur.item.id != item {
-            return;
-        }
         match done {
             Done::Claim { outcome, .. } => {
                 let event = match outcome {

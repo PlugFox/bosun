@@ -105,11 +105,44 @@ pub(crate) fn classify_tail(text: &str) -> Exit {
 }
 
 impl Loop {
-    /// Recovers every item of the repository a previous daemon left in flight, once per start.
-    /// `true` when done; `false` when the board or the store could not be read (asked again at
-    /// the next tick) .
-    #[allow(clippy::too_many_lines)]
+    /// Recovers every item of the repository a previous daemon left in flight, once per start;
+    /// then, in worktree mode, sweeps the worktrees no item in flight owns (#8). `true` when
+    /// done; `false` when the board or the store could not be read (asked again at the next
+    /// tick).
     pub(crate) async fn recover(&mut self) -> bool {
+        if !self.recover_items().await {
+            return false;
+        }
+        if !self.halted {
+            self.sweep_worktrees().await;
+        }
+        true
+    }
+
+    /// After the item in flight was rebuilt and its recorded children reaped: closes what no
+    /// item owns. The item in flight keeps its own worktree, and what its tasks opened since
+    /// the start is spared too.
+    async fn sweep_worktrees(&self) {
+        let config = self.config();
+        let Some((repo, identity)) = lookup(&config, &self.shared.options.repo) else {
+            return;
+        };
+        let Some(workspace) = super::workspace::Workspace::of(repo) else {
+            return;
+        };
+        let owned: Vec<PathBuf> = self
+            .current
+            .as_ref()
+            .and_then(|c| c.claimed.as_ref())
+            .and_then(|c| c.worktree.as_ref())
+            .map(|wt| wt.worktree.path.clone())
+            .into_iter()
+            .collect();
+        workspace.sweep(&self.shared, identity, &owned, true).await;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn recover_items(&mut self) -> bool {
         let config = self.config();
         let repo_name = self.shared.options.repo.clone();
         let Some((repo, _)) = lookup(&config, &repo_name) else {

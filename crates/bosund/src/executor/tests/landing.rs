@@ -305,6 +305,70 @@ async fn each_merge_method_lands_the_verified_tree_with_the_trailers() {
     }
 }
 
+/// A sequence editor for `git rebase -i` that stops the rebase after its first pick: it inserts
+/// `break` after the first line of the todo, with shell builtins only (no `sed` on the path).
+const BREAK_AFTER_FIRST: &str = "#!/bin/sh
+out=
+first=1
+while IFS= read -r line; do
+  if [ -n \"$first\" ]; then out=\"$line
+break\"; first=; else out=\"$out
+$line\"; fi
+done < \"$1\"
+printf '%s\n' \"$out\" > \"$1\"
+";
+
+/// The session commits `a.txt` (c1), then `b.txt` (c2), then leaves its worktree mid-rebase:
+/// `git rebase -i HEAD~2` with a `break` after the first pick stops with exit 0, its head
+/// detached at c1, `rebase-merge` present, the item's branch still at c2. The verdict would pass
+/// on c1 already. The item ends Done: the rebase is aborted (reported once) before its head is
+/// checked, verified or landed, so the user's target head is c2 with both files
+/// (`mutant_loop_land_over_stale_rebase` leaves the rebase: c1 is never what lands).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rebase_left_in_progress_is_aborted_before_landing() {
+    let scene = Scene::with_worktrees(None).await;
+    let editor = scene.path("break.sh");
+    std::fs::write(&editor, BREAK_AFTER_FIRST).unwrap();
+    let mut sub = subscribe_trouble(&scene);
+    scene.write_board(&[card(1, "Left mid-rebase", "test -f a.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            "commit a.txt a".to_owned(),
+            "commit b.txt b".to_owned(),
+            format!(
+                "git -c sequence.editor={} -c commit.gpgSign=false rebase -i HEAD~2",
+                sh_path(&editor)
+            ),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let files = files_at(&scene, "HEAD");
+    assert!(
+        files.contains("a.txt") && files.contains("b.txt"),
+        "{files:?}"
+    );
+    assert_eq!(scene.git(&["log", "-1", "--format=%s", "HEAD"]), "b");
+    assert_eq!(
+        scene.git(&["status", "--porcelain", "--untracked-files=all"]),
+        ""
+    );
+    let seen = trouble(&mut sub);
+    assert_eq!(
+        seen.iter()
+            .filter(|t| t.contains("a rebase was left in progress"))
+            .count(),
+        1,
+        "{seen:#?}"
+    );
+}
+
 /// The identity file's author, which every commit the daemon makes carries (E26).
 const IDENTITY: &str = "Synthetic Agent <agent@example.com>";
 

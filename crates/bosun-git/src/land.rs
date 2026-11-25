@@ -207,8 +207,7 @@ pub fn rebase_onto(worktree: &Git, target: &str, committer: &Ident) -> Result<Re
         return Ok(Rebase::Rebased { head });
     }
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    let state = paths(worktree, &["rebase-merge", "rebase-apply"])?;
-    if !state.iter().any(|p| p.exists()) {
+    if !rebase_in_progress(worktree)? {
         // It never started: git said why.
         return Err(crate::Error::Git {
             repo: worktree.repo().to_owned(),
@@ -231,6 +230,18 @@ pub fn rebase_onto(worktree: &Git, target: &str, committer: &Ident) -> Result<Re
         return Err(Error::Stopped { stderr });
     }
     Ok(Rebase::Conflict { files })
+}
+
+/// Whether a rebase is stopped in `worktree`: its git directory holds `rebase-merge` or
+/// `rebase-apply` (a conflict, a `break`, or a rebase whose process died).
+///
+/// # Errors
+///
+/// Git cannot name the paths.
+pub fn rebase_in_progress(worktree: &Git) -> Result<bool, Error> {
+    Ok(paths(worktree, &["rebase-merge", "rebase-apply"])?
+        .iter()
+        .any(|p| p.exists()))
 }
 
 /// Moves `branch` (a short name) of `repo` to `to` (a ref or a commit), which must descend

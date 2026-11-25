@@ -1392,6 +1392,76 @@ async fn a_worktree_its_process_and_its_landing_read_back() {
     store.close().await.unwrap();
 }
 
+/// #8: a landing row never carries another attempt's or another head's landed commit. A new
+/// attempt replaces the row whole; a new verified head within the attempt clears what landed;
+/// any other write within the attempt keeps what it does not give.
+#[tokio::test]
+async fn a_new_attempt_or_a_new_verified_head_clears_the_landing_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    store.writer().write(vec![register()]).await.unwrap();
+    let reader = store.reader();
+
+    let first = LandingRow {
+        item: id(),
+        attempt: 1,
+        target: "master".to_owned(),
+        head_sha: Some("1".repeat(40)),
+        verified_tree: Some("a".repeat(40)),
+        landed_sha: Some("1".repeat(40)),
+        delivered_ms: Some(T0 + 1),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        updated_ms: T0 + 1,
+    };
+    twice(&store, vec![Write::Landing(first.clone())]).await;
+    assert_eq!(reader.landing(&id()).await.unwrap(), Some(first.clone()));
+
+    // Attempt 2 verifies its head: nothing of attempt 1's landing is left.
+    let verified = LandingRow {
+        attempt: 2,
+        head_sha: Some("2".repeat(40)),
+        verified_tree: Some("b".repeat(40)),
+        landed_sha: None,
+        delivered_ms: None,
+        updated_ms: T0 + 2,
+        ..first
+    };
+    twice(&store, vec![Write::Landing(verified.clone())]).await;
+    assert_eq!(reader.landing(&id()).await.unwrap(), Some(verified.clone()));
+
+    // Within attempt 2, a write of the landed commit only keeps the verified head and tree.
+    let landed = LandingRow {
+        head_sha: None,
+        verified_tree: None,
+        landed_sha: Some("3".repeat(40)),
+        updated_ms: T0 + 3,
+        ..verified.clone()
+    };
+    twice(&store, vec![Write::Landing(landed)]).await;
+    assert_eq!(
+        reader.landing(&id()).await.unwrap(),
+        Some(LandingRow {
+            landed_sha: Some("3".repeat(40)),
+            updated_ms: T0 + 3,
+            ..verified.clone()
+        })
+    );
+
+    // A new verified head (rebased, verified again): what landed was another head.
+    let again = LandingRow {
+        head_sha: Some("4".repeat(40)),
+        verified_tree: Some("c".repeat(40)),
+        updated_ms: T0 + 4,
+        ..verified
+    };
+    twice(&store, vec![Write::Landing(again.clone())]).await;
+    assert_eq!(reader.landing(&id()).await.unwrap(), Some(again));
+    assert_eq!(count(&store, "landing").await, 1);
+    store.close().await.unwrap();
+}
+
 /// #150: a lease request is filed, granted and released, each written twice: one row, with its
 /// three times. A `bosun with` command's request has no item.
 #[tokio::test]

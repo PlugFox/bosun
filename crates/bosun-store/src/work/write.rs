@@ -1098,7 +1098,10 @@ pub(crate) async fn lease_released(
 }
 
 /// Where the item's landing stands, keyed by the item. The attempt, the target and the time are
-/// replaced; a column given as `None` keeps its stored value.
+/// replaced. A row of another attempt is replaced whole, `None`s included: an attempt never
+/// carries another's verified head or landed commit (#8). Within the attempt a column given as
+/// `None` keeps its stored value, except that a new verified head (`head_sha` given and
+/// different) also replaces `landed_sha` and `delivered_ms`: what landed was another head.
 pub(crate) async fn upsert_landing(
     conn: &mut SqliteConnection,
     landing: &LandingRow,
@@ -1109,34 +1112,82 @@ pub(crate) async fn upsert_landing(
         .map(|n| to_db(n, "pull request number"))
         .transpose()?;
     let pr_state = landing.pr_state.map(codec::pr_state);
-    sqlx::query!(
-        "INSERT INTO landing (item_id, attempt, target, head_sha, verified_tree, landed_sha,
-                              delivered_ms, pr_number, pr_url, pr_state, updated_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (item_id) DO UPDATE SET
-             attempt = excluded.attempt,
-             target = excluded.target,
-             head_sha = coalesce(excluded.head_sha, head_sha),
-             verified_tree = coalesce(excluded.verified_tree, verified_tree),
-             landed_sha = coalesce(excluded.landed_sha, landed_sha),
-             delivered_ms = coalesce(excluded.delivered_ms, delivered_ms),
-             pr_number = coalesce(excluded.pr_number, pr_number),
-             pr_url = coalesce(excluded.pr_url, pr_url),
-             pr_state = coalesce(excluded.pr_state, pr_state),
-             updated_ms = excluded.updated_ms",
-        item,
-        landing.attempt,
-        landing.target,
-        landing.head_sha,
-        landing.verified_tree,
-        landing.landed_sha,
-        landing.delivered_ms,
-        pr_number,
-        landing.pr_url,
-        pr_state,
-        landing.updated_ms,
-    )
-    .execute(conn)
-    .await?;
+    // Mutant (`mutant_store_landing_row_coalesces`): every column given as `None` keeps its
+    // stored value, whichever attempt or head stored it.
+    if cfg!(mutant_store_landing_row_coalesces) {
+        sqlx::query!(
+            "INSERT INTO landing (item_id, attempt, target, head_sha, verified_tree, landed_sha,
+                                  delivered_ms, pr_number, pr_url, pr_state, updated_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (item_id) DO UPDATE SET
+                 attempt = excluded.attempt,
+                 target = excluded.target,
+                 head_sha = coalesce(excluded.head_sha, head_sha),
+                 verified_tree = coalesce(excluded.verified_tree, verified_tree),
+                 landed_sha = coalesce(excluded.landed_sha, landed_sha),
+                 delivered_ms = coalesce(excluded.delivered_ms, delivered_ms),
+                 pr_number = coalesce(excluded.pr_number, pr_number),
+                 pr_url = coalesce(excluded.pr_url, pr_url),
+                 pr_state = coalesce(excluded.pr_state, pr_state),
+                 updated_ms = excluded.updated_ms",
+            item,
+            landing.attempt,
+            landing.target,
+            landing.head_sha,
+            landing.verified_tree,
+            landing.landed_sha,
+            landing.delivered_ms,
+            pr_number,
+            landing.pr_url,
+            pr_state,
+            landing.updated_ms,
+        )
+        .execute(&mut *conn)
+        .await?;
+    } else {
+        sqlx::query!(
+            "INSERT INTO landing (item_id, attempt, target, head_sha, verified_tree, landed_sha,
+                                  delivered_ms, pr_number, pr_url, pr_state, updated_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (item_id) DO UPDATE SET
+                 attempt = excluded.attempt,
+                 target = excluded.target,
+                 head_sha = CASE WHEN excluded.attempt IS NOT attempt THEN excluded.head_sha
+                                 ELSE coalesce(excluded.head_sha, head_sha) END,
+                 verified_tree = CASE WHEN excluded.attempt IS NOT attempt
+                                      THEN excluded.verified_tree
+                                      ELSE coalesce(excluded.verified_tree, verified_tree) END,
+                 landed_sha = CASE WHEN excluded.attempt IS NOT attempt
+                                        OR (excluded.head_sha IS NOT NULL
+                                            AND excluded.head_sha IS NOT head_sha)
+                                   THEN excluded.landed_sha
+                                   ELSE coalesce(excluded.landed_sha, landed_sha) END,
+                 delivered_ms = CASE WHEN excluded.attempt IS NOT attempt
+                                          OR (excluded.head_sha IS NOT NULL
+                                              AND excluded.head_sha IS NOT head_sha)
+                                     THEN excluded.delivered_ms
+                                     ELSE coalesce(excluded.delivered_ms, delivered_ms) END,
+                 pr_number = CASE WHEN excluded.attempt IS NOT attempt THEN excluded.pr_number
+                                  ELSE coalesce(excluded.pr_number, pr_number) END,
+                 pr_url = CASE WHEN excluded.attempt IS NOT attempt THEN excluded.pr_url
+                               ELSE coalesce(excluded.pr_url, pr_url) END,
+                 pr_state = CASE WHEN excluded.attempt IS NOT attempt THEN excluded.pr_state
+                                 ELSE coalesce(excluded.pr_state, pr_state) END,
+                 updated_ms = excluded.updated_ms",
+            item,
+            landing.attempt,
+            landing.target,
+            landing.head_sha,
+            landing.verified_tree,
+            landing.landed_sha,
+            landing.delivered_ms,
+            pr_number,
+            landing.pr_url,
+            pr_state,
+            landing.updated_ms,
+        )
+        .execute(&mut *conn)
+        .await?;
+    }
     Ok(())
 }

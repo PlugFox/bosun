@@ -1176,9 +1176,18 @@ impl Loop {
     }
 
     /// The verdict preconditions of `bosun-git`. In worktree mode (E19) the verdict runs in a
-    /// checkout of the commit, so what is left uncommitted is noted, not refused.
+    /// checkout of the commit, so what is left uncommitted is noted, not refused, and a rebase
+    /// the session left stopped is aborted first ([`landing::abort_stale_rebase`]): its partial
+    /// pick is never the head that is verified.
     async fn git_preconditions(&self, item: &ItemId, attempt: u32, claimed: Arc<Claimed>) -> Event {
         let path = claimed.workdir.clone();
+        if claimed.worktree.is_some()
+            && let Err(e) = landing::abort_stale_rebase(&self.shared, item, path.clone()).await
+        {
+            let why = format!("the rebase left in the item's worktree cannot be aborted: {e}");
+            self.shared.trouble(why.clone());
+            return self.unchecked(item, attempt, why).await;
+        }
         let runs = self.shared.deps.reader.runs(item).await.unwrap_or_default();
         let checked = {
             let item = item.clone();

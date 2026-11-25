@@ -12,9 +12,18 @@
 //! 2. The target is fetched from the user's checkout into the daemon's clone, fast-forward only
 //!    ([`super::workspace::Workspace::sync_target`]); a refused fetch (the user rewrote the
 //!    target) is [`Event::LandingRefused`]. The base the item's preconditions compare refs with,
-//!    and the capture of the user's checkout, follow the target ([`Done::Followed`]).
-//! 3. A target that is not an ancestor of the worktree's head is rebased onto; a conflict is
-//!    stored as the item's `conflict` note and reported as [`Event::Conflict`].
+//!    and the capture of the user's checkout, follow the target ([`Done::Followed`]). A target
+//!    that holds the commit the attempt's row says it landed, at it or past it (the user
+//!    committed on it after a fast-forward the daemon crashed behind), is already landed
+//!    ([`already_landed`]): it is not rebased onto again. The row is the attempt's own and its
+//!    head's (a new attempt or a new verified head clears what landed, `bosun-store`), so an
+//!    old landed commit never matches.
+//! 3. A rebase left stopped in the item's worktree (git finishing or stopping after the daemon
+//!    died during step 3, or a session) is aborted first and reported ([`abort_stale_rebase`];
+//!    the preconditions do the same before the verdict): HEAD would be a partial pick of the
+//!    item's commits. An abort that fails is [`Event::LandingRefused`]. Then a target that is
+//!    not an ancestor of the worktree's head is rebased onto; a conflict is stored as the
+//!    item's `conflict` note and reported as [`Event::Conflict`].
 //! 4. A head the row does not name as verified, rebased now or before a crash, is
 //!    [`Event::Rebased`]: the machine runs the verdict on it, and a pass emits `Land` again. A
 //!    verdict that passed before the rebase is never a verdict on the target.
@@ -171,17 +180,32 @@ impl Task<'_> {
             Ok(row) => row.filter(|r| r.attempt == attempt),
             Err(e) => return self.refuse(format!("its landing row: {e}")),
         };
-        // A crash after the fast-forward: the target is at what this attempt landed.
-        if let Some(row) = &row
-            && row.landed_sha.as_deref() == Some(t.as_str())
-        {
-            return Pass::Done(
-                self.delivered(wt, &target, row.delivered_ms.is_none())
-                    .await,
+        // A crash after the fast-forward: the target holds what this attempt landed (the user
+        // may have committed on it since).
+        if let Some(row) = &row {
+            let (clone, landed, at) = (
+                Git::new(wt.workspace.clone_path()),
+                row.landed_sha.clone(),
+                t.clone(),
             );
+            match blocking(move || already_landed(&clone, landed.as_deref(), &at)).await {
+                Ok(true) => {
+                    return Pass::Done(
+                        self.delivered(wt, &target, row.delivered_ms.is_none())
+                            .await,
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => return self.refuse(format!("whether it already landed: {e}")),
+            }
         }
 
-        // 3. The head of the item's worktree, rebased onto the target unless it descends.
+        // 3. The head of the item's worktree, rebased onto the target unless it descends. A
+        // rebase left stopped there (a daemon that died during it, a session) holds a partial
+        // pick: it is aborted first, so the head is the item's branch again.
+        if let Err(e) = abort_stale_rebase(self.shared, item, self.claimed.workdir.clone()).await {
+            return self.refuse(format!("the rebase left in the item's worktree: {e}"));
+        }
         let dir = self.claimed.workdir.clone();
         let (at, committer) = (t.clone(), ident.clone());
         let rebased = blocking(move || -> Result<Result<String, Vec<String>>, String> {
@@ -546,6 +570,62 @@ fn method(repo: &Repo) -> Result<Method, String> {
     }
 }
 
+/// Aborts a rebase stopped in the item's worktree at `dir` (a daemon that died during the
+/// landing's rebase, a session that left one), reported through [`Shared::trouble`] when there
+/// was one. Its head is then the item's branch again, never a partial pick of it.
+pub(super) async fn abort_stale_rebase(
+    shared: &Shared,
+    item: &ItemId,
+    dir: std::path::PathBuf,
+) -> Result<(), String> {
+    let aborted = blocking(move || -> Result<bool, land::Error> {
+        let git = Git::new(&dir);
+        // Mutant (`mutant_loop_land_over_stale_rebase`): the stopped rebase is left, and its
+        // partial pick is the head that is checked, verified and landed.
+        if cfg!(mutant_loop_land_over_stale_rebase) || !land::rebase_in_progress(&git)? {
+            return Ok(false);
+        }
+        git.run(&["rebase", "--abort"], None)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if aborted {
+        shared.trouble(format!(
+            "{item}: a rebase was left in progress in its worktree; it is aborted"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `landed`, the commit this attempt landed, is in the history of the target's head
+/// `t` in the daemon's clone: equal to it, or an ancestor (the user committed on the target
+/// after the fast-forward). No landed commit, or one the clone does not have, is not landed.
+fn already_landed(clone: &Git, landed: Option<&str>, t: &str) -> Result<bool, bosun_git::Error> {
+    let Some(landed) = landed else {
+        return Ok(false);
+    };
+    // Mutant (`mutant_loop_landed_only_when_equal`): only a target exactly at the landed commit
+    // counts, and one the user committed on is rebased onto again.
+    if cfg!(mutant_loop_landed_only_when_equal) {
+        return Ok(landed == t);
+    }
+    if landed == t {
+        return Ok(true);
+    }
+    let commit = format!("{landed}^{{commit}}");
+    if !clone.test(&[
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        &commit,
+    ])? {
+        return Ok(false);
+    }
+    clone.test(&["merge-base", "--is-ancestor", "--end-of-options", landed, t])
+}
+
 /// Moves `branch` of the user's repository at `user` to `to` (E2), which was read at `from`.
 fn fast_forward(
     user: &std::path::Path,
@@ -565,4 +645,55 @@ fn fast_forward(
         });
     }
     land::fast_forward(&git, branch, to)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs git in `dir` with an identity of its own, whatever the developer's configuration.
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Synthetic",
+                "-c",
+                "user.email=synthetic@example.com",
+            ])
+            .args(["-c", "commit.gpgSign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    fn commit(dir: &std::path::Path, file: &str) -> String {
+        std::fs::write(dir.join(file), file).unwrap();
+        git(dir, &["add", file]);
+        git(dir, &["commit", "-q", "-m", file]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// #8: a landing is done when the target holds the landed commit, at it or past it (the
+    /// user committed on the target after the fast-forward), and only then.
+    #[test]
+    fn a_target_past_the_landed_commit_counts_as_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        let base = commit(repo, "base.txt");
+        let landed = commit(repo, "landed.txt");
+        let past = commit(repo, "user.txt");
+        git(repo, &["checkout", "-q", "-b", "other", &base]);
+        let elsewhere = commit(repo, "other.txt");
+        let clone = Git::new(repo);
+
+        assert!(already_landed(&clone, Some(&landed), &landed).unwrap());
+        assert!(already_landed(&clone, Some(&landed), &past).unwrap());
+        assert!(!already_landed(&clone, Some(&elsewhere), &past).unwrap());
+        assert!(!already_landed(&clone, None, &past).unwrap());
+    }
 }

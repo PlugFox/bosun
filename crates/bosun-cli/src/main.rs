@@ -93,7 +93,12 @@
 //!   until the whole set is granted, runs the command with inherited standard streams,
 //!   releases the lease and exits with the command's exit code (128 + the signal of a command
 //!   a signal killed). When the daemon is down or refuses, the command is not run and the exit
-//!   code is the usual one. It ignores `--format`.
+//!   code is the usual one. While the command runs, Ctrl-C is the command's; on Unix a SIGTERM
+//!   or SIGHUP to `bosun` is passed on to the command, and `bosun` waits for it, releases the
+//!   lease and exits with its code. On Windows a bare name is looked up through `PATHEXT`, so a
+//!   `.cmd` or `.bat` (`npm`, `gradlew`) runs; `taskkill /F` of `bosun.exe` alone leaves the
+//!   command running without the lease (ending it too needs a Job object, which is `unsafe`
+//!   FFI). It ignores `--format`.
 //!
 //! `--name` names the registration (default `bosun`): a second daemon, or a test.
 //!
@@ -298,6 +303,12 @@ enum Command {
     Tui,
     /// Runs a command under the leases of resources, as items take them: waits until granted,
     /// runs it, releases them, and exits with the command's exit code.
+    ///
+    /// While the command runs, Ctrl-C is the command's to handle; on Unix a SIGTERM or SIGHUP to
+    /// bosun is passed on to the command, and bosun waits for it before it releases the leases.
+    /// On Windows a bare command name is looked up through PATHEXT, so `npm` or `gradlew` finds
+    /// its .cmd or .bat. Windows limitation: `taskkill /F` of bosun.exe alone leaves the command
+    /// running without the leases; closing the console ends both.
     #[command(after_help = EXIT_CODES)]
     With(with::WithArgs),
 }

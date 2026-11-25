@@ -307,6 +307,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_api_lease_acquire_always_grants)",
   "cfg(mutant_api_lease_without_operator)",
   "cfg(mutant_cli_with_exit_zero)",
+  # #180: `bosun with` on refusal, through PATHEXT, and under SIGTERM.
+  "cfg(mutant_cli_with_runs_on_refusal)",
+  "cfg(mutant_cli_with_no_pathext)",
+  "cfg(mutant_cli_with_no_signal_forward)",
   # #157: landing in worktree mode.
   "cfg(mutant_loop_accept_pre_rebase_verdict)",
   "cfg(mutant_loop_land_while_deferred)",

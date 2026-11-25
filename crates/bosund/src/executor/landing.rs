@@ -63,6 +63,44 @@ pub(crate) const NOTE_CONFLICT: &str = "conflict";
 /// again before it is refused.
 pub(crate) const RESTARTS: u32 = 3;
 
+/// How many times in a row one attempt may report the same head [`Event::Rebased`] before the
+/// landing is refused: a passing verdict that cannot record the head it verified would
+/// otherwise run the verdict again without end.
+pub(crate) const REBASED_LIMIT: u32 = 3;
+
+/// The run of [`Event::Rebased`] reports of one head in one attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Streak {
+    pub(crate) attempt: u32,
+    pub(crate) head: String,
+    pub(crate) count: u32,
+}
+
+impl Streak {
+    /// Whether the streak has reached [`REBASED_LIMIT`]: the landing is refused.
+    pub(crate) fn refused(&self) -> bool {
+        // Mutant (`mutant_loop_rebased_unbounded`): the same head is rebased and verified
+        // again without end.
+        !cfg!(mutant_loop_rebased_unbounded) && self.count >= REBASED_LIMIT
+    }
+}
+
+/// The streak after the landing of `attempt` reported `head` [`Event::Rebased`] again,
+/// following `prev`: one more for the same head in the same attempt, a new one otherwise.
+pub(crate) fn rebased_again(prev: Option<&Streak>, attempt: u32, head: &str) -> Streak {
+    match prev {
+        Some(p) if p.attempt == attempt && p.head == head => Streak {
+            count: p.count + 1,
+            ..p.clone()
+        },
+        _ => Streak {
+            attempt,
+            head: head.to_owned(),
+            count: 1,
+        },
+    }
+}
+
 /// Which landing this is.
 #[derive(Debug)]
 pub(crate) struct Spec {
@@ -80,6 +118,8 @@ pub(crate) struct Landed {
     /// The claim with its base and its capture of the user's checkout moved along with the
     /// target, when landing moved it.
     pub(crate) followed: Option<Claimed>,
+    /// The head reported [`Event::Rebased`], when that is the event.
+    pub(crate) rebased: Option<String>,
 }
 
 /// Runs the landing of `spec` (see the module documentation).
@@ -95,12 +135,14 @@ pub(crate) async fn land(
         spec,
         claimed: claimed.clone(),
         followed: false,
+        rebased: None,
         kill,
     };
     let event = task.run(config).await;
     Landed {
         event,
         followed: task.followed.then_some(task.claimed),
+        rebased: task.rebased,
     }
 }
 
@@ -112,6 +154,8 @@ struct Task<'a> {
     claimed: Claimed,
     /// [`Task::claimed`] differs from the claim the task was given.
     followed: bool,
+    /// The head of an [`Event::Rebased`] report.
+    rebased: Option<String>,
     kill: watch::Receiver<bool>,
 }
 
@@ -244,7 +288,10 @@ impl Task<'_> {
                 Ok(tree) => tree,
                 Err(e) => return self.refuse(e),
             },
-            None => return Pass::Done(Some(Event::Rebased { attempt })),
+            None => {
+                self.rebased = Some(h);
+                return Pass::Done(Some(Event::Rebased { attempt }));
+            }
         };
 
         // 5. The commit to land.
@@ -285,10 +332,18 @@ impl Task<'_> {
         let fetched = blocking(move || -> Result<(), bosun_git::Error> {
             Git::new(&clone).run(&["update-ref", &offered, &commit], None)?;
             let from = clone.to_string_lossy();
-            Git::new(&user).run(
-                &["fetch", "--quiet", "--no-tags", "--", &from, &offered],
-                None,
-            )?;
+            // Objects only (E14): no `FETCH_HEAD`, no maintenance or gc in the user's `.git`;
+            // the configuration as well as the flags, for a git that ignores the flag.
+            let mut args = vec!["-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch"];
+            args.extend(["--quiet", "--no-tags"]);
+            args.extend(["--no-write-fetch-head", "--no-auto-maintenance"]);
+            if cfg!(mutant_loop_landing_fetch_writes_fetch_head) {
+                // Mutant (`mutant_loop_landing_fetch_writes_fetch_head`): the fetch writes the
+                // user's `FETCH_HEAD` and may start maintenance there.
+                args = vec!["fetch", "--quiet", "--no-tags"];
+            }
+            args.extend(["--", &from, &offered]);
+            Git::new(&user).run(&args, None)?;
             Ok(())
         })
         .await;
@@ -324,10 +379,17 @@ impl Task<'_> {
                     let poll = self.shared.options.poll;
                     tokio::select! {
                         () = tokio::time::sleep(poll) => {}
-                        () = verdict::killed(&mut self.kill) => return Pass::Done(None),
+                        () = verdict::killed(&mut self.kill) => {
+                            // Mutant (`mutant_loop_keep_landing_ref`): the offer outlives a
+                            // landing killed while deferred.
+                            if !cfg!(mutant_loop_keep_landing_ref) {
+                                self.drop_offer(wt).await;
+                            }
+                            return Pass::Done(None);
+                        }
                     }
                 }
-                Err(land::Error::NotDescendant { head, .. }) => {
+                Err(land::Error::NotDescendant { head, .. } | land::Error::Moved { head, .. }) => {
                     crate::log::log!(
                         "bosund: repository {}: {item}: {target} moved to {head} during the \
                          landing; it starts again",
@@ -416,7 +478,7 @@ impl Task<'_> {
         let item = &self.spec.item;
         self.shared.trouble(format!(
             "{item}: the rebase onto {target} at {t} conflicts in {}",
-            files.join(", ")
+            listed(&files)
         ));
         // `at_ms` in the body too: the session started in answer to it reads it (`prompt_of`).
         let at_ms = now_ms();
@@ -555,6 +617,23 @@ impl Task<'_> {
     }
 }
 
+/// How many conflicting file names a trouble message lists.
+const LISTED: usize = 20;
+
+/// The first [`LISTED`] of `files`, and how many more there are.
+fn listed(files: &[String]) -> String {
+    let text = files
+        .iter()
+        .take(LISTED)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match files.len().checked_sub(LISTED) {
+        Some(more) if more > 0 => format!("{text} and {more} more"),
+        _ => text,
+    }
+}
+
 /// How `repo` lands: `local` is `ff` (E6, E20); `merge` its method. `pr` is refused by the
 /// configuration in this version.
 fn method(repo: &Repo) -> Result<Method, String> {
@@ -675,6 +754,36 @@ mod tests {
         git(dir, &["add", file]);
         git(dir, &["commit", "-q", "-m", file]);
         git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// #8: a passing verdict that cannot record its head would report the same head rebased
+    /// forever; the third report of one head in one attempt refuses the landing.
+    #[test]
+    fn the_same_head_rebased_three_times_is_refused() {
+        let first = rebased_again(None, 1, "h");
+        assert!(!first.refused());
+        let second = rebased_again(Some(&first), 1, "h");
+        assert!(!second.refused());
+        let third = rebased_again(Some(&second), 1, "h");
+        assert_eq!(third.count, REBASED_LIMIT);
+        assert!(third.refused());
+
+        // A new head, or a new attempt, starts again.
+        let other = rebased_again(Some(&second), 1, "g");
+        assert_eq!(other.count, 1);
+        assert!(!rebased_again(Some(&other), 1, "g").refused());
+        let next = rebased_again(Some(&second), 2, "h");
+        assert_eq!(next.count, 1);
+        assert!(!rebased_again(Some(&next), 2, "h").refused());
+    }
+
+    #[test]
+    fn a_long_list_of_conflicting_files_is_capped() {
+        let files: Vec<String> = (0..25).map(|i| format!("f{i}")).collect();
+        let text = listed(&files);
+        assert!(text.starts_with("f0, f1, "), "{text}");
+        assert!(text.ends_with("f19 and 5 more"), "{text}");
+        assert_eq!(listed(&files[..2]), "f0, f1");
     }
 
     /// #8: a landing is done when the target holds the landed commit, at it or past it (the

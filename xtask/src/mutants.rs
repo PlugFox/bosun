@@ -2079,6 +2079,54 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_keep_landing_ref",
+        issue: LANDING_LEAK_CARD,
+        breaks: "a landing ref outlives a landing cancelled while deferred",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_cancelled_deferred_landing_leaves_no_landing_ref",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_landing_fetch_writes_fetch_head",
+        issue: LANDING_LEAK_CARD,
+        breaks: "landing's fetch writes the user's FETCH_HEAD and may start maintenance there",
+        package: "bosund",
+        check: Check::Test("executor::tests::landing::landing_leaves_the_users_fetch_head_alone"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_ff_race_is_failure",
+        issue: LANDING_LEAK_CARD,
+        breaks: "a branch that moved before its update-ref refuses the landing instead of restarting it",
+        package: "bosun-git",
+        check: Check::Test(
+            "land::tests::a_branch_that_moved_before_its_update_is_reported_as_moved",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_rebased_unbounded",
+        issue: LANDING_LEAK_CARD,
+        breaks: "a verified head that cannot be recorded is rebased and verified again without end",
+        package: "bosund",
+        check: Check::Test(
+            "executor::landing::tests::the_same_head_rebased_three_times_is_refused",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_conflict_files_keep_format_chars",
+        issue: LANDING_LEAK_CARD,
+        breaks: "conflicting file names keep line separators and invisible format characters",
+        package: "bosun-runner",
+        check: Check::Test(
+            "prompt::tests::conflicting_file_names_lose_invisible_and_line_breaking_characters",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #8 that makes the daemon's commits carry the repository identity (E26; its own
@@ -2097,6 +2145,11 @@ const REATTACH_CARD: u32 = 8;
 /// commit, or a landing twice (its own number was not known when it was written; its parent's
 /// stands in).
 const LANDING_FIX_CARD: u32 = 8;
+
+/// The card of #8 that keeps landing from leaking its ref, writing the user's `FETCH_HEAD`,
+/// refusing a racing target, looping on an unrecordable verified head, or quoting invisible
+/// characters (its own number was not known when it was written; its parent's stands in).
+const LANDING_LEAK_CARD: u32 = 8;
 
 /// The re-attach scene of the card, which hosts two mutants.
 const REATTACH_SCENE: &str = "executor::tests::recovery::a_daemon_killed_mid_session_reattaches_and_finishes_with_one_attempt_and_one_run";

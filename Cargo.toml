@@ -327,6 +327,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_land_over_stale_rebase)",
   "cfg(mutant_store_landing_row_coalesces)",
   "cfg(mutant_loop_landed_only_when_equal)",
+  # #8: landing leaks nothing and loops nowhere.
+  "cfg(mutant_loop_keep_landing_ref)",
+  "cfg(mutant_loop_landing_fetch_writes_fetch_head)",
+  "cfg(mutant_git_ff_race_is_failure)",
+  "cfg(mutant_loop_rebased_unbounded)",
+  "cfg(mutant_runner_conflict_files_keep_format_chars)",
 ] }
 
 [workspace.lints.clippy]

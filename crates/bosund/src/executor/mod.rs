@@ -485,6 +485,9 @@ struct Current {
     child: park::ChildSlot,
     /// The ignored files before the first session of the attempt numbered here (#59).
     ignored: Option<(u32, Arc<bosun_git::Ignored>)>,
+    /// How many times in a row the landing reported one head rebased in one attempt (#8):
+    /// shared with the landing task, which refuses at [`landing::REBASED_LIMIT`].
+    rebased: Arc<std::sync::Mutex<Option<landing::Streak>>>,
 }
 
 /// A lint result, cached per card body.
@@ -1084,13 +1087,33 @@ impl Loop {
         let item = cur.item.id.clone();
         let title = cur.card.title.clone();
         let done = self.done_tx.clone();
+        let streak = cur.rebased.clone();
         let handle = tokio::spawn(async move {
             let spec = landing::Spec {
                 item: item.clone(),
                 attempt,
                 title,
             };
-            let landed = landing::land(&shared, &config, &claimed, &spec, kill_rx).await;
+            let mut landed = landing::land(&shared, &config, &claimed, &spec, kill_rx).await;
+            if let Some(head) = landed.rebased.take() {
+                // A verified head the verdict cannot record comes back rebased each time.
+                let next = {
+                    let mut slot = streak
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let next = landing::rebased_again(slot.as_ref(), attempt, &head);
+                    *slot = Some(next.clone());
+                    next
+                };
+                if next.refused() {
+                    shared.trouble(format!(
+                        "{item}: the landing is refused: the verified commit {head} cannot be \
+                         recorded (reported rebased {} times)",
+                        next.count
+                    ));
+                    landed.event = Some(Event::LandingRefused);
+                }
+            }
             if let Some(claimed) = landed.followed {
                 let _ = done.send(Done::Followed {
                     item: item.clone(),
@@ -1363,6 +1386,21 @@ impl Loop {
             // Worktree mode: the worktree and its branch go. A Done item's work is on the
             // target (landing, #8); any other item's is kept in the clone under its aside ref.
             let aside = (!done).then_some(&cur.item.id);
+            // The clone's offer of a landed commit goes whatever the item's end: a landing
+            // killed while deferred, or one a crashed daemon left (#8, E14).
+            if !cfg!(mutant_loop_keep_landing_ref) {
+                let (clone, offered) = (wt.workspace.clone_path(), git::landing_ref(&cur.item.id));
+                let dropped = blocking(move || {
+                    bosun_git::Git::new(clone).run(&["update-ref", "-d", &offered], None)
+                })
+                .await;
+                if let Err(e) = dropped {
+                    self.shared.trouble(format!(
+                        "{}: the landing ref cannot be removed: {e}",
+                        cur.item.id
+                    ));
+                }
+            }
             self.close_worktree(wt, aside).await;
         } else if !done && let Some(claimed) = &cur.claimed {
             let config = self.config();
@@ -1717,6 +1755,7 @@ impl Loop {
             failing: Vec::new(),
             child: park::ChildSlot::default(),
             ignored: None,
+            rebased: Arc::default(),
         });
         self.apply(Event::Claim).await;
     }

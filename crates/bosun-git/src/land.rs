@@ -130,6 +130,13 @@ pub enum Error {
         /// The commit it was to move to.
         to: String,
     },
+    /// The branch moved between the read of its head and its update; nothing moved.
+    Moved {
+        /// The branch.
+        branch: String,
+        /// Its head now.
+        head: String,
+    },
     /// The rebase stopped with no conflicting file; it was aborted.
     Stopped {
         /// What git said.
@@ -145,6 +152,10 @@ impl fmt::Display for Error {
             Self::NotDescendant { branch, head, to } => write!(
                 f,
                 "{to} does not descend from {branch} at {head}: not a fast-forward, nothing moved"
+            ),
+            Self::Moved { branch, head } => write!(
+                f,
+                "{branch} moved to {head} while it was fast-forwarded: nothing moved"
             ),
             Self::Stopped { stderr } => {
                 write!(f, "the rebase stopped and was aborted: {}", stderr.trim())
@@ -301,11 +312,7 @@ pub fn fast_forward(repo: &Git, branch: &str, to: &str) -> Result<FastForward, E
         holder(repo, &full)?
     };
     let Some(holder) = holder else {
-        repo.run(
-            &["update-ref", "-m", "bosun: fast-forward", &full, &to, &head],
-            None,
-        )?;
-        return Ok(FastForward::Moved { from: head, to });
+        return update(repo, branch, &to, &head);
     };
     let checkout = Git::new(&holder.path);
     if let Some(operation) = holder.operation {
@@ -339,6 +346,56 @@ pub fn fast_forward(repo: &Git, branch: &str, to: &str) -> Result<FastForward, E
         None,
     )?;
     Ok(FastForward::Moved { from: head, to })
+}
+
+/// Moves `branch` (a short name), which no worktree has checked out, to the commit `to` with
+/// `git update-ref`, given `expected`, the head it was read at.
+///
+/// # Errors
+///
+/// [`Error::Moved`] when the branch no longer names `expected` (someone committed on it
+/// meanwhile; nothing moved), or git fails.
+fn update(repo: &Git, branch: &str, to: &str, expected: &str) -> Result<FastForward, Error> {
+    let full = format!("refs/heads/{branch}");
+    let updated = repo.run(
+        &[
+            "update-ref",
+            "-m",
+            "bosun: fast-forward",
+            &full,
+            to,
+            expected,
+        ],
+        None,
+    );
+    match updated {
+        Ok(_) => Ok(FastForward::Moved {
+            from: expected.to_owned(),
+            to: to.to_owned(),
+        }),
+        // Mutant (`mutant_git_ff_race_is_failure`): a branch that moved before its update is a
+        // plain git failure, not a reason to start again.
+        Err(e) if cfg!(mutant_git_ff_race_is_failure) => Err(e.into()),
+        Err(e) => {
+            let now = repo.run(
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    &full,
+                ],
+                None,
+            );
+            match now.map(|h| h.trim().to_owned()) {
+                Ok(head) if head != expected => Err(Error::Moved {
+                    branch: branch.to_owned(),
+                    head,
+                }),
+                _ => Err(e.into()),
+            }
+        }
+    }
 }
 
 /// A worktree that holds a branch: checked out, or detached by an operation on it.
@@ -740,6 +797,25 @@ mod tests {
         assert_eq!((branch.as_str(), at, to), ("land", &before, &other));
         assert!(error.to_string().contains("nothing moved"), "{error}");
         assert_eq!(head(&repo, "land"), before);
+    }
+
+    #[test]
+    fn a_branch_that_moved_before_its_update_is_reported_as_moved() {
+        let (_dir, repo) = setup();
+        let stale = head(&repo, "main");
+        git(&repo, &["branch", "land"]);
+        // The user commits on `land` after its head was read.
+        git(&repo, &["checkout", "--quiet", "land"]);
+        let moved = commit(&repo, "u.txt", "user\n");
+        git(&repo, &["checkout", "--quiet", "main"]);
+        let to = commit(&repo, "b.txt", "second\n");
+
+        let error = update(&Git::new(&repo), "land", &to, &stale).unwrap_err();
+        let Error::Moved { branch, head: now } = &error else {
+            panic!("a branch that moved was answered {error:?}");
+        };
+        assert_eq!((branch.as_str(), now), ("land", &moved));
+        assert_eq!(head(&repo, "land"), moved);
     }
 
     #[test]

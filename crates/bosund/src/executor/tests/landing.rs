@@ -355,14 +355,9 @@ printf '%s\n' \"$out\" > \"$1\"
 async fn a_rebase_left_in_progress_is_aborted_before_landing() {
     let scene = Scene::with_worktrees(None).await;
     let editor = scene.path("break.sh");
-    std::fs::write(&editor, BREAK_AFTER_FIRST).unwrap();
     // Git executes the editor itself (its path has no shell metacharacters), so on Unix it
     // must be executable; Git for Windows runs it through `sh` either way.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    write_executable(&editor, BREAK_AFTER_FIRST);
     let mut sub = subscribe_trouble(&scene);
     scene.write_board(&[card(1, "Left mid-rebase", "test -f a.txt", "Item one.")]);
     scene.script(

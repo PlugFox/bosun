@@ -54,6 +54,32 @@ pub(super) fn without_session(command: &mut Command) -> &mut Command {
     command
 }
 
+/// Writes `text` to `path` as an executable script (mode 0755 on Unix).
+///
+/// On Unix the file is written by a child `sh`, never through a descriptor of this process:
+/// the tests run on many threads, and a child forked by another test while this process held
+/// the file open for writing keeps that descriptor until its own `exec`, so executing the
+/// script meanwhile fails with `ETXTBSY` ("Text file busy").
+fn write_executable(path: &Path, text: &str) {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        let mut child = Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(text.as_bytes()).unwrap();
+        drop(stdin);
+        let status = child.wait().unwrap();
+        assert!(status.success(), "writing {}: {status}", path.display());
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, text).unwrap();
+}
+
 /// How long a session that asked a blocking question may go on in these scenarios.
 const GRACE: Duration = Duration::from_secs(2);
 
@@ -576,20 +602,14 @@ impl Scene {
             shim
         } else {
             let shim = bin.join("claude");
-            std::fs::write(
+            write_executable(
                 &shim,
-                format!(
+                &format!(
                     "#!/bin/sh\nexec '{}' --fake-script-dir '{}' \"$@\"\n",
                     fake_agent().display(),
                     self.scripts.display()
                 ),
-            )
-            .unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            );
             shim
         }
     }

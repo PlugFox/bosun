@@ -422,6 +422,13 @@ pub enum Event {
         /// For a running item, the exit classified from the transcript tail, if any.
         tail: Option<Exit>,
     },
+    /// The daemon restarted and re-attached the running item's session, which went on under its
+    /// shim (#8, E3): nothing was lost, so nothing is spawned or counted; only the boot is
+    /// recorded.
+    Reattached {
+        /// The daemon's boot number, increasing across starts.
+        boot: u32,
+    },
     /// A user command.
     User(UserCommand),
 }
@@ -456,6 +463,7 @@ impl Event {
             Self::BudgetExceeded => "budget_exceeded",
             Self::ConfigChanged => "config_changed",
             Self::Restarted { .. } => "restarted",
+            Self::Reattached { .. } => "reattached",
             Self::User(UserCommand::Cancel) => "user_cancel",
             Self::User(UserCommand::Requeue) => "user_requeue",
             Self::User(UserCommand::Restart) => "user_restart",
@@ -838,6 +846,7 @@ impl Draft {
                 self.needs_you(Reason::ConfigChanged);
             }
             Event::Restarted { boot, tail } => self.restarted(*boot, *tail)?,
+            Event::Reattached { boot } => self.reattached(*boot)?,
             Event::User(command) => self.user(*command)?,
         }
         Some(())
@@ -1220,6 +1229,21 @@ impl Draft {
         Some(())
     }
 
+    /// A running item whose session the restarted daemon follows again (#8): nothing was lost,
+    /// so only the boot is recorded, once per boot.
+    fn reattached(&mut self, boot: u32) -> Option<()> {
+        self.expect(&[State::Running])?;
+        if boot <= self.item.boot {
+            return None;
+        }
+        if cfg!(mutant_core_reattach_counts) {
+            // Mutant (`mutant_core_reattach_counts`): the re-attach costs an uncounted resume.
+            self.item.uncounted += 1;
+        }
+        self.item.boot = boot;
+        Some(())
+    }
+
     fn user(&mut self, command: UserCommand) -> Option<()> {
         let state = self.item.state;
         match command {
@@ -1557,6 +1581,38 @@ mod tests {
         let stuck = go(&retried, &miss(&retried), &ctx()).item;
         assert_eq!(stuck.state, State::NeedsYou(Reason::Handshake));
         assert_eq!((stuck.failed, cur(&stuck).0), (0, 1));
+    }
+
+    #[test]
+    fn a_reattached_item_keeps_running_and_counts_nothing() {
+        let item = running();
+        let boot = item.boot + 1;
+        let next = go(&item, &Event::Reattached { boot }, &ctx());
+        assert_eq!(next.transition.cause, "reattached");
+        assert!(
+            next.transition
+                .effects
+                .iter()
+                .all(|e| e.kind == EffectKind::Report),
+            "nothing but the report: {:?}",
+            next.transition
+        );
+        let next = next.item;
+        assert_eq!(next.state, State::Running);
+        assert_eq!(cur(&next), cur(&item), "the same attempt, spawn and run");
+        assert_eq!(
+            (next.attempts, next.failed, next.uncounted),
+            (item.attempts, item.failed, item.uncounted)
+        );
+        assert_eq!(next.boot, boot);
+        assert_eq!(
+            step(&next, &Event::Reattached { boot }, &ctx()),
+            None,
+            "once per boot"
+        );
+        let mut verifying = item.clone();
+        verifying.state = State::Verifying;
+        assert_eq!(step(&verifying, &Event::Reattached { boot }, &ctx()), None);
     }
 
     #[test]
@@ -1903,6 +1959,9 @@ mod tests {
             Event::Restarted {
                 boot: item.boot + 1,
                 tail: None,
+            },
+            Event::Reattached {
+                boot: item.boot + 1,
             },
         ];
         match item.state {

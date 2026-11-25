@@ -886,7 +886,34 @@ impl Loop {
         if cur.ignored.as_ref().is_none_or(|(n, _)| *n != attempt) {
             self.record_guards(attempt, &claimed).await;
         }
-        let cur = self.current.as_ref()?;
+        self.start_session_task(attempt, spawn, mode, claimed, None)
+            .await;
+        None
+    }
+
+    /// Follows the session a previous daemon left running under its shim (#8, E3), found by
+    /// crash recovery, as the item's session task: no checks, no spawn, no new run.
+    async fn start_attached(&mut self, attached: session::Attached) {
+        let Some(claimed) = self.current.as_ref().and_then(|c| c.claimed.clone()) else {
+            return;
+        };
+        let (attempt, spawn, mode) = (attached.run.attempt, attached.run.spawn, attached.run.mode);
+        self.start_session_task(attempt, spawn, mode, claimed, Some(attached))
+            .await;
+    }
+
+    /// Starts the task of a session: a new one, or the `attached` one of a previous daemon.
+    async fn start_session_task(
+        &mut self,
+        attempt: u32,
+        spawn: u32,
+        mode: SpawnMode,
+        claimed: Arc<Claimed>,
+        attached: Option<session::Attached>,
+    ) {
+        let Some(cur) = self.current.as_ref() else {
+            return;
+        };
         let (kill, kill_rx) = watch::channel(false);
         let shared = self.shared.clone();
         let config = self.config();
@@ -923,8 +950,23 @@ impl Loop {
                 child: slot,
                 shim_cap,
             };
-            let event =
-                session::session(&shared, &config, &claimed, &run, kill_rx, on_blocking).await;
+            let event = match attached {
+                Some(attached) => {
+                    session::attach(
+                        &shared,
+                        &config,
+                        &claimed,
+                        &run,
+                        attached,
+                        kill_rx,
+                        on_blocking,
+                    )
+                    .await
+                }
+                None => {
+                    session::session(&shared, &config, &claimed, &run, kill_rx, on_blocking).await
+                }
+            };
             let _ = done.send(Done::Event {
                 item,
                 event,
@@ -935,7 +977,6 @@ impl Loop {
         if let Some(cur) = self.current.as_mut() {
             cur.child = child;
         }
-        None
     }
 
     /// Before the first session of `attempt`: records the ignored files (#59) and stores them

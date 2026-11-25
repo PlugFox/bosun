@@ -559,3 +559,265 @@ async fn a_session_that_reported_its_result_is_verified_not_resumed() {
         "the kept output goes with its session"
     );
 }
+
+/// The `process` rows of card `n`, gone or not.
+async fn shims(scene: &Scene, n: u64) -> Vec<bosun_store::ProcessRow> {
+    scene.store.reader().processes_of(&id(n)).await.unwrap()
+}
+
+/// An assistant text line of the stream format, which the runner turns into a live entry.
+fn print_text(text: &str) -> String {
+    format!(
+        "print {{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\
+         \"text\":\"{text}\"}}]}}}}"
+    )
+}
+
+/// A worktree-mode scene (#8) whose card 1 prints `before-the-kill`, writes `started`, waits
+/// for `release`, prints `after-the-release`, commits `one.txt` and ends normally.
+async fn shimmed_session() -> Scene {
+    let scene = Scene::with_worktrees(None).await;
+    let p = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[card(1, "Under the shim", "test -f one.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            print_text("before-the-kill"),
+            format!("write {} x", p("started")),
+            format!("wait {}", p("release")),
+            print_text("after-the-release"),
+            "commit one.txt one".to_owned(),
+        ],
+    );
+    scene
+}
+
+/// Runs a child daemon until card 1's session waits under its shim and its row holds the
+/// offsets past the first line, then kills it. Returns the shim's record; the agent runs on.
+async fn kill_under_shim(scene: &Scene) -> bosun_proc::shim::Record {
+    let mut daemon = Spawned::start(scene, Role::Daemon);
+    wait_file(&scene.path("started")).await;
+    let mut row = None;
+    wait_for(
+        "the shim's row and its offsets",
+        Duration::from_secs(30),
+        async || {
+            row = shims(scene, 1).await.into_iter().next();
+            row.as_ref().is_some_and(|r| r.stdout_offset > 0)
+        },
+    )
+    .await;
+    let row = row.unwrap();
+    let record = bosun_proc::shim::Record::read(Path::new(&row.record_path)).unwrap();
+    daemon.kill();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        bosun_proc::is_running(record.child),
+        "the agent died with its daemon: {}",
+        child_log(scene)
+    );
+    record
+}
+
+/// Ends the agent of `record` if it still runs, so that nothing outlives the scene.
+fn end_agent(record: &bosun_proc::shim::Record) {
+    let _ = bosun_proc::reap(record.child);
+}
+
+/// The test loop's API over the scene's credentials, as `bosun-mcp` calls it.
+fn api_of(scene: &Scene) -> crate::state::State {
+    crate::state::State {
+        started_ms: 0,
+        identities: BTreeMap::new(),
+        credentials: scene.credentials.clone(),
+        control: scene.control.clone(),
+        leases: Arc::new(crate::leases::Leases::none()),
+    }
+}
+
+/// Waits until the item's re-attach is recorded.
+async fn reattached(scene: &Scene) {
+    wait_for("the re-attach", Duration::from_secs(60), async || {
+        causes(scene, 1).await.iter().any(|c| c == "reattached")
+    })
+    .await;
+}
+
+/// #8 (E3, E10): in worktree mode the daemon is killed while the session waits; the agent
+/// runs on under its shim. The restarted daemon finds the item `running`, re-attaches the
+/// session and finishes it: one attempt, one run (fresh, `ok`), nothing uncounted, a
+/// `reattached` transition and no `restarted`, the shim's row gone; the session's credential is
+/// accepted again before the release (`mutant_loop_reap_instead_of_attach` reaps and resumes
+/// it, `mutant_loop_reattach_without_credential` refuses the call).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_daemon_killed_mid_session_reattaches_and_finishes_with_one_attempt_and_one_run() {
+    let scene = shimmed_session().await;
+    let record = kill_under_shim(&scene).await;
+    let credential = credential_of_session(&scene.path("work"));
+
+    let (task, watcher) = scene.start(None);
+    reattached(&scene).await;
+    let running = scene.state(1).await;
+    let api = api_of(&scene);
+    let mut conn = crate::api::Connection::default();
+    let note = rpc(
+        &api,
+        &mut conn,
+        "agent.note",
+        serde_json::json!({"credential": credential, "item": "demo#1", "text": "still here"}),
+    )
+    .await;
+    std::fs::write(scene.path("release"), "").unwrap();
+    let state = ended(&scene, 1, Duration::from_secs(120)).await;
+    drained(&scene).await;
+    task.abort();
+    watcher.abort();
+    end_agent(&record);
+    let log = child_log(&scene);
+    assert_eq!(running, Some(State::Running), "{log}");
+    assert!(
+        note["result"].is_object(),
+        "the credential is refused after the restart: {note}"
+    );
+    assert_eq!(state, State::Done(Outcome::Pass), "{log}");
+
+    let item = scene.item(1).await.unwrap();
+    assert_eq!(
+        (item.attempts, item.failed, item.uncounted),
+        (1, 0, 0),
+        "{item:?}"
+    );
+    let runs = scene.runs(1).await;
+    assert_eq!(
+        modes(&runs),
+        vec![(1, SpawnMode::Fresh)],
+        "one run: {runs:?}"
+    );
+    assert_eq!(runs[0].exit, Some(bosun_core::Exit::Ok), "{runs:?}");
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
+    let causes = causes(&scene, 1).await;
+    assert_eq!(
+        causes.iter().filter(|c| *c == "reattached").count(),
+        1,
+        "{causes:?}"
+    );
+    assert!(
+        !causes.iter().any(|c| c == "restarted"),
+        "the session is not restarted: {causes:?}"
+    );
+    let rows = shims(&scene, 1).await;
+    assert!(
+        !rows.is_empty() && rows.iter().all(|r| r.gone_ms.is_some()),
+        "{rows:?}"
+    );
+}
+
+/// #8 (E3): the session ends while no daemon runs, and its shim records the exit. The
+/// restarted daemon reads the rest of its output and the recorded exit, and the item ends Done
+/// with one run, nothing resumed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_that_ended_while_the_daemon_was_down_is_read_from_its_record() {
+    let scene = shimmed_session().await;
+    let record = kill_under_shim(&scene).await;
+    std::fs::write(scene.path("release"), "").unwrap();
+    let path = PathBuf::from(&shims(&scene, 1).await[0].record_path);
+    wait_for(
+        "the shim to record the exit",
+        Duration::from_secs(60),
+        async || bosun_proc::shim::Record::read(&path).is_ok_and(|r| r.exit.is_some()),
+    )
+    .await;
+    assert!(!bosun_proc::is_running(record.child));
+
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, Duration::from_secs(120)).await;
+    drained(&scene).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(state, State::Done(Outcome::Pass), "{}", child_log(&scene));
+    let item = scene.item(1).await.unwrap();
+    assert_eq!((item.attempts, item.uncounted), (1, 0), "{item:?}");
+    let runs = scene.runs(1).await;
+    assert_eq!(modes(&runs), vec![(1, SpawnMode::Fresh)], "{runs:?}");
+    assert_eq!(runs[0].exit, Some(bosun_core::Exit::Ok), "{runs:?}");
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
+    let causes = causes(&scene, 1).await;
+    assert!(causes.iter().any(|c| c == "reattached"), "{causes:?}");
+    assert!(!causes.iter().any(|c| c == "restarted"), "{causes:?}");
+}
+
+/// #8 (E9): the kill switch reaches a re-attached session as any other: within 5 s its agent
+/// is gone, by its recorded pid and start time, and the item is parked as `killed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_kill_switch_ends_a_reattached_session() {
+    let scene = shimmed_session().await;
+    let record = kill_under_shim(&scene).await;
+    let (task, watcher) = scene.start(None);
+    reattached(&scene).await;
+
+    let thrown = Instant::now();
+    scene.control.set_killed(true);
+    wait_for("the agent to be gone", Duration::from_secs(5), async || {
+        !bosun_proc::is_running(record.child)
+    })
+    .await;
+    assert!(thrown.elapsed() <= Duration::from_secs(5));
+    wait_for("the item to park", Duration::from_secs(10), async || {
+        matches!(
+            scene.state(1).await,
+            Some(State::Parked(bosun_core::Park {
+                reason: ParkReason::Killed,
+                ..
+            }))
+        )
+    })
+    .await;
+    task.abort();
+    watcher.abort();
+    end_agent(&record);
+}
+
+/// The texts of the session output events `sub` has received so far.
+fn output_lines(sub: &mut crate::events::Subscriber) -> Vec<String> {
+    match sub.take(10_000) {
+        crate::events::Batch::Events(events) => events
+            .iter()
+            .filter_map(|e| {
+                let v: serde_json::Value = serde_json::from_slice(&e.line).unwrap();
+                v["params"]["body"]["line"].as_str().map(str::to_owned)
+            })
+            .collect(),
+        crate::events::Batch::Lagged(_) => panic!("the subscription lagged"),
+    }
+}
+
+/// #8 (E18): the restarted daemon reads the session from the offsets its row holds: the line
+/// the session printed before the kill is not published again, the line after the release is
+/// (`mutant_loop_reattach_from_zero` reads it all again).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reattached_session_is_read_from_its_stored_offsets() {
+    let scene = shimmed_session().await;
+    let record = kill_under_shim(&scene).await;
+    let filter = bosun_api::EventFilter {
+        kinds: Some(vec!["session_output".to_owned()]),
+        tail: Some(bosun_api::Tail::default()),
+    };
+    let mut sub = scene.events.subscribe("test", None, None, filter).1;
+    let (task, watcher) = scene.start(None);
+    reattached(&scene).await;
+    std::fs::write(scene.path("release"), "").unwrap();
+    let state = ended(&scene, 1, Duration::from_secs(120)).await;
+    task.abort();
+    watcher.abort();
+    end_agent(&record);
+    assert_eq!(state, State::Done(Outcome::Pass), "{}", child_log(&scene));
+    let lines = output_lines(&mut sub);
+    assert!(
+        lines.iter().any(|l| l == "after-the-release"),
+        "the output after the release: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l == "before-the-kill"),
+        "the output before the kill is read again: {lines:?}"
+    );
+}

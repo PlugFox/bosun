@@ -311,6 +311,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_drop_shim_offsets)",
   "cfg(mutant_loop_sessions_without_shim)",
   "cfg(mutant_loop_shim_cap_unbounded)",
+  # #8: a restarted daemon re-attaches worktree-mode sessions.
+  "cfg(mutant_loop_reap_instead_of_attach)",
+  "cfg(mutant_loop_reattach_from_zero)",
+  "cfg(mutant_loop_reattach_without_credential)",
+  "cfg(mutant_core_reattach_counts)",
 ] }
 
 [workspace.lints.clippy]

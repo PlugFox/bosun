@@ -1548,6 +1548,7 @@ async fn an_item_after_a_conflict_reads_back_with_its_counter() {
     events.pop();
     events.push(|item| Event::Conflict {
         attempt: current(item).0,
+        run: current(item).2,
     });
     for event in events {
         let stepped = go(&item, &event(&item));

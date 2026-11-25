@@ -1123,12 +1123,15 @@ impl Loop {
         let config = self.config();
         let item = cur.item.id.clone();
         let title = cur.card.title.clone();
+        // The verdict run whose pass emitted this `Land`: it keys a conflict to this pass.
+        let run = cur.item.attempt.as_ref().map_or(0, |a| a.run);
         let done = self.done_tx.clone();
         let streak = cur.rebased.clone();
         let handle = tokio::spawn(async move {
             let spec = landing::Spec {
                 item: item.clone(),
                 attempt,
+                run,
                 title,
             };
             let mut landed = landing::land(&shared, &config, &claimed, &spec, kill_rx).await;

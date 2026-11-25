@@ -36,10 +36,21 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # E26 (#8): tests never depend on a git configuration of the machine. The runner's global
+      # and system configuration are out; a test that commits names its own identity.
+      - name: An empty global git configuration
+        shell: bash
+        run: ': > "$RUNNER_TEMP/empty.gitconfig"'
       - name: Tests
         run: cargo test --workspace --all-targets --locked
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/empty.gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
       - name: Doc tests
         run: cargo test --workspace --doc --locked
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/empty.gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
 
   policy:
     name: policy
@@ -104,8 +115,15 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.name }}
+      # E26 (#8): no global or system git configuration, as in the test job.
+      - name: An empty global git configuration
+        shell: bash
+        run: ': > "$RUNNER_TEMP/empty.gitconfig"'
       - name: Every selected mutant goes red
         run: cargo xtask mutants ${{ matrix.args }}
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/empty.gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
 
   mutants:
     name: mutants

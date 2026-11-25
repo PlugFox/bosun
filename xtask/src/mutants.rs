@@ -2049,6 +2049,36 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_land_over_stale_rebase",
+        issue: LANDING_FIX_CARD,
+        breaks: "a rebase left in progress in the worktree is not aborted, and its partial pick lands",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_rebase_left_in_progress_is_aborted_before_landing",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_landing_row_coalesces",
+        issue: LANDING_FIX_CARD,
+        breaks: "a landing row keeps another attempt's or another head's landed commit",
+        package: "bosun-store",
+        check: Check::Test(
+            "work::tests::a_new_attempt_or_a_new_verified_head_clears_the_landing_row",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_landed_only_when_equal",
+        issue: LANDING_FIX_CARD,
+        breaks: "a target the user committed on past the landed commit is rebased onto again",
+        package: "bosund",
+        check: Check::Test(
+            "executor::landing::tests::a_target_past_the_landed_commit_counts_as_landed",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #8 that makes the daemon's commits carry the repository identity (E26; its own
@@ -2062,6 +2092,11 @@ const CONFLICT_CARD: u32 = 8;
 /// The card of #8 that re-attaches worktree-mode sessions after a daemon restart (its own
 /// number was not known when it was written; its parent's stands in).
 const REATTACH_CARD: u32 = 8;
+
+/// The card of #8 that keeps landing from landing a partial rebase, another attempt's landed
+/// commit, or a landing twice (its own number was not known when it was written; its parent's
+/// stands in).
+const LANDING_FIX_CARD: u32 = 8;
 
 /// The re-attach scene of the card, which hosts two mutants.
 const REATTACH_SCENE: &str = "executor::tests::recovery::a_daemon_killed_mid_session_reattaches_and_finishes_with_one_attempt_and_one_run";

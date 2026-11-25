@@ -323,6 +323,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #8 (E26): the daemon's commits carry the repository identity.
   "cfg(mutant_loop_ambient_commit_identity)",
   "cfg(mutant_loop_aside_commit_fixed_identity)",
+  # #8: landing never lands a partial rebase, another attempt's row, or a landing twice.
+  "cfg(mutant_loop_land_over_stale_rebase)",
+  "cfg(mutant_store_landing_row_coalesces)",
+  "cfg(mutant_loop_landed_only_when_equal)",
 ] }
 
 [workspace.lints.clippy]

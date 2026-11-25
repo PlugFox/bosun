@@ -1552,6 +1552,23 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("a_version_1_spec_is_refused_by_name"),
         platform: None,
     },
+    // #183: the prompt and the spec owner-only, and no prompt left behind.
+    Mutant {
+        name: "mutant_shim_stdin_default_permissions",
+        issue: 183,
+        breaks: "the stdin file and the spec get default permissions; other users may read them",
+        package: "bosun-proc",
+        check: Check::Test("the_stdin_and_spec_files_admit_only_the_user"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_shim_prompt_left_on_error",
+        issue: 183,
+        breaks: "a spawn that fails after writing the prompt leaves it on disk",
+        package: "bosun-proc",
+        check: Check::Test("a_failed_spawn_leaves_no_prompt"),
+        platform: None,
+    },
     // #124: item worktrees.
     Mutant {
         name: "mutant_git_worktree_skip_disk_floor",

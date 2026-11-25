@@ -606,6 +606,99 @@ fn a_child_reads_its_prompt_from_the_stdin_file() {
     );
 }
 
+/// A `talk` child of `ShimSpawner` with `stdin` and `cwd` set, in a session under `dir`.
+fn talk_with_a_prompt(dir: &Path) -> ChildSpec {
+    ChildSpec {
+        program: std::env::current_exe().expect("current exe"),
+        args: ["run_role", "--exact", "--nocapture", "--quiet"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        env: role_env("talk"),
+        cwd: dir.to_path_buf(),
+        stdin: Some(b"a prompt nobody else may read".to_vec()),
+    }
+}
+
+/// Checks that the file at `path` is readable by the current user alone: a protected
+/// one-entry DACL on Windows, mode 0600 on Unix.
+fn assert_owner_only(path: &Path) {
+    #[cfg(windows)]
+    {
+        let file = std::fs::File::open(path).expect("open");
+        bosun_proc::pipe::OwnerOnly::new()
+            .expect("the user's descriptor")
+            .verify(&file)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{}: mode {mode:o}", path.display());
+    }
+}
+
+/// The stdin file and the spec of a `ShimSpawner` session admit only the user, also when a
+/// leftover stdin file with default permissions was in the session directory.
+#[test]
+fn the_stdin_and_spec_files_admit_only_the_user() {
+    use tokio::io::AsyncReadExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = ShimSpawner::new(
+        env!("CARGO_BIN_EXE_bosun-shim"),
+        dir.path().join("sessions"),
+        SLEEP,
+    );
+    let session = dir.path().join("session");
+    std::fs::create_dir_all(&session).expect("session dir");
+    std::fs::write(session.join(STDIN_FILE), "a leftover").expect("leftover");
+    let status = runtime().block_on(async {
+        let mut spawned = shim
+            .spawn_in(&talk_with_a_prompt(dir.path()), &session)
+            .expect("spawn");
+        let mut seen = Vec::new();
+        while !parse(&String::from_utf8_lossy(&seen)).contains_key("first") {
+            let mut chunk = [0_u8; 256];
+            let read = spawned.stdout.read(&mut chunk).await.expect("read");
+            assert!(read > 0, "stdout ended before the first line");
+            seen.extend_from_slice(&chunk[..read]);
+        }
+        assert_owner_only(&session.join(STDIN_FILE));
+        assert_owner_only(&session.join("session.spec"));
+        std::fs::write(dir.path().join("go"), "").expect("go");
+        tokio::time::timeout(PATIENCE, spawned.tree.wait())
+            .await
+            .expect("the child exits after go")
+            .expect("wait")
+    });
+    assert_eq!(status.code(), Some(TALKED_CODE), "{status}");
+}
+
+/// A `spawn_in` that fails after writing the prompt (here: the shim does not exist) leaves no
+/// stdin file behind.
+#[test]
+fn a_failed_spawn_leaves_no_prompt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let shim = ShimSpawner::new(
+        dir.path().join("no-such-shim.exe"),
+        dir.path().join("sessions"),
+        SLEEP,
+    );
+    let session = dir.path().join("session");
+    let refused = shim.spawn_in(&talk_with_a_prompt(dir.path()), &session);
+    assert!(refused.is_err(), "a shim that does not exist started");
+    assert!(
+        !session.join(STDIN_FILE).exists(),
+        "the prompt outlived the failed spawn"
+    );
+}
+
 /// A spec whose header says version 1 (before the stdin file) is refused: the shim fails with
 /// its own code, starts nothing, and its error names both versions.
 #[test]

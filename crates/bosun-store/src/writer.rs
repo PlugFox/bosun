@@ -187,6 +187,13 @@ pub enum Write {
     /// A session shim the daemon started (#8). Keyed by its record's path: writing it again
     /// stores nothing.
     Process(NewProcess),
+    /// The shim of a `process` row written before its spawn (pid 0) has started: its pid and
+    /// start time. Writing it again stores the same.
+    ProcessStarted {
+        record_path: String,
+        pid: u32,
+        pid_started_ms: i64,
+    },
     /// How far the daemon has read the shim's output files (E18). An offset only grows: the
     /// larger of the stored and the written one is kept.
     ProcessOffsets {
@@ -494,6 +501,11 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
         }
         Write::WorktreeBytes { path, bytes } => work::worktree_bytes(conn, &path, bytes).await,
         Write::Process(new) => work::insert_process(conn, &new).await,
+        Write::ProcessStarted {
+            record_path,
+            pid,
+            pid_started_ms,
+        } => work::process_started(conn, &record_path, pid, pid_started_ms).await,
         Write::ProcessOffsets {
             record_path,
             stdout,

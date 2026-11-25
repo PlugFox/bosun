@@ -29,7 +29,7 @@ use bosun_core::{Effect, EffectKey, EffectKind, Event, ItemId, State, UserComman
 use bosun_queue::{Card, Changes, Column};
 use bosun_store::{OutboxOp, StoredItem, Write};
 
-use super::{Loop, blocking, claim, git, item_id, lookup, outbox};
+use super::{Loop, Signal, blocking, claim, git, item_id, lookup, outbox};
 
 /// The label that restarts an item's session (#5).
 pub(crate) const RESTART_LABEL: &str = "restart";
@@ -258,7 +258,7 @@ impl Loop {
         };
         let item = cur.item.id.clone();
         if let Some(mut task) = cur.task.take() {
-            let _ = task.kill.send(true);
+            let _ = task.kill.send(Signal::Kill);
             let _ = (&mut task.handle).await;
         }
         // Worktree mode: the old worktree is closed with its work kept; the claim opens a new one.

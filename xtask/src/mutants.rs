@@ -2127,7 +2127,42 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_stop_kills_shim_sessions",
+        issue: DETACH_CARD,
+        breaks: "a graceful daemon stop kills worktree-mode sessions instead of leaving them for the next daemon",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::shim::a_graceful_stop_leaves_the_session_running_and_the_next_loop_reattaches",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_process_row_after_spawn",
+        issue: DETACH_CARD,
+        breaks: "a session's `process` row is written only after its shim started",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::shim::the_process_row_is_written_before_the_shim_starts",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_attach_range_from_base",
+        issue: DETACH_CARD,
+        breaks: "a re-attached session's commit range starts at the attempt's base, not where the session started",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::recovery::a_reattached_session_counts_only_its_own_commits",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that leaves worktree-mode sessions running at a graceful stop, writes their
+/// `process` row before the spawn and records where a session's commit range starts (its own
+/// number was not known when it was written; its parent's stands in).
+const DETACH_CARD: u32 = 8;
 
 /// The card of #8 that makes the daemon's commits carry the repository identity (E26; its own
 /// number was not known when it was written; its parent's stands in).

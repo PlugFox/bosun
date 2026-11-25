@@ -19,7 +19,7 @@ use bosun_api::{EventBody, Wide};
 use bosun_core::{Event, Hold, ItemId, State};
 use bosun_store::{By, Group, Write};
 
-use super::Loop;
+use super::{Loop, Signal};
 
 /// The loop's own state for holds and budgets.
 #[derive(Debug, Default)]
@@ -144,7 +144,7 @@ impl Loop {
             // without a board write and the card goes back to Ready.
             State::Claimed if kills => {
                 if let Some(task) = cur.task.as_ref() {
-                    let _ = task.kill.send(true);
+                    let _ = task.kill.send(Signal::Kill);
                 }
             }
             State::Parked(_) if hold.is_none() => self.apply(Event::Tick).await,

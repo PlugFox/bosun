@@ -17,12 +17,12 @@ use bosun_store::{VerdictEnd, VerdictStart, Write};
 use tokio::sync::{oneshot, watch};
 
 use super::workspace::Unopened;
-use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms, workspace};
+use super::{Claimed, Shared, Signal, blocking, git, identity, lookup, now_ms, workspace};
 use crate::events;
 
 /// Resolves when `kill` is raised; never when its sender is gone without raising it.
-pub(crate) async fn killed(kill: &mut watch::Receiver<bool>) {
-    if kill.wait_for(|k| *k).await.is_err() {
+pub(crate) async fn killed(kill: &mut watch::Receiver<Signal>) {
+    if kill.wait_for(|k| *k != Signal::Run).await.is_err() {
         std::future::pending::<()>().await;
     }
 }
@@ -105,7 +105,7 @@ pub(crate) async fn verdict(
     config: &Config,
     claimed: &Claimed,
     run: &Run,
-    mut kill: watch::Receiver<bool>,
+    mut kill: watch::Receiver<Signal>,
 ) -> (Event, Vec<String>) {
     let Some(wt) = &claimed.worktree else {
         return run_in(shared, config, claimed, run, kill, &claimed.workdir).await;
@@ -247,7 +247,7 @@ async fn run_in(
     config: &Config,
     claimed: &Claimed,
     run: &Run,
-    mut kill: watch::Receiver<bool>,
+    mut kill: watch::Receiver<Signal>,
     cwd: &Path,
 ) -> (Event, Vec<String>) {
     let fail = |result| Event::Verdict {

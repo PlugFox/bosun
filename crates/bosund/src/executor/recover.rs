@@ -20,7 +20,11 @@
 //!    session id from the run row, the credential re-admitted from the row's digest, the tail
 //!    file read and appended to), and the item records `Event::Reattached`, which spawns and
 //!    counts nothing. A user command on the board still wins, and the session is then reaped.
-//!    Every other `process` row of the repository's items is marked gone.
+//!    Every other `process` row of the repository's items is marked gone, and the agent its
+//!    record names, if the record reads, is reaped by its pid and start time first: the row is
+//!    written before the spawn and the attempt's child after it, so the row may be all that
+//!    names it. A daemon that stopped gracefully (E22) leaves what one that crashed leaves: the
+//!    same steps re-attach its sessions.
 //! 3. Otherwise the item's lost work goes back to the machine as `Event::Restarted`: a
 //!    `running` item is classified from its session's tail (the exit its run row recorded, else
 //!    the output the session task kept on disk) and otherwise resumed once, uncounted; a
@@ -309,9 +313,29 @@ impl Loop {
         }
     }
 
-    /// Marks the session shims of `rows` gone (#8): their sessions are not followed.
+    /// Marks the session shims of `rows` gone (#8): their sessions are not followed. The agent
+    /// of a row whose record reads is reaped first, by the record's pid and start time: the
+    /// row is written before the spawn, the attempt's `SessionChild` after it, so a daemon that
+    /// died between the two left an agent no other row names.
     async fn processes_gone(&self, item: &ItemId, rows: &[ProcessRow]) {
         for row in rows {
+            let path = PathBuf::from(&row.record_path);
+            let reaped = blocking(move || {
+                let record = bosun_proc::shim::Record::read(&path).ok()?;
+                Some((record.child, bosun_proc::reap(record.child)))
+            })
+            .await;
+            match reaped {
+                Some((child, Ok(true))) => crate::log::log!(
+                    "bosund: repository {}: {item}: reaped pid {} of a session not followed",
+                    self.shared.options.repo,
+                    child.pid
+                ),
+                Some((child, Err(e))) => self
+                    .shared
+                    .trouble(format!("{item}: pid {} cannot be reaped: {e}", child.pid)),
+                Some((_, Ok(false))) | None => {}
+            }
             let gone = Write::ProcessGone {
                 record_path: row.record_path.clone(),
                 at_ms: now_ms(),

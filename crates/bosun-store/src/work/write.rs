@@ -447,8 +447,8 @@ pub(crate) async fn insert_run(conn: &mut SqliteConnection, run: &RunStart) -> R
     let attempt = attempt_id(conn, &run.item, run.attempt).await?;
     let mode = codec::spawn_mode(run.mode);
     sqlx::query!(
-        "INSERT INTO run (attempt_id, spawn, mode, provider, session_key, started_ms)
-         VALUES (?, ?, ?, ?, ?, ?)
+        "INSERT INTO run (attempt_id, spawn, mode, provider, session_key, started_ms, start_sha)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (attempt_id, spawn) DO NOTHING",
         attempt,
         run.spawn,
@@ -456,6 +456,7 @@ pub(crate) async fn insert_run(conn: &mut SqliteConnection, run: &RunStart) -> R
         run.provider,
         run.session_key,
         run.started_ms,
+        run.start_sha,
     )
     .execute(&mut *conn)
     .await?;
@@ -954,6 +955,28 @@ pub(crate) async fn insert_process(
     )
     .execute(conn)
     .await?;
+    Ok(())
+}
+
+/// The shim of the `process` row at `record_path`, written before the spawn with pid 0, has
+/// started: its pid and start time.
+pub(crate) async fn process_started(
+    conn: &mut SqliteConnection,
+    record_path: &str,
+    pid: u32,
+    pid_started_ms: i64,
+) -> Result<(), Error> {
+    let updated = sqlx::query!(
+        "UPDATE process SET pid = ?, pid_started_ms = ? WHERE record_path = ?",
+        pid,
+        pid_started_ms,
+        record_path,
+    )
+    .execute(conn)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(Error::UnknownRow(format!("process {record_path}")));
+    }
     Ok(())
 }
 

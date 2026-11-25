@@ -962,6 +962,137 @@ fn a_shared_build_names_an_exclusive_resource_and_a_directory_outside_the_reposi
     }
 }
 
+/// E1: a shared build directory that holds the checkout or the worktrees gets cargo's files
+/// next to them, and a `cargo clean` there deletes them. `mutant_config_shared_build_holder_allowed`
+/// checks only the "under" direction.
+#[test]
+fn a_shared_build_holding_the_repository_or_the_worktree_root_is_refused() {
+    let text = |dir: &str| {
+        with_repo(&format!(
+            "worktree = {{ root = '{}', shared_build = {{ dir = '{}', resource = 'target' }} \
+             }}\n{TARGET_RESOURCE}",
+            abs("wt/bosun"),
+            abs(dir),
+        ))
+    };
+    for (dir, holds) in [
+        ("wt", "holds `worktree.root`"),
+        ("git", "holds the repository's path"),
+    ] {
+        let found = problems(&text(dir));
+        assert_eq!(found.len(), 1, "{dir}: {found:?}");
+        assert!(
+            found[0].contains("`repo.bosun.worktree.shared_build.dir`") && found[0].contains(holds),
+            "{dir}: {found:?}"
+        );
+    }
+    let config = parse(&text("wt/bosun-target"), &Local).unwrap();
+    let worktree = config.repos["bosun"].worktree.as_ref().unwrap();
+    assert_eq!(
+        worktree.shared_build.as_ref().map(|s| s.dir.clone()),
+        Some(PathBuf::from(abs("wt/bosun-target")))
+    );
+}
+
+/// E19: only worktree mode reads `landing.target`; without a worktree it is ignored with a
+/// notice, as before #149. `mutant_config_target_kept_without_worktree` keeps it silently.
+#[test]
+fn a_target_without_a_worktree_is_ignored_with_a_notice() {
+    let config = parse(&with_repo("landing = { target = 'main' }\n"), &Local).unwrap();
+    assert_eq!(config.repos["bosun"].landing.target, None);
+    let notices: Vec<String> = config
+        .notices
+        .iter()
+        .map(ToString::to_string)
+        .filter(|n| n.contains("`repo.bosun.landing.target`"))
+        .collect();
+    assert_eq!(notices.len(), 1, "{:?}", config.notices);
+    assert!(notices[0].contains("worktree"), "{notices:?}");
+
+    let worktree = format!("worktree = {{ root = '{}' }}\n", abs("wt/bosun"));
+    for landing in [
+        "landing = { target = 'main' }\n",
+        "landing = { mode = 'local', target = 'main' }\n",
+    ] {
+        for text in [
+            with_repo(&format!("{landing}{worktree}")),
+            with_repo(&format!("{worktree}{landing}")),
+        ] {
+            let config = parse(&text, &Local).unwrap();
+            assert_eq!(
+                config.repos["bosun"].landing.target.as_deref(),
+                Some("main"),
+                "{text}"
+            );
+            assert!(
+                !config
+                    .notices
+                    .iter()
+                    .any(|n| n.to_string().contains("target")),
+                "{text}: {:?}",
+                config.notices
+            );
+        }
+    }
+}
+
+/// A target git would refuse at landing time is refused when the file is read, by the rules of
+/// `git check-ref-format --branch`. `mutant_config_target_loose_branch_rules` checks the old few.
+#[test]
+fn a_landing_target_follows_gits_branch_name_rules() {
+    let text = |target: &str| {
+        with_repo(&format!(
+            "landing = {{ target = \"{}\" }}\nworktree = {{ root = '{}' }}\n",
+            target
+                .chars()
+                .map(|c| match c {
+                    '\\' | '"' => format!("\\{c}"),
+                    c if c.is_control() => format!("\\u{:04X}", u32::from(c)),
+                    c => c.to_string(),
+                })
+                .collect::<String>(),
+            abs("wt/bosun"),
+        ))
+    };
+    for bad in [
+        "a..b",
+        "x.lock",
+        "a~1",
+        "a^",
+        "a:b",
+        "a?b",
+        "a*b",
+        "a[b",
+        r"a\b",
+        "a//b",
+        "/a",
+        "a/",
+        ".a",
+        "a/.b",
+        "a.",
+        "@",
+        "a@{b",
+        "a\u{1}b",
+        "HEAD",
+        "-x",
+        "refs/heads/x",
+        "",
+        "a b",
+        "a\u{7f}b",
+    ] {
+        let found = problems(&text(bad));
+        assert_eq!(found.len(), 1, "{bad:?}: {found:?}");
+        assert!(
+            found[0].contains("`repo.bosun.landing.target`"),
+            "{bad:?}: {found:?}"
+        );
+    }
+    for good in ["main", "feature/x", "release-1.2", "user@host", "a.b/c_d"] {
+        let config = parse(&text(good), &Local).unwrap();
+        assert_eq!(config.repos["bosun"].landing.target.as_deref(), Some(good));
+    }
+}
+
 #[test]
 fn the_repository_hash_covers_landing_and_the_worktree() {
     let base = with_repo(&format!(

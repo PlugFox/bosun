@@ -284,6 +284,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #149: landing modes, merge and pull request keys, shared build directories.
   "cfg(mutant_config_landing_without_worktree)",
   "cfg(mutant_config_shared_build_any_resource)",
+  # #181: shared build holders, landing.target without a worktree, branch names.
+  "cfg(mutant_config_shared_build_holder_allowed)",
+  "cfg(mutant_config_target_kept_without_worktree)",
+  "cfg(mutant_config_target_loose_branch_rules)",
   # #150: the worktree, process, lease-wait and landing tables.
   "cfg(mutant_store_process_offsets_overwrite)",
   "cfg(mutant_store_lease_wait_duplicates)",

@@ -1693,6 +1693,34 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #181: a shared build directory that holds the checkout or the worktrees; `landing.target`
+    // without a worktree; git's branch name rules for the target.
+    Mutant {
+        name: "mutant_config_shared_build_holder_allowed",
+        issue: 181,
+        breaks: "a shared build directory that holds the repository or the worktree root passes",
+        package: "bosun-config",
+        check: Check::Test(
+            "tests::a_shared_build_holding_the_repository_or_the_worktree_root_is_refused",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_target_kept_without_worktree",
+        issue: 181,
+        breaks: "landing.target is kept without a worktree, which nothing reads, and no notice says so",
+        package: "bosun-config",
+        check: Check::Test("tests::a_target_without_a_worktree_is_ignored_with_a_notice"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_target_loose_branch_rules",
+        issue: 181,
+        breaks: "a landing.target git refuses as a branch name is accepted until landing",
+        package: "bosun-config",
+        check: Check::Test("tests::a_landing_target_follows_gits_branch_name_rules"),
+        platform: None,
+    },
     // #150: the worktree, process, lease-wait and landing tables.
     Mutant {
         name: "mutant_store_process_offsets_overwrite",

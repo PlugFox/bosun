@@ -345,15 +345,26 @@ async fn a_lease_call_without_the_operator_token_is_refused() {
 }
 
 /// One repository with `[resource.target]` as its shared build directory under the variable
-/// `BUILD_DIR_FOR_TEST`; its setup sleeps a second and stamps the directory. The session
-/// commits `a.txt`; the verdict passes only when the directory is in its environment and
-/// `a.txt` (in the fresh verdict checkout, older than the stamp of its setup) was touched after
-/// the setup and before the verdict. The item ends Done (`mutant_loop_no_build_env` and
-/// `mutant_loop_skip_mtime_touch` fail it).
+/// `BUILD_DIR_FOR_TEST`; its setup sleeps a second, stamps the directory and sleeps another
+/// second. The session commits `a.txt`; the verdict passes only when the directory is in its
+/// environment and `a.txt` (in the fresh verdict checkout, older than the stamp of its setup)
+/// was touched after the setup and before the verdict. The item ends Done
+/// (`mutant_loop_no_build_env` and `mutant_loop_skip_mtime_touch` fail it).
+///
+/// Both sleeps matter because the verdict shell may compare whole seconds: macOS `/bin/sh` is
+/// bash 3.2, whose `test -nt` compares `st_mtime` in whole seconds (dash, bash 5 and Git for
+/// Windows' bash compare nanoseconds). At whole-second resolution `x + 1 s` always falls in a
+/// later second than `x`. With the touch, `a.txt` is touched at least a second after the stamp,
+/// so it is newer even at one-second resolution; without the second sleep it would share the
+/// stamp's second and every verdict would fail. Without the touch
+/// (`mutant_loop_skip_mtime_touch`), `a.txt` keeps its checkout time, at least a second before
+/// the stamp, so it stays older and the mutant still goes red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_verdict_under_the_shared_build_gets_its_directory_and_fresh_file_times() {
-    let mut scene =
-        Scene::with_worktrees(Some("sleep 1; touch \"$BUILD_DIR_FOR_TEST/stamp\"")).await;
+    let mut scene = Scene::with_worktrees(Some(
+        "sleep 1; touch \"$BUILD_DIR_FOR_TEST/stamp\"; sleep 1",
+    ))
+    .await;
     let build = scene.path("build");
     std::fs::create_dir_all(&build).unwrap();
     scene.worktree_more = format!(

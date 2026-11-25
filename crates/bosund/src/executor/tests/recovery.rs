@@ -929,6 +929,63 @@ async fn the_kill_switch_ends_a_reattached_session() {
     end_agent(&record);
 }
 
+/// #8: an item in flight is recovered in the mode it was claimed in. A worktree-mode item's
+/// daemon is killed mid-session; meanwhile the user commits on the target and removes
+/// `repo.demo.worktree` from the configuration. The restarted daemon sends the item to Needs
+/// you (`config_changed`), closes its worktree with its work kept in the clone, and leaves the
+/// user's checkout alone: no `refs/bosun/` ref there, HEAD, branch and status as the user left
+/// them (`mutant_loop_mode_from_config` rebuilds the item as a stage-1 one and sets it aside in
+/// the user's checkout).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worktree_item_recovered_without_the_worktree_key_leaves_the_users_checkout_alone() {
+    let mut scene = shimmed_session().await;
+    let record = kill_under_shim(&scene).await;
+    scene.git(&["commit", "--allow-empty", "-q", "-m", "user"]);
+    scene.worktrees = false;
+    std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();
+    let user = |scene: &Scene| {
+        (
+            scene.git(&["rev-parse", "HEAD"]),
+            scene.git(&["symbolic-ref", "HEAD"]),
+            scene.git(&["status", "--porcelain", "--untracked-files=all"]),
+        )
+    };
+    let before = user(&scene);
+
+    let (task, watcher) = scene.start(None);
+    std::fs::write(scene.path("release"), "").unwrap();
+    let state = ended(&scene, 1, Duration::from_secs(120)).await;
+    worktrees::closed(&scene, 1).await;
+    drained(&scene).await;
+    task.abort();
+    watcher.abort();
+    end_agent(&record);
+    let log = child_log(&scene);
+    assert_eq!(state, State::NeedsYou(Reason::ConfigChanged), "{log}");
+
+    assert_eq!(
+        scene.git(&["for-each-ref", "refs/bosun/"]),
+        "",
+        "the user's repository got a bosun ref"
+    );
+    assert_eq!(user(&scene), before, "the user's checkout changed");
+    let rows = worktrees::rows(&scene, 1).await;
+    let items: Vec<_> = rows
+        .iter()
+        .filter(|r| r.kind == bosun_store::WorktreeKind::Item)
+        .collect();
+    assert!(
+        !items.is_empty() && items.iter().all(|r| r.state == WorktreeState::Removed),
+        "{rows:?}"
+    );
+    let clone = scene.worktree_root().join(workspace::CLONE);
+    let aside = git::aside_ref(&id(1));
+    assert!(
+        !worktrees::git_in(&scene, &clone, &["for-each-ref", &aside]).is_empty(),
+        "the item's work is not kept in the clone"
+    );
+}
+
 /// The texts of the session output events `sub` has received so far.
 fn output_lines(sub: &mut crate::events::Subscriber) -> Vec<String> {
     match sub.take(10_000) {

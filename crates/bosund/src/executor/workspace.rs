@@ -8,6 +8,15 @@
 //!   git configuration with their repository, so they never hang off the user's own (E5). It
 //!   is never `--shared` and never `--reference`: it owns its objects. Anything else found at
 //!   its path is an error and is left as it is.
+//! - A bare clone copies none of the user's repository-local configuration, and the daemon
+//!   copies only one setting: on Windows the clone gets `core.longpaths=true` (at the clone,
+//!   and in its own config; an existing clone without it gets it when checked), so a
+//!   repository whose files sit deeper than 260 characters can have worktrees even when the
+//!   user turned it on in that repository only. Nothing else is copied: not its filters,
+//!   hooks, `core.autocrlf`, LFS or submodule settings (filters and hooks run commands, and
+//!   git's own configuration is guarded, #59). What the user set globally or for the system
+//!   applies to the clone as to any repository; a repository that needs more prepares its
+//!   worktrees with `setup`.
 //! - The target is fetched from the user's checkout at claim ([`Workspace::sync_target`]),
 //!   fast-forward only: a target the user rewrote is an error, not an overwrite. It is never
 //!   checked out in the clone.
@@ -114,6 +123,12 @@ impl Registry {
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&(key.pid, key.start.raw()))
     }
+}
+
+/// Whether the daemon's clone gets `core.longpaths=true`: on Windows only.
+fn long_paths() -> bool {
+    // Mutant (`mutant_loop_clone_without_longpaths`): the clone does not get it.
+    cfg!(windows) && !cfg!(mutant_loop_clone_without_longpaths)
 }
 
 /// The worktrees of one repository configured with `repo.<name>.worktree`.
@@ -311,6 +326,20 @@ impl Workspace {
         })
     }
 
+    /// The workspace an item claimed in worktree mode was recorded in, for a configuration
+    /// that no longer has `repo.<name>.worktree` (#8): `root` (the parent of the item's
+    /// worktree) with its clone at `<root>/.clone`, and no `setup`, no `teardown`, no disk
+    /// floor. Enough to close the item's worktree with its work kept in the clone.
+    pub(crate) fn recorded(repo: &Repo, root: PathBuf) -> Self {
+        Self {
+            user: repo.path.clone(),
+            identity: repo.identity.clone(),
+            config: bosun_config::Worktree::at(root),
+            shell: repo.verdict.shell.as_deref().map(PathBuf::from),
+            timeout: repo.verdict.timeout,
+        }
+    }
+
     /// The worktree root: `repo.<name>.worktree.root`.
     pub(crate) fn root(&self) -> &Path {
         &self.config.root
@@ -344,8 +373,17 @@ impl Workspace {
                     source,
                 })?;
                 let user = self.user.to_string_lossy();
-                Git::new(root).run(&["clone", "--bare", "--quiet", "--", &user, CLONE], None)?;
-                Ok(Git::new(path))
+                let mut args = Vec::new();
+                if long_paths() {
+                    args.extend(["-c", "core.longpaths=true"]);
+                }
+                args.extend(["clone", "--bare", "--quiet", "--", &user, CLONE]);
+                Git::new(root).run(&args, None)?;
+                let git = Git::new(path);
+                if long_paths() {
+                    git.run(&["config", "core.longpaths", "true"], None)?;
+                }
+                Ok(git)
             }
             Err(source) => Err(Error::Io { path, source }),
         }
@@ -395,6 +433,14 @@ impl Workspace {
         let user = self.user.to_string_lossy();
         if canonical_path(&origin, style) != canonical_path(&user, style) {
             return Err(not(format!("its origin is {origin}, not {user}")));
+        }
+        // A clone made before the setting was: it gets it now.
+        if long_paths()
+            && git
+                .optional(&["config", "--local", "--get", "core.longpaths"])?
+                .is_none_or(|v| v.trim() != "true")
+        {
+            git.run(&["config", "core.longpaths", "true"], None)?;
         }
         Ok(git)
     }
@@ -1558,6 +1604,36 @@ mod tests {
 
     fn canonical(path: impl AsRef<Path>) -> PathBuf {
         std::fs::canonicalize(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_clone_has_long_paths_on_windows() {
+        let w = World::new().await;
+        let ws = w.workspace(|_| {});
+        let local = |w: &World| {
+            w.git(
+                &ws.clone_path(),
+                &["config", "--local", "--get-all", "core.longpaths"],
+            )
+        };
+        w.git(&w.repo, &["config", "core.autocrlf", "input"]);
+        ws.ensure_clone().unwrap();
+        assert_eq!(local(&w), "true");
+        // A clone made before the setting was: it gets it at the next check.
+        w.git(&ws.clone_path(), &["config", "--unset", "core.longpaths"]);
+        ws.ensure_clone().unwrap();
+        assert_eq!(local(&w), "true");
+        // Nothing else of the user's repository-local configuration comes along.
+        let autocrlf = [
+            "config",
+            "--local",
+            "--get",
+            "--default",
+            "",
+            "core.autocrlf",
+        ];
+        assert_eq!(w.git(&ws.clone_path(), &autocrlf), "");
     }
 
     #[tokio::test]

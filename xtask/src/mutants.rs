@@ -2294,6 +2294,33 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_guard_compares_remotes",
+        issue: 175,
+        breaks: "a pruned or force-fetched remote-tracking ref sends the item to Needs you",
+        package: "bosund",
+        check: Check::Test("executor::checkout::tests::only_heads_and_tags_are_compared"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_clone_without_longpaths",
+        issue: 175,
+        breaks: "the daemon's clone lacks core.longpaths on Windows",
+        package: "bosund",
+        check: Check::Test("executor::workspace::tests::the_clone_has_long_paths_on_windows"),
+        // The setting is Windows-only, and so is its test.
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_loop_mode_from_config",
+        issue: 175,
+        breaks: "recovery takes an item's mode from today's configuration and writes to the user's checkout",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::recovery::a_worktree_item_recovered_without_the_worktree_key_leaves_the_users_checkout_alone",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #8 that sweeps the worktrees no item owns, retries quarantines and records the

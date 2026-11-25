@@ -57,18 +57,51 @@ pub(crate) struct Checked {
     pub(crate) uncommitted: Vec<String>,
 }
 
+/// The commit `head` and `target` (a ref or a commit) have in common: `git merge-base`.
+pub(crate) fn merge_base(git: &Git, head: &str, target: &str) -> Result<String, Error> {
+    Ok(git
+        .run(&["merge-base", "--end-of-options", head, target], None)?
+        .trim()
+        .to_owned())
+}
+
+/// Worktree mode (#8): `base` with the start of the item's own commits as its head: the merge
+/// base of the worktree's HEAD and the clone's `refs/heads/<target>` now. Landing rebases the
+/// item onto the target, so the commits that came in from the target (a person's, with
+/// whatever messages they have) are never judged as the agent's. The refs and the stash are
+/// `base`'s own, as captured.
+pub(crate) fn item_base(git: &Git, base: &Base, target: &str) -> Result<Base, Error> {
+    let head = head(git)?;
+    let start = merge_base(git, &head, &format!("refs/heads/{target}"))?;
+    Ok(Base {
+        head: start,
+        ..base.clone()
+    })
+}
+
 /// The verdict preconditions of the item claimed at `base`. The trailers a commit may carry
 /// are the item's own: its id, its runs' labels and its sessions' ids, plus the co-author line
-/// the provider writes. With `worktree` (worktree mode, E19) the clean tree is not one of them:
-/// what is not committed is listed in [`Checked::uncommitted`] instead.
+/// the provider writes. With `target` (worktree mode, E19: the branch the item lands on) the
+/// clean tree is not one of them: what is not committed is listed in [`Checked::uncommitted`]
+/// instead, and the item's commits start at [`item_base`], while the claim's own head must
+/// still be an ancestor of HEAD.
 pub(crate) fn preconditions(
     repo: &Path,
     base: &Base,
     item: &ItemId,
     runs: &[RunRow],
-    worktree: bool,
+    target: Option<&str>,
 ) -> Result<Checked, Error> {
     let git = Git::new(repo);
+    let claim = base;
+    let own;
+    let base = match target {
+        Some(target) => {
+            own = item_base(&git, base, target)?;
+            &own
+        }
+        None => base,
+    };
     let mut expected = Expected {
         item: BTreeSet::from([item.to_string()]),
         run: runs.iter().map(|r| run_label(r.attempt, r.spawn)).collect(),
@@ -86,13 +119,17 @@ pub(crate) fn preconditions(
             .filter(|v| PROVIDER_CO_AUTHOR.is_match(v))
             .collect();
     }
-    if !worktree {
+    if target.is_none() {
         return Ok(Checked {
             reasons: bosun_git::check(&git, base, &expected)?,
             uncommitted: Vec::new(),
         });
     }
-    let mut reasons = bosun_git::ancestry(&git, base)?;
+    // History below the claim's head rewritten; else no commit of the item's own.
+    let mut reasons = bosun_git::ancestry(&git, claim)?;
+    if reasons.is_empty() {
+        reasons = bosun_git::ancestry(&git, base)?;
+    }
     reasons.extend(bosun_git::refs(&git, base)?);
     reasons.extend(bosun_git::messages(&git, base, &expected)?);
     let mut uncommitted: Vec<String> = Vec::new();
@@ -131,12 +168,21 @@ pub(crate) fn restore_if_dirty(repo: &Path, base: &Base) -> Result<(), Error> {
 
 /// The name of the ref an item's work is set aside under.
 pub(crate) fn aside_ref(item: &ItemId) -> String {
-    let slug: String = item
-        .0
+    format!("refs/bosun/items/{}", slug(item))
+}
+
+/// The name of the ref the daemon's clone offers an item's landed commit under, for the
+/// user's repository to fetch (#8, E14).
+pub(crate) fn landing_ref(item: &ItemId) -> String {
+    format!("refs/bosun/landing/{}", slug(item))
+}
+
+/// `item` as a ref name component: every character but ASCII letters and digits is `-`.
+fn slug(item: &ItemId) -> String {
+    item.0
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    format!("refs/bosun/items/{slug}")
+        .collect()
 }
 
 /// An item that did not end Done: its work (commits, and uncommitted changes as one more

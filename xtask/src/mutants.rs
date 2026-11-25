@@ -1905,6 +1905,36 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("with::tests::the_commands_exit_code_is_the_clis"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_accept_pre_rebase_verdict",
+        issue: 157,
+        breaks: "a rebased head lands on the strength of the verdict before the rebase",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_rebase_that_breaks_the_verdict_does_not_land",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_land_while_deferred",
+        issue: 157,
+        breaks: "a deferred fast-forward of the target is reported as landed",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_dirty_checkout_of_the_target_defers_the_landing_and_holds_the_queue",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_land_ref_only",
+        issue: 157,
+        breaks: "landing moves the user's branch by its ref alone, not its checkout",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_target_that_moved_is_rebased_onto_and_verified_again",
+        ),
+        platform: None,
+    },
 ];
 
 /// The guard and trailer scenario of #99, which hosts several mutants.

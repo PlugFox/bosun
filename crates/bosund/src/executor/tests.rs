@@ -29,6 +29,7 @@ use super::*;
 use crate::config_watch;
 use crate::events::{Events, Options as EventOptions};
 
+mod landing;
 mod leases;
 mod recovery;
 mod sticky;

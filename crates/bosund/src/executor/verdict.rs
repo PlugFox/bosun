@@ -96,8 +96,10 @@ pub(crate) fn run_result(outcome: Outcome) -> RunResult {
 /// throwaway checkout of the head of the item's worktree
 /// ([`super::workspace::Workspace::checkout`], set up as the item's worktree is), closed when
 /// the run is over however it ended. A checkout that
-/// cannot be made or set up is [`Event::SetupFailed`], not a failed run. Without worktree mode
-/// it runs in the checkout, as in stage 1.
+/// cannot be made or set up is [`Event::SetupFailed`], not a failed run. A run that passes
+/// records the commit it judged and its tree in the item's `landing` row: what landing accepts
+/// as verified ([`super::landing`]). Without worktree mode it runs in the checkout, as in
+/// stage 1.
 pub(crate) async fn verdict(
     shared: &Arc<Shared>,
     config: &Config,
@@ -175,7 +177,67 @@ pub(crate) async fn verdict(
         // A quarantine is reported by the workspace; the run's result stands.
         checkout.close(shared, identity).await;
     }
+    if matches!(
+        ran.0,
+        Event::Verdict {
+            result: RunResult::Pass,
+            ..
+        }
+    ) && let Err(e) = verified(shared, claimed, &wt.target, run, &head).await
+    {
+        // Without the row the commit is not taken as verified: landing asks for another run.
+        shared.trouble(format!(
+            "the verdict of {}: the verified commit cannot be recorded: {e}",
+            run.item
+        ));
+    }
     ran
+}
+
+/// Worktree mode (#8): records `head` as the commit a passing run of `run`'s attempt verified,
+/// with its tree; the only evidence landing accepts that a commit was verified.
+async fn verified(
+    shared: &Shared,
+    claimed: &Claimed,
+    target: &str,
+    run: &Run,
+    head: &str,
+) -> Result<(), String> {
+    let (dir, at) = (claimed.workdir.clone(), head.to_owned());
+    let tree = blocking(move || {
+        Git::new(dir)
+            .run(
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &format!("{at}^{{tree}}"),
+                ],
+                None,
+            )
+            .map(|t| t.trim().to_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let row = bosun_store::LandingRow {
+        item: run.item.clone(),
+        attempt: run.attempt,
+        target: target.to_owned(),
+        head_sha: Some(head.to_owned()),
+        verified_tree: Some(tree),
+        landed_sha: None,
+        delivered_ms: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        updated_ms: now_ms(),
+    };
+    shared
+        .deps
+        .writer
+        .write(vec![Write::Landing(row)])
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// [`verdict`]'s run itself, in `cwd`.

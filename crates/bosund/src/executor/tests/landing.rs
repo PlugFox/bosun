@@ -305,6 +305,49 @@ async fn each_merge_method_lands_the_verified_tree_with_the_trailers() {
     }
 }
 
+/// The identity file's author, which every commit the daemon makes carries (E26).
+const IDENTITY: &str = "Synthetic Agent <agent@example.com>";
+
+/// `landing = { mode = "merge", merge = { method = "no-ff" } }`; the session commits `a.txt`
+/// and the setup script commits `b.txt` on the user's target once, so the item is rebased. The
+/// item ends Done; on the user's target the merge commit's author and committer are the
+/// repository identity's, and so is the committer of its second parent, the rebased item
+/// commit. The daemon's clone has no identity of its own and the tests run with no global one
+/// (E26), so a commit made without the identity's author is refused, or carries whatever global
+/// identity the process has (`mutant_loop_ambient_commit_identity`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_daemons_commits_carry_the_repository_identity() {
+    let mut scene = Scene::with_worktrees(None).await;
+    scene.config_more =
+        "[repo.demo.landing]\nmode = \"merge\"\nmerge = { method = \"no-ff\" }\n".to_owned();
+    let then = commit_on_target(&scene, "b.txt", "Add b");
+    setup_once(&mut scene, &then);
+    scene.write_board(&[card(1, "Identity", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    assert_eq!(scene.git(&["log", "-1", "--format=%s", "HEAD^1"]), "Add b");
+    assert_eq!(scene.git(&["log", "-1", "--format=%s", "HEAD^2"]), "a");
+    let ident =
+        |format: &str, rev: &str| scene.git(&["log", "-1", &format!("--format={format}"), rev]);
+    assert_eq!(ident("%an <%ae>", "HEAD"), IDENTITY, "the merge's author");
+    assert_eq!(
+        ident("%cn <%ce>", "HEAD"),
+        IDENTITY,
+        "the merge's committer"
+    );
+    assert_eq!(
+        ident("%cn <%ce>", "HEAD^2"),
+        IDENTITY,
+        "the rebased commit's committer"
+    );
+}
+
 /// The setup script writes an untracked file into the user's checkout once, before the first
 /// item's verdict. With two cards in Ready, the first reaches Landing and stays there: the
 /// user's target and files are unchanged, a trouble event says the fast-forward is deferred,

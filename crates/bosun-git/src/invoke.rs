@@ -62,7 +62,18 @@ impl Git {
     ///
     /// `git` cannot be started, or it exits unsuccessfully.
     pub fn run(&self, args: &[&str], stdin: Option<&str>) -> Result<String, Error> {
-        let out = self.exec(args, stdin)?;
+        self.run_in(self.command(), args, stdin)
+    }
+
+    /// [`Git::run`] with `command`, a [`Git::command`] the caller added to (an environment
+    /// variable, say).
+    pub(crate) fn run_in(
+        &self,
+        command: Command,
+        args: &[&str],
+        stdin: Option<&str>,
+    ) -> Result<String, Error> {
+        let out = Self::exec_in(command, args, stdin)?;
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
@@ -121,7 +132,14 @@ impl Git {
     }
 
     fn exec(&self, args: &[&str], stdin: Option<&str>) -> Result<std::process::Output, Error> {
-        let mut command = self.command();
+        Self::exec_in(self.command(), args, stdin)
+    }
+
+    fn exec_in(
+        mut command: Command,
+        args: &[&str],
+        stdin: Option<&str>,
+    ) -> Result<std::process::Output, Error> {
         command.args(args);
         if stdin.is_some() {
             command.stdin(Stdio::piped());

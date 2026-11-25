@@ -20,7 +20,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::{Git, Reason};
+use crate::{Git, Ident, Reason};
 
 /// What [`rebase_onto`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +171,9 @@ impl From<crate::Error> for Error {
 
 /// Rebases the checkout of `worktree` onto `target` (a ref or a commit).
 ///
+/// Every rebased commit gets `committer` as its committer (git keeps each commit's author),
+/// whatever the process's global git identity is (E26 of #8), and is not signed (#126).
+///
 /// On a conflict the rebase is aborted, so the worktree is clean at its previous head, and the
 /// conflicting files are returned.
 ///
@@ -178,9 +181,15 @@ impl From<crate::Error> for Error {
 ///
 /// Git refuses to start the rebase (local changes, an unknown target), the rebase stops for a
 /// reason other than a conflict (it is aborted then), or the abort fails.
-pub fn rebase_onto(worktree: &Git, target: &str) -> Result<Rebase, Error> {
-    let out = worktree
-        .command()
+pub fn rebase_onto(worktree: &Git, target: &str, committer: &Ident) -> Result<Rebase, Error> {
+    let mut command = worktree.command();
+    // Mutant (`mutant_loop_ambient_commit_identity`): the rebased commits get the process's
+    // global git identity as their committer.
+    if !cfg!(mutant_loop_ambient_commit_identity) {
+        committer.committer(&mut command);
+    }
+    let out = command
+        .args(["-c", "commit.gpgSign=false"])
         .args([
             "rebase",
             "--quiet",
@@ -507,6 +516,14 @@ mod tests {
         git(dir, &["status", "--porcelain", "--untracked-files=all"])
     }
 
+    /// The identity the daemon's commits carry: not the repository's own `Test`.
+    fn ident() -> Ident {
+        Ident {
+            name: "Repository Identity".to_owned(),
+            email: "identity@example.invalid".to_owned(),
+        }
+    }
+
     #[test]
     fn a_clean_rebase_moves_the_branch_onto_the_target() {
         let (_dir, repo) = setup();
@@ -516,12 +533,21 @@ mod tests {
         let target = commit(&repo, "m.txt", "main\n");
         git(&repo, &["checkout", "--quiet", "topic"]);
 
-        let rebased = rebase_onto(&Git::new(&repo), "main").unwrap();
+        let rebased = rebase_onto(&Git::new(&repo), "main", &ident()).unwrap();
         let Rebase::Rebased { head: new } = rebased else {
             panic!("a clean rebase was reported {rebased:?}");
         };
         assert_eq!(new, head(&repo, "topic"));
         assert_eq!(head(&repo, "topic^"), target);
+        assert_eq!(
+            git(&repo, &["log", "-1", "--format=%cn <%ce>", "topic"]),
+            "Repository Identity <identity@example.invalid>"
+        );
+        assert_eq!(
+            git(&repo, &["log", "-1", "--format=%an <%ae>", "topic"]),
+            "Test <test@example.invalid>",
+            "a rebase keeps the author"
+        );
         assert!(repo.join("t.txt").is_file() && repo.join("m.txt").is_file());
         assert_eq!(status(&repo), "");
     }
@@ -538,7 +564,7 @@ mod tests {
         let before = head(&repo, "HEAD");
         let git_repo = Git::new(&repo);
 
-        let rebased = rebase_onto(&git_repo, "main").unwrap();
+        let rebased = rebase_onto(&git_repo, "main", &ident()).unwrap();
         assert_eq!(
             rebased,
             Rebase::Conflict {
@@ -735,7 +761,7 @@ mod tests {
         let before = head(&repo, "HEAD");
 
         // As an option, `--root` would rebase the whole branch and succeed.
-        let error = rebase_onto(&Git::new(&repo), "--root").unwrap_err();
+        let error = rebase_onto(&Git::new(&repo), "--root", &ident()).unwrap_err();
         assert!(matches!(error, Error::Git(_)), "{error:?}");
         assert_eq!(head(&repo, "HEAD"), before);
         assert_eq!(status(&repo), "");

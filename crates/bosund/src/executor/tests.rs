@@ -413,8 +413,15 @@ impl Scene {
 
     /// A scene in worktree mode (#8): the same configuration plus `repo.demo.worktree`, its
     /// root at `<scene>/wt`, with `setup` as its setup command.
+    ///
+    /// The scene's repository names its own committer, the identity file's, so the test's own
+    /// commits there (a setup script's included) need no global git identity (E26). The
+    /// daemon's clone does not inherit it: its commits carry the identity only if the daemon
+    /// gives them it.
     async fn with_worktrees(setup: Option<&str>) -> Self {
         let mut scene = Self::new().await;
+        scene.git(&["config", "user.name", "Synthetic Agent"]);
+        scene.git(&["config", "user.email", "agent@example.com"]);
         scene.worktrees = true;
         scene.setup = setup.map(str::to_owned);
         std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();

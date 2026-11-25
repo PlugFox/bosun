@@ -95,6 +95,36 @@ pub struct Trailers {
     pub session: String,
 }
 
+/// The author and committer of a commit the daemon makes (E26 of #8): the repository
+/// identity's, never the daemon process's global git identity.
+///
+/// It is set on the git command through `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`,
+/// `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`, which override every configuration file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ident {
+    /// The name.
+    pub name: String,
+    /// The email address.
+    pub email: String,
+}
+
+impl Ident {
+    /// Sets this identity as the committer of the commits `command` makes.
+    pub fn committer(&self, command: &mut std::process::Command) {
+        command
+            .env("GIT_COMMITTER_NAME", &self.name)
+            .env("GIT_COMMITTER_EMAIL", &self.email);
+    }
+
+    /// Sets this identity as the author and the committer of the commits `command` makes.
+    pub fn author_and_committer(&self, command: &mut std::process::Command) {
+        command
+            .env("GIT_AUTHOR_NAME", &self.name)
+            .env("GIT_AUTHOR_EMAIL", &self.email);
+        self.committer(command);
+    }
+}
+
 /// The injected hooks directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hooks {

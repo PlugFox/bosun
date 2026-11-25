@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use bosun_core::ItemId;
-use bosun_git::{Base, Error, Expected, Git, Reason};
+use bosun_git::{Base, Error, Expected, Git, Ident, Reason};
 use bosun_store::RunRow;
 use regex::Regex;
 
@@ -197,7 +197,7 @@ pub(crate) fn set_aside(repo: &Path, base: &Base, item: &ItemId) -> Result<(), E
         return Ok(());
     }
     let tip = if dirty {
-        snapshot_commit(&git, &head, item)?
+        snapshot_commit(&git, &head, item, &fixed_ident())?
     } else {
         head
     };
@@ -220,30 +220,57 @@ pub(crate) fn set_aside(repo: &Path, base: &Base, item: &ItemId) -> Result<(), E
 /// uncommitted changes (untracked files too) as one more commit. In a linked worktree the ref
 /// is written to the repository the worktree hangs off (refs are shared). Nothing in the
 /// checkout changes. Returns the commit kept.
-pub(crate) fn keep_work(dir: &Path, item: &ItemId) -> Result<String, Error> {
+///
+/// The commit of the uncommitted changes has `author` (the repository identity's, E26) as its
+/// author and committer.
+pub(crate) fn keep_work(dir: &Path, item: &ItemId, author: &Ident) -> Result<String, Error> {
     let git = Git::new(dir);
     let head = head(&git)?;
+    // Mutant (`mutant_loop_aside_commit_fixed_identity`): the set-aside commit is made as
+    // `bosun <bosun@localhost>`, as stage 1's.
+    let fixed = fixed_ident();
+    let author = if cfg!(mutant_loop_aside_commit_fixed_identity) {
+        &fixed
+    } else {
+        author
+    };
     let tip = if bosun_git::clean_tree(&git)?.is_empty() {
         head
     } else {
-        snapshot_commit(&git, &head, item)?
+        snapshot_commit(&git, &head, item, author)?
     };
     git.run(&["update-ref", &aside_ref(item), &tip], None)?;
     Ok(tip)
 }
 
+/// `author` as the identity of a commit the daemon makes.
+pub(crate) fn ident(author: &bosun_identity::Author) -> Ident {
+    Ident {
+        name: author.name.clone(),
+        email: author.email.clone(),
+    }
+}
+
+/// The author and committer of stage 1's set-aside commit ([`set_aside`]), which has no
+/// repository identity to carry (E19 keeps it as it was).
+fn fixed_ident() -> Ident {
+    Ident {
+        name: "bosun".to_owned(),
+        email: "bosun@localhost".to_owned(),
+    }
+}
+
 /// A commit on top of `head` holding the working tree as it is (untracked files too, ignored
-/// ones not), made through a temporary index so the checkout's own index is untouched.
-fn snapshot_commit(git: &Git, head: &str, item: &ItemId) -> Result<String, Error> {
+/// ones not), made through a temporary index so the checkout's own index is untouched. Its
+/// author and committer are `author`.
+fn snapshot_commit(git: &Git, head: &str, item: &ItemId, author: &Ident) -> Result<String, Error> {
     let scratch =
         tempfile::tempdir().map_err(|e| git.unexpected(format!("a temporary index: {e}")))?;
     let index = scratch.path().join("index");
     let run = |args: &[&str]| -> Result<String, Error> {
         let mut command = git.command();
-        command
-            .env("GIT_INDEX_FILE", &index)
-            .args(["-c", "user.name=bosun", "-c", "user.email=bosun@localhost"])
-            .args(args);
+        author.author_and_committer(&mut command);
+        command.env("GIT_INDEX_FILE", &index).args(args);
         let out = command
             .output()
             .map_err(|e| git.unexpected(format!("git {}: {e}", args.join(" "))))?;

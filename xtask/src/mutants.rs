@@ -2029,7 +2029,31 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_ambient_commit_identity",
+        issue: IDENTITY_CARD,
+        breaks: "the landing rebase and commit-tree take the daemon process's global git identity",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::the_daemons_commits_carry_the_repository_identity",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_aside_commit_fixed_identity",
+        issue: IDENTITY_CARD,
+        breaks: "a worktree's set-aside work is committed as bosun <bosun@localhost>",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::the_set_aside_work_carries_the_repository_identity",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that makes the daemon's commits carry the repository identity (E26; its own
+/// number was not known when it was written; its parent's stands in).
+const IDENTITY_CARD: u32 = 8;
 
 /// The card of #8 that tells the session after a rebase conflict about it (its own number was
 /// not known when it was written; its parent's stands in).

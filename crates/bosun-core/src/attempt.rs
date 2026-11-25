@@ -97,7 +97,8 @@ pub enum AttemptEvent {
     /// The attempt failed without a verdict: a precondition failed, a crash exceeded its retry.
     Failed,
     /// The landing step rebased the attempt's commits: its verdict runs again on the rebased
-    /// commit (#8). The first run's result is kept.
+    /// commit (#8). The runs before the rebase are forgotten: the rebased commit gets the whole
+    /// re-run rule (a first pass is `pass`, fail then pass is `flaky`, two non-passing runs fail).
     Reverify,
 }
 
@@ -158,7 +159,14 @@ impl Attempt {
             (S::Exited | S::Limited | S::Killed | S::VerdictPending, AttemptEvent::Failed) => {
                 S::Fail
             }
-            (S::Pass | S::Flaky, AttemptEvent::Reverify) => S::VerdictRunning,
+            (S::Pass | S::Flaky, AttemptEvent::Reverify) => {
+                // Mutant (`mutant_core_reverify_keeps_first_run`): a flaky attempt's failed first
+                // run counts as the first run on the rebased commit.
+                if !cfg!(mutant_core_reverify_keeps_first_run) {
+                    next.first_run = None;
+                }
+                S::VerdictRunning
+            }
             _ => return None,
         };
         Some(next)

@@ -108,6 +108,9 @@ pub(crate) fn rebased_again(prev: Option<&Streak>, attempt: u32, head: &str) -> 
 pub(crate) struct Spec {
     pub(crate) item: ItemId,
     pub(crate) attempt: u32,
+    /// The attempt's verdict run whose pass emitted the `Land` this task answers; it keys the
+    /// task's [`Event::Conflict`] to this landing pass.
+    pub(crate) run: u32,
     /// The card's title: the subject of a squash or merge commit.
     pub(crate) title: String,
 }
@@ -499,6 +502,7 @@ impl Task<'_> {
         }
         Event::Conflict {
             attempt: self.spec.attempt,
+            run: self.spec.run,
         }
     }
 

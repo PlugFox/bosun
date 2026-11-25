@@ -2157,6 +2157,50 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #172: the landing arrows of the item machine after review (restart, kill switch, flaky
+    // re-run rule, conflict keys).
+    Mutant {
+        name: "mutant_core_restart_lands_unverified",
+        issue: 172,
+        breaks: "a restart during the re-verdict of a rebased commit emits `Land` and strands the item",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_daemon_restarted_during_a_re_verdict_runs_it_again"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_kill_switch_skips_landing",
+        issue: 172,
+        breaks: "the kill switch neither kills nor parks the re-verdict of a rebased commit",
+        package: "bosun-core",
+        check: Check::Test("item::tests::the_kill_switch_reaches_a_re_verdict_in_landing"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_rebased_ignores_kill_hold",
+        issue: 172,
+        breaks: "a rebase under the kill switch starts the re-verdict",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_rebase_under_the_kill_switch_waits_to_verify"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_reverify_keeps_first_run",
+        issue: 172,
+        breaks: "a flaky attempt's rebased commit fails on one failing run, with no re-run",
+        package: "bosun-core",
+        check: Check::Test(
+            "item::tests::a_flaky_attempt_gets_the_re_run_rule_on_its_rebased_commit",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_conflict_unkeyed",
+        issue: 172,
+        breaks: "a late conflict of an earlier landing pass counts as the second conflict",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_conflict_from_an_earlier_landing_pass_is_ignored"),
+        platform: None,
+    },
 ];
 
 /// The card of #8 that leaves worktree-mode sessions running at a graceful stop, writes their

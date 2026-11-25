@@ -256,7 +256,8 @@ impl State {
         )
     }
 
-    /// A child process (a session or a verdict run) may be alive in this state.
+    /// A child process (a session or a verdict run) may be alive in this state. In
+    /// [`State::Landing`] it depends on the attempt: see `Draft::has_child`.
     fn has_child(self) -> bool {
         matches!(self, Self::Running | Self::Verifying)
     }
@@ -404,6 +405,9 @@ pub enum Event {
     Conflict {
         /// The attempt being landed.
         attempt: u32,
+        /// The attempt's verdict run whose pass emitted the `Land` this landing pass answers;
+        /// a conflict of an earlier pass names an older run and is ignored.
+        run: u32,
     },
     /// The worktree's setup (its creation or its setup command) failed.
     SetupFailed,
@@ -932,11 +936,25 @@ impl Draft {
                 }
                 // A verdict that passed before the rebase is never a verdict on the target.
                 self.attempt_step(AttemptEvent::Reverify)?;
-                self.run_verdict();
+                if cfg!(mutant_core_rebased_ignores_kill_hold) {
+                    // Mutant (`mutant_core_rebased_ignores_kill_hold`): the re-verdict starts
+                    // after the kill switch was thrown.
+                    self.run_verdict();
+                } else {
+                    self.reverify();
+                }
             }
-            Event::Conflict { attempt } => {
+            Event::Conflict { attempt, run } => {
                 self.expect(&[State::Landing])?;
                 self.current(*attempt)?;
+                // Only a conflict of the current landing pass: the one the pass of run `run`
+                // started. After a conflict session the attempt verifies under a new run.
+                let a = self.item.attempt.as_ref()?;
+                // Mutant (`mutant_core_conflict_unkeyed`): the run is not compared, so a late
+                // conflict of an earlier pass counts as the second one.
+                if !a.state.passed() || (a.run != *run && !cfg!(mutant_core_conflict_unkeyed)) {
+                    return None;
+                }
                 // Mutant (`mutant_core_conflict_sessions_unbounded`): every conflict starts
                 // another session.
                 if self.item.conflicts == 0 || cfg!(mutant_core_conflict_sessions_unbounded) {
@@ -1096,6 +1114,20 @@ impl Draft {
         }
     }
 
+    /// The verdict of a rebased commit in [`State::Landing`] (#8): it runs at once, or the item
+    /// parks to verify when the kill switch holds. A pause and the daily cap hold sessions only.
+    fn reverify(&mut self) {
+        if self.ctx.hold == Some(Hold::Kill) {
+            self.item.state = State::Parked(Park {
+                reason: ParkReason::Killed,
+                until_ms: None,
+                next: Next::Verify,
+            });
+        } else {
+            self.run_verdict();
+        }
+    }
+
     fn run_verdict(&mut self) {
         self.item.runs += 1;
         let run = self.item.runs;
@@ -1190,6 +1222,11 @@ impl Draft {
                 Next::Resume
             }
             State::Verifying => Next::Verify,
+            // The verdict of the rebased commit (#8); a landing task in flight is not stopped.
+            // Mutant (`mutant_core_kill_switch_skips_landing`): the re-verdict runs on.
+            State::Landing if self.has_child() && !cfg!(mutant_core_kill_switch_skips_landing) => {
+                Next::Verify
+            }
             _ => return None,
         };
         self.effects.push(EffectKind::Kill);
@@ -1219,6 +1256,13 @@ impl Draft {
                 }
             },
             State::Verifying => self.start(Next::Verify),
+            // The verdict of the rebased commit was in flight: it runs again. A landing task
+            // reports `Rebased` for a head no passing run recorded, which a re-verdict in
+            // flight does not take.
+            // Mutant (`mutant_core_restart_lands_unverified`): `Land` whatever the attempt.
+            State::Landing if self.has_child() && !cfg!(mutant_core_restart_lands_unverified) => {
+                self.reverify();
+            }
             State::Landing => {
                 let attempt = self.item.attempt_number();
                 self.effects.push(EffectKind::Land { attempt });
@@ -1291,9 +1335,21 @@ impl Draft {
     }
 
     fn kill_child(&mut self) {
-        if self.item.state.has_child() {
+        if self.has_child() {
             self.effects.push(EffectKind::Kill);
         }
+    }
+
+    /// A child process may be alive: a session or a verdict run, including the verdict of a
+    /// rebased commit in [`State::Landing`] (#8).
+    fn has_child(&self) -> bool {
+        self.item.state.has_child()
+            || (self.item.state == State::Landing
+                && self
+                    .item
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|a| a.state == AttemptState::VerdictRunning))
     }
 
     fn needs_you(&mut self, reason: Reason) {
@@ -1763,10 +1819,187 @@ mod tests {
         }
     }
 
+    /// The conflict of the current landing pass: the one the attempt's current run started.
     fn conflict(item: &Item) -> Event {
-        Event::Conflict {
-            attempt: cur(item).0,
+        let (attempt, _, run) = cur(item);
+        Event::Conflict { attempt, run }
+    }
+
+    fn is_run_verdict(k: &EffectKind) -> bool {
+        matches!(k, EffectKind::RunVerdict { .. })
+    }
+
+    fn parked_to_verify(item: &Item) -> bool {
+        item.state
+            == State::Parked(Park {
+                reason: ParkReason::Killed,
+                until_ms: None,
+                next: Next::Verify,
+            })
+    }
+
+    #[test]
+    fn a_daemon_restarted_during_a_re_verdict_runs_it_again() {
+        let landing = attempt(running(), &[RunResult::Pass]);
+        let item = go(&landing, &rebased(&landing), &ctx()).item;
+        let (attempt, _, in_flight) = cur(&item);
+        let boot = item.boot + 1;
+        let restarted = go(&item, &Event::Restarted { boot, tail: None }, &ctx());
+        assert_eq!(restarted.item.state, State::Landing);
+        let run = cur(&restarted.item).2;
+        assert!(run > in_flight, "a new run: {run} after {in_flight}");
+        let effects = kinds(&restarted);
+        assert!(effects.contains(&EffectKind::RunVerdict { attempt, run }));
+        assert!(
+            !effects.contains(&EffectKind::Land { attempt }),
+            "the rebased commit has not passed: {effects:?}"
+        );
+        let item = restarted.item;
+        let old = Event::Verdict {
+            attempt,
+            run: in_flight,
+            result: RunResult::Pass,
+        };
+        assert_eq!(step(&item, &old, &ctx()), None, "the lost run is ignored");
+        let passed = go(&item, &verdict(&item, RunResult::Pass), &ctx());
+        assert_eq!(passed.item.state, State::Landing);
+        assert!(kinds(&passed).contains(&EffectKind::Land { attempt }));
+        let done = go(&passed.item, &Event::Landed, &ctx()).item;
+        assert_eq!(done.state, State::Done(Outcome::Pass));
+
+        // A passed item in landing lands again.
+        let boot = landing.boot + 1;
+        let again = go(&landing, &Event::Restarted { boot, tail: None }, &ctx());
+        assert_eq!(again.item.state, State::Landing);
+        let effects = kinds(&again);
+        assert!(effects.contains(&EffectKind::Land { attempt }));
+        assert!(!effects.iter().any(is_run_verdict), "{effects:?}");
+    }
+
+    #[test]
+    fn the_kill_switch_reaches_a_re_verdict_in_landing() {
+        let landing = attempt(running(), &[RunResult::Pass]);
+        let attempt = cur(&landing).0;
+        let item = go(&landing, &rebased(&landing), &ctx()).item;
+        let killed = go(&item, &Event::KillSwitch, &ctx());
+        assert!(kinds(&killed).contains(&EffectKind::Kill));
+        assert!(parked_to_verify(&killed.item), "{:?}", killed.item.state);
+        let kill = Ctx {
+            hold: Some(Hold::Kill),
+            ..ctx()
+        };
+        assert_eq!(step(&killed.item, &Event::Tick, &kill), None);
+        let woke = go(&killed.item, &Event::Tick, &ctx());
+        assert_eq!(woke.item.state, State::Verifying);
+        let run = cur(&woke.item).2;
+        assert!(kinds(&woke).contains(&EffectKind::RunVerdict { attempt, run }));
+        let passed = go(&woke.item, &verdict(&woke.item, RunResult::Pass), &ctx());
+        assert_eq!(passed.item.state, State::Landing);
+        assert!(kinds(&passed).contains(&EffectKind::Land { attempt }));
+
+        // A user command there stops the verdict child.
+        for command in [
+            UserCommand::Cancel,
+            UserCommand::Requeue,
+            UserCommand::Restart,
+            UserCommand::ManualDone,
+        ] {
+            let next = go(&item, &Event::User(command), &ctx());
+            assert!(kinds(&next).contains(&EffectKind::Kill), "{command:?}");
         }
+        let setup = go(&item, &Event::SetupFailed, &ctx());
+        assert!(kinds(&setup).contains(&EffectKind::Kill));
+
+        // The landing task of a passed attempt is not the kill switch's.
+        assert_eq!(step(&landing, &Event::KillSwitch, &ctx()), None);
+        let cancelled = go(&landing, &Event::User(UserCommand::Cancel), &ctx());
+        assert!(!kinds(&cancelled).contains(&EffectKind::Kill));
+    }
+
+    #[test]
+    fn a_rebase_under_the_kill_switch_waits_to_verify() {
+        let landing = attempt(running(), &[RunResult::Pass]);
+        let attempt = cur(&landing).0;
+        let kill = Ctx {
+            hold: Some(Hold::Kill),
+            ..ctx()
+        };
+        let held = go(&landing, &rebased(&landing), &kill);
+        assert!(parked_to_verify(&held.item), "{:?}", held.item.state);
+        assert!(
+            !kinds(&held).iter().any(is_run_verdict),
+            "{:?}",
+            kinds(&held)
+        );
+        assert_eq!(
+            held.item.attempt.as_ref().unwrap().state,
+            AttemptState::VerdictRunning,
+            "the verdict before the rebase is gone"
+        );
+        let woke = go(&held.item, &Event::Tick, &ctx());
+        assert_eq!(woke.item.state, State::Verifying);
+        assert!(kinds(&woke).iter().any(is_run_verdict));
+        let passed = go(&woke.item, &verdict(&woke.item, RunResult::Pass), &ctx());
+        assert!(kinds(&passed).contains(&EffectKind::Land { attempt }));
+
+        let pause = Ctx {
+            hold: Some(Hold::Pause),
+            ..ctx()
+        };
+        let verifying = go(&landing, &rebased(&landing), &pause);
+        assert_eq!(verifying.item.state, State::Landing);
+        assert!(kinds(&verifying).iter().any(is_run_verdict));
+    }
+
+    #[test]
+    fn a_flaky_attempt_gets_the_re_run_rule_on_its_rebased_commit() {
+        let flaky = attempt(running(), &[RunResult::Fail, RunResult::Pass]);
+        assert_eq!(flaky.attempt.as_ref().unwrap().state, AttemptState::Flaky);
+        let attempt = cur(&flaky).0;
+        let item = go(&flaky, &rebased(&flaky), &ctx()).item;
+        let rerun = go(&item, &verdict(&item, RunResult::Fail), &ctx());
+        assert_eq!(rerun.item.state, State::Landing, "re-run once first");
+        assert_eq!(rerun.item.failed, 0);
+        assert!(kinds(&rerun).iter().any(is_run_verdict));
+
+        let passed = go(&rerun.item, &verdict(&rerun.item, RunResult::Pass), &ctx());
+        assert_eq!(passed.item.state, State::Landing);
+        assert_eq!(
+            passed.item.attempt.as_ref().unwrap().state,
+            AttemptState::Flaky
+        );
+        assert!(kinds(&passed).contains(&EffectKind::Land { attempt }));
+        let done = go(&passed.item, &Event::Landed, &ctx()).item;
+        assert_eq!(done.state, State::Done(Outcome::Flaky));
+
+        let failed = go(&rerun.item, &verdict(&rerun.item, RunResult::Fail), &ctx()).item;
+        assert_eq!(failed.state, State::Running);
+        assert_eq!((failed.failed, cur(&failed).0), (1, attempt + 1));
+
+        // A first pass on the rebased commit is a pass.
+        let pass = go(&item, &verdict(&item, RunResult::Pass), &ctx()).item;
+        assert_eq!(pass.attempt.as_ref().unwrap().state, AttemptState::Pass);
+    }
+
+    #[test]
+    fn a_conflict_from_an_earlier_landing_pass_is_ignored() {
+        let landing = attempt(running(), &[RunResult::Pass]);
+        let first_event = conflict(&landing);
+        let first = go(&landing, &first_event, &ctx()).item;
+        assert_eq!((first.state, first.conflicts), (State::Running, 1));
+
+        // The session exits, verifies under a new run and reaches landing again.
+        let again = attempt(first, &[RunResult::Pass]);
+        assert_eq!(again.state, State::Landing);
+        assert_eq!(step(&again, &first_event, &ctx()), None, "the earlier pass");
+        assert_eq!(again.conflicts, 1);
+
+        let second = go(&again, &conflict(&again), &ctx()).item;
+        assert_eq!(second.state, State::NeedsYou(Reason::LandingRefused));
+
+        // A re-verdict in flight is not a landing pass that can conflict.
+        let reverifying = go(&again, &rebased(&again), &ctx()).item;
+        assert_eq!(step(&reverifying, &conflict(&reverifying), &ctx()), None);
     }
 
     #[test]
@@ -2005,7 +2238,8 @@ mod tests {
                 Event::Landed,
                 Event::Landed,
                 Event::Rebased { attempt },
-                Event::Conflict { attempt },
+                Event::Conflict { attempt, run },
+                Event::KillSwitch,
                 Event::Verdict {
                     attempt,
                     run,

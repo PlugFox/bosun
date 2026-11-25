@@ -68,7 +68,13 @@ async fn two_items_that_need_the_same_resource_never_overlap_and_the_wait_is_rec
         scene.config_more = RIG.to_owned();
         configure(scene);
     }
-    let leases = Arc::new(Leases::new(&one.config(), &one.path("state")).unwrap());
+    let leases = Arc::new(
+        Leases::new(
+            &one.config(),
+            &crate::leases::journal_path(&one.path("state").join("bosun.token")),
+        )
+        .unwrap(),
+    );
     one.leases = Some(leases.clone());
     two.leases = Some(leases.clone());
 
@@ -209,7 +215,13 @@ async fn a_command_holding_a_resource_blocks_an_item_until_it_exits() {
     let mut scene = Scene::with_worktrees(None).await;
     scene.config_more = RIG.to_owned();
     configure(&scene);
-    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    let leases = Arc::new(
+        Leases::new(
+            &scene.config(),
+            &crate::leases::journal_path(&scene.path("state").join("bosun.token")),
+        )
+        .unwrap(),
+    );
     scene.leases = Some(leases.clone());
     let api = lease_api(&scene, &leases).await;
     let mut conn = crate::api::Connection::default();
@@ -283,7 +295,13 @@ async fn a_lease_call_without_the_operator_token_is_refused() {
     let mut scene = Scene::new().await;
     scene.config_more = RIG.to_owned();
     configure(&scene);
-    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    let leases = Arc::new(
+        Leases::new(
+            &scene.config(),
+            &crate::leases::journal_path(&scene.path("state").join("bosun.token")),
+        )
+        .unwrap(),
+    );
     let api = lease_api(&scene, &leases).await;
     let mut conn = crate::api::Connection::default();
     let me = this_process();
@@ -403,7 +421,11 @@ async fn a_card_that_needs_a_resource_is_refused_without_worktree_mode() {
     let lint = |scene: &Scene| {
         let config = scene.config();
         let repo = &config.repos["demo"];
-        let leases = Leases::new(&config, &scene.path("state")).unwrap();
+        let leases = Leases::new(
+            &config,
+            &crate::leases::journal_path(&scene.path("state").join("bosun.token")),
+        )
+        .unwrap();
         let resources = lint_resources(repo, &leases.names());
         claim::static_lint(&card, repo, &on_board, &resources)
     };
@@ -427,7 +449,13 @@ fn share_the_build(scene: &mut Scene, more: &str) -> Arc<Leases> {
     );
     scene.config_more = TARGET.to_owned();
     configure(scene);
-    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    let leases = Arc::new(
+        Leases::new(
+            &scene.config(),
+            &crate::leases::journal_path(&scene.path("state").join("bosun.token")),
+        )
+        .unwrap(),
+    );
     scene.leases = Some(leases.clone());
     leases
 }
@@ -557,7 +585,13 @@ async fn a_loop_that_halts_frees_its_items_leases() {
     let mut scene = Scene::with_worktrees(None).await;
     scene.config_more = RIG.to_owned();
     configure(&scene);
-    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    let leases = Arc::new(
+        Leases::new(
+            &scene.config(),
+            &crate::leases::journal_path(&scene.path("state").join("bosun.token")),
+        )
+        .unwrap(),
+    );
     scene.leases = Some(leases.clone());
     scene.write_board(&[card_needing(1, "test -f done.txt", &["rig"])]);
     scene.script(1, &["commit done.txt done".to_owned()]);
@@ -594,7 +628,13 @@ async fn rig_scene() -> (Scene, Arc<Leases>) {
     let mut scene = Scene::with_worktrees(None).await;
     scene.config_more = RIG.to_owned();
     configure(&scene);
-    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    let leases = Arc::new(
+        Leases::new(
+            &scene.config(),
+            &crate::leases::journal_path(&scene.path("state").join("bosun.token")),
+        )
+        .unwrap(),
+    );
     scene.leases = Some(leases.clone());
     (scene, leases)
 }
@@ -750,7 +790,13 @@ async fn a_lease_refusal_before_the_verdict_needs_the_user_and_counts_no_attempt
     let mut scene = Scene::with_worktrees(None).await;
     scene.config_more = format!("{RIG}[resource.other]\nkind = \"device\"\ncapacity = 1\n");
     configure(&scene);
-    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    let leases = Arc::new(
+        Leases::new(
+            &scene.config(),
+            &crate::leases::journal_path(&scene.path("state").join("bosun.token")),
+        )
+        .unwrap(),
+    );
     scene.leases = Some(leases.clone());
     let (started, go) = (scene.path("started"), scene.path("go"));
     scene.write_board(&[card_needing(1, "test -f done.txt", &["rig"])]);

@@ -366,6 +366,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_hold_leases_while_parked)",
   "cfg(mutant_loop_hold_leases_while_deferred)",
   "cfg(mutant_loop_lease_refusal_fails_verdict)",
+  # #179: the lease journal is per daemon; load adopts no other daemon's entries; a holder that
+  # asks again is re-stamped; a corrupt journal is moved aside.
+  "cfg(mutant_leases_one_journal_per_directory)",
+  "cfg(mutant_leases_adopt_running_daemon)",
+  "cfg(mutant_leases_reask_keeps_old_daemon)",
+  "cfg(mutant_leases_overwrite_corrupt_journal)",
 ] }
 
 [workspace.lints.clippy]

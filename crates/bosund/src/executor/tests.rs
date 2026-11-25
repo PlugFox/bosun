@@ -785,7 +785,13 @@ impl Scene {
             },
             control: self.control.clone(),
             leases: self.leases.clone().unwrap_or_else(|| {
-                Arc::new(crate::leases::Leases::new(&self.config(), &self.path("state")).unwrap())
+                Arc::new(
+                    crate::leases::Leases::new(
+                        &self.config(),
+                        &crate::leases::journal_path(&self.path("state").join("bosun.token")),
+                    )
+                    .unwrap(),
+                )
             }),
             free_space: self.free_space.clone(),
         };

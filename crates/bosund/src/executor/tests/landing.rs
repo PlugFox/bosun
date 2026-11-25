@@ -20,7 +20,7 @@ const LIMIT: Duration = Duration::from_secs(180);
 
 /// Makes the repository's `setup` a script that runs `then` (shell lines) once, in the first
 /// checkout that has `a.txt`, and rewrites the configuration.
-fn setup_once(scene: &mut Scene, then: &str) {
+pub(super) fn setup_once(scene: &mut Scene, then: &str) {
     let script = scene.path("setup.sh");
     let marker = sh_path(&scene.path("setup-done"));
     std::fs::write(
@@ -79,7 +79,7 @@ fn has_ref(scene: &Scene, dir: &Path, reference: &str) -> bool {
 }
 
 /// The files of commit `rev` of the user's repository.
-fn files_at(scene: &Scene, rev: &str) -> BTreeSet<String> {
+pub(super) fn files_at(scene: &Scene, rev: &str) -> BTreeSet<String> {
     scene
         .git(&["ls-tree", "-r", "--name-only", rev])
         .lines()

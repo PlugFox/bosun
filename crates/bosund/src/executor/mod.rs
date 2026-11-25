@@ -64,10 +64,15 @@
 //! base commit run under them, the loop stays responsive while it waits, and a kill withdraws
 //! the request ([`hold_names`]). A claim that does not confirm releases them after its
 //! worktree is closed. A confirmed item holds them through its sessions, verdicts, landing and
-//! teardown, until it leaves the loop ([`Loop::finish`]); each session asks again
-//! ([`hold_leases`]) and is granted at once. A loop the store halts frees its item's leases; a
-//! graceful stop keeps them journalled for the next daemon (E22). Lint admits the configured resources only in worktree mode
-//! ([`lint_resources`]). Under a shared build every process started in a worktree gets the
+//! teardown, until it leaves the loop ([`Loop::finish`]), except while it waits (E24): it lets
+//! go of them when it is Parked ([`Loop::apply`]) and when its landing's fast-forward is
+//! deferred ([`landing`]). Each session and each verdict asks again ([`hold_leases`]): granted
+//! at once to a holder of exactly that set, else filed all or nothing and awaited, its wait
+//! written as new `lease_wait` rows. A fast-forward after a deferral takes none. A refusal (an
+//! unknown resource, another set held: the configuration changed since the daemon started) is
+//! [`Event::ConfigChanged`], not a failed attempt. A loop the store halts frees its item's
+//! leases; a graceful stop keeps them journalled for the next daemon (E22). Lint admits the
+//! configured resources only in worktree mode ([`lint_resources`]). Under a shared build every process started in a worktree gets the
 //! directory, and the worktree's tracked files are touched first ([`workspace::enter`]).
 //!
 //! # Guards and trailers (#59, #99)
@@ -801,6 +806,16 @@ impl Loop {
                 pending.extend(self.perform(&stepped.transition.effects).await);
             }
             let state = stepped.item.state;
+            // A parked item waits for its limit's reset, often for hours, holding nothing (E24):
+            // its next session asks again, all or nothing ([`hold_leases`]).
+            // Mutant (`mutant_loop_hold_leases_while_parked`): it keeps them while parked.
+            if matches!(state, State::Parked(_))
+                && !cfg!(mutant_loop_hold_leases_while_parked)
+                && let Some(cur) = &self.current
+                && cur.claimed.as_ref().is_some_and(|c| c.worktree.is_some())
+            {
+                self.release_leases(&cur.item.id).await;
+            }
             if !state.is_active() {
                 self.finish().await;
                 return;

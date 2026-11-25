@@ -376,6 +376,16 @@ impl Task<'_> {
                 Ok(FastForward::Deferred { reason }) => {
                     if !reported {
                         reported = true;
+                        // The user may take hours: the item waits holding nothing (E24). Its
+                        // re-verdict after a restart asks again; a fast-forward needs none.
+                        // Mutant (`mutant_loop_hold_leases_while_deferred`): it keeps them.
+                        if !cfg!(mutant_loop_hold_leases_while_deferred) {
+                            self.shared
+                                .deps
+                                .leases
+                                .release(&crate::leases::Holder::Item(item.clone()))
+                                .await;
+                        }
                         self.shared.trouble(format!(
                             "{item}: the fast-forward of `{target}` is deferred: {reason}; the \
                              repository claims nothing until it moves"

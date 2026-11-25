@@ -654,15 +654,17 @@ pub(crate) async fn session(
         return crash;
     };
     // Its leases (#8), before its first session: the loop stays responsive meanwhile, and a
-    // kill withdraws the request. A later session holds them already and goes on at once.
+    // kill withdraws the request. A later session holds them already and goes on at once, but
+    // one after a park takes them again, all or nothing (E24).
     // Mutant (`mutant_loop_skip_leases`): the session starts without waiting for its lease.
     if !cfg!(mutant_loop_skip_leases) {
         match super::hold_leases(shared, repo, claimed, &run.item, &mut kill).await {
             Ok(()) => {}
             Err(None) => return crash,
+            // A refusal is the configuration's change since the daemon started (E24).
             Err(Some(e)) => {
                 shared.trouble(format!("{}: its leases: {e}", run.item));
-                return crash;
+                return Some(Event::ConfigChanged);
             }
         }
     }
@@ -1320,9 +1322,10 @@ pub(crate) async fn attach(
         match super::hold_leases(shared, repo, claimed, &run.item, &mut kill).await {
             Ok(()) => {}
             Err(None) => return crash,
+            // A refusal is the configuration's change since the daemon started (E24).
             Err(Some(e)) => {
                 shared.trouble(format!("{}: its leases: {e}", run.item));
-                return crash;
+                return Some(Event::ConfigChanged);
             }
         }
     }

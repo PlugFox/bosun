@@ -11,6 +11,10 @@
 //!   in one global order, first come first served. Dropping its future withdraws the request.
 //!   A holder that already holds exactly that set is granted at once (a later session of the
 //!   same item, a recovered item asking again).
+//! - An item lets go of its leases while it waits (E24): Parked on a rate limit, or with its
+//!   landing's fast-forward deferred. It takes them again, all or nothing, before its next
+//!   session, verdict or landing re-verdict; each grant is a new `lease_wait` row per resource,
+//!   and each release closes the holder's open rows.
 //! - The live leases are journalled after every change to [`JOURNAL`] in the daemon's own
 //!   directory, by writing a temporary file and renaming it over the journal (E15). Each entry
 //!   names the daemon that recorded it (pid and start time) and, while one of the item's
@@ -51,7 +55,8 @@ pub(crate) const JOURNAL: &str = "leases.json";
 /// Who holds a lease: an item, or a `bosun with` command (E16).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Holder {
-    /// An item, from its first session through its landing re-verdict.
+    /// An item, from its claim through its teardown, except while it is Parked or its
+    /// landing's fast-forward is deferred (E24).
     Item(ItemId),
     /// A `bosun with` process.
     Command(ProcessKey),

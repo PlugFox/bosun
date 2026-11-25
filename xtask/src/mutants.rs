@@ -2349,7 +2349,40 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("executor::tests::leases::a_loop_that_halts_frees_its_items_leases"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_hold_leases_while_parked",
+        issue: LEASE_WAIT_CARD,
+        breaks: "a parked item keeps its leases until its limit resets",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::leases::a_parked_item_holds_no_lease_and_takes_it_again_to_resume",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_hold_leases_while_deferred",
+        issue: LEASE_WAIT_CARD,
+        breaks: "an item keeps its leases while its landing's fast-forward is deferred",
+        package: "bosund",
+        check: Check::Test("executor::tests::leases::a_deferred_landing_holds_no_lease"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_lease_refusal_fails_verdict",
+        issue: LEASE_WAIT_CARD,
+        breaks: "a lease refusal before the verdict is a failed run that counts an attempt",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::leases::a_lease_refusal_before_the_verdict_needs_the_user_and_counts_no_attempt",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that lets an item go of its leases while it is Parked or its landing is
+/// deferred, and takes a lease refusal for a configuration change (E24; its own number was not
+/// known when it was written; its parent's stands in).
+const LEASE_WAIT_CARD: u32 = 8;
 
 /// The card of #8 that leases an item's resources from before its worktree's setup to after
 /// its teardown, and frees them when the loop halts (its own number was not known when it was

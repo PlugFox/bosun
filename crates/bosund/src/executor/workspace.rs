@@ -15,8 +15,16 @@
 //!   user turned it on in that repository only. Nothing else is copied: not its filters,
 //!   hooks, `core.autocrlf`, LFS or submodule settings (filters and hooks run commands, and
 //!   git's own configuration is guarded, #59). What the user set globally or for the system
-//!   applies to the clone as to any repository; a repository that needs more prepares its
-//!   worktrees with `setup`.
+//!   applies to the clone as to any repository, except the line-ending policy; a repository
+//!   that needs more prepares its worktrees with `setup`.
+//! - The clone's own config pins the line-ending policy to git's defaults
+//!   (`core.autocrlf=false`, `core.eol=native`; [`EOL_PIN`]), set the way `core.longpaths`
+//!   is. An item's worktree is written by the daemon's git, which reads the machine's system
+//!   and global configuration, and judged by the agent's git, which reads neither (the
+//!   identity's file is its global one, and `GIT_CONFIG_NOSYSTEM=1`): with Git for Windows'
+//!   system `core.autocrlf=true`, the daemon checked out CRLF files that the agent's git saw
+//!   as modified, and every rebase and commit in the session failed. The clone's config is
+//!   the one scope both read; the repository's own `.gitattributes` still decides.
 //! - The target is fetched from the user's checkout at claim ([`Workspace::sync_target`]),
 //!   fast-forward only: a target the user rewrote is an error, not an overwrite. It is never
 //!   checked out in the clone.
@@ -129,6 +137,27 @@ impl Registry {
 fn long_paths() -> bool {
     // Mutant (`mutant_loop_clone_without_longpaths`): the clone does not get it.
     cfg!(windows) && !cfg!(mutant_loop_clone_without_longpaths)
+}
+
+/// The line-ending policy the daemon's clone pins in its own config, and so every item
+/// worktree and verdict checkout made from it: git's defaults, whatever the machine's system
+/// or global configuration says (see the module documentation).
+const EOL_PIN: [(&str, &str); 2] = [("core.autocrlf", "false"), ("core.eol", "native")];
+
+/// Sets [`EOL_PIN`] in the clone's own config where it holds another value or none; a clone
+/// already pinned is not written to (its config is part of the guarded git configuration).
+fn pin_eol(git: &Git) -> Result<(), Error> {
+    // Mutant (`mutant_loop_clone_without_eol_pin`): the clone keeps the machine's policy.
+    if cfg!(mutant_loop_clone_without_eol_pin) {
+        return Ok(());
+    }
+    for (key, value) in EOL_PIN {
+        let local = git.optional(&["config", "--local", "--get", key])?;
+        if local.as_deref().map(str::trim) != Some(value) {
+            git.run(&["config", key, value], None)?;
+        }
+    }
+    Ok(())
 }
 
 /// The worktrees of one repository configured with `repo.<name>.worktree`.
@@ -383,6 +412,7 @@ impl Workspace {
                 if long_paths() {
                     git.run(&["config", "core.longpaths", "true"], None)?;
                 }
+                pin_eol(&git)?;
                 Ok(git)
             }
             Err(source) => Err(Error::Io { path, source }),
@@ -442,6 +472,8 @@ impl Workspace {
         {
             git.run(&["config", "core.longpaths", "true"], None)?;
         }
+        // A clone made before the pin was: it gets it now, once.
+        pin_eol(&git)?;
         Ok(git)
     }
 
@@ -1642,7 +1674,8 @@ mod tests {
         w.git(&ws.clone_path(), &["config", "--unset", "core.longpaths"]);
         ws.ensure_clone().unwrap();
         assert_eq!(local(&w), "true");
-        // Nothing else of the user's repository-local configuration comes along.
+        // Nothing else of the user's repository-local configuration comes along: the clone's
+        // `core.autocrlf` is its own pin, not the user's `input`.
         let autocrlf = [
             "config",
             "--local",
@@ -1651,7 +1684,33 @@ mod tests {
             "",
             "core.autocrlf",
         ];
-        assert_eq!(w.git(&ws.clone_path(), &autocrlf), "");
+        assert_eq!(w.git(&ws.clone_path(), &autocrlf), "false");
+    }
+
+    /// The clone pins the line-ending policy in its own config, whatever the user's
+    /// repository says (here `core.autocrlf=true`, which a bare clone does not copy anyway),
+    /// and a clone made before the pin gets it at the next check
+    /// (`mutant_loop_clone_without_eol_pin` leaves the clone unpinned).
+    #[tokio::test]
+    async fn the_clone_pins_the_line_ending_policy() {
+        let w = World::new().await;
+        let ws = w.workspace(|_| {});
+        let pinned = |w: &World| {
+            EOL_PIN.map(|(key, _)| {
+                w.git(
+                    &ws.clone_path(),
+                    &["config", "--local", "--get", "--default", "", key],
+                )
+            })
+        };
+        w.git(&w.repo, &["config", "core.autocrlf", "true"]);
+        ws.ensure_clone().unwrap();
+        assert_eq!(pinned(&w), ["false", "native"]);
+        // A clone made before the pin: it gets it at the next check.
+        w.git(&ws.clone_path(), &["config", "--unset", "core.autocrlf"]);
+        w.git(&ws.clone_path(), &["config", "core.eol", "crlf"]);
+        ws.ensure_clone().unwrap();
+        assert_eq!(pinned(&w), ["false", "native"]);
     }
 
     #[tokio::test]

@@ -341,10 +341,17 @@ pub fn fast_forward(repo: &Git, branch: &str, to: &str) -> Result<FastForward, E
             },
         });
     }
-    checkout.run(
-        &["merge", "--ff-only", "--quiet", "--end-of-options", &to],
-        None,
-    )?;
+    // The checkout's files are written by git with the checkout's own configuration, line
+    // endings included, so it is left as the user's own git would leave it.
+    // Mutant (`mutant_git_ff_ignores_eol`): the merge writes the files with
+    // `core.autocrlf=false`, whatever the user set.
+    let eol: &[&str] = if cfg!(mutant_git_ff_ignores_eol) {
+        &["-c", "core.autocrlf=false"]
+    } else {
+        &[]
+    };
+    let merge = ["merge", "--ff-only", "--quiet", "--end-of-options", &to];
+    checkout.run(&[eol, &merge[..]].concat(), None)?;
     Ok(FastForward::Moved { from: head, to })
 }
 

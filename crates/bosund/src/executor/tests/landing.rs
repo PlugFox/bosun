@@ -149,6 +149,33 @@ async fn a_target_that_moved_is_rebased_onto_and_verified_again() {
     assert!(!has_ref(&scene, &clone, &git::landing_ref(&item(1))));
 }
 
+/// The user's repository has `core.autocrlf=true`; the session commits `a.txt` (`a` and a
+/// newline). The item ends Done and the user's checkout is what the user's own git would have
+/// checked out: clean, with `a.txt` on disk as `a\r\n` (E2: the checkout is untouched apart
+/// from a clean fast-forward, whatever its line-ending policy;
+/// `mutant_git_ff_ignores_eol` fast-forwards with `core.autocrlf=false`: `a.txt` lands as
+/// `a\n`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_checkout_with_autocrlf_lands_clean_with_its_line_endings() {
+    let scene = Scene::with_worktrees(None).await;
+    scene.git(&["config", "core.autocrlf", "true"]);
+    scene.write_board(&[card(1, "Line endings", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    assert_eq!(scene.git(&["log", "-1", "--format=%s", "HEAD"]), "a");
+    assert_eq!(
+        scene.git(&["status", "--porcelain", "--untracked-files=all"]),
+        ""
+    );
+    assert_eq!(std::fs::read(scene.repo.join("a.txt")).unwrap(), b"a\r\n");
+}
+
 /// The setup script commits `breaker` on the user's target once; the verdict needs `a.txt`
 /// and no `breaker`. The first attempt passes before the rebase and fails after it; the second
 /// attempt has verdict runs of its own (its preconditions passed: the daemon's own moves of the
@@ -329,6 +356,13 @@ async fn a_rebase_left_in_progress_is_aborted_before_landing() {
     let scene = Scene::with_worktrees(None).await;
     let editor = scene.path("break.sh");
     std::fs::write(&editor, BREAK_AFTER_FIRST).unwrap();
+    // Git executes the editor itself (its path has no shell metacharacters), so on Unix it
+    // must be executable; Git for Windows runs it through `sh` either way.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let mut sub = subscribe_trouble(&scene);
     scene.write_board(&[card(1, "Left mid-rebase", "test -f a.txt", "Item one.")]);
     scene.script(

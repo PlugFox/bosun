@@ -1614,6 +1614,16 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("land::tests::a_dirty_checkout_of_the_target_defers_the_fast_forward"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_git_ff_ignores_eol",
+        issue: 125,
+        breaks: "a fast-forward writes the user's checkout without its line-ending policy",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_checkout_with_autocrlf_lands_clean_with_its_line_endings",
+        ),
+        platform: None,
+    },
     // #126: landing modes.
     Mutant {
         name: "mutant_git_squash_skip_tree_check",
@@ -2387,6 +2397,14 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("executor::workspace::tests::the_clone_has_long_paths_on_windows"),
         // The setting is Windows-only, and so is its test.
         platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_loop_clone_without_eol_pin",
+        issue: 124,
+        breaks: "the daemon's clone takes the machine's line-ending policy, not git's defaults",
+        package: "bosund",
+        check: Check::Test("executor::workspace::tests::the_clone_pins_the_line_ending_policy"),
+        platform: None,
     },
     Mutant {
         name: "mutant_loop_mode_from_config",

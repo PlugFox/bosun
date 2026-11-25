@@ -471,6 +471,13 @@ impl Scene {
     async fn on(projects: Option<Arc<FakeGitHub>>) -> Self {
         let scene = Self::build(Root::Temp(tempfile::tempdir().unwrap()), projects).await;
         scene.git(&["init", "-q", "-b", "main"]);
+        // The daemon under test runs in this process and its git reads the machine's system
+        // and global configuration, which the scene's own git ([`Scene::git`]) does not; the
+        // repository's line-ending policy is pinned here, where both read it, so a checkout
+        // the daemon writes is compared with the policy it was written with (a runner's
+        // system `core.autocrlf=true` would otherwise reach only the daemon's side). A scene
+        // that tests a policy sets its own after this.
+        scene.git(&["config", "core.autocrlf", "false"]);
         scene.git(&[
             "remote",
             "add",

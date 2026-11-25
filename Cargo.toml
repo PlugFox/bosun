@@ -271,6 +271,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #125: landing.
   "cfg(mutant_git_rebase_keep_conflict)",
   "cfg(mutant_git_ff_dirty_checkout)",
+  "cfg(mutant_git_ff_ignores_eol)",
   # #126: landing modes.
   "cfg(mutant_git_squash_skip_tree_check)",
   "cfg(mutant_git_merge_drop_trailers)",
@@ -368,6 +369,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # recovery keeps the mode an item was claimed in.
   "cfg(mutant_loop_guard_compares_remotes)",
   "cfg(mutant_loop_clone_without_longpaths)",
+  "cfg(mutant_loop_clone_without_eol_pin)",
   "cfg(mutant_loop_mode_from_config)",
   # #8: an item's leases cover its setup, base verdict and teardown; a halted loop frees them.
   "cfg(mutant_loop_lease_after_setup)",

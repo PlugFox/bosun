@@ -95,8 +95,11 @@
 //!   worktree the commits stay on the current branch, as in stage 1. `merge` and `pr` need
 //!   `repo.<name>.worktree` (E19: every new path is gated on it, and without it stage 1 is
 //!   unchanged); `pr` is read but refused, it is not available yet.
-//!   - `target`: the branch landed on, a bare name (no `refs/heads/`, no whitespace, no leading
-//!     `-`); default: the branch the item was claimed from.
+//!   - `target`: the branch the item is claimed from and lands on, whatever the mode; default:
+//!     the branch the item was claimed from. It is a bare name (no `refs/heads/`) that git
+//!     accepts as a branch (`git check-ref-format --branch`, checked here without running git).
+//!     Only worktree mode reads it: without `repo.<name>.worktree` it is ignored with a
+//!     [`Notice`] (E19).
 //!   - `merge.method`: `ff` (default), `squash` or `no-ff`; `merge.push`: default false, and
 //!     `true` is not available yet. A `merge` table with `mode = "local"` is refused.
 //!   - `pr.draft` (default true), `pr.reviewers` and `pr.labels` (default empty) are read for
@@ -110,7 +113,9 @@
 //!   - `shared_build` (E1): the one build directory the repository's worktrees share, behind an
 //!     exclusive lease held from the session through the landing re-verdict, and injected as
 //!     `env` (default `CARGO_TARGET_DIR`, an ASCII identifier). `dir` is absolute and `resource`
-//!     names a `[resource.<name>]`; both are required. It is the default for Rust: per-worktree
+//!     names a `[resource.<name>]`; both are required. `dir` neither holds nor lies under the
+//!     repository's `path` or `worktree.root`: cargo writes its own files into it, and a
+//!     `cargo clean` deletes it whole. It is the default for Rust: per-worktree
 //!     targets cost 12-15 GB each, and are the opt-in (no `shared_build`) of a repository that
 //!     raises concurrency.
 //! - `[resource.<name>]` (#8): a resource items may name in `needs`. `kind` is required. They
@@ -131,8 +136,13 @@
 //!   are compared by their canonical key ([`bosun_core::canonical_path`]), so on Windows case
 //!   and separators do not matter. Links and junctions are not resolved for this comparison.
 //! - A repository's `worktree.root` is neither its `path` nor under it, compared the same way.
-//! - A `worktree.shared_build.dir` is neither the repository's `path` nor under it, nor under
-//!   `worktree.root`, compared the same way; its `resource` exists and has `capacity = 1`.
+//! - A `worktree.shared_build.dir` neither holds nor lies under the repository's `path` or
+//!   `worktree.root` (nor is either), compared the same way; its `resource` exists and has
+//!   `capacity = 1`.
+//! - A `landing.target` is a valid git branch name: no component begins with `.` or ends with
+//!   `.lock`; no `..`, `@{`, `//`, control character, space, `~`, `^`, `:`, `?`, `*`, `[` or
+//!   `\`; it does not begin or end with `/`, end with `.` or begin with `-`, and is not `@` or
+//!   `HEAD`. A `refs/...` name is refused with a hint to write the bare name.
 //! - A `landing.mode` of `merge` or `pr` has a `worktree`; `pr` and `merge.push = true` are
 //!   refused as not available yet.
 //! - The directory of each database is on a local disk, as a [`DiskProbe`] sees it.
@@ -368,8 +378,9 @@ pub const DEFAULT_SHARED_BUILD_ENV: &str = "CARGO_TARGET_DIR";
 pub struct Landing {
     /// `mode`. Default `local`.
     pub mode: LandingMode,
-    /// `target`: the branch the item lands on, a bare name (no `refs/heads/`). Default `None`:
-    /// the branch the item was claimed from.
+    /// `target`: the branch the item is claimed from and lands on, a valid bare branch name.
+    /// Default `None`: the branch the item was claimed from. Always `None` without
+    /// `repo.<name>.worktree` (E19).
     pub target: Option<String>,
     /// `merge`: how `mode = "merge"` lands.
     pub merge: Merge,

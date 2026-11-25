@@ -92,6 +92,7 @@ pub(crate) struct DraftLanding {
     pub(crate) landing: Landing,
     pub(crate) mode_at: Option<Location>,
     pub(crate) push_at: Option<Location>,
+    pub(crate) target_at: Option<Location>,
 }
 
 /// `repo.<name>.worktree`, its root kept with its key and position for the cross-check against
@@ -435,6 +436,18 @@ impl Reader<'_> {
                 _ => self.ignored(key_at, &what),
             }
         }
+        // E19: the target is the branch an item is claimed from and lands on, which only worktree
+        // mode reads; without a worktree, commits stay on the current branch, as before.
+        // Mutant (`mutant_config_target_kept_without_worktree`): the target is kept, silently.
+        if repo.worktree.is_none()
+            && !cfg!(mutant_config_target_kept_without_worktree)
+            && repo.landing.landing.target.take().is_some()
+        {
+            self.notice(
+                repo.landing.target_at,
+                format!("`{path}.landing.target` takes effect with `{path}.worktree`; ignored"),
+            );
+        }
         for key in ["path", "identity"] {
             if table.get(key).is_none() {
                 self.problem(at, format!("`{path}` has no `{key}`"));
@@ -573,7 +586,10 @@ impl Reader<'_> {
                         );
                     }
                 }
-                "target" => draft.landing.target = self.branch(item, &path),
+                "target" => {
+                    draft.target_at = key_at;
+                    draft.landing.target = self.branch(item, &path);
+                }
                 "merge" => {
                     merge_at = key_at;
                     if let Some(table) = self.table(item, &path, key_at) {
@@ -909,20 +925,28 @@ impl Reader<'_> {
         Some(text.to_owned())
     }
 
-    /// A branch name, bare: not empty, no whitespace, no leading `-`, no `refs/heads/`.
+    /// A branch name, bare, by git's rules ([`branch_name_rule`]).
     fn branch(&mut self, item: &Item, what: &str) -> Option<String> {
         let (text, at) = self.string(item, what)?;
-        let why = if text.is_empty() || text.chars().any(char::is_whitespace) {
-            "it must be non-empty, with no whitespace"
-        } else if text.starts_with('-') {
-            "it must not start with `-`"
-        } else if text.starts_with("refs/") {
-            "write the bare branch name, without `refs/heads/`"
+        let why = if text.starts_with("refs/") {
+            Some("write the bare branch name, without `refs/heads/`")
+        } else if cfg!(mutant_config_target_loose_branch_rules) {
+            // Mutant (`mutant_config_target_loose_branch_rules`): the rules before git's.
+            if text.is_empty() || text.chars().any(char::is_whitespace) {
+                Some("it must be non-empty, with no whitespace")
+            } else if text.starts_with('-') {
+                Some("it must not start with `-`")
+            } else {
+                None
+            }
         } else {
-            return Some(text.to_owned());
+            branch_name_rule(text)
         };
-        self.problem(at, format!("`{what}` is {text:?}; {why}"));
-        None
+        if let Some(why) = why {
+            self.problem(at, format!("`{what}` is {text:?}; {why}"));
+            return None;
+        }
+        Some(text.to_owned())
     }
 
     /// A list of labels: each non-empty, with no surrounding spaces; inner spaces are allowed.
@@ -1118,6 +1142,57 @@ impl Reader<'_> {
             at,
         })
     }
+}
+
+/// The rule of `git check-ref-format --branch` that `name` breaks, or `None` for a valid
+/// branch name. Pure: parsing the file never runs git.
+pub(crate) fn branch_name_rule(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("a branch name is not empty");
+    }
+    if name == "HEAD" {
+        return Some("a branch is not named `HEAD`");
+    }
+    if name == "@" {
+        return Some("a branch is not named `@`");
+    }
+    if name.starts_with('-') {
+        return Some("a branch name does not begin with `-`");
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|&c| c.is_ascii_control() || " ~^:?*[\\".contains(c))
+    {
+        return Some(if c.is_ascii_control() {
+            "a branch name has no control character"
+        } else if c == ' ' {
+            "a branch name has no space"
+        } else {
+            "a branch name has none of `~`, `^`, `:`, `?`, `*`, `[` and `\\`"
+        });
+    }
+    if name.contains("..") {
+        return Some("a branch name has no `..`");
+    }
+    if name.contains("@{") {
+        return Some("a branch name has no `@{`");
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+        return Some("a branch name does not begin or end with `/` and has no `//`");
+    }
+    if name.ends_with('.') {
+        return Some("a branch name does not end with `.`");
+    }
+    // Git compares `.lock` case-sensitively: `x.LOCK` is a valid branch name to it.
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    let locked = |part: &str| part.ends_with(".lock");
+    if name
+        .split('/')
+        .any(|part| part.starts_with('.') || locked(part))
+    {
+        return Some("no component of a branch name begins with `.` or ends with `.lock`");
+    }
+    None
 }
 
 /// Replaces `target` when a value was read; a refused value keeps the default.

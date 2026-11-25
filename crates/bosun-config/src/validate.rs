@@ -198,7 +198,8 @@ fn landing(repo: &DraftRepo, problems: &mut Vec<Problem>) {
 }
 
 /// Refuses a shared build directory (E1) that is not guarded by an existing exclusive resource,
-/// or that lies in the repository's checkout or under its worktree root.
+/// or that lies in the repository's checkout or under its worktree root, or holds either: cargo
+/// writes its own files next to them, and a `cargo clean` deletes the whole directory.
 fn shared_build(
     repo: &str,
     shared: &DraftSharedBuild,
@@ -235,17 +236,26 @@ fn shared_build(
         let Some(value) = value else {
             continue;
         };
-        if strip_root(&dir.key, &value.key, PathStyle::host()).is_some() {
-            problems.push(Problem {
-                location: dir.at,
-                message: format!(
-                    "`{what}.dir` {} is inside {owner} {}; the shared build directory lies \
-                     outside both",
-                    dir.path.display(),
-                    value.path.display()
-                ),
-            });
-        }
+        let style = PathStyle::host();
+        let relation = if strip_root(&dir.key, &value.key, style).is_some() {
+            "is inside"
+        } else if !cfg!(mutant_config_shared_build_holder_allowed)
+            // Mutant (`mutant_config_shared_build_holder_allowed`): a `dir` that holds it passes.
+            && strip_root(&value.key, &dir.key, style).is_some()
+        {
+            "holds"
+        } else {
+            continue;
+        };
+        problems.push(Problem {
+            location: dir.at,
+            message: format!(
+                "`{what}.dir` {} {relation} {owner} {}; the shared build directory lies outside \
+                 both and holds neither",
+                dir.path.display(),
+                value.path.display()
+            ),
+        });
     }
 }
 

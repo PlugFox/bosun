@@ -1,14 +1,20 @@
 //! The crash recovery plan of #7: what to do at start for an item in a daemon-owned state.
 //!
 //! In order: apply the user's command found on the board first (a cancel made while the
-//! daemon was down wins over the resume); reap the recorded children that survived (stage 1
-//! adopts none, D1); then hand the state's lost work back to the machine as
-//! [`Event::Restarted`]: `running` with a dead child is classified from the transcript tail and
-//! resumed (or verified, parked, sent to Needs you), uncounted but capped; `verifying` re-runs
-//! the verdict; `landing` redoes its keyed step; `claimed` redoes the claim procedure. The
-//! caller drains the outbox after every item is recovered.
+//! daemon was down wins over the resume); reap the recorded children that survived; then hand
+//! the state's lost work back to the machine as [`Event::Restarted`]: `running` with a dead
+//! child is classified from the transcript tail and resumed (or verified, parked, sent to Needs
+//! you), uncounted but capped; `verifying` re-runs the verdict; `landing` redoes its keyed
+//! step; `claimed` redoes the claim procedure. The caller drains the outbox after every item is
+//! recovered.
+//!
+//! Stage 1 adopts no child (D1). In worktree mode (#8, E3) a `running` item whose session went
+//! on under its shim, or ended under it while no daemon ran, is adopted instead
+//! ([`Facts::attachable`]): unless a user command replaced the work, the plan is
+//! [`Action::Attach`] and then [`Event::Reattached`]; the session's child is not reaped, and
+//! nothing is resumed or counted.
 
-use crate::item::{Ctx, Event, Exit, Item, UserCommand, step};
+use crate::item::{Ctx, Event, Exit, Item, State, UserCommand, step};
 
 /// A child process recorded for the item (#50: pid and start time identify it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +25,8 @@ pub struct Child {
     pub started_ms: i64,
     /// It is still alive (same pid and start time).
     pub alive: bool,
+    /// It is the agent of the item's current session, the one [`Facts::attachable`] is about.
+    pub session: bool,
 }
 
 /// What the daemon found at start for one item.
@@ -32,6 +40,9 @@ pub struct Facts {
     pub children: Vec<Child>,
     /// The exit classified from the session's transcript tail, if one could be.
     pub tail: Option<Exit>,
+    /// The item's current session can be attached (#8, worktree mode): its shim's record is
+    /// readable, and the shim still runs or recorded the session's exit.
+    pub attachable: bool,
 }
 
 /// One recovery step, performed in order.
@@ -39,6 +50,9 @@ pub struct Facts {
 pub enum Action {
     /// Apply this event to the item ([`step`]) and perform its effects.
     Apply(Event),
+    /// Follow the item's current session, running or ended under its shim, to its end, as if
+    /// this daemon had spawned it (#8, E3).
+    Attach,
     /// Kill a surviving child and its tree; it cannot be adopted.
     Reap {
         /// Its process id.
@@ -63,16 +77,26 @@ pub fn recover(item: &Item, facts: &Facts, ctx: &Ctx) -> Vec<Action> {
             actions.push(Action::Apply(event));
         }
     }
+    // A command replaces the work in flight, an attached session included.
+    let attach = !commanded && facts.attachable && current.state == State::Running;
     actions.extend(
         facts
             .children
             .iter()
-            .filter(|c| c.alive)
+            .filter(|c| c.alive && !(attach && c.session))
             .map(|c| Action::Reap {
                 pid: c.pid,
                 started_ms: c.started_ms,
             }),
     );
+    if attach {
+        let event = Event::Reattached { boot: facts.boot };
+        if step(&current, &event, ctx).is_some() {
+            actions.push(Action::Attach);
+            actions.push(Action::Apply(event));
+        }
+        return actions;
+    }
     // A command replaces the work in flight: cancel, requeue and manual done end it, a
     // restart starts a new claim.
     if !commanded {
@@ -135,14 +159,17 @@ mod tests {
                     pid: 10,
                     started_ms: 5,
                     alive: true,
+                    session: true,
                 },
                 Child {
                     pid: 11,
                     started_ms: 6,
                     alive: false,
+                    session: false,
                 },
             ],
             tail: None,
+            attachable: false,
         }
     }
 
@@ -259,6 +286,91 @@ mod tests {
                 .any(|a| matches!(a, Action::Apply(Event::Restarted { .. })))
         );
         assert_eq!(perform(&item, &actions)[0].item.state, State::Cancelled);
+    }
+
+    #[test]
+    fn an_attachable_session_is_attached_not_reaped() {
+        let item = running();
+        let mut f = facts(1);
+        f.children.push(Child {
+            pid: 12,
+            started_ms: 7,
+            alive: true,
+            session: false,
+        });
+        f.attachable = true;
+        let actions = recover(&item, &f, &ctx());
+        assert_eq!(
+            actions,
+            vec![
+                Action::Reap {
+                    pid: 12,
+                    started_ms: 7
+                },
+                Action::Attach,
+                Action::Apply(Event::Reattached { boot: 1 }),
+            ],
+            "the session's child is followed, not reaped"
+        );
+        let steps = perform(&item, &actions);
+        let after = &steps[0].item;
+        assert_eq!(
+            (after.state, after.uncounted, after.boot),
+            (State::Running, 0, 1)
+        );
+        assert!(
+            steps[0]
+                .transition
+                .effects
+                .iter()
+                .all(|e| e.kind == EffectKind::Report),
+            "nothing is spawned"
+        );
+        assert!(
+            !recover(after, &f, &ctx()).contains(&Action::Attach),
+            "attached once per boot"
+        );
+
+        // A cancel on the board still wins: the session is reaped.
+        let mut cancelled = f.clone();
+        cancelled.command = Some(UserCommand::Cancel);
+        let actions = recover(&item, &cancelled, &ctx());
+        assert_eq!(actions[0], Action::Apply(Event::User(UserCommand::Cancel)));
+        assert!(actions.contains(&Action::Reap {
+            pid: 10,
+            started_ms: 5
+        }));
+        assert!(!actions.contains(&Action::Attach));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::Apply(Event::Reattached { .. })))
+        );
+
+        // Without `attachable`, today's plan.
+        let mut lost = f.clone();
+        lost.attachable = false;
+        let today = recover(&item, &lost, &ctx());
+        assert_eq!(
+            today[..2],
+            [
+                Action::Reap {
+                    pid: 10,
+                    started_ms: 5
+                },
+                Action::Reap {
+                    pid: 12,
+                    started_ms: 7
+                },
+            ]
+        );
+        assert!(matches!(today[2], Action::Apply(Event::Restarted { .. })));
+        assert_eq!(today.len(), 3);
+
+        // Only a running item is attached.
+        let verifying = verifying();
+        let plan = recover(&verifying, &f, &ctx());
+        assert!(!plan.contains(&Action::Attach));
     }
 
     #[test]

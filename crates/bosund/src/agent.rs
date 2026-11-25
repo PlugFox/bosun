@@ -5,10 +5,12 @@
 //! The executor issues one credential per session, at spawn, bound to the session's identity,
 //! item, attempt and session id ([`Credentials::issue`]); it reaches the session through the
 //! per-session MCP configuration (#64 writes the server's side). It is 32 bytes from the OS's
-//! random source. Only its SHA-256 digest is kept, in the daemon's memory, never in the store:
-//! a daemon restart kills the session in stage 1 (#7), so nothing needs to survive one. The
-//! [`Issued`] handle revokes it when dropped, which the session does as soon as its process is
-//! gone, on every path.
+//! random source. Only its SHA-256 digest is kept, in the daemon's memory; the text never. A
+//! daemon restart kills the session in stage 1 (#7), so nothing needs to survive one there. In
+//! worktree mode (#8, E10) a session goes on under its shim across a restart: the digest is
+//! also on its `process` row, and the restarted daemon admits it again with the session's
+//! binding ([`Credentials::readmit`]). The [`Issued`] handle revokes it when dropped, which the
+//! session does as soon as its process is gone, on every path.
 //!
 //! A request carrying a credential may call `agent.*` only, and `agent.*` admits nothing but a
 //! live credential naming its own item ([`crate::api`] refuses the rest).
@@ -185,6 +187,27 @@ impl Credentials {
             hello,
             credentials: self.clone(),
         })
+    }
+
+    /// Admits again the credential whose digest is `digest`, bound to `binding`: the
+    /// credential of a session a previous daemon issued and that went on under its shim (#8,
+    /// E10). Its `bosun-mcp` said hello to that daemon, so it counts as having said it. The text
+    /// is not known here (only its digest was stored): [`Issued::token`] is empty.
+    pub(crate) fn readmit(&self, digest: [u8; 32], binding: Binding) -> Issued {
+        let hello = Arc::new(AtomicBool::new(true));
+        self.lock().live.insert(
+            digest,
+            Live {
+                binding: Arc::new(binding),
+                hello: hello.clone(),
+            },
+        );
+        Issued {
+            token: String::new(),
+            digest,
+            hello,
+            credentials: self.clone(),
+        }
     }
 
     /// The binding of a live `credential` that names `item`; refused otherwise.

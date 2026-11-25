@@ -1969,7 +1969,48 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_reap_instead_of_attach",
+        issue: REATTACH_CARD,
+        breaks: "a restarted daemon reaps a worktree-mode session and resumes it uncounted",
+        package: "bosund",
+        check: Check::Test(REATTACH_SCENE),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_reattach_from_zero",
+        issue: REATTACH_CARD,
+        breaks: "a re-attached session's output is read again from its start",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::recovery::a_reattached_session_is_read_from_its_stored_offsets",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_reattach_without_credential",
+        issue: REATTACH_CARD,
+        breaks: "a re-attached session's credential is not admitted again",
+        package: "bosund",
+        check: Check::Test(REATTACH_SCENE),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_reattach_counts",
+        issue: REATTACH_CARD,
+        breaks: "a re-attach counts as an uncounted resume",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_reattached_item_keeps_running_and_counts_nothing"),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that re-attaches worktree-mode sessions after a daemon restart (its own
+/// number was not known when it was written; its parent's stands in).
+const REATTACH_CARD: u32 = 8;
+
+/// The re-attach scene of the card, which hosts two mutants.
+const REATTACH_SCENE: &str = "executor::tests::recovery::a_daemon_killed_mid_session_reattaches_and_finishes_with_one_attempt_and_one_run";
 
 /// The shim scene of #158, which hosts two mutants.
 const SHIM_SCENE: &str =

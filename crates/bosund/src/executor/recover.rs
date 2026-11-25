@@ -11,10 +11,20 @@
 //!    read confirms it.
 //! 2. The children recorded for the repository's items (sessions and verdict runs, by pid and
 //!    start time) that still run are killed (`bosun_proc::reap`); stage 1 adopts none (D1).
-//!    Their rows are cleared.
-//! 3. The item's lost work goes back to the machine as `Event::Restarted`: a `running` item is
-//!    classified from its session's tail (the exit its run row recorded, else the output the
-//!    session task kept on disk) and otherwise resumed once, uncounted; a `verifying` one runs
+//!    Their rows are cleared. In worktree mode (#8, E3, E19) a `running` item's current
+//!    session ran under the session shim and may have outlived the daemon: when its `process`
+//!    row's record is readable, its run's end is not recorded, and its shim still runs or
+//!    recorded the session's exit, the session is re-attached at the row's offsets
+//!    (`bosun_proc::shim::attach`) and adopted instead: its agent is not reaped, the session
+//!    task follows it to its end as if this daemon had spawned it (`session::attach`: the
+//!    session id from the run row, the credential re-admitted from the row's digest, the tail
+//!    file read and appended to), and the item records `Event::Reattached`, which spawns and
+//!    counts nothing. A user command on the board still wins, and the session is then reaped.
+//!    Every other `process` row of the repository's items is marked gone.
+//! 3. Otherwise the item's lost work goes back to the machine as `Event::Restarted`: a
+//!    `running` item is classified from its session's tail (the exit its run row recorded, else
+//!    the output the session task kept on disk) and otherwise resumed once, uncounted; a
+//!    `verifying` one runs
 //!    its verdict again under a new run number, uncounted; a `landing` one redoes its keyed
 //!    step; a `claimed` one redoes the claim, whose board writes are keyed too. A parked item
 //!    waits for its tick.
@@ -35,7 +45,7 @@ use std::sync::Arc;
 use bosun_core::{Action, AttemptState, Child, Event, Exit, Facts, ItemId, RunResult, State};
 use bosun_queue::{Card, Changes, Column, Snapshot};
 use bosun_runner::{ProcessExit, Runner, Tail};
-use bosun_store::{OutboxOp, Reader, RecordedChild, StoredItem, Write, Writer};
+use bosun_store::{OutboxOp, ProcessRow, Reader, RecordedChild, StoredItem, Write, Writer};
 
 use super::{
     Claimed, Current, Loop, blocking, commands, item_id, lookup, now_ms, outbox, park, session,
@@ -94,6 +104,7 @@ impl Loop {
     /// Recovers every item of the repository a previous daemon left in flight, once per start.
     /// `true` when done; `false` when the board or the store could not be read (asked again at
     /// the next tick) .
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn recover(&mut self) -> bool {
         let config = self.config();
         let repo_name = self.shared.options.repo.clone();
@@ -124,11 +135,25 @@ impl Loop {
                 return false;
             }
         };
+        // The session shims recorded for the repository's items (#8), not known to be gone.
+        let processes: Vec<ProcessRow> = match reader.processes().await {
+            Ok(rows) => {
+                let ours: BTreeSet<&ItemId> = stored.iter().map(|s| &s.item.id).collect();
+                rows.into_iter()
+                    .filter(|p| ours.contains(&p.item))
+                    .collect()
+            }
+            Err(e) => {
+                self.shared
+                    .trouble(format!("the store cannot be read: {e}"));
+                return false;
+            }
+        };
         let active: Vec<StoredItem> = stored
             .into_iter()
             .filter(|s| s.item.state.is_active())
             .collect();
-        if active.is_empty() && children.is_empty() {
+        if active.is_empty() && children.is_empty() && processes.is_empty() {
             return true;
         }
         let boot = match self.boot().await {
@@ -173,13 +198,24 @@ impl Loop {
                 self.reap(item, children).await;
             }
         }
+        let mut shims: BTreeMap<ItemId, Vec<ProcessRow>> = BTreeMap::new();
+        for process in processes {
+            shims.entry(process.item.clone()).or_default().push(process);
+        }
+        for (item, rows) in &shims {
+            if !ids.contains(item) {
+                self.processes_gone(item, rows).await;
+            }
+        }
 
         for stored in active {
             let children = by_item.remove(&stored.item.id).unwrap_or_default();
+            let rows = shims.remove(&stored.item.id).unwrap_or_default();
             if self.current.is_some() {
                 // Stage 1 runs one item at a time per repository: a second one in flight is
                 // not the loop's to guess about.
                 self.reap(&stored.item.id, &children).await;
+                self.processes_gone(&stored.item.id, &rows).await;
                 self.waiting = true;
                 self.shared.trouble(format!(
                     "{} was in flight too; the repository waits for the user",
@@ -192,7 +228,7 @@ impl Loop {
                 .and_then(|b| outbox::card_of(&stored.item.id).and_then(|n| b.card(n)))
                 .cloned();
             let pending = pending.contains(&stored.item.id);
-            self.recover_item(stored, boot, card, pending, &children)
+            self.recover_item(stored, boot, card, pending, &children, &rows)
                 .await;
             if self.halted {
                 return true;
@@ -273,6 +309,85 @@ impl Loop {
         }
     }
 
+    /// Marks the session shims of `rows` gone (#8): their sessions are not followed.
+    async fn processes_gone(&self, item: &ItemId, rows: &[ProcessRow]) {
+        for row in rows {
+            let gone = Write::ProcessGone {
+                record_path: row.record_path.clone(),
+                at_ms: now_ms(),
+            };
+            if let Err(e) = self.shared.deps.writer.write(vec![gone]).await {
+                self.shared
+                    .trouble(format!("{item}: the shim's row cannot be cleared: {e}"));
+            }
+        }
+    }
+
+    /// The current session of the running `item`, re-attached (#8, E3) from its `process` row
+    /// in `rows` at the row's offsets: `None` when it cannot be. It can be while the shim's
+    /// record is readable, its run's end is not recorded yet, and the shim still runs or
+    /// recorded the session's exit (a session that ended while no daemon ran).
+    async fn attachable(
+        &self,
+        item: &bosun_core::Item,
+        rows: &[ProcessRow],
+    ) -> Option<session::Attached> {
+        let attempt = item.attempt.as_ref()?;
+        let process = rows
+            .iter()
+            .rev()
+            .find(|r| r.attempt == attempt.number && r.spawn == attempt.spawn)?
+            .clone();
+        let runs = self.shared.deps.reader.runs(&item.id).await.ok()?;
+        let run = runs
+            .into_iter()
+            .rev()
+            .find(|r| r.attempt == attempt.number && r.spawn == attempt.spawn)?;
+        if run.exit.is_some() {
+            // Its end is recorded: recovered from it, as in stage 1.
+            return None;
+        }
+        let offsets = if cfg!(mutant_loop_reattach_from_zero) {
+            // Mutant (`mutant_loop_reattach_from_zero`): the session's output is read again
+            // from its start.
+            bosun_proc::shim::Offsets {
+                stdout: 0,
+                stderr: 0,
+            }
+        } else {
+            bosun_proc::shim::Offsets {
+                stdout: process.stdout_offset,
+                stderr: process.stderr_offset,
+            }
+        };
+        let path = PathBuf::from(&process.record_path);
+        let found = blocking(move || {
+            let record = bosun_proc::shim::Record::read(&path).map_err(|e| e.to_string())?;
+            if record.exit.is_none() && !bosun_proc::is_running(record.shim) {
+                return Err("its shim is gone without recording the session's exit".to_owned());
+            }
+            let spawned = bosun_proc::shim::attach(&path, offsets).map_err(|e| e.to_string())?;
+            Ok::<_, String>((record, spawned))
+        })
+        .await;
+        match found {
+            Ok((record, spawned)) => Some(session::Attached {
+                process,
+                run,
+                record,
+                spawned,
+            }),
+            Err(e) => {
+                crate::log::log!(
+                    "bosund: repository {}: {}: the session cannot be re-attached: {e}",
+                    self.shared.options.repo,
+                    item.id
+                );
+                None
+            }
+        }
+    }
+
     /// Recovers one item in flight: rebuilds it as the loop's current item, then performs the
     /// plan of `bosun_core::recover`.
     #[allow(clippy::too_many_lines)]
@@ -283,6 +398,7 @@ impl Loop {
         card: Option<Card>,
         pending: bool,
         children: &[RecordedChild],
+        processes: &[ProcessRow],
     ) {
         let item = stored.item;
         let id = item.id.clone();
@@ -331,11 +447,23 @@ impl Loop {
             self.restarts.insert(id.clone());
         }
 
+        // Worktree mode (#8, E19): a running item's session may have gone on under its shim.
+        let mut attached = None;
+        if item.state == State::Running
+            && claimed.as_ref().is_some_and(|c| c.worktree.is_some())
+            && !cfg!(mutant_loop_reap_instead_of_attach)
+        {
+            // Mutant (`mutant_loop_reap_instead_of_attach`): no session is attachable; each is
+            // reaped and resumed, as in stage 1.
+            attached = self.attachable(&item, processes).await;
+        }
+        let session_child = attached.as_ref().map(|a| a.record.child);
         let mut facts = Facts {
             boot,
             command,
             children: Vec::new(),
             tail: None,
+            attachable: attached.is_some(),
         };
         for child in children {
             let key = key_of(child);
@@ -344,9 +472,10 @@ impl Loop {
                 pid: child.pid,
                 started_ms: child.started_ms,
                 alive: blocking(move || alive(key)).await,
+                session: session_child == Some(key),
             });
         }
-        if item.state == State::Running {
+        if item.state == State::Running && attached.is_none() {
             facts.tail = self.lost_exit(&item).await;
         }
         if cfg!(mutant_recover_resume_before_board) {
@@ -408,7 +537,15 @@ impl Loop {
             }
         }
 
+        // The children the plan may reap: all but an attached session's agent.
+        let attaching = plan.contains(&Action::Attach);
+        let reapable: Vec<RecordedChild> = children
+            .iter()
+            .filter(|c| !(attaching && session_child == Some(key_of(c))))
+            .cloned()
+            .collect();
         let mut reaped = false;
+        let mut followed: Option<String> = None;
         for action in plan {
             match action {
                 Action::Apply(event) => {
@@ -420,15 +557,29 @@ impl Loop {
                 Action::Reap { .. } => {
                     if !reaped {
                         reaped = true;
-                        self.reap(&id, children).await;
+                        self.reap(&id, &reapable).await;
+                    }
+                }
+                Action::Attach => {
+                    if let Some(attached) = attached.take() {
+                        followed = Some(attached.process.record_path.clone());
+                        self.start_attached(attached).await;
                     }
                 }
             }
         }
         if !reaped {
             // Only dead children: their rows are cleared all the same.
-            self.reap(&id, children).await;
+            self.reap(&id, &reapable).await;
         }
+        // The shims whose sessions are not followed are done with; the followed one's row goes
+        // when its session ends.
+        let others: Vec<ProcessRow> = processes
+            .iter()
+            .filter(|p| followed.as_ref() != Some(&p.record_path))
+            .cloned()
+            .collect();
+        self.processes_gone(&id, &others).await;
     }
 
     /// The power request of an item that goes on after recovery.

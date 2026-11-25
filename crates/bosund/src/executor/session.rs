@@ -29,6 +29,12 @@
 //! daemon's kill ends it. Without `repo.<name>.worktree` the agent is a plain child of
 //! [`Deps::spawner`] and dies with the daemon, as in stage 1.
 //!
+//! A session is run in two parts: [`session`] prepares and spawns it, and a follower reads it
+//! to its end (both streams, the live entries, the tail, the exit's classification, the run's
+//! end and its commit range, the offsets). A daemon restarted while a session ran under its
+//! shim calls the follower through [`attach`] (#8, E3): what it needs is rebuilt from the store
+//! and the disk, never a new run row or session id, and there is no handshake to wait for.
+//!
 //! [`Options::handshake`]: super::Options::handshake
 //! [`Deps::spawner`]: super::Deps::spawner
 
@@ -51,7 +57,7 @@ use bosun_runner::claude::{ClaudeRunner, mcp_config};
 use bosun_runner::{
     LiveEntry, McpServer, ProcessExit, Runner, SessionContext, SessionId, Tail, ToolPolicy, prompt,
 };
-use bosun_store::{NewProcess, RunCommits, RunEnd, RunStart, Write};
+use bosun_store::{NewProcess, ProcessRow, RunCommits, RunEnd, RunRow, RunStart, Write};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::watch;
@@ -421,6 +427,33 @@ impl TailFile {
         }
     }
 
+    /// Opens the file a previous daemon left for a session this one re-attached (#8): what it
+    /// holds is returned, and the session's output from here on is appended to it.
+    fn reopen(path: PathBuf) -> (Self, String) {
+        let kept = std::fs::read_to_string(&path).unwrap_or_default();
+        let file = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+            });
+        let file = match file {
+            Ok(file) => Some(file),
+            Err(e) => {
+                crate::log::log!("bosund: {}: {e}", path.display());
+                None
+            }
+        };
+        let tail = Self {
+            path,
+            file: std::sync::Mutex::new(file),
+        };
+        (tail, kept)
+    }
+
     fn push(&self, line: &str) {
         let mut file = self
             .file
@@ -589,15 +622,11 @@ pub(crate) async fn session(
 
     // The session's credential (#63), revoked when `credential` is dropped: when the process
     // is gone, or on any early return.
-    let credential = shared.deps.credentials.issue(Binding {
-        identity: repo.identity.clone(),
-        item: run.item.clone(),
-        attempt: run.attempt,
-        session: session_id.to_string(),
-        repo: repo.path.clone(),
-        writer: shared.deps.writer.clone(),
-        on_blocking,
-    });
+    let credential =
+        shared
+            .deps
+            .credentials
+            .issue(binding(shared, repo, run, &session_id, on_blocking));
     let credential = match credential {
         Ok(credential) => credential,
         Err(e) => {
@@ -746,17 +775,40 @@ pub(crate) async fn session(
             return crash;
         }
     };
-    let bosun_proc::Spawned {
-        mut tree,
-        stdout,
-        stderr,
-    } = spawned;
-    let key = tree.key();
+    let key = spawned.tree.key();
     set_child(&run.child, Some(key));
-    let mut shim_run = match &shim_dir {
+    let shim_run = match &shim_dir {
         Some(dir) => record_shim(shared, run, &session_id, &credential, dir).await,
         None => None,
     };
+    record_child(shared, run, key).await;
+    shared.publish(EventBody::SessionStarted {
+        item: run.item.to_string(),
+        attempt: run.attempt,
+        spawn: run.spawn,
+        mode: mode_name(run.mode).to_owned(),
+        session: Some(session_id.to_string()),
+    });
+    let following = Following {
+        runner,
+        session_id,
+        credential: Some(credential),
+        session_dir,
+        under_shim: shim_dir.is_some(),
+        shim_run,
+        tail_file,
+        tail: Tail::default(),
+        up: false,
+        start_head,
+        git_repo,
+        await_hello: true,
+        consumed: (0, 0),
+    };
+    follow(shared, run, following, spawned, kill).await
+}
+
+/// Records `key` as the session's child on its attempt, for crash recovery's reaping (#68).
+async fn record_child(shared: &Shared, run: &Run, key: bosun_proc::ProcessKey) {
     let child = Write::SessionChild {
         item: run.item.clone(),
         attempt: run.attempt,
@@ -766,22 +818,77 @@ pub(crate) async fn session(
     if let Err(e) = shared.deps.writer.write(vec![child]).await {
         shared.trouble(format!("{}: the session's child: {e}", run.item));
     }
-    shared.publish(EventBody::SessionStarted {
-        item: run.item.to_string(),
-        attempt: run.attempt,
-        spawn: run.spawn,
-        mode: mode_name(run.mode).to_owned(),
-        session: Some(session_id.to_string()),
-    });
+}
+
+/// What following a session to its end needs: of one just spawned, or of one a previous daemon
+/// left running under its shim ([`attach`]).
+struct Following {
+    runner: ClaudeRunner,
+    session_id: SessionId,
+    /// The session's credential, revoked when the session's process is gone; `None` when it
+    /// could not be re-admitted after a restart.
+    credential: Option<crate::agent::Issued>,
+    /// Removed once the session (and under the shim, its shim) is gone.
+    session_dir: SessionDir,
+    under_shim: bool,
+    shim_run: Option<ShimRun>,
+    tail_file: TailFile,
+    /// The session's output read so far, for the exit's classification.
+    tail: Tail,
+    /// The session came up (the CLI's `init` was read).
+    up: bool,
+    /// HEAD when the session started: the start of its commit range.
+    start_head: Option<String>,
+    git_repo: Git,
+    /// The handshake of #64 is still to come.
+    await_hello: bool,
+    /// The bytes of each stream consumed so far, in whole lines (E18).
+    consumed: (u64, u64),
+}
+
+/// Follows a running session to its end: reads both streams (the live entries, the tail, the
+/// offsets), classifies its exit and records the run's end and its commit range.
+#[allow(clippy::too_many_lines)]
+async fn follow(
+    shared: &Arc<Shared>,
+    run: &Run,
+    following: Following,
+    spawned: bosun_proc::Spawned,
+    mut kill: watch::Receiver<bool>,
+) -> Event {
+    let Following {
+        runner,
+        session_id,
+        credential,
+        session_dir,
+        under_shim,
+        mut shim_run,
+        tail_file,
+        mut tail,
+        up,
+        start_head,
+        git_repo,
+        await_hello,
+        mut consumed,
+    } = following;
+    let said_hello = |credential: &Option<crate::agent::Issued>| {
+        credential
+            .as_ref()
+            .is_some_and(crate::agent::Issued::said_hello)
+    };
+    let bosun_proc::Spawned {
+        mut tree,
+        stdout,
+        stderr,
+    } = spawned;
 
     let mut out = BufReader::new(stdout);
     let mut err = BufReader::new(stderr);
     let (mut out_line, mut err_line) = (Vec::new(), Vec::new());
     let (mut out_open, mut err_open) = (true, true);
-    let mut tail = Tail::default();
     let mismatch = std::sync::atomic::AtomicBool::new(false);
     // The session came up (the CLI's `init`): a crash after it is not a failed resume.
-    let up = std::sync::atomic::AtomicBool::new(false);
+    let up = std::sync::atomic::AtomicBool::new(up);
     let on_line = |stream: OutputStream, bytes: &[u8], tail: &mut Tail| {
         let line = String::from_utf8_lossy(bytes).trim_end().to_owned();
         let texts: Vec<(String, Option<String>)> = match stream {
@@ -832,17 +939,20 @@ pub(crate) async fn session(
     // The handshake (#64): `bosun-mcp` says hello within the timeout, or the session is killed.
     let handshake = tokio::time::sleep(shared.options.handshake);
     tokio::pin!(handshake);
-    let mut awaiting_hello = !cfg!(mutant_mcp_skip_handshake);
+    let mut awaiting_hello = await_hello && !cfg!(mutant_mcp_skip_handshake);
     let mut missed = false;
-    // The bytes of each stream consumed so far, in whole lines (E18).
-    let mut consumed = (0u64, 0u64);
+    // Offsets read just before the output goes quiet are written a second later all the same:
+    // a daemon that dies while the agent is silent leaves them in the row (E18).
+    let mut flush = tokio::time::interval(OFFSETS_EVERY);
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let status = {
         let mut wait = tree.wait();
         loop {
             tokio::select! {
+                _ = flush.tick(), if shim_run.is_some() => {}
                 () = &mut handshake, if awaiting_hello => {
                     awaiting_hello = false;
-                    if !credential.said_hello() {
+                    if !said_hello(&credential) {
                         missed = true;
                         break None;
                     }
@@ -880,13 +990,13 @@ pub(crate) async fn session(
     // Whatever the session left running in its container goes with it, and so does its
     // credential.
     // A session that ended before the timeout must have said hello too.
-    let missed = missed || (awaiting_hello && status.is_some() && !credential.said_hello());
+    let missed = missed || (awaiting_hello && status.is_some() && !said_hello(&credential));
     // Whatever the session left running in its container goes with it, and so do its
     // credential and its files.
     let _ = tree.kill_tree();
     drop(credential);
     // Under the shim its directory, which holds the shim's files, goes once the shim is gone.
-    let session_dir = if shim_dir.is_some() {
+    let session_dir = if under_shim {
         Some(session_dir)
     } else {
         drop(session_dir);
@@ -989,6 +1099,177 @@ pub(crate) async fn session(
         };
     }
     run.exited(exit)
+}
+
+/// A session a previous daemon left under its shim (#8, E3), as crash recovery found it: its
+/// `process` row, its run row, the shim's record and the session re-attached from the row's
+/// offsets.
+#[derive(Debug)]
+pub(crate) struct Attached {
+    pub(crate) process: ProcessRow,
+    pub(crate) run: RunRow,
+    pub(crate) record: Record,
+    pub(crate) spawned: bosun_proc::Spawned,
+}
+
+/// Follows `attached`, the session of `run` that a previous daemon started under the shim, to
+/// its end, as [`session`] follows one it spawned. Everything comes from the store and the
+/// disk: the session id from the run row (no new run row, no new id); the credential re-admitted
+/// from the row's digest with the session's binding, as having said hello (its `bosun-mcp`
+/// said it to the previous daemon), and revoked at the end; the output read so far from the
+/// tail file, appended to from here on; the start of the commit range from the attempt's
+/// previous session's end, else the item's base.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn attach(
+    shared: &Arc<Shared>,
+    config: &Config,
+    claimed: &Claimed,
+    run: &Run,
+    attached: Attached,
+    mut kill: watch::Receiver<bool>,
+    on_blocking: Box<dyn Fn() + Send + Sync>,
+) -> Event {
+    let crash = run.exited(Exit::Crash);
+    let Some((repo, _)) = lookup(config, &shared.options.repo) else {
+        return crash;
+    };
+    let Attached {
+        process,
+        run: run_row,
+        record,
+        spawned,
+    } = attached;
+    let Ok(session_id) = SessionId::parse(&run_row.session_key) else {
+        shared.trouble(format!(
+            "{}: the session id {:?} does not parse",
+            run.item, run_row.session_key
+        ));
+        return crash;
+    };
+    // The leases it holds already: granted again at once (E16).
+    if !cfg!(mutant_loop_skip_leases) {
+        match super::hold_leases(shared, repo, claimed, &run.item, &mut kill).await {
+            Ok(()) => {}
+            Err(None) => return crash,
+            Err(Some(e)) => {
+                shared.trouble(format!("{}: its leases: {e}", run.item));
+                return crash;
+            }
+        }
+    }
+    let digest = process
+        .credential_digest
+        .as_deref()
+        .and_then(|d| <[u8; 32]>::try_from(d).ok());
+    let credential = if cfg!(mutant_loop_reattach_without_credential) {
+        // Mutant (`mutant_loop_reattach_without_credential`): the stored digest is not
+        // re-admitted; the session's agent calls are refused.
+        None
+    } else {
+        digest.map(|digest| {
+            shared
+                .deps
+                .credentials
+                .readmit(digest, binding(shared, repo, run, &session_id, on_blocking))
+        })
+    };
+    if credential.is_none() {
+        shared.trouble(format!(
+            "{}: the credential of session {session_id} cannot be re-admitted",
+            run.item
+        ));
+    }
+    let program = shared
+        .options
+        .agent
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("claude"));
+    let runner = ClaudeRunner::new(&program);
+    let session_dir = SessionDir(
+        shared
+            .options
+            .work_dir
+            .join("sessions")
+            .join(session_id.as_str()),
+    );
+    let (tail_file, kept) =
+        TailFile::reopen(tail_path(&shared.options.work_dir, session_id.as_str()));
+    let up = kept.lines().any(|line| {
+        runner
+            .live_entries(line)
+            .iter()
+            .any(|e| matches!(e, LiveEntry::Started { .. }))
+    });
+    let git_repo = Git::new(&claimed.workdir);
+    let runs = shared.deps.reader.runs(&run.item).await.unwrap_or_default();
+    let start_head = runs
+        .iter()
+        .rev()
+        .filter(|r| r.attempt == run.attempt && r.spawn < run.spawn)
+        .find_map(|r| r.head_sha.clone())
+        .or_else(|| {
+            Some(
+                claimed
+                    .worktree
+                    .as_ref()
+                    .map_or_else(|| claimed.base.head.clone(), |w| w.worktree.base.clone()),
+            )
+        });
+    let key = spawned.tree.key();
+    set_child(&run.child, Some(key));
+    record_child(shared, run, key).await;
+    shared
+        .deps
+        .leases
+        .set_shim(&Holder::Item(run.item.clone()), Some(record.shim));
+    let shim_run = ShimRun {
+        record: PathBuf::from(&process.record_path),
+        shim: record.shim,
+        written: (process.stdout_offset, process.stderr_offset),
+        written_at: Instant::now(),
+    };
+    crate::log::log!(
+        "bosund: {}: re-attached session {session_id} under shim pid {} at offsets {}/{}",
+        run.item,
+        record.shim.pid,
+        process.stdout_offset,
+        process.stderr_offset
+    );
+    let following = Following {
+        runner,
+        session_id,
+        credential,
+        session_dir,
+        under_shim: true,
+        shim_run: Some(shim_run),
+        tail_file,
+        tail: Tail::from_text(&kept),
+        up,
+        start_head,
+        git_repo,
+        await_hello: false,
+        consumed: (process.stdout_offset, process.stderr_offset),
+    };
+    follow(shared, run, following, spawned, kill).await
+}
+
+/// The binding of the credential of session `id` of `run` (#63).
+fn binding(
+    shared: &Shared,
+    repo: &Repo,
+    run: &Run,
+    id: &SessionId,
+    on_blocking: Box<dyn Fn() + Send + Sync>,
+) -> Binding {
+    Binding {
+        identity: repo.identity.clone(),
+        item: run.item.clone(),
+        attempt: run.attempt,
+        session: id.to_string(),
+        repo: repo.path.clone(),
+        writer: shared.deps.writer.clone(),
+        on_blocking,
+    }
 }
 
 /// Starts `spec` under a copy of the session shim, in `dir` (which must not exist yet: a

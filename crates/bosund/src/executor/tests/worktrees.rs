@@ -37,7 +37,7 @@ impl Seen {
 }
 
 /// Runs `git args` in `dir` the way [`Scene::git`] does in the scene's repository.
-fn git_in(scene: &Scene, dir: &Path, args: &[&str]) -> String {
+pub(super) fn git_in(scene: &Scene, dir: &Path, args: &[&str]) -> String {
     let out = without_session(&mut Command::new("git"))
         .arg("-C")
         .arg(dir)
@@ -50,12 +50,12 @@ fn git_in(scene: &Scene, dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-fn item(card: u64) -> ItemId {
+pub(super) fn item(card: u64) -> ItemId {
     ItemId::new(format!("demo#{card}"))
 }
 
 /// The item worktree rows of `card`.
-async fn rows(scene: &Scene, card: u64) -> Vec<bosun_store::WorktreeRow> {
+pub(super) async fn rows(scene: &Scene, card: u64) -> Vec<bosun_store::WorktreeRow> {
     scene
         .store
         .reader()
@@ -69,7 +69,7 @@ async fn rows(scene: &Scene, card: u64) -> Vec<bosun_store::WorktreeRow> {
 
 /// Waits until every item worktree of `card` has ended (the loop closes it after the item's
 /// last transition).
-async fn closed(scene: &Scene, card: u64) {
+pub(super) async fn closed(scene: &Scene, card: u64) {
     wait_for("the item's worktree to close", LIMIT, async || {
         let rows = rows(scene, card).await;
         !rows.is_empty() && rows.iter().all(|r| r.state != WorktreeState::Created)
@@ -88,7 +88,7 @@ fn root_entries(scene: &Scene) -> Vec<String> {
 }
 
 /// The loop's trouble (`board_sync_error`) as it is published.
-fn subscribe_trouble(scene: &Scene) -> Subscriber {
+pub(super) fn subscribe_trouble(scene: &Scene) -> Subscriber {
     let filter = EventFilter {
         kinds: Some(vec!["board_sync_error".to_owned()]),
         tail: None,
@@ -97,7 +97,7 @@ fn subscribe_trouble(scene: &Scene) -> Subscriber {
 }
 
 /// The trouble `sub` has received so far.
-fn trouble(sub: &mut Subscriber) -> Vec<String> {
+pub(super) fn trouble(sub: &mut Subscriber) -> Vec<String> {
     match sub.take(1_000) {
         Batch::Events(events) => events
             .iter()
@@ -114,7 +114,7 @@ fn trouble(sub: &mut Subscriber) -> Vec<String> {
 }
 
 /// The values of trailer `key` on commit `rev` of the repository at `dir`.
-fn trailer_in(scene: &Scene, dir: &Path, rev: &str, key: &str) -> Vec<String> {
+pub(super) fn trailer_in(scene: &Scene, dir: &Path, rev: &str, key: &str) -> Vec<String> {
     git_in(
         scene,
         dir,
@@ -133,11 +133,12 @@ fn trailer_in(scene: &Scene, dir: &Path, rev: &str, key: &str) -> Vec<String> {
 }
 
 /// The item commits a file and leaves an ignored one in the build directory; its verdict
-/// passes only after the commit. It ends Done, and the user's checkout (HEAD, branch, refs,
-/// status, worktree list) is as it was: neither file is there. The work is in the daemon's
-/// clone under the item's aside ref, its commit carrying the attempt's trailers; the worktree
-/// is gone and its row is `removed` (`mutant_loop_session_in_user_checkout` runs the session in
-/// the user's checkout).
+/// passes only after the commit. It ends Done, and the session never touched the user's
+/// checkout: it is on its branch, clean, with one worktree and no other ref, and what reached
+/// it is only the landed commit (the committed file, carrying the attempt's trailers, on top of
+/// the head at claim), not the ignored file. A Done item's work is on the target, so no aside
+/// ref is kept; the worktree is gone and its row is `removed`
+/// (`mutant_loop_session_in_user_checkout` runs the session in the user's checkout).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_item_runs_in_its_worktree_and_the_users_checkout_is_untouched() {
     let scene = Scene::with_worktrees(None).await;
@@ -160,8 +161,16 @@ async fn an_item_runs_in_its_worktree_and_the_users_checkout_is_untouched() {
     watcher.abort();
 
     assert!(matches!(state, State::Done(_)), "{state:?}");
-    assert_eq!(Seen::of(&scene), before);
-    assert!(!scene.repo.join("one.txt").exists());
+    let after = Seen::of(&scene);
+    assert_eq!(after.branch, before.branch);
+    assert_eq!(after.status, before.status);
+    assert_eq!(
+        after.refs,
+        format!("refs/heads/main {}", after.head),
+        "{after:?}"
+    );
+    assert_eq!(scene.git(&["rev-parse", "HEAD~1"]), before.head);
+    assert!(scene.repo.join("one.txt").is_file());
     assert!(!scene.repo.join("target").exists());
     let listed = scene.git(&["worktree", "list", "--porcelain"]);
     assert_eq!(
@@ -173,22 +182,23 @@ async fn an_item_runs_in_its_worktree_and_the_users_checkout_is_untouched() {
         "{listed}"
     );
 
-    let clone = scene.worktree_root().join(workspace::CLONE);
-    let aside = git::aside_ref(&item(1));
-    git_in(
-        &scene,
-        &clone,
-        &["rev-parse", "--verify", "--quiet", &aside],
-    );
-    let files = git_in(&scene, &clone, &["ls-tree", "-r", "--name-only", &aside]);
-    assert!(files.lines().any(|f| f == "one.txt"), "{files}");
     let runs = scene.runs(1).await;
     assert_eq!(runs.len(), 1, "{runs:?}");
-    assert_eq!(trailer_in(&scene, &clone, &aside, "Item"), ["demo#1"]);
-    assert_eq!(trailer_in(&scene, &clone, &aside, "Run"), ["a1s1"]);
+    assert_eq!(trailer_in(&scene, &scene.repo, "HEAD", "Item"), ["demo#1"]);
+    assert_eq!(trailer_in(&scene, &scene.repo, "HEAD", "Run"), ["a1s1"]);
     assert_eq!(
-        trailer_in(&scene, &clone, &aside, "Session"),
+        trailer_in(&scene, &scene.repo, "HEAD", "Session"),
         [runs[0].session_key.clone()]
+    );
+    let clone = scene.worktree_root().join(workspace::CLONE);
+    let aside = git::aside_ref(&item(1));
+    assert_eq!(
+        git_in(
+            &scene,
+            &clone,
+            &["for-each-ref", "--format=%(refname)", &aside]
+        ),
+        ""
     );
 
     let rows = rows(&scene, 1).await;
@@ -228,8 +238,10 @@ async fn a_session_that_switches_the_users_branch_needs_the_user() {
 }
 
 /// While the session runs, the user's target branch gains a commit and an untracked file
-/// appears in the user's checkout: the item ends Done, and the change of the status is
-/// reported as a warning naming the file (`mutant_loop_strict_checkout_guard` refuses both).
+/// appears in the user's checkout: the change of the status is reported as a warning naming
+/// the file, and the item goes on to its landing, which the untracked file defers until the
+/// test removes it. The item ends Done on top of the user's commit
+/// (`mutant_loop_strict_checkout_guard` refuses both).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_user_commit_and_a_dirty_file_during_the_run_do_not_stop_the_item() {
     let scene = Scene::with_worktrees(None).await;
@@ -252,20 +264,25 @@ async fn a_user_commit_and_a_dirty_file_during_the_run_do_not_stop_the_item() {
     );
     let head = scene.git(&["rev-parse", "HEAD"]);
     let (task, watcher) = scene.start(None);
+    // The user's untracked file holds the landing (#8, E2) until it goes.
+    let mut seen = Vec::new();
+    wait_for("the landing to be deferred", LIMIT, async || {
+        seen.extend(trouble(&mut sub));
+        seen.iter().any(|t| t.contains("is deferred")) || terminal(scene.state(1).await)
+    })
+    .await;
+    std::fs::remove_file(scene.repo.join("notes.txt")).unwrap();
     let state = ended(&scene, 1, LIMIT).await;
     closed(&scene, 1).await;
     task.abort();
     watcher.abort();
 
     assert!(matches!(state, State::Done(_)), "{state:?}");
-    // The user's commit is there, on the branch the user is on.
-    assert_eq!(scene.git(&["rev-parse", "HEAD~1"]), head);
+    // The user's commit is there, on the branch the user is on, below the item's.
+    assert_eq!(scene.git(&["log", "-1", "--format=%s", "HEAD~1"]), "user");
+    assert_eq!(scene.git(&["rev-parse", "HEAD~2"]), head);
     assert_eq!(scene.git(&["symbolic-ref", "HEAD"]), "refs/heads/main");
-    let trouble = trouble(&mut sub);
-    assert!(
-        trouble.iter().any(|t| t.contains("notes.txt")),
-        "{trouble:#?}"
-    );
+    assert!(seen.iter().any(|t| t.contains("notes.txt")), "{seen:#?}");
 }
 
 /// With `setup = "exit 3"` the item ends Needs you (`setup`), no session is started and no

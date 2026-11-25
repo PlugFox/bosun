@@ -237,6 +237,7 @@ async fn open_worktree(
             workspace: workspace.clone(),
             worktree,
             user,
+            target,
         }),
         // Mutant (`mutant_loop_setup_failure_is_claim_failure`): a failing setup is a failed
         // claim, retried later, instead of Needs you.

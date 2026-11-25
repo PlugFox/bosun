@@ -15,7 +15,7 @@
 //! | `Kill` | the running task's kill signal; for a blocking question, after [`Options::question_grace`] |
 //! | `CheckPreconditions` | the guards of #59 ([`guards`]: protected paths, new ignored files, git's own configuration), then the verdict preconditions of `bosun-git` |
 //! | `RunVerdict` | the verdict task ([`verdict`]): always the snapshot's command |
-//! | `Land` | `local` landing: nothing to push; it never waits for the board |
+//! | `Land` | without `repo.<name>.worktree`: nothing to push; it never waits for the board. In worktree mode, `local` and `merge`: the landing task ([`landing`]): rebase onto the target's head, the verdict again on a rebased head, the commit to land, the fetch into the user's repository and its fast-forward (deferred while the checkout of the target is dirty or busy) |
 //! | `Project`, `Comment`, `Report` | the store's outbox, written with the transition; sent by the drainer ([`outbox`]) |
 //!
 //! Long effects run as tasks that report back an [`Event`]; the loop applies it like any
@@ -45,8 +45,16 @@
 //! throwaway checkout of the worktree's head, set up and closed again ([`verdict`]). The
 //! verdict on the base commit at claim still runs in the item's fresh worktree. The user's
 //! checkout is captured at claim and compared
-//! before every verdict ([`checkout`], E4 as amended by E21). Every item, Done or not, ends
-//! with its worktree closed and its work kept in the clone under `refs/bosun/items/<item>`.
+//! before every verdict ([`checkout`], E4 as amended by E21). A passing verdict run records the
+//! commit it judged; landing ([`landing`], E2, E14) rebases the item onto the target's head,
+//! has the rebased head verified again, and fast-forwards the target in the user's repository
+//! (its clean checkout with it), so a Done item's work is on the target. The target the daemon
+//! moves in its clone, and in the user's repository, is taken into the claim's base and the
+//! capture of the user's checkout, and the item's own commits start at the merge base of its
+//! head and the target ([`git::item_base`]), so neither the next attempt nor a restarted daemon
+//! takes landing for tampering, nor a person's commits for the agent's. Every item ends with
+//! its worktree closed; one that is not Done keeps its work in the clone under
+//! `refs/bosun/items/<item>`.
 //!
 //! # Leases (#8)
 //!
@@ -115,6 +123,7 @@ mod commands;
 mod git;
 mod hold;
 mod identity;
+mod landing;
 mod outbox;
 mod park;
 mod recover;
@@ -305,7 +314,7 @@ pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + '
 }
 
 /// What the claim found, beyond the machine's item.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Claimed {
     /// The snapshot the item runs from: its verdict, prose and inlined comments.
     pub(crate) snapshot: bosun_queue::Snapshot,
@@ -315,7 +324,8 @@ pub(crate) struct Claimed {
     pub(crate) workdir: PathBuf,
     /// Worktree mode (#8, E19): the item's worktree and the user's checkout at claim.
     pub(crate) worktree: Option<ItemWorktree>,
-    /// The working directory at claim, for the preconditions.
+    /// The working directory at claim, for the preconditions. In worktree mode its refs follow
+    /// the target when landing moves it ([`landing`]).
     pub(crate) base: bosun_git::Base,
     /// Git's own configuration at claim, for the guards (#59).
     pub(crate) git_config: bosun_git::GitConfig,
@@ -327,14 +337,28 @@ pub(crate) struct Claimed {
 
 /// An item's worktree off the daemon's clone (#8), with the user's checkout as captured at
 /// claim (E4, E21).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ItemWorktree {
     /// The repository's workspace at claim: what closes the worktree.
     pub(crate) workspace: workspace::Workspace,
     /// The worktree: its directory is [`Claimed::workdir`].
     pub(crate) worktree: bosun_git::worktree::Worktree,
-    /// The user's checkout at claim, compared before every verdict.
+    /// The user's checkout at claim, compared before every verdict; its target follows
+    /// landing.
     pub(crate) user: checkout::UserCheckout,
+    /// The branch the item started from and lands on (a bare name): `landing.target`, else
+    /// the branch the user's checkout was on at claim.
+    pub(crate) target: String,
+}
+
+/// The branch `repo`'s items land on: `landing.target`, else the branch of the user's
+/// checkout `user` (captured at claim). `None` for a detached HEAD without `landing.target`.
+pub(crate) fn landing_target(repo: &Repo, user: &bosun_git::Base) -> Option<String> {
+    repo.landing.target.clone().or_else(|| {
+        user.branch
+            .as_deref()
+            .map(|b| b.strip_prefix("refs/heads/").unwrap_or(b).to_owned())
+    })
 }
 
 /// How a claim task ended.
@@ -366,6 +390,12 @@ pub(crate) enum Done {
         event: Event,
         /// The failing test names of a verdict run that did not pass.
         failing: Vec<String>,
+    },
+    /// Landing moved the target (#8): what the item's preconditions and the checkout guard
+    /// compare with from now on. Sent before the landing's event.
+    Followed {
+        item: ItemId,
+        claimed: Arc<Claimed>,
     },
 }
 
@@ -692,6 +722,10 @@ impl Loop {
                 // `local` landing (#7): nothing to push; the trailers are injected at commit
                 // time (#59) and the report is the outbox's (#65), which landing never waits
                 // for: an outage of the board never stops an item.
+                // Worktree mode (#8, E19): the landing task rebases, verifies and delivers.
+                EffectKind::Land { attempt } if self.worktree_mode() => {
+                    self.start_landing(attempt).await;
+                }
                 EffectKind::Land { .. } => {
                     if cfg!(mutant_outbox_stop_on_outage) {
                         // Mutant: landing waits until the board has every write of the item.
@@ -914,6 +948,52 @@ impl Loop {
         self.set_task(kill, handle).await;
     }
 
+    /// Whether the item in flight runs in its own worktree (#8, E19).
+    fn worktree_mode(&self) -> bool {
+        self.current
+            .as_ref()
+            .and_then(|c| c.claimed.as_ref())
+            .is_some_and(|c| c.worktree.is_some())
+    }
+
+    /// Starts the landing task of `attempt` (worktree mode, [`landing`]).
+    async fn start_landing(&mut self, attempt: u32) {
+        let Some(cur) = self.current.as_ref() else {
+            return;
+        };
+        let Some(claimed) = cur.claimed.clone() else {
+            return;
+        };
+        let (kill, kill_rx) = watch::channel(false);
+        let shared = self.shared.clone();
+        let config = self.config();
+        let item = cur.item.id.clone();
+        let title = cur.card.title.clone();
+        let done = self.done_tx.clone();
+        let handle = tokio::spawn(async move {
+            let spec = landing::Spec {
+                item: item.clone(),
+                attempt,
+                title,
+            };
+            let landed = landing::land(&shared, &config, &claimed, &spec, kill_rx).await;
+            if let Some(claimed) = landed.followed {
+                let _ = done.send(Done::Followed {
+                    item: item.clone(),
+                    claimed: Arc::new(claimed),
+                });
+            }
+            if let Some(event) = landed.event {
+                let _ = done.send(Done::Event {
+                    item,
+                    event,
+                    failing: Vec::new(),
+                });
+            }
+        });
+        self.set_task(kill, handle).await;
+    }
+
     /// The verdict's preconditions and guards, and a last look at the hashes.
     async fn preconditions(&mut self, attempt: u32) -> Event {
         let Some(cur) = self.current.as_ref() else {
@@ -986,10 +1066,13 @@ impl Loop {
     async fn git_preconditions(&self, item: &ItemId, attempt: u32, claimed: Arc<Claimed>) -> Event {
         let path = claimed.workdir.clone();
         let runs = self.shared.deps.reader.runs(item).await.unwrap_or_default();
-        let worktree = claimed.worktree.is_some();
         let checked = {
             let item = item.clone();
-            blocking(move || git::preconditions(&path, &claimed.base, &item, &runs, worktree)).await
+            blocking(move || {
+                let target = claimed.worktree.as_ref().map(|wt| wt.target.as_str());
+                git::preconditions(&path, &claimed.base, &item, &runs, target)
+            })
+            .await
         };
         if let Ok(checked) = &checked
             && !checked.uncommitted.is_empty()
@@ -1154,11 +1237,10 @@ impl Loop {
         if let Some(claimed) = &cur.claimed
             && let Some(wt) = &claimed.worktree
         {
-            // Worktree mode: the item's work is kept in the clone under its aside ref, and the
-            // worktree and its branch go. This applies to a Done item too: until landing moves
-            // the target (the landing card of #8), the aside ref is where a Done item's work is
-            // found.
-            self.close_worktree(wt, Some(&cur.item.id)).await;
+            // Worktree mode: the worktree and its branch go. A Done item's work is on the
+            // target (landing, #8); any other item's is kept in the clone under its aside ref.
+            let aside = (!done).then_some(&cur.item.id);
+            self.close_worktree(wt, aside).await;
         } else if !done && let Some(claimed) = &cur.claimed {
             let config = self.config();
             if let Some((repo, _)) = lookup(&config, &self.shared.options.repo) {
@@ -1192,7 +1274,9 @@ impl Loop {
 
     async fn on_done(&mut self, done: Done) {
         let item = match &done {
-            Done::Claim { item, .. } | Done::Event { item, .. } => item.clone(),
+            Done::Claim { item, .. } | Done::Event { item, .. } | Done::Followed { item, .. } => {
+                item.clone()
+            }
         };
         let Some(cur) = self.current.as_mut() else {
             return;
@@ -1259,6 +1343,11 @@ impl Loop {
                     cur.failing = failing;
                 }
                 self.apply(event).await;
+            }
+            Done::Followed { claimed, .. } => {
+                if cur.claimed.is_some() {
+                    cur.claimed = Some(claimed);
+                }
             }
         }
     }
@@ -1660,9 +1749,14 @@ fn guards(
         return Ok(Vec::new());
     }
     let git = bosun_git::Git::new(&claimed.workdir);
+    // Worktree mode: the item's own commits, not those that came in from the target (#8).
+    let base = match &claimed.worktree {
+        Some(wt) => git::item_base(&git, &claimed.base, &wt.target)?,
+        None => claimed.base.clone(),
+    };
     let mut refusals = bosun_git::protected(
         &git,
-        &claimed.base,
+        &base,
         |path| repo.policy.protects(path),
         &claimed.snapshot.contract.allow_protected,
     )?;

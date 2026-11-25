@@ -564,6 +564,8 @@ impl Loop {
             .ok_or("the user's checkout at claim was not recorded")
             .map_err(str::to_owned)
             .and_then(super::checkout::UserCheckout::from_json)?;
+        let target = super::landing_target(repo, &user.base)
+            .ok_or("the user's checkout was on a detached HEAD at claim and `landing.target` is not configured")?;
         let worktree = bosun_git::worktree::Worktree {
             path: path.clone(),
             branch: row.branch,
@@ -575,6 +577,7 @@ impl Loop {
                 workspace,
                 worktree,
                 user,
+                target,
             }),
         ))
     }

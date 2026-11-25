@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE snapshot SET base_refs = ?\n         WHERE id = (SELECT snapshot_id FROM item WHERE id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "22b116846cb5e3470e258195df4c9c01f0f75e9afed9502c28d6c4a06631b663"
+}

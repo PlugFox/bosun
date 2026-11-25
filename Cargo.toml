@@ -302,6 +302,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_api_lease_acquire_always_grants)",
   "cfg(mutant_api_lease_without_operator)",
   "cfg(mutant_cli_with_exit_zero)",
+  # #157: landing in worktree mode.
+  "cfg(mutant_loop_accept_pre_rebase_verdict)",
+  "cfg(mutant_loop_land_while_deferred)",
+  "cfg(mutant_loop_land_ref_only)",
 ] }
 
 [workspace.lints.clippy]

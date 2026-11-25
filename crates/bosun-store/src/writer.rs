@@ -216,6 +216,16 @@ pub enum Write {
     /// Where the item's landing stands (#8). Keyed by the item: the attempt, target and time
     /// are replaced, and a column given as `None` keeps its stored value.
     Landing(LandingRow),
+    /// The refs of the base of `item`'s current snapshot (a JSON object, as
+    /// [`Snapshot::base_refs_json`]), captured again: landing moved the target the item's
+    /// preconditions compare with (#8). Fails when the item has no snapshot.
+    SnapshotRefs { item: ItemId, refs_json: String },
+    /// The user's checkout as captured for the worktree at `path`
+    /// ([`NewWorktree::user_base_json`]), captured again: landing moved the user's target (#8).
+    WorktreeUserBase {
+        path: String,
+        user_base_json: String,
+    },
     /// Mutant `mutant_ingest_reingest_truncates` (#21): deletes every ingested row, as a
     /// reingest that truncates before it rebuilds would.
     #[cfg(mutant_ingest_reingest_truncates)]
@@ -506,6 +516,13 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
         } => work::lease_granted(conn, &holder, &resource, filed_ms, at_ms).await,
         Write::LeaseReleased { holder, at_ms } => work::lease_released(conn, &holder, at_ms).await,
         Write::Landing(landing) => work::upsert_landing(conn, &landing).await,
+        Write::SnapshotRefs { item, refs_json } => {
+            work::snapshot_refs(conn, &item, &refs_json).await
+        }
+        Write::WorktreeUserBase {
+            path,
+            user_base_json,
+        } => work::worktree_user_base(conn, &path, &user_base_json).await,
         #[cfg(mutant_ingest_reingest_truncates)]
         Write::Truncate => {
             conn.execute(

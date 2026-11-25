@@ -880,6 +880,46 @@ pub(crate) async fn worktree_bytes(
     Ok(())
 }
 
+/// The user's checkout as captured for the worktree at `path`, captured again (#8, landing).
+pub(crate) async fn worktree_user_base(
+    conn: &mut SqliteConnection,
+    path: &str,
+    user_base_json: &str,
+) -> Result<(), Error> {
+    let updated = sqlx::query!(
+        "UPDATE worktree SET user_base_json = ? WHERE path = ?",
+        user_base_json,
+        path
+    )
+    .execute(&mut *conn)
+    .await?;
+    if updated.rows_affected() == 0 {
+        known_worktree(conn, path).await?;
+    }
+    Ok(())
+}
+
+/// The refs of the base of `item`'s current snapshot, captured again (#8, landing).
+pub(crate) async fn snapshot_refs(
+    conn: &mut SqliteConnection,
+    item: &ItemId,
+    refs_json: &str,
+) -> Result<(), Error> {
+    let id = item_id(conn, item).await?;
+    let updated = sqlx::query!(
+        "UPDATE snapshot SET base_refs = ?
+         WHERE id = (SELECT snapshot_id FROM item WHERE id = ?)",
+        refs_json,
+        id
+    )
+    .execute(&mut *conn)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(Error::UnknownRow(format!("the snapshot of {item}")));
+    }
+    Ok(())
+}
+
 /// Fails unless a worktree at `path` is recorded.
 async fn known_worktree(conn: &mut SqliteConnection, path: &str) -> Result<(), Error> {
     sqlx::query_scalar!(

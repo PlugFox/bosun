@@ -1128,6 +1128,86 @@ async fn twice(store: &Store, batch: Vec<Write>) {
     store.writer().write(batch).await.unwrap();
 }
 
+/// #157: landing moved the target: the current snapshot's base refs and the worktree's capture
+/// of the user's checkout are replaced; the rest of both rows stays, and an unknown worktree
+/// or an item without a snapshot fails the batch.
+#[tokio::test]
+async fn landing_replaces_the_base_refs_and_the_users_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    store.writer().write(vec![register()]).await.unwrap();
+    let reader = store.reader();
+    let refs = Write::SnapshotRefs {
+        item: id(),
+        refs_json: r#"{"refs/heads/main":"moved"}"#.to_owned(),
+    };
+    assert!(store.writer().write(vec![refs.clone()]).await.is_err());
+
+    let snapshot = Snapshot {
+        item: id(),
+        key: "local:demo#1/a0/t1/e0".to_owned(),
+        taken_ms: T0,
+        hash: "h1".to_owned(),
+        body: "Do the thing.".to_owned(),
+        contract_json: r#"{"verdict":"cargo test"}"#.to_owned(),
+        comments_json: "[]".to_owned(),
+        config_hash: Some("c".to_owned()),
+        policy_hash: Some("p".to_owned()),
+        base_sha: Some("base".to_owned()),
+        branch: Some("main".to_owned()),
+        base_refs_json: Some(r#"{"refs/heads/main":"base"}"#.to_owned()),
+        base_stash_json: Some("[]".to_owned()),
+    };
+    let worktree = NewWorktree {
+        item: id(),
+        path: "/work/trees/demo-1".to_owned(),
+        branch: "bosun/demo-1".to_owned(),
+        base_sha: "a".repeat(40),
+        kind: WorktreeKind::Item,
+        user_base_json: Some("{\"head\":\"base\"}".to_owned()),
+        created_ms: T0,
+    };
+    store
+        .writer()
+        .write(vec![
+            Write::Snapshot(snapshot),
+            Write::Worktree(worktree.clone()),
+        ])
+        .await
+        .unwrap();
+    twice(
+        &store,
+        vec![
+            refs,
+            Write::WorktreeUserBase {
+                path: worktree.path.clone(),
+                user_base_json: "{\"head\":\"moved\"}".to_owned(),
+            },
+        ],
+    )
+    .await;
+
+    let row = reader.snapshot(&id()).await.unwrap().unwrap();
+    assert_eq!(
+        row.base_refs_json.as_deref(),
+        Some(r#"{"refs/heads/main":"moved"}"#)
+    );
+    assert_eq!(row.base_sha.as_deref(), Some("base"));
+    assert_eq!(row.hash, "h1");
+    let rows = reader.worktrees(&id()).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].user_base_json.as_deref(),
+        Some("{\"head\":\"moved\"}")
+    );
+    assert_eq!(rows[0].state, WorktreeState::Created);
+    let unknown = Write::WorktreeUserBase {
+        path: "/work/trees/other".to_owned(),
+        user_base_json: "{}".to_owned(),
+    };
+    assert!(store.writer().write(vec![unknown]).await.is_err());
+}
+
 /// #150: the stage-2 rows of one item (its worktree, its session shim and its landing) are
 /// written idempotently and read back; output offsets only grow, a quarantined worktree is no
 /// longer open, and a landing update keeps what it does not give.

@@ -126,13 +126,22 @@ pub(crate) async fn verdict(
     let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
         return fail();
     };
-    // The item's leases are held through its verdicts (#8): already, unless it was recovered
-    // straight to its verdict.
-    if let Err(e) = super::hold_leases(shared, repo, claimed, &run.item, &mut kill).await {
-        if let Some(e) = e {
+    // The item's leases (#8): held already, or taken again, all or nothing, after a park or a
+    // deferred landing let them go (E24), or when it was recovered straight to its verdict. A
+    // refusal (an unknown resource, another set held) is the configuration's change since the
+    // daemon started: retrying cannot help, so it counts no attempt.
+    match super::hold_leases(shared, repo, claimed, &run.item, &mut kill).await {
+        Ok(()) => {}
+        Err(None) => return fail(),
+        Err(Some(e)) => {
             shared.trouble(format!("the verdict of {}: its leases: {e}", run.item));
+            // Mutant (`mutant_loop_lease_refusal_fails_verdict`): the refusal is a failed run,
+            // which counts an attempt.
+            if cfg!(mutant_loop_lease_refusal_fails_verdict) {
+                return fail();
+            }
+            return (Event::ConfigChanged, Vec::new());
         }
-        return fail();
     }
     let dir = claimed.workdir.clone();
     let head = match blocking(move || git::head(&Git::new(dir))).await {

@@ -588,3 +588,208 @@ async fn a_loop_that_halts_frees_its_items_leases() {
     .expect("rig is free once the loop halted");
     assert_eq!(leases.holds(&this_process()), ["rig"]);
 }
+
+/// One worktree-mode scene with `[resource.rig]` and its own lease manager.
+async fn rig_scene() -> (Scene, Arc<Leases>) {
+    let mut scene = Scene::with_worktrees(None).await;
+    scene.config_more = RIG.to_owned();
+    configure(&scene);
+    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    scene.leases = Some(leases.clone());
+    (scene, leases)
+}
+
+/// Whether the journal at `path` lists a lease of `item`.
+fn journal_lists(path: &Path, item: &str) -> bool {
+    journalled(path)
+        .iter()
+        .any(|e| e["holder"]["item"].as_str() == Some(item))
+}
+
+/// E24: a card that needs `rig` parks once on a rate limit, then commits. While it is Parked it
+/// holds nothing, the journal does not list it, and this process is granted `rig` at once. The
+/// test moves the clock past the park while it holds `rig`: for 2 s the item runs no session.
+/// The test lets go: the item resumes and ends Done, and its store has two grants of `rig`
+/// (the claim's and the resume's), each released (`mutant_loop_hold_leases_while_parked` keeps
+/// the lease while parked).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_item_holds_no_lease_and_takes_it_again_to_resume() {
+    let (scene, leases) = rig_scene().await;
+    let m = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[card_needing(1, "test -f done.txt", &["rig"])]);
+    scene.script(
+        1,
+        &[
+            format!(
+                "once {} replay {}",
+                m("m1"),
+                Scene::stream("limit-no-reset.jsonl")
+            ),
+            format!("once {} exit 1", m("m2")),
+            "commit done.txt done".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let item = Holder::Item(ItemId::new("demo#1"));
+
+    wait_for("the limit to park the item", LIMIT, async || {
+        let state = scene.state(1).await;
+        matches!(state, Some(State::Parked(_))) || terminal(state)
+    })
+    .await;
+    let state = scene.state(1).await;
+    assert!(matches!(state, Some(State::Parked(_))), "{state:?}");
+    assert_eq!(
+        leases.holds(&item),
+        Vec::<String>::new(),
+        "held while parked"
+    );
+    assert!(
+        !journal_lists(leases.journal(), "demo#1"),
+        "journalled while parked: {:?}",
+        journalled(leases.journal())
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        hold_as_this_process(&leases, &["rig"]),
+    )
+    .await
+    .expect("rig is free while the item is parked");
+    assert_eq!(scene.runs(1).await.len(), 1);
+
+    // Past the park: the item asks for `rig` again and waits.
+    scene.clock.advance(Duration::from_mins(16));
+    let held_until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < held_until {
+        assert_eq!(
+            scene.runs(1).await.len(),
+            1,
+            "the item resumed while the test held rig"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    leases.release(&this_process()).await;
+    let state = ended(&scene, 1, LIMIT).await;
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let mut rows = Vec::new();
+    wait_for("both grants of rig to be released", LIMIT, async || {
+        rows = scene
+            .store
+            .reader()
+            .lease_waits(0, i64::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.resource == "rig" && r.holder == "item demo#1")
+            .collect();
+        rows.len() >= 2 && rows.iter().all(|r| r.released_ms.is_some())
+    })
+    .await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().all(|r| r.granted_ms.is_some()), "{rows:?}");
+}
+
+/// E24: as `a_dirty_checkout_of_the_target_defers_the_landing_and_holds_the_queue`, with a card
+/// that needs `rig`: once the fast-forward is reported deferred, the item holds nothing and
+/// this process is granted `rig` at once. The test lets go and deletes the file: the item ends
+/// Done with its commit on the user's target (`mutant_loop_hold_leases_while_deferred` keeps
+/// the lease while deferred).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deferred_landing_holds_no_lease() {
+    let (mut scene, leases) = rig_scene().await;
+    let scratch = scene.repo.join("scratch.txt");
+    let then = format!("echo mine > '{}'", sh_path(&scratch));
+    super::landing::setup_once(&mut scene, &then);
+    let mut sub = super::worktrees::subscribe_trouble(&scene);
+    scene.write_board(&[card_needing(1, "test -f a.txt", &["rig"])]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let start = scene.git(&["rev-parse", "HEAD"]);
+    let (task, watcher) = scene.start(None);
+    let item = Holder::Item(ItemId::new("demo#1"));
+
+    let mut seen = Vec::new();
+    wait_for("the deferred fast-forward", LIMIT, async || {
+        seen.extend(super::worktrees::trouble(&mut sub));
+        seen.iter().any(|t| t.contains("is deferred")) || terminal(scene.state(1).await)
+    })
+    .await;
+    assert!(seen.iter().any(|t| t.contains("is deferred")), "{seen:#?}");
+    assert_eq!(
+        leases.holds(&item),
+        Vec::<String>::new(),
+        "held while deferred"
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        hold_as_this_process(&leases, &["rig"]),
+    )
+    .await
+    .expect("rig is free while the landing is deferred");
+    assert_eq!(scene.state(1).await, Some(State::Landing));
+
+    leases.release(&this_process()).await;
+    std::fs::remove_file(&scratch).unwrap();
+    let state = ended(&scene, 1, LIMIT).await;
+    task.abort();
+    watcher.abort();
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    assert_eq!(scene.git(&["rev-parse", "HEAD~1"]), start);
+    assert!(super::landing::files_at(&scene, "HEAD").contains("a.txt"));
+}
+
+/// A lease refusal is a configuration change, not a failed run: with `rig` and `other`, a card
+/// that needs `rig` starts its session; the test then swaps the item's lease for `other`, so
+/// the verdict's request for `rig` is refused (the holder holds another set). The item ends
+/// Needs you (`config_changed`) with no verdict run and one attempt, none failed
+/// (`mutant_loop_lease_refusal_fails_verdict` takes the refusal for a failed run).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lease_refusal_before_the_verdict_needs_the_user_and_counts_no_attempt() {
+    let mut scene = Scene::with_worktrees(None).await;
+    scene.config_more = format!("{RIG}[resource.other]\nkind = \"device\"\ncapacity = 1\n");
+    configure(&scene);
+    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    scene.leases = Some(leases.clone());
+    let (started, go) = (scene.path("started"), scene.path("go"));
+    scene.write_board(&[card_needing(1, "test -f done.txt", &["rig"])]);
+    scene.script(
+        1,
+        &[
+            format!("write {} x", started.display()),
+            format!("wait {}", go.display()),
+            "commit done.txt done".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let id = ItemId::new("demo#1");
+    let item = Holder::Item(id.clone());
+
+    wait_for("the session to start holding rig", LIMIT, async || {
+        (started.exists() && leases.holds(&item) == ["rig"]) || terminal(scene.state(1).await)
+    })
+    .await;
+    assert_eq!(leases.holds(&item), ["rig"]);
+    leases.release(&item).await;
+    leases
+        .acquire(Request {
+            holder: item.clone(),
+            names: vec!["other".to_owned()],
+            repo: "demo".to_owned(),
+            identity: "test".to_owned(),
+            writer: None,
+        })
+        .await
+        .unwrap();
+    std::fs::write(&go, "x").unwrap();
+
+    let state = ended(&scene, 1, LIMIT).await;
+    task.abort();
+    watcher.abort();
+    assert_eq!(state, State::NeedsYou(Reason::ConfigChanged));
+    let verdicts = scene.store.reader().verdict_runs(&id).await.unwrap();
+    assert!(verdicts.is_empty(), "{verdicts:?}");
+    let row = scene.item(1).await.unwrap();
+    assert_eq!((row.attempts, row.failed), (1, 0), "{row:?}");
+}

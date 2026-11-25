@@ -298,8 +298,16 @@ async fn plant_survivor(
     scene: &Scene,
     recorded: &[bosun_proc::ProcessKey],
 ) -> Option<(Spawned, bosun_proc::ProcessKey)> {
-    if recorded.iter().any(|k| bosun_proc::is_running(*k)) {
-        return None;
+    // A child that dies with the daemon (Linux's parent-death signal, a Windows job) may still
+    // be on its way out just after the kill: asked at once, it would count as a survivor, none
+    // would be planted, and the check would pass with nothing left to reap
+    // (`mutant_recover_skip_reap` went green that way). It is given a moment to go.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while recorded.iter().any(|k| bosun_proc::is_running(*k)) {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let survivor = Spawned::start(scene, Role::Survivor);
     let start = bosun_proc::start_time(survivor.pid())

@@ -828,9 +828,9 @@ fn landing_keys_are_read() {
     assert_eq!(shared.env, DEFAULT_SHARED_BUILD_ENV);
 }
 
-/// E19: every new landing path is gated on `repo.<name>.worktree`. `pr` and `merge.push` are
-/// read and refused until a later card. `mutant_config_landing_without_worktree` accepts
-/// `merge` without a worktree.
+/// E19: every new landing path is gated on `repo.<name>.worktree`. `pr` is accepted with one;
+/// `merge.push` is read and refused until a later card. `mutant_config_landing_without_worktree`
+/// accepts `merge` without a worktree.
 #[test]
 fn merge_and_pr_need_a_worktree() {
     let worktree = format!("worktree = {{ root = '{}' }}\n", abs("wt/bosun"));
@@ -851,17 +851,14 @@ fn merge_and_pr_need_a_worktree() {
     // `local` needs none: stage 1 is unchanged.
     parse(&with_repo("landing = { mode = 'local' }\n"), &Local).unwrap();
 
-    let found = problems(&with_repo(&format!(
-        "landing = {{ mode = 'pr' }}\n{worktree}"
-    )));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert!(
-        found[0].starts_with("line 7, column 20: `repo.bosun.landing.mode` is \"pr\"")
-            && found[0].contains("not available yet"),
-        "{found:?}"
-    );
+    let config = parse(
+        &with_repo(&format!("landing = {{ mode = 'pr' }}\n{worktree}")),
+        &Local,
+    )
+    .unwrap();
+    assert_eq!(config.repos["bosun"].landing.mode, LandingMode::Pr);
     let found = problems(&with_repo("landing = { mode = 'pr' }\n"));
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 1, "{found:?}");
     assert!(
         found
             .iter()

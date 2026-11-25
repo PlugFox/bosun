@@ -661,3 +661,390 @@ async fn landing_leaves_the_users_fetch_head_alone() {
     assert_eq!(scene.git(&["rev-parse", "HEAD~1"]), start);
     assert_eq!(std::fs::read(&fetch_head).unwrap(), mine.as_bytes());
 }
+
+/// One pull request of the [`FakeForge`].
+#[derive(Debug, Clone)]
+pub(super) struct FakePr {
+    pub(super) number: u64,
+    pub(super) new: forge::NewPullRequest,
+    /// The body now: the one it was opened with, or what was set or edited since.
+    pub(super) body: String,
+}
+
+/// The forge of the `pr` scenes: pull requests in memory, and the answers a scene asks for.
+#[derive(Debug, Default)]
+pub(super) struct FakeForge {
+    prs: std::sync::Mutex<Vec<FakePr>>,
+    /// Every call is refused with this.
+    refuse: std::sync::Mutex<Option<String>>,
+    /// While set, every call goes unanswered ([`forge::ForgeError::Unreachable`]).
+    down: AtomicBool,
+    /// The calls answered unreachable.
+    unanswered: AtomicUsize,
+    /// The calls of `create`.
+    creates: AtomicUsize,
+    /// The next `create` stops after it opened the pull request ([`FakeForge::paused`]) and
+    /// returns only once [`FakeForge::release`] is called.
+    pause_after_create: AtomicBool,
+    paused: AtomicBool,
+    released: AtomicBool,
+}
+
+impl FakeForge {
+    fn prs(&self) -> Vec<FakePr> {
+        self.prs.lock().unwrap().clone()
+    }
+
+    /// The answer every call gets before it is served, if not served.
+    fn answer(&self) -> Result<(), forge::ForgeError> {
+        if let Some(why) = self.refuse.lock().unwrap().clone() {
+            return Err(forge::ForgeError::Refused(why));
+        }
+        if self.down.load(Ordering::SeqCst) {
+            self.unanswered.fetch_add(1, Ordering::SeqCst);
+            return Err(forge::ForgeError::Unreachable(
+                "Could not resolve host: github.com".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A person edits the body of pull request `number`.
+    fn edit(&self, number: u64, edit: impl FnOnce(&str) -> String) {
+        let mut prs = self.prs.lock().unwrap();
+        let pr = prs.iter_mut().find(|p| p.number == number).unwrap();
+        pr.body = edit(&pr.body);
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+    }
+}
+
+impl forge::Forge for FakeForge {
+    fn open_pull_request(
+        &self,
+        _at: &forge::At,
+        head_branch: &str,
+    ) -> Result<Option<forge::PullRequest>, forge::ForgeError> {
+        self.answer()?;
+        Ok(self
+            .prs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.new.head == head_branch)
+            .map(|p| forge::PullRequest {
+                number: p.number,
+                url: url_of(p.number),
+                body: p.body.clone(),
+            }))
+    }
+
+    fn create(
+        &self,
+        _at: &forge::At,
+        new: &forge::NewPullRequest,
+    ) -> Result<forge::PullRequest, forge::ForgeError> {
+        self.answer()?;
+        self.creates.fetch_add(1, Ordering::SeqCst);
+        let number = {
+            let mut prs = self.prs.lock().unwrap();
+            let number = prs.len() as u64 + 1;
+            prs.push(FakePr {
+                number,
+                new: new.clone(),
+                body: new.body.clone(),
+            });
+            number
+        };
+        if self.pause_after_create.swap(false, Ordering::SeqCst) {
+            self.paused.store(true, Ordering::SeqCst);
+            while !self.released.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        Ok(forge::PullRequest {
+            number,
+            url: url_of(number),
+            body: new.body.clone(),
+        })
+    }
+
+    fn set_body(&self, _at: &forge::At, number: u64, body: &str) -> Result<(), forge::ForgeError> {
+        self.answer()?;
+        self.edit(number, |_| body.to_owned());
+        Ok(())
+    }
+}
+
+fn url_of(number: u64) -> String {
+    format!("https://github.com/synthetic-owner/demo/pull/{number}")
+}
+
+/// The scene's `origin`, which the identity checks read.
+const ORIGIN: &str = "https://github.com/synthetic-owner/demo.git";
+
+/// A scene in worktree mode with `landing = { mode = "pr" }` and `more` configuration, a
+/// [`FakeForge`], and a bare repository in the scene's directory that pushes to `origin` go to
+/// instead (`pushInsteadOf` in the identity's git configuration file: `git remote get-url`
+/// still prints the synthetic URL). Nothing is pushed anywhere else.
+async fn pr_scene(more: &str) -> (Scene, Arc<FakeForge>, PathBuf) {
+    let mut scene = Scene::with_worktrees(None).await;
+    scene.config_more = format!("[repo.demo.landing]\nmode = \"pr\"\n{more}");
+    configure(&scene);
+    let remote = scene.path("remote.git");
+    let out = without_session(&mut Command::new("git"))
+        .args(["init", "-q", "--bare", "-b", "main"])
+        .arg(&remote)
+        .env("GIT_CONFIG_GLOBAL", &scene.gitconfig)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let path = remote.to_string_lossy().replace('\\', "/");
+    let url = if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    };
+    let mut config = std::fs::read_to_string(&scene.gitconfig).unwrap();
+    let _ = write!(config, "[url \"{url}\"]\n\tpushInsteadOf = {ORIGIN}\n");
+    std::fs::write(&scene.gitconfig, config).unwrap();
+    let fake = Arc::new(FakeForge::default());
+    scene.forge = Some(fake.clone());
+    (scene, fake, remote)
+}
+
+/// The branches under `refs/heads/bosun/` of the bare remote, with their commits.
+fn pushed(scene: &Scene, remote: &Path) -> Vec<String> {
+    git_in(
+        scene,
+        remote,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads/bosun/",
+        ],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// The daemon's region of a pull request body is there.
+fn has_region(body: &str) -> bool {
+    body.contains(&bosun_core::publish::marker("pr:facts:start"))
+        && body.contains(&bosun_core::publish::marker("pr:facts:end"))
+}
+
+/// `landing = { mode = "pr" }`: the session commits `a.txt` and submits a summary. The item
+/// ends Done; the bare remote has `refs/heads/bosun/demo-1` at the item's verified head; the
+/// forge holds one draft pull request of that branch into `main`, titled as the card, whose
+/// body has the summary, the daemon's region (the verified head in it) and `Closes #1`; the
+/// landing row has its number and `open`. The user's target did not move, and neither the
+/// user's repository nor the clone has a ref under `refs/bosun/landing/`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pr_mode_ends_done_with_one_open_draft_pull_request() {
+    let (scene, fake, remote) = pr_scene("").await;
+    assert_eq!(scene.git(&["remote", "get-url", "origin"]), ORIGIN);
+    scene.write_board(&[card(1, "Proposed", "test -f a.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            "commit a.txt a".to_owned(),
+            r#"mcp bosun submit_summary {"body": "Added a.txt for the proposal."}"#.to_owned(),
+        ],
+    );
+    let start = scene.git(&["rev-parse", "HEAD"]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let row = scene
+        .store
+        .reader()
+        .landing(&item(1))
+        .await
+        .unwrap()
+        .expect("the landing row");
+    let head = row.head_sha.clone().expect("the verified head");
+    assert_eq!(row.landed_sha.as_deref(), Some(head.as_str()), "{row:?}");
+    assert_eq!(row.pr_number, Some(1), "{row:?}");
+    assert_eq!(row.pr_state, Some(bosun_store::PrState::Open), "{row:?}");
+    assert_eq!(row.pr_url.as_deref(), Some(url_of(1).as_str()), "{row:?}");
+    assert_eq!(
+        pushed(&scene, &remote),
+        [format!("refs/heads/bosun/demo-1 {head}")]
+    );
+
+    let prs = fake.prs();
+    assert_eq!(prs.len(), 1, "{prs:#?}");
+    let pr = &prs[0];
+    assert!(pr.new.draft, "{pr:#?}");
+    assert_eq!(pr.new.head, "bosun/demo-1");
+    assert_eq!(pr.new.base, "main");
+    assert_eq!(pr.new.title, "Proposed");
+    assert!(
+        pr.new.reviewers.is_empty() && pr.new.labels.is_empty(),
+        "{pr:#?}"
+    );
+    assert!(
+        pr.body.starts_with("Added a.txt for the proposal."),
+        "{}",
+        pr.body
+    );
+    assert!(has_region(&pr.body), "{}", pr.body);
+    assert!(pr.body.contains(&head), "{}", pr.body);
+    assert!(pr.body.trim_end().ends_with("Closes #1"), "{}", pr.body);
+
+    assert_eq!(scene.git(&["rev-parse", "refs/heads/main"]), start);
+    assert_eq!(scene.git(&["rev-parse", "HEAD"]), start);
+    assert_eq!(
+        scene.git(&["for-each-ref", "--format=%(refname)", "refs/bosun/landing/"]),
+        ""
+    );
+    assert_eq!(
+        git_in(
+            &scene,
+            &clone_of(&scene),
+            &["for-each-ref", "--format=%(refname)", "refs/bosun/landing/"]
+        ),
+        ""
+    );
+}
+
+/// The fake forge opens the pull request and then holds the landing task before the row is
+/// stored; a person edits its body meanwhile (text above and below the daemon's region), and
+/// the test stops the loop and starts it again: recovery redoes the landing. The item ends
+/// Done; the forge holds one pull request and was asked to create one once; the remote has one
+/// `bosun/` branch; the body keeps the person's text and the region
+/// (`mutant_loop_pr_create_without_lookup` opens a second one; `mutant_loop_pr_body_overwritten`
+/// writes the body afresh).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_landing_redone_after_the_pull_request_opened_opens_no_second_one() {
+    let (scene, fake, remote) = pr_scene("").await;
+    fake.pause_after_create.store(true, Ordering::SeqCst);
+    scene.write_board(&[card(1, "Redone", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    wait_for("the pull request to be opened", LIMIT, async || {
+        fake.paused.load(Ordering::SeqCst) || terminal(scene.state(1).await)
+    })
+    .await;
+    assert!(fake.paused.load(Ordering::SeqCst));
+    assert_eq!(scene.state(1).await, Some(State::Landing));
+    fake.edit(1, |body| {
+        format!("A person wrote this above.\n\n{body}\n\nAnd this below.\n")
+    });
+    task.abort();
+    watcher.abort();
+    let _ = task.await;
+
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+    // The first loop's landing task, held in the fake, may go now.
+    fake.release();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let prs = fake.prs();
+    assert_eq!(prs.len(), 1, "{prs:#?}");
+    assert_eq!(fake.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(pushed(&scene, &remote).len(), 1);
+    let body = &prs[0].body;
+    assert!(body.starts_with("A person wrote this above.\n\n"), "{body}");
+    assert!(body.ends_with("\n\nAnd this below.\n"), "{body}");
+    assert!(has_region(body), "{body}");
+    assert!(body.contains("Closes #1"), "{body}");
+    let row = scene.store.reader().landing(&item(1)).await.unwrap();
+    let row = row.expect("the landing row");
+    assert_eq!(
+        (row.pr_number, row.pr_state),
+        (Some(1), Some(bosun_store::PrState::Open)),
+        "{row:?}"
+    );
+}
+
+/// A lease a card may need in these scenes.
+const RIG: &str = "[resource.rig]\nkind = \"device\"\ncapacity = 1\nscope = \"machine\"\n";
+
+/// With the forge refusing (`branch protection`) the item ends Needs you (`landing_refused`)
+/// in one attempt, none failed, the error in its `landing` note. With the forge unanswered
+/// until the test lets it answer, a card that needs `rig` stays in Landing holding no lease
+/// while the forge is asked again, and ends Done with one pull request
+/// (`mutant_loop_pr_refusal_is_retried` waits the refusal out: the item never needs the user).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_pull_request_needs_the_user_and_an_unreachable_forge_keeps_landing() {
+    let (scene, fake, _remote) = pr_scene("").await;
+    *fake.refuse.lock().unwrap() = Some("branch protection".to_owned());
+    scene.write_board(&[card(1, "Refused", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    // Bounded: a refusal waited out never ends.
+    let mut state = None;
+    let deadline = Instant::now() + LIMIT;
+    while Instant::now() < deadline {
+        state = scene.state(1).await;
+        if terminal(state) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    task.abort();
+    watcher.abort();
+    assert_eq!(state, Some(State::NeedsYou(Reason::LandingRefused)));
+    let row = scene.item(1).await.unwrap();
+    assert_eq!((row.attempts, row.failed), (1, 0), "{row:?}");
+    let note = scene
+        .store
+        .reader()
+        .item_note(&item(1), "landing")
+        .await
+        .unwrap()
+        .expect("the landing note");
+    assert!(note.contains("branch protection"), "{note}");
+    assert!(fake.prs().is_empty());
+
+    let (mut scene, fake, remote) = pr_scene(RIG).await;
+    let leases = Arc::new(
+        crate::leases::Leases::new(
+            &scene.config(),
+            &crate::leases::journal_path(&scene.path("state").join("bosun.token")),
+        )
+        .unwrap(),
+    );
+    scene.leases = Some(leases.clone());
+    fake.down.store(true, Ordering::SeqCst);
+    scene.write_board(&[Card {
+        body: "Item one.\n\n```bosun\nverdict = 'test -f a.txt'\nneeds = [\"rig\"]\n```\n"
+            .to_owned(),
+        ..card(1, "Unreachable", "true", "")
+    }]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    wait_for("the forge to be asked twice", LIMIT, async || {
+        fake.unanswered.load(Ordering::SeqCst) >= 2 || terminal(scene.state(1).await)
+    })
+    .await;
+    assert_eq!(scene.state(1).await, Some(State::Landing));
+    let holder = crate::leases::Holder::Item(item(1));
+    assert_eq!(
+        leases.holds(&holder),
+        Vec::<String>::new(),
+        "held while waiting"
+    );
+    fake.down.store(false, Ordering::SeqCst);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    assert_eq!(fake.prs().len(), 1);
+    assert_eq!(pushed(&scene, &remote).len(), 1);
+}

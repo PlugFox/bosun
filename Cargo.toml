@@ -383,6 +383,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_hold_leases_while_parked)",
   "cfg(mutant_loop_hold_leases_while_deferred)",
   "cfg(mutant_loop_lease_refusal_fails_verdict)",
+  # #8: the `pr` landing mode looks its pull request up by head, keeps what people wrote in
+  # its body, and takes a refusal for Needs you.
+  "cfg(mutant_loop_pr_body_overwritten)",
+  "cfg(mutant_loop_pr_create_without_lookup)",
+  "cfg(mutant_loop_pr_refusal_is_retried)",
   # #179: the lease journal is per daemon; load adopts no other daemon's entries; a holder that
   # asks again is re-stamped; a corrupt journal is moved aside.
   "cfg(mutant_leases_one_journal_per_directory)",

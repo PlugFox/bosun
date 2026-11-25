@@ -379,6 +379,8 @@ struct Scene {
     sessions: Option<Arc<dyn ShimSessions>>,
     /// The free space the disk floor reads.
     free_space: Arc<FakeSpace>,
+    /// The forge of the `pr` landing mode; `None`: a fake of its own nobody looks at.
+    forge: Option<Arc<dyn forge::Forge>>,
 }
 
 impl Scene {
@@ -582,6 +584,7 @@ impl Scene {
             leases: None,
             sessions: None,
             free_space: Arc::new(FakeSpace::default()),
+            forge: None,
             dir,
         }
     }
@@ -822,6 +825,10 @@ impl Scene {
                 )
             }),
             free_space: self.free_space.clone(),
+            forge: self
+                .forge
+                .clone()
+                .unwrap_or_else(|| Arc::new(landing::FakeForge::default())),
         };
         (options, deps)
     }

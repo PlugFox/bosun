@@ -177,6 +177,12 @@ pub(crate) fn landing_ref(item: &ItemId) -> String {
     format!("refs/bosun/landing/{}", slug(item))
 }
 
+/// The branch a `pr` landing pushes an item's verified head to and proposes (#8):
+/// `bosun/<slug>`, the slug of [`aside_ref`] and [`landing_ref`].
+pub(crate) fn pr_branch(item: &ItemId) -> String {
+    format!("bosun/{}", slug(item))
+}
+
 /// `item` as a ref name component: every character but ASCII letters and digits is `-`.
 fn slug(item: &ItemId) -> String {
     item.0

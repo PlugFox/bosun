@@ -607,6 +607,7 @@ fn start_loops(
             control: state.control.clone(),
             leases: leases.clone(),
             free_space: Arc::new(executor::Disk),
+            forge: Arc::new(executor::GhForge),
         };
         crate::log::log!("bosund: repository {name}: the loop runs");
         loops.push(tokio::spawn(

@@ -1121,3 +1121,44 @@ fn the_repository_hash_covers_landing_and_the_worktree() {
         assert_ne!(hash(&edit), before, "{edit}");
     }
 }
+
+#[test]
+fn a_stage_1_repository_keeps_its_hash() {
+    let hash = |text: &str| parse(text, &Local).unwrap().repo_hash("bosun").unwrap();
+    let bare = hash(&with_repo(""));
+    // Both literals were computed with the encoding before #149 (commit `fd4be74`); `abs`
+    // makes the paths, and so the hashes, platform-specific.
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            bare,
+            "91cb6c9e80fc5851def90d18c246486871b762bc2f72605426c7eadc93425733"
+        );
+        assert_eq!(
+            hash(&with_repo(
+                "landing = { mode = 'local' }
+model = 'opus'
+verdict = { timeout = '5m' }
+"
+            )),
+            "c77dbbb84a1535669de33ac3b620ed866a8548cfdbe1767cb36364b41adeb8bd"
+        );
+    }
+    for same in [
+        "landing = { mode = 'local' }
+",
+        // Ignored without a worktree (E19).
+        "landing = { target = 'main' }
+",
+        "landing = { pr = { draft = true, reviewers = [], labels = [] } }
+",
+    ] {
+        assert_eq!(hash(&with_repo(same)), bare, "{same}");
+    }
+    let worktree = with_repo(&format!(
+        "worktree = {{ root = '{}' }}
+",
+        abs("wt/bosun")
+    ));
+    assert_ne!(hash(&worktree), bare);
+}

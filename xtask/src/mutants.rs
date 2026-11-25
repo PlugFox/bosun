@@ -738,6 +738,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_config_hash_always_extended",
+        issue: 182,
+        breaks: "the keys added by #149 are hashed at their defaults, so a stage-1 repository's hash changes",
+        package: "bosun-config",
+        check: Check::Test("tests::a_stage_1_repository_keeps_its_hash"),
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
         name: "mutant_config_gitignore_unprotected",
         issue: 55,
         breaks: "`.gitignore` is protected only when the policy lists it",

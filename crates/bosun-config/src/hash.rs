@@ -124,13 +124,14 @@ impl Config {
     pub fn repo_hash(&self, name: &str) -> Option<String> {
         let repo = self.repos.get(name)?;
         let identity = self.identities.get(&repo.identity)?;
-        let mut canon = Canon::new("bosun-config/repo/2");
+        let mut canon = Canon::new("bosun-config/repo/1");
         canon.str(name);
         self::repo(&mut canon, repo);
         canon.str(&repo.identity);
         self::identity(&mut canon, identity);
         budget(&mut canon, &self.budget);
         daemon(&mut canon, &self.daemon);
+        extensions(&mut canon, repo);
         Some(canon.finish())
     }
 }
@@ -167,15 +168,44 @@ fn repo(canon: &mut Canon, repo: &Repo) {
             .strs(server.args.iter().map(String::as_str))
             .map(&server.env);
     }
-    worktree(canon, repo.worktree.as_ref());
 }
 
+/// The landing mode, at the place and in the form of the version-1 encoding: `local` encodes
+/// as before; `merge` and `pr` are new values, so they cannot match a version-1 hash.
 fn landing(canon: &mut Canon, landing: &Landing) {
     canon.str(match landing.mode {
         LandingMode::Local => "local",
         LandingMode::Merge => "merge",
         LandingMode::Pr => "pr",
     });
+}
+
+/// The keys added after the version-1 encoding (#149), appended after `[daemon]`, one tagged
+/// section per group and only when the group is not at its defaults: a repository without
+/// `worktree` whose landing keys are at their defaults keeps its version-1 hash, so installing
+/// a new daemon sends no item in flight to Needs you (E19). Each tag holds a `/`, which no
+/// configured name can contain, so a section cannot be read as another value.
+fn extensions(canon: &mut Canon, repo: &Repo) {
+    let defaults = Landing::default();
+    let landing = &repo.landing;
+    // Mutant (`mutant_config_hash_always_extended`): the new values are encoded even at their
+    // defaults, so every stage-1 repository's hash changes.
+    let always = cfg!(mutant_config_hash_always_extended);
+    if always
+        || landing.target != defaults.target
+        || landing.merge != defaults.merge
+        || landing.pr != defaults.pr
+    {
+        canon.str("landing/2");
+        landing_extras(canon, landing);
+    }
+    if always || repo.worktree.is_some() {
+        canon.str("worktree/2");
+        worktree(canon, repo.worktree.as_ref());
+    }
+}
+
+fn landing_extras(canon: &mut Canon, landing: &Landing) {
     canon.opt_str(landing.target.as_deref());
     canon.str(match landing.merge.method {
         MergeMethod::Ff => "ff",

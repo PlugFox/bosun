@@ -1525,7 +1525,13 @@ mod tests {
                 clock: Arc::new(SystemClock::new()),
                 alive: Arc::new(|_| true),
                 control: crate::control::Control::with_token("bosun-test-workspace", None),
-                leases: Arc::new(crate::leases::Leases::new(&config, &d.join("state")).unwrap()),
+                leases: Arc::new(
+                    crate::leases::Leases::new(
+                        &config,
+                        &crate::leases::journal_path(&d.join("state").join("bosun.token")),
+                    )
+                    .unwrap(),
+                ),
                 free_space: Arc::new(Disk),
             };
             Self {

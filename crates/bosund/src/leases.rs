@@ -15,13 +15,20 @@
 //!   landing's fast-forward deferred. It takes them again, all or nothing, before its next
 //!   session, verdict or landing re-verdict; each grant is a new `lease_wait` row per resource,
 //!   and each release closes the holder's open rows.
-//! - The live leases are journalled after every change to [`JOURNAL`] in the daemon's own
-//!   directory, by writing a temporary file and renaming it over the journal (E15). Each entry
-//!   names the daemon that recorded it (pid and start time) and, while one of the item's
-//!   sessions runs under the session shim, that shim ([`Leases::set_shim`]).
-//! - A lease whose holder is gone is released when the manager is built and on every tick of a
-//!   loop ([`Leases::release_stale`]): an item's lease is stale only when neither the daemon
-//!   that recorded it nor its shim still runs (E16); a command's while its process runs.
+//! - The live leases are journalled after every change, by writing a temporary file, syncing
+//!   it and renaming it over the journal (E15). The journal is per daemon (E25), named after
+//!   its operator token ([`journal_path`]): two daemons of one user share nothing, and the
+//!   `machine` scope means one daemon's every identity and repository. Each entry names the
+//!   daemon that recorded it (pid and start time) and, while one of the item's sessions runs
+//!   under the session shim, that shim ([`Leases::set_shim`]).
+//! - When the manager is built, an entry is kept only if its shim or its command's process
+//!   still runs (E25): the entries of another daemon that still runs are never adopted. A
+//!   journal that does not parse is moved to `<journal>.corrupt`, never overwritten.
+//! - At run time a lease whose holder is gone is released on every tick of a loop
+//!   ([`Leases::release_stale`]): an item's lease is stale only when neither this daemon
+//!   recorded it nor its shim still runs (E16); a command's when its process is gone. A holder
+//!   that asks again for the set it holds (an item re-attached after a restart) is re-stamped
+//!   with this daemon and its store, so its lease outlives its session's shim.
 //! - The wait of a granted request is written to the requesting repository's store, one
 //!   `lease_wait` row per resource: filed, granted, and released with the holder (E15: the
 //!   per-identity databases keep only the wait history).
@@ -49,8 +56,18 @@ use crate::api::{call, failed};
 use crate::executor::now_ms;
 use crate::state::State;
 
-/// The journal's file name in the daemon's directory.
-pub(crate) const JOURNAL: &str = "leases.json";
+/// The lease journal of the daemon whose operator token is `operator_file` (E25): the token's
+/// name with its extension replaced by `leases.json`, in the token's directory. The token is
+/// per endpoint, its directory is not (every daemon of a user may share it), so two daemons
+/// never share a journal: `bosun.token` -> `bosun.leases.json`, `bosun.sock.operator` ->
+/// `bosun.sock.leases.json`.
+pub(crate) fn journal_path(operator_file: &Path) -> PathBuf {
+    if cfg!(mutant_leases_one_journal_per_directory) {
+        // Mutant (`mutant_leases_one_journal_per_directory`): one journal per directory.
+        return operator_file.with_file_name("leases.json");
+    }
+    operator_file.with_extension("leases.json")
+}
 
 /// Who holds a lease: an item, or a `bosun with` command (E16).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,13 +220,14 @@ fn own_key() -> ProcessKey {
 }
 
 impl Leases {
-    /// The manager of the resources of `config`, journalled in `dir`: the journal found there
-    /// is loaded, and an entry is kept only while its holder lives ([`Leases::release_stale`]).
+    /// The manager of the resources of `config`, journalled to `journal` ([`journal_path`]):
+    /// the journal found there is loaded, and an entry is kept only if its shim or its
+    /// command's process still runs (E25).
     ///
     /// # Errors
     ///
     /// The resources do not make a lease table (a duplicate instance, a capacity of 0).
-    pub(crate) fn new(config: &Config, dir: &Path) -> Result<Self, String> {
+    pub(crate) fn new(config: &Config, journal: &Path) -> Result<Self, String> {
         let mut instances = Vec::new();
         let mut scopes = std::collections::BTreeMap::new();
         for (name, resource) in &config.resources {
@@ -237,7 +255,7 @@ impl Leases {
                 waiting: Vec::new(),
             }),
             scopes,
-            journal: dir.join(JOURNAL),
+            journal: journal.to_owned(),
             daemon: own_key(),
         };
         this.load();
@@ -270,21 +288,41 @@ impl Leases {
 
     /// Loads the journal: each entry whose holder lives is held again; the rest are released.
     fn load(&self) {
-        let text = match std::fs::read_to_string(&self.journal) {
-            Ok(text) => text,
+        let bytes = match std::fs::read(&self.journal) {
+            Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
                 crate::log::log!("bosund: the lease journal {}: {e}", self.journal.display());
                 return;
             }
         };
-        let journal: Journal = match serde_json::from_str(&text) {
+        let journal: Journal = match serde_json::from_slice(&bytes) {
             Ok(journal) => journal,
             Err(e) => {
-                crate::log::log!(
-                    "bosund: the lease journal {} cannot be read, its leases are dropped: {e}",
-                    self.journal.display()
-                );
+                // E25: a journal that does not parse is moved aside, never overwritten.
+                let aside = corrupt_path(&self.journal);
+                // Mutant (`mutant_leases_overwrite_corrupt_journal`): it is not moved aside.
+                let moved = if cfg!(mutant_leases_overwrite_corrupt_journal) {
+                    Ok(())
+                } else {
+                    // A rename refused (the file open elsewhere) falls back to a copy.
+                    std::fs::rename(&self.journal, &aside)
+                        .or_else(|_| std::fs::write(&aside, &bytes))
+                };
+                match moved {
+                    Ok(()) => crate::log::log!(
+                        "bosund: the lease journal {} cannot be read, it is moved to {} and its \
+                         leases are dropped: {e}",
+                        self.journal.display(),
+                        aside.display()
+                    ),
+                    Err(keep) => crate::log::log!(
+                        "bosund: the lease journal {} cannot be read ({e}) nor kept as {}: \
+                         {keep}; its leases are dropped",
+                        self.journal.display(),
+                        aside.display()
+                    ),
+                }
                 Journal::default()
             }
         };
@@ -304,7 +342,7 @@ impl Leases {
                 writer: None,
             };
             // Mutant (`mutant_loop_keep_stale_leases`): every entry loaded is kept.
-            if !cfg!(mutant_loop_keep_stale_leases) && !self.lives(&entry) {
+            if !cfg!(mutant_loop_keep_stale_leases) && !self.lives(&entry, true) {
                 crate::log::log!(
                     "bosund: the lease of {holder} on {} is released: its holder is gone",
                     stored.resources.join(", ")
@@ -333,14 +371,22 @@ impl Leases {
         self.save(&inner);
     }
 
-    /// Whether `entry`'s holder still lives (E16).
-    fn lives(&self, entry: &Entry) -> bool {
+    /// Whether `entry`'s holder still lives (E16, E25). A command lives while its process runs.
+    /// An item's lives while its shim runs, or, at run time (not `loading`), while this daemon
+    /// recorded it. Another daemon that recorded it does not count: at load a recording daemon
+    /// that still runs can only be another daemon (after a restart the old one is gone), and
+    /// its entries are its own.
+    fn lives(&self, entry: &Entry, loading: bool) -> bool {
         match &entry.holder {
             Holder::Command(key) => bosun_proc::is_running(*key),
             Holder::Item(_) => {
-                entry.daemon == self.daemon
-                    || bosun_proc::is_running(entry.daemon)
-                    || entry.shim.is_some_and(bosun_proc::is_running)
+                // Mutant (`mutant_leases_adopt_running_daemon`): a running recorder keeps it.
+                let recorder = if cfg!(mutant_leases_adopt_running_daemon) {
+                    entry.daemon == self.daemon || bosun_proc::is_running(entry.daemon)
+                } else {
+                    !loading && entry.daemon == self.daemon
+                };
+                recorder || entry.shim.is_some_and(bosun_proc::is_running)
             }
         }
     }
@@ -389,8 +435,23 @@ impl Leases {
         let (grant, granted) = oneshot::channel();
         let filed_ms = now_ms();
         let mut inner = self.lock();
-        if let Some(entry) = inner.granted.iter().find(|e| e.holder == holder) {
+        if let Some(entry) = inner.granted.iter_mut().find(|e| e.holder == holder) {
             if entry.resources == resources {
+                // A holder that asks again (a re-attached item after a restart) is now this
+                // daemon's: its lease outlives its session's shim, and its release is written
+                // to its store.
+                // Mutant (`mutant_leases_reask_keeps_old_daemon`): it is not re-stamped.
+                if !cfg!(mutant_leases_reask_keeps_old_daemon) {
+                    let changed = entry.daemon != self.daemon;
+                    entry.daemon = self.daemon;
+                    if let Some(writer) = &request.writer {
+                        entry.writer = Some(writer.clone());
+                    }
+                    // Only the daemon is journalled; the store is not.
+                    if changed {
+                        self.save(&inner);
+                    }
+                }
                 return Ok(None);
             }
             return Err(format!(
@@ -572,7 +633,7 @@ impl Leases {
         let mut dead: Vec<Holder> = inner
             .granted
             .iter()
-            .filter(|e| !self.lives(e))
+            .filter(|e| !self.lives(e, false))
             .map(|e| e.holder.clone())
             .collect();
         dead.extend(
@@ -646,8 +707,16 @@ fn write_journal(path: &Path, journal: &Journal) -> std::io::Result<()> {
     }
     let text = serde_json::to_string_pretty(journal).map_err(std::io::Error::other)?;
     let temp = path.with_extension("json.saving");
-    std::fs::write(&temp, text)?;
-    // On Windows a rename over a file being read is refused for a moment.
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(text.as_bytes())?;
+        // On disk before the rename, so a power cut leaves the old journal or the new one,
+        // never an empty or torn one. No test covers it: a power cut cannot be simulated here.
+        file.sync_all()?;
+    }
+    // On Windows a rename over a file being read is refused for a moment. The retries run
+    // under the manager's lock, for at most half a second, as they always did.
     let mut tries = 0;
     loop {
         match std::fs::rename(&temp, path) {
@@ -659,6 +728,13 @@ fn write_journal(path: &Path, journal: &Journal) -> std::io::Result<()> {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Where a journal that does not parse is moved: `<journal>.corrupt`.
+fn corrupt_path(journal: &Path) -> PathBuf {
+    let mut name = journal.as_os_str().to_owned();
+    name.push(".corrupt");
+    PathBuf::from(name)
 }
 
 /// The holder of the running process `pid`; refused when it is not running.
@@ -879,6 +955,203 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
+    /// The journal of a daemon whose operator token is `<dir>/bosun.token`.
+    fn journal_at(dir: &Path) -> PathBuf {
+        journal_path(&dir.join("bosun.token"))
+    }
+
+    /// This process's key, as the journal stores it.
+    fn me() -> StoredKey {
+        let pid = std::process::id();
+        let start = bosun_proc::start_time(pid).unwrap().unwrap().raw();
+        StoredKey { pid, start }
+    }
+
+    /// The journal's entries as stored.
+    fn stored(path: &Path) -> Vec<Stored> {
+        let journal: Journal =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        journal.leases
+    }
+
+    /// `holder`'s request is granted within 5 s.
+    async fn granted_at_once(leases: &Leases, holder: &Holder, names: &[&str]) {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            leases.acquire(request(holder, names)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{holder} was not granted {names:?} at once"))
+        .unwrap();
+    }
+
+    /// Two daemons of one user on two endpoints: their operator tokens share a directory, their
+    /// lease journals do not (E25), so each is granted the same machine resource and journals
+    /// only its own lease. `mutant_leases_one_journal_per_directory` names one journal for both.
+    #[tokio::test]
+    async fn two_daemons_on_two_endpoints_keep_two_journals() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path(), "[resource.a]\nkind = 'device'\n");
+        let tokens = dir.path().join("operator");
+        let (one, two) = (
+            journal_path(&tokens.join("one.token")),
+            journal_path(&tokens.join("two.token")),
+        );
+        assert_ne!(one, two);
+        assert_eq!(one.parent(), Some(tokens.as_path()));
+        assert_eq!(two.parent(), Some(tokens.as_path()));
+        assert_eq!(
+            journal_path(Path::new("x/bosun.sock.operator")),
+            Path::new("x/bosun.sock.leases.json")
+        );
+
+        let first = Leases::new(&config, &one).unwrap();
+        let holder_one = Holder::Item(ItemId::new("demo#1"));
+        granted_at_once(&first, &holder_one, &["a"]).await;
+
+        let second = Leases::new(&config, &two).unwrap();
+        let holder_two = Holder::Item(ItemId::new("demo#2"));
+        granted_at_once(&second, &holder_two, &["a"]).await;
+
+        assert_eq!(journalled(&one), [entry("item demo#1", &["a"])]);
+        assert_eq!(journalled(&two), [entry("item demo#2", &["a"])]);
+        assert_eq!(first.holds(&holder_one), ["a"]);
+    }
+
+    /// A journal entry recorded by another daemon that still runs (a child of the test stands
+    /// in for it) and with no shim is not adopted (E25): the new manager does not hold it, and
+    /// another holder is granted the resource at once. `mutant_leases_adopt_running_daemon`
+    /// keeps the entry while its recorder runs, so the request waits.
+    #[tokio::test]
+    async fn an_entry_of_another_running_daemon_is_not_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path(), "[resource.a]\nkind = 'device'\n");
+        let state = dir.path().join("state");
+        // A process that runs until its stdin closes: `git hash-object --stdin`.
+        let mut child = std::process::Command::new("git")
+            .args(["hash-object", "--stdin"])
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let other = ProcessKey {
+            pid: child.id(),
+            start: bosun_proc::start_time(child.id()).unwrap().unwrap(),
+        };
+        assert!(bosun_proc::is_running(other));
+        let journal = Journal {
+            leases: vec![Stored {
+                holder: StoredHolder::Item("demo#1".to_owned()),
+                resources: vec!["a".to_owned()],
+                daemon: other.into(),
+                shim: None,
+                granted_ms: 1,
+            }],
+        };
+        write_journal(&journal_at(&state), &journal).unwrap();
+
+        let leases = Leases::new(&config, &journal_at(&state)).unwrap();
+        let theirs = Holder::Item(ItemId::new("demo#1"));
+        let mine = Holder::Item(ItemId::new("demo#2"));
+        let held = leases.holds(&theirs);
+        let asked = tokio::time::timeout(
+            Duration::from_secs(2),
+            leases.acquire(request(&mine, &["a"])),
+        )
+        .await;
+
+        // The child exits when its stdin closes; it is reaped (and killed if it lingers).
+        drop(child.stdin.take());
+        if tokio::time::timeout(Duration::from_secs(10), async {
+            while child.try_wait().unwrap().is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_err()
+        {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+
+        assert_eq!(held, NONE);
+        asked
+            .expect("the resource is held for another daemon")
+            .unwrap();
+        assert_eq!(leases.holds(&mine), ["a"]);
+        assert_eq!(journalled(leases.journal()), [entry("item demo#2", &["a"])]);
+    }
+
+    /// After a restart an item's entry is kept because its shim runs; its re-attached session
+    /// asks again for the same set and is granted at once. Its entry is re-stamped with this
+    /// daemon, so when the session's shim ends the lease stays. `mutant_leases_reask_keeps_old_
+    /// daemon` leaves the dead daemon's key: the next tick releases the lease.
+    #[tokio::test]
+    async fn a_holder_that_asks_again_after_a_restart_keeps_its_lease_when_its_shim_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path(), "[resource.a]\nkind = 'device'\n");
+        let state = dir.path().join("state");
+        let me = me();
+        // This pid with another start time: the daemon that recorded it, gone.
+        let gone = StoredKey {
+            pid: me.pid,
+            start: me.start.wrapping_add(1),
+        };
+        let journal = Journal {
+            leases: vec![Stored {
+                holder: StoredHolder::Item("demo#1".to_owned()),
+                resources: vec!["a".to_owned()],
+                daemon: gone,
+                shim: Some(me),
+                granted_ms: 1,
+            }],
+        };
+        write_journal(&journal_at(&state), &journal).unwrap();
+
+        let leases = Leases::new(&config, &journal_at(&state)).unwrap();
+        let item = Holder::Item(ItemId::new("demo#1"));
+        assert_eq!(leases.holds(&item), ["a"]);
+        granted_at_once(&leases, &item, &["a"]).await;
+        leases.set_shim(&item, None);
+
+        assert_eq!(leases.release_stale(), []);
+        assert_eq!(leases.holds(&item), ["a"]);
+        let entries = stored(leases.journal());
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].daemon, me);
+        assert_eq!(entries[0].shim, None);
+    }
+
+    /// A journal that does not parse is moved to `<journal>.corrupt` with its bytes as they
+    /// were (E25); the journal becomes a valid empty one and the manager holds nothing.
+    /// `mutant_leases_overwrite_corrupt_journal` writes the empty journal over it.
+    #[tokio::test]
+    async fn a_journal_that_does_not_parse_is_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path(), "[resource.a]\nkind = 'device'\n");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let path = journal_at(&state);
+        let bad = br#"{"leases": [ {"holder": "#;
+        std::fs::write(&path, bad).unwrap();
+        // An older `.corrupt` is replaced.
+        let aside = corrupt_path(&path);
+        assert_eq!(
+            aside.file_name().unwrap(),
+            std::ffi::OsStr::new("bosun.leases.json.corrupt")
+        );
+        std::fs::write(&aside, b"older").unwrap();
+
+        let leases = Leases::new(&config, &path).unwrap();
+        assert_eq!(std::fs::read(&aside).unwrap(), bad);
+        assert_eq!(stored(&path), []);
+        let holder = Holder::Item(ItemId::new("demo#1"));
+        assert_eq!(leases.holds(&holder), NONE);
+        granted_at_once(&leases, &holder, &["a"]).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_request_waits_for_its_whole_set_and_is_served_in_arrival_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -887,7 +1160,7 @@ mod tests {
             "[resource.a]\nkind = 'device'\n\n[resource.b]\nkind = 'device'\n",
         );
         let state = dir.path().join("state");
-        let leases = Arc::new(Leases::new(&config, &state).unwrap());
+        let leases = Arc::new(Leases::new(&config, &journal_at(&state)).unwrap());
         let journal = leases.journal().to_owned();
         let (first, second, third, fourth) = (
             Holder::Item(ItemId::new("demo#1")),
@@ -992,9 +1265,9 @@ mod tests {
                 },
             ],
         };
-        write_journal(&state.join(JOURNAL), &journal).unwrap();
+        write_journal(&journal_at(&state), &journal).unwrap();
 
-        let leases = Leases::new(&config, &state).unwrap();
+        let leases = Leases::new(&config, &journal_at(&state)).unwrap();
         assert_eq!(leases.holds(&Holder::Item(ItemId::new("demo#1"))), NONE);
         assert_eq!(leases.holds(&Holder::Item(ItemId::new("demo#2"))), ["b"]);
         assert_eq!(leases.holds(&Holder::Command(gone.into())), NONE);

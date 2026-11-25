@@ -2377,6 +2377,40 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_leases_one_journal_per_directory",
+        issue: 179,
+        breaks: "every daemon of a user reads and overwrites one lease journal",
+        package: "bosund",
+        check: Check::Test("leases::tests::two_daemons_on_two_endpoints_keep_two_journals"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_leases_adopt_running_daemon",
+        issue: 179,
+        breaks: "a new daemon adopts the journalled leases of another daemon that still runs",
+        package: "bosund",
+        check: Check::Test("leases::tests::an_entry_of_another_running_daemon_is_not_adopted"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_leases_reask_keeps_old_daemon",
+        issue: 179,
+        breaks: "a re-attached item's lease is released when its session's shim ends",
+        package: "bosund",
+        check: Check::Test(
+            "leases::tests::a_holder_that_asks_again_after_a_restart_keeps_its_lease_when_its_shim_ends",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_leases_overwrite_corrupt_journal",
+        issue: 179,
+        breaks: "a lease journal that does not parse is overwritten instead of moved aside",
+        package: "bosund",
+        check: Check::Test("leases::tests::a_journal_that_does_not_parse_is_moved_aside"),
+        platform: None,
+    },
 ];
 
 /// The card of #8 that lets an item go of its leases while it is Parked or its landing is

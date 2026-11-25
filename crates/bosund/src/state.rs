@@ -172,10 +172,12 @@ pub(crate) async fn run(
         ClaimError::Io(e) => Failure::Other(format!("cannot listen: {e}")),
     })?;
 
-    // The daemon's own directory: the operator token's, where the lease journal goes (E15).
+    // The operator token's directory: the session shims' (E16). Every daemon of the user may
+    // share it, so the lease journal is named after the token file, not put in it (E25).
     let lease_dir = operator_file
         .parent()
         .map_or_else(|| PathBuf::from("."), std::path::Path::to_owned);
+    let lease_journal = crate::leases::journal_path(&operator_file);
     // A fresh operator token at every start, outside every checkout (#67).
     let operator = match operator_token(&config, operator_file) {
         Ok(operator) => operator,
@@ -200,16 +202,17 @@ pub(crate) async fn run(
         "bosund: listening at {endpoint}; {} identities",
         identities.len()
     );
-    // The lease manager (#8, E15): one for every loop and the API, journalled next to the
-    // operator token.
-    let leases = match Leases::new(&config, &lease_dir) {
+    // The lease manager (#8, E15, E25): one for every loop and the API, journalled per daemon,
+    // in a file named after its operator token (two daemons of one user share nothing).
+    let leases = match Leases::new(&config, &lease_journal) {
         Ok(leases) => Arc::new(leases),
         Err(e) => {
             crate::log::log!("bosund: the resources cannot be leased: {e}");
             let mut empty = config.clone();
             empty.resources.clear();
             Arc::new(
-                Leases::new(&empty, &lease_dir).expect("a table without resources is always valid"),
+                Leases::new(&empty, &lease_journal)
+                    .expect("a table without resources is always valid"),
             )
         }
     };

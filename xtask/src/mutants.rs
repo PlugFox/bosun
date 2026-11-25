@@ -2200,6 +2200,56 @@ const MUTANTS: &[Mutant] = &[
         package: "bosun-core",
         check: Check::Test("item::tests::a_conflict_from_an_earlier_landing_pass_is_ignored"),
         platform: None,
+    }, // #173: what `setup` made in an item's worktree survives the claim and a reset; `setup` and
+    // `teardown` end at a kill; a verdict waits below the disk floor; a setup failure's
+    // Needs-you comment says what failed.
+    Mutant {
+        name: "mutant_loop_base_verdict_in_item_worktree",
+        issue: 173,
+        breaks: "the base verdict runs in the item's worktree and its restore wipes what `setup` made",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::the_setup_output_is_there_for_the_first_session",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_reset_without_setup",
+        issue: 173,
+        breaks: "a fresh session after a reset starts without what `setup` made",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::a_fresh_session_after_a_reset_finds_the_setup_output",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_setup_ignores_kill",
+        issue: 173,
+        breaks: "a cancel or the kill switch waits for a running `setup` or `teardown` to end",
+        package: "bosund",
+        check: Check::Test("executor::tests::worktrees::a_cancel_during_setup_ends_it_at_once"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_floor_is_setup_failure",
+        issue: 173,
+        breaks: "a verdict checkout below the disk floor sends the item to Needs you",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::a_verdict_below_the_disk_floor_waits_instead_of_needing_the_user",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_setup_comment_without_cause",
+        issue: 173,
+        breaks: "a setup failure's Needs-you comment does not say what failed",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::worktrees::a_failed_setup_says_what_failed_in_its_comment",
+        ),
+        platform: None,
     },
 ];
 

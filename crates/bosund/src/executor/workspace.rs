@@ -15,7 +15,10 @@
 //!   the clone, below no disk floor, and recorded ([`Write::Worktree`]). The configured
 //!   `setup` command runs in it ([`Workspace::setup`]) the way a verdict command runs; a
 //!   failure is the caller's Needs you, not a failed attempt, and leaves no worktree behind
-//!   ([`Workspace::open_with_setup`]).
+//!   ([`Workspace::open_with_setup`]). The disk floor is read through [`super::Deps`]'s
+//!   `free_space` ([`Disk`] in the daemon).
+//! - `setup` and `teardown` end at once when the task's kill is raised (a cancel, the kill
+//!   switch): a killed command is [`Unopened::Killed`], not a failed setup.
 //! - Closing it ([`Workspace::close`]) keeps the item's work in the clone when asked (under
 //!   [`super::git::aside_ref`]), runs `teardown`, measures it, and removes it with its branch;
 //!   one that cannot be removed is quarantined, recorded with the file that blocked, and
@@ -42,8 +45,9 @@ use bosun_git::worktree::{self, Floor, FreeSpace, Quarantine, Removal, Worktree}
 use bosun_queue::lint::verdict_shell;
 use bosun_runner::verdict::{Limits, Outcome, VerdictSpec};
 use bosun_store::{NewWorktree, WorktreeKind, WorktreeState, Write};
+use tokio::sync::watch;
 
-use super::{Shared, blocking, identity, now_ms};
+use super::{Shared, Signal, blocking, identity, now_ms};
 
 /// The name of the daemon's clone under the worktree root.
 pub(crate) const CLONE: &str = ".clone";
@@ -141,6 +145,13 @@ pub(crate) struct SetupFailed {
     pub(crate) tail: String,
 }
 
+impl SetupFailed {
+    /// The command and how it ended, without its output.
+    pub(crate) fn cause(&self) -> String {
+        format!("`{}` {}", self.command, self.reason)
+    }
+}
+
 impl fmt::Display for SetupFailed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "`{}` {}", self.command, self.reason)?;
@@ -151,13 +162,16 @@ impl fmt::Display for SetupFailed {
     }
 }
 
-/// Why [`Workspace::open_with_setup`] made no worktree.
+/// Why [`Workspace::open_with_setup`] made no worktree, or why a `setup` did not end well.
 #[derive(Debug)]
 pub(crate) enum Unopened {
     /// It was not made.
     Error(Error),
     /// It was made, its setup failed, and it was closed again.
     Setup(SetupFailed),
+    /// The task's kill was raised while the command ran: it was ended, and the worktree (if
+    /// one was made) closed again. Not a failed setup.
+    Killed,
 }
 
 /// What [`Workspace::close`] did. None of these stops the caller.
@@ -186,16 +200,24 @@ impl Checkout {
         &self.worktree.path
     }
 
-    /// Removes it with its branch, or quarantines it (reported by [`Workspace::close`]).
-    pub(crate) async fn close(self, shared: &Shared, identity: &Identity) -> Closed {
+    /// Removes it with its branch, or quarantines it (reported by [`Workspace::close`]);
+    /// `kill`: the run's, which ends its `teardown`.
+    pub(crate) async fn close(
+        self,
+        shared: &Shared,
+        identity: &Identity,
+        kill: Option<&mut watch::Receiver<Signal>>,
+    ) -> Closed {
         self.workspace
-            .close(shared, identity, &self.worktree, None)
+            .close(shared, identity, &self.worktree, None, kill)
             .await
     }
 }
 
-/// The volume's free space, as the system reports it.
-struct Disk;
+/// The volume's free space, as the system reports it: the daemon's [`super::Deps`]
+/// `free_space`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Disk;
 
 impl FreeSpace for Disk {
     fn free(&self, path: &Path) -> std::io::Result<u64> {
@@ -337,8 +359,9 @@ impl Workspace {
             .to_owned())
     }
 
-    /// The blocking part of [`Workspace::open`].
-    fn create(&self, name: &str, at: &str) -> Result<Worktree, Error> {
+    /// The blocking part of [`Workspace::open`]; `space` reads the free space of the disk
+    /// floor.
+    fn create(&self, name: &str, at: &str, space: &dyn FreeSpace) -> Result<Worktree, Error> {
         // Mutant (`mutant_loop_worktree_in_user_repo`): the worktree hangs off the user's
         // checkout.
         let source = if cfg!(mutant_loop_worktree_in_user_repo) {
@@ -347,16 +370,9 @@ impl Workspace {
             self.clone_git()
         };
         let made = match self.config.disk_floor {
-            Some(bytes) => worktree::create(
-                &source,
-                &self.config.root,
-                name,
-                at,
-                Floor {
-                    bytes,
-                    space: &Disk,
-                },
-            ),
+            Some(bytes) => {
+                worktree::create(&source, &self.config.root, name, at, Floor { bytes, space })
+            }
             None => worktree::create(
                 &source,
                 &self.config.root,
@@ -390,7 +406,8 @@ impl Workspace {
     ) -> Result<Worktree, Error> {
         let this = self.clone();
         let (name, at) = (name.to_owned(), at.to_owned());
-        let made = blocking(move || this.create(&name, &at)).await?;
+        let space = shared.deps.free_space.clone();
+        let made = blocking(move || this.create(&name, &at, space.as_ref())).await?;
         let row = Write::Worktree(NewWorktree {
             item: item.clone(),
             path: made.path.to_string_lossy().into_owned(),
@@ -415,34 +432,40 @@ impl Workspace {
         Ok(made)
     }
 
-    /// Runs the configured `setup` command, if any, in `worktree`.
+    /// Runs the configured `setup` command, if any, in `worktree`, until it ends or `kill` is
+    /// raised.
     ///
     /// # Errors
     ///
-    /// It exited non-zero, timed out or could not run.
+    /// [`Unopened::Setup`]: it exited non-zero, timed out or could not run.
+    /// [`Unopened::Killed`]: `kill` was raised and it was ended.
     pub(crate) async fn setup(
         &self,
         shared: &Shared,
         identity: &Identity,
         worktree: &Worktree,
-    ) -> Result<(), SetupFailed> {
+        kill: &mut watch::Receiver<Signal>,
+    ) -> Result<(), Unopened> {
         let Some(command) = &self.config.setup else {
             return Ok(());
         };
-        let ran = self.run(shared, identity, &worktree.path, command).await;
+        let ran = self
+            .run(shared, identity, &worktree.path, command, Some(kill))
+            .await;
         // Mutant (`mutant_loop_setup_failure_ignored`): a failing setup counts as done.
-        if cfg!(mutant_loop_setup_failure_ignored) {
+        if cfg!(mutant_loop_setup_failure_ignored) && matches!(ran, Err(Unopened::Setup(_))) {
             return Ok(());
         }
         ran
     }
 
-    /// [`Workspace::open`], then [`Workspace::setup`]; a worktree whose setup failed is closed
-    /// again.
+    /// [`Workspace::open`], then [`Workspace::setup`]; a worktree whose setup failed or was
+    /// killed is closed again.
     ///
     /// # Errors
     ///
-    /// It was not made, or its setup failed (and it is gone, or quarantined and reported).
+    /// It was not made, or its setup failed or was killed (and it is gone, or quarantined and
+    /// reported).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open_with_setup(
         &self,
@@ -453,14 +476,15 @@ impl Workspace {
         at: &str,
         kind: WorktreeKind,
         user_base: Option<String>,
+        kill: &mut watch::Receiver<Signal>,
     ) -> Result<Worktree, Unopened> {
         let made = self
             .open(shared, item, name, at, kind, user_base)
             .await
             .map_err(Unopened::Error)?;
-        if let Err(failed) = self.setup(shared, identity, &made).await {
-            self.close(shared, identity, &made, None).await;
-            return Err(Unopened::Setup(failed));
+        if let Err(unopened) = self.setup(shared, identity, &made, kill).await {
+            self.close(shared, identity, &made, None, Some(kill)).await;
+            return Err(unopened);
         }
         Ok(made)
     }
@@ -472,7 +496,8 @@ impl Workspace {
     ///
     /// # Errors
     ///
-    /// It was not made, or its setup failed (and it is gone, or quarantined and reported).
+    /// It was not made, or its setup failed or was killed by `kill` (and it is gone, or
+    /// quarantined and reported).
     pub(crate) async fn checkout(
         &self,
         shared: &Shared,
@@ -480,6 +505,7 @@ impl Workspace {
         item: &ItemId,
         name: &str,
         at: &str,
+        kill: &mut watch::Receiver<Signal>,
     ) -> Result<Checkout, Unopened> {
         let worktree = if cfg!(mutant_loop_verdict_checkout_without_setup) {
             // Mutant (`mutant_loop_verdict_checkout_without_setup`): the verdict checkout is
@@ -496,6 +522,7 @@ impl Workspace {
                 at,
                 WorktreeKind::Verdict,
                 None,
+                kill,
             )
             .await?
         };
@@ -506,14 +533,15 @@ impl Workspace {
     }
 
     /// Closes `worktree`: keeps `aside`'s work in the clone first when given, runs `teardown`
-    /// (a failure is reported and the removal goes on), measures it, and removes it with its
-    /// branch, or quarantines it. The row is ended either way.
+    /// (a failure, or its end by `kill`, is reported and the removal goes on), measures it, and
+    /// removes it with its branch, or quarantines it. The row is ended either way.
     pub(crate) async fn close(
         &self,
         shared: &Shared,
         identity: &Identity,
         worktree: &Worktree,
         aside: Option<&ItemId>,
+        kill: Option<&mut watch::Receiver<Signal>>,
     ) -> Closed {
         if let Some(item) = aside {
             let (dir, owned) = (worktree.path.clone(), item.clone());
@@ -535,14 +563,7 @@ impl Workspace {
                 return Closed::Kept(error);
             }
         }
-        if let Some(command) = &self.config.teardown
-            && let Err(failed) = self.run(shared, identity, &worktree.path, command).await
-        {
-            shared.trouble(format!(
-                "the teardown of the worktree {} failed, and it is removed anyway: {failed}",
-                worktree.path.display()
-            ));
-        }
+        self.teardown(shared, identity, worktree, kill).await;
         let (this, wt) = (self.clone(), worktree.clone());
         let (bytes, removed) = blocking(move || {
             let bytes = size(&wt.path);
@@ -612,19 +633,58 @@ impl Workspace {
         closed
     }
 
+    /// Runs `teardown`, if any, in `worktree`; a failure, or its end by `kill`, is reported.
+    async fn teardown(
+        &self,
+        shared: &Shared,
+        identity: &Identity,
+        worktree: &Worktree,
+        kill: Option<&mut watch::Receiver<Signal>>,
+    ) {
+        if let Some(command) = &self.config.teardown {
+            match self
+                .run(shared, identity, &worktree.path, command, kill)
+                .await
+            {
+                Ok(()) => {}
+                Err(Unopened::Killed) => shared.trouble(format!(
+                    "the teardown of the worktree {} was killed, and it is removed anyway",
+                    worktree.path.display()
+                )),
+                Err(Unopened::Setup(failed)) => shared.trouble(format!(
+                    "the teardown of the worktree {} failed, and it is removed anyway: {failed}",
+                    worktree.path.display()
+                )),
+                Err(Unopened::Error(e)) => shared.trouble(format!(
+                    "the teardown of the worktree {} failed, and it is removed anyway: {e}",
+                    worktree.path.display()
+                )),
+            }
+        }
+    }
+
     /// Runs `command` in `dir` as a verdict command runs: the verdict shell, the agent
-    /// environment, the verdict timeout, a bounded output.
+    /// environment, the verdict timeout, a bounded output. When `kill` is raised meanwhile the
+    /// command's tree is ended ([`Unopened::Killed`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Unopened::Setup`]: it exited non-zero, timed out or could not run.
+    /// [`Unopened::Killed`]: it was ended by `kill`.
     async fn run(
         &self,
         shared: &Shared,
         identity: &Identity,
         dir: &Path,
         command: &str,
-    ) -> Result<(), SetupFailed> {
-        let failed = |reason: String, tail: String| SetupFailed {
-            command: command.to_owned(),
-            reason,
-            tail,
+        kill: Option<&mut watch::Receiver<Signal>>,
+    ) -> Result<(), Unopened> {
+        let failed = |reason: String, tail: String| {
+            Unopened::Setup(SetupFailed {
+                command: command.to_owned(),
+                reason,
+                tail,
+            })
         };
         let env = identity::bundle(&self.identity, identity, dir)
             .and_then(|b| {
@@ -655,9 +715,19 @@ impl Workspace {
             timeout: self.timeout,
             limits: Limits::default(),
         };
-        let ran = bosun_runner::verdict::run(shared.deps.spawner.as_ref(), &spec)
-            .await
-            .map_err(|e| failed(format!("cannot run: {e}"), String::new()))?;
+        let running = bosun_runner::verdict::run(shared.deps.spawner.as_ref(), &spec);
+        // Mutant (`mutant_loop_setup_ignores_kill`): the command runs to its end or its
+        // timeout whatever the kill says.
+        let kill = kill.filter(|_| !cfg!(mutant_loop_setup_ignores_kill));
+        let ran = match kill {
+            // The command's tree goes with the dropped future.
+            Some(kill) => tokio::select! {
+                ran = running => ran,
+                () = super::verdict::killed(kill) => return Err(Unopened::Killed),
+            },
+            None => running.await,
+        }
+        .map_err(|e| failed(format!("cannot run: {e}"), String::new()))?;
         match ran.outcome {
             Outcome::Pass => Ok(()),
             Outcome::Fail => Err(failed(
@@ -869,6 +939,7 @@ mod tests {
                 alive: Arc::new(|_| true),
                 control: crate::control::Control::with_token("bosun-test-workspace", None),
                 leases: Arc::new(crate::leases::Leases::new(&config, &d.join("state")).unwrap()),
+                free_space: Arc::new(Disk),
             };
             Self {
                 repo,
@@ -945,6 +1016,11 @@ mod tests {
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// A kill receiver that is never raised.
+    fn kill() -> tokio::sync::watch::Receiver<super::super::Signal> {
+        tokio::sync::watch::channel(super::super::Signal::Run).1
     }
 
     fn canonical(path: impl AsRef<Path>) -> PathBuf {
@@ -1031,7 +1107,7 @@ mod tests {
         assert!(stray.join("mine.txt").is_file());
 
         assert_eq!(
-            ws.close(&w.shared, w.identity(), &made, None).await,
+            ws.close(&w.shared, w.identity(), &made, None, None).await,
             Closed::Removed
         );
     }
@@ -1052,6 +1128,7 @@ mod tests {
                 &at,
                 WorktreeKind::Item,
                 None,
+                &mut kill(),
             )
             .await;
         let Err(Unopened::Setup(failed)) = result else {
@@ -1078,12 +1155,15 @@ mod tests {
                 &at,
                 WorktreeKind::Item,
                 None,
+                &mut kill(),
             )
             .await
             .unwrap();
         assert!(made.path.join("made-by-setup").is_file());
         assert_eq!(
-            passing.close(&w.shared, w.identity(), &made, None).await,
+            passing
+                .close(&w.shared, w.identity(), &made, None, None)
+                .await,
             Closed::Removed
         );
     }
@@ -1104,7 +1184,7 @@ mod tests {
         std::fs::write(made.path.join("loose.txt"), "not committed\n").unwrap();
 
         let closed = ws
-            .close(&w.shared, w.identity(), &made, Some(&w.item))
+            .close(&w.shared, w.identity(), &made, Some(&w.item), None)
             .await;
         assert_eq!(closed, Closed::Removed);
 
@@ -1144,7 +1224,7 @@ mod tests {
             .open(&held)
             .unwrap();
 
-        let closed = ws.close(&w.shared, w.identity(), &made, None).await;
+        let closed = ws.close(&w.shared, w.identity(), &made, None, None).await;
         let Closed::Quarantined(report) = closed else {
             panic!("a worktree with a file held open was closed as {closed:?}");
         };
@@ -1167,7 +1247,7 @@ mod tests {
 
         drop(handle);
         assert_eq!(
-            ws.close(&w.shared, w.identity(), &again, None).await,
+            ws.close(&w.shared, w.identity(), &again, None, None).await,
             Closed::Removed
         );
     }

@@ -7,8 +7,8 @@
 //!   board's own `Retry-After` for a rate limit).
 //! - **Rendered at send time.** A row holds what to write, never a body. The sticky report is
 //!   rendered from the database when it is sent ([`report_facts`]), a Needs-you comment from
-//!   its reason (a question from the agent's recorded call, lint findings and a budget's figure
-//!   from the item's notes, #111), and a column write sends the column of the item's state
+//!   its reason (a question from the agent's recorded call, lint findings, a budget's figure
+//!   and what failed to make or set up a worktree from the item's notes, #111, #8), and a column write sends the column of the item's state
 //!   now. So a replay can never put an older report or column on the board than the database
 //!   holds, and a row pending across a daemon restart renders as it would have before.
 //! - **Figures.** The report's cost is the item's runs, exact (#72: every session bosun spawned
@@ -65,6 +65,43 @@ pub(crate) const NOTE_BUDGET: &str = "budget";
 /// [`super::git::UNCOMMITTED_CAP`] paths, what its last attempt left uncommitted in its
 /// worktree (#8): not part of what was verified.
 pub(crate) const NOTE_UNCOMMITTED: &str = "uncommitted";
+/// The kind of an item's note that says why its worktree, or a verdict checkout of it, could
+/// not be made or set up (#8): the `setup` command and how it ended, or the error. Its
+/// Needs-you comment (`setup`) quotes it.
+pub(crate) const NOTE_SETUP: &str = "setup";
+
+/// The longest note of kind [`NOTE_SETUP`], in characters.
+const SETUP_NOTE_CAP: usize = 500;
+
+/// Stores why `item`'s worktree could not be made or set up, as its [`NOTE_SETUP`] note:
+/// `cause` (the command and how it ended, or the error), and the output's `tail` only when the
+/// repository is not public, as the verdict tails of the sticky report (#111). Sanitised and
+/// bounded; a note that cannot be written is reported.
+pub(crate) async fn note_setup(shared: &super::Shared, item: &ItemId, cause: &str, tail: &str) {
+    // Mutant (`mutant_loop_setup_comment_without_cause`): no note; the comment cannot say what
+    // failed.
+    if cfg!(mutant_loop_setup_comment_without_cause) {
+        return;
+    }
+    let mut text = cause.trim().to_owned();
+    if !tail.trim().is_empty() {
+        let visibility = shared.deps.visibility.clone();
+        let public = super::blocking(move || visibility.public()).await;
+        if !public {
+            let _ = write!(text, "; its output ends: {}", tail.trim());
+        }
+    }
+    let body = publish::sanitise_inline(&publish::scrub(&text), SETUP_NOTE_CAP);
+    let note = Write::ItemNote {
+        item: item.clone(),
+        kind: NOTE_SETUP.to_owned(),
+        body,
+        at_ms: super::now_ms(),
+    };
+    if let Err(e) = shared.deps.writer.write(vec![note]).await {
+        shared.trouble(format!("the setup failure of {item} cannot be stored: {e}"));
+    }
+}
 
 /// Stores the lint findings of `item` for its Needs-you comment (#111).
 pub(crate) async fn note_findings(
@@ -499,6 +536,13 @@ impl Drainer {
                 {
                     let _ = write!(body, ": {}", figure.text());
                 }
+                // What failed (#8): the command and how it ended, or the error.
+                if other == Reason::Setup
+                    && let Some(cause) = self.note(item, NOTE_SETUP).await?
+                    && !cause.trim().is_empty()
+                {
+                    let _ = write!(body, ": {}", publish::sanitise_inline(&cause, 500));
+                }
                 body.push_str(
                     ". The item report above has the facts. Move the card to Ready to retry \
                      with a fresh attempt counter, or to Backlog to cancel.",
@@ -532,7 +576,7 @@ fn reason_text(reason: Reason) -> &'static str {
         Reason::AttemptsExhausted => "The failed attempts reached the limit",
         Reason::Guard(_) => "A guard refused the attempt before its verdict",
         Reason::LandingRefused => "Landing was refused",
-        Reason::Setup => "The worktree's setup command failed",
+        Reason::Setup => "The item's worktree could not be made or set up",
         Reason::Handshake => "The session's MCP server did not start, again after one retry",
         Reason::Identity => "The identity checks before a session refused it",
     }

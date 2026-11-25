@@ -232,13 +232,89 @@ fn number<T: std::str::FromStr>(key: &str, value: &str) -> io::Result<T> {
         .map_err(|_| invalid(format!("{key} is not a number: {value}")))
 }
 
-/// Writes `text` to `path` through a temporary file in the same directory and a rename.
-fn replace(path: &Path, text: &str) -> io::Result<()> {
+/// The temporary file [`replace`] and [`replace_private`] write before their rename.
+fn temporary(path: &Path) -> PathBuf {
     let mut name = path.file_name().map_or_else(OsString::new, OsString::from);
     name.push(".tmp");
-    let temporary = path.with_file_name(name);
+    path.with_file_name(name)
+}
+
+/// Writes `text` to `path` through a temporary file in the same directory and a rename.
+fn replace(path: &Path, text: &str) -> io::Result<()> {
+    let temporary = temporary(path);
     std::fs::write(&temporary, text)?;
     std::fs::rename(&temporary, path)
+}
+
+/// As [`replace`], with the temporary file created fresh by [`create_private`]: a rename keeps
+/// the file's own security descriptor (Windows) and mode (Unix), so `path` ends up readable by
+/// its owner alone.
+fn replace_private(path: &Path, text: &str) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let temporary = temporary(path);
+    let mut file = create_private(&temporary)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&temporary, path)
+}
+
+/// Creates `path` fresh for writing, readable and writable by the current user alone: on
+/// Windows with the protected one-entry DACL of [`crate::pipe::OwnerOnly`], on Unix with mode
+/// 0600. A file already at `path` (a leftover) is removed first, since opening it would keep
+/// its permissions.
+fn create_private(path: &Path) -> io::Result<File> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    if cfg!(mutant_shim_stdin_default_permissions) {
+        // Mutant (`mutant_shim_stdin_default_permissions`): the file gets the default
+        // permissions (the directory's ACL on Windows, the umask's mode on Unix).
+        return File::create(path);
+    }
+    #[cfg(windows)]
+    {
+        crate::pipe::OwnerOnly::new()?.create_file(path)
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+    }
+}
+
+/// Removes the file at its path when dropped, unless disarmed: the prompt in [`STDIN_FILE`] on
+/// every early return of [`ShimSpawner::spawn_in`] and of [`run`].
+struct RemoveOnDrop(Option<PathBuf>);
+
+impl RemoveOnDrop {
+    fn new(path: &Path) -> Self {
+        if cfg!(mutant_shim_prompt_left_on_error) {
+            // Mutant (`mutant_shim_prompt_left_on_error`): the guard is disarmed from the start;
+            // an error leaves the prompt on disk.
+            return Self(None);
+        }
+        Self(Some(path.to_path_buf()))
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            // Best effort: there is nobody to tell.
+            std::fs::remove_file(path).ok();
+        }
+    }
 }
 
 impl Spec {
@@ -321,13 +397,15 @@ impl Spec {
         })
     }
 
-    /// Writes the spec to `path`.
+    /// Writes the spec to `path`, readable by its owner alone (it holds the child's whole
+    /// environment): through a temporary file created fresh with an owner-only DACL on Windows,
+    /// mode 0600 on Unix, and a rename.
     ///
     /// # Errors
     ///
     /// As [`Spec::encode`], or when the file cannot be written.
     pub fn write(&self, path: &Path) -> io::Result<()> {
-        std::fs::write(path, self.encode()?)
+        replace_private(path, &self.encode()?)
     }
 
     /// Reads the spec at `path`.
@@ -462,6 +540,9 @@ fn exit_of(status: ExitStatus) -> io::Result<Exit> {
 /// A child that started is killed with its container before the error returns.
 pub fn run(spec_path: &Path) -> io::Result<i32> {
     let spec = Spec::read(spec_path)?;
+    // Every return from here on removes the prompt; the normal path does so explicitly, before
+    // the exit is on record.
+    let mut prompt = spec.stdin.as_deref().map(RemoveOnDrop::new);
     let record_path = record_path(spec_path);
     std::fs::create_dir_all(&spec.output_dir)?;
     let stdout = spec.output_dir.join(STDOUT_FILE);
@@ -539,6 +620,9 @@ pub fn run(spec_path: &Path) -> io::Result<i32> {
         // Best effort, and before the exit is on record, so that whoever sees the exit finds the
         // prompt gone: the session directory may be kept for long.
         std::fs::remove_file(path).ok();
+    }
+    if let Some(prompt) = &mut prompt {
+        prompt.disarm();
     }
     let exit = match status.and_then(exit_of) {
         Ok(exit) => exit,
@@ -635,9 +719,12 @@ impl ShimSpawner {
                 format!("a session is already recorded in {}", dir.display()),
             ));
         }
+        // Every error return from here on removes the prompt.
+        let mut prompt = None;
         let stdin = match &spec.stdin {
             Some(bytes) => {
                 let path = dir.join(STDIN_FILE);
+                prompt = Some(RemoveOnDrop::new(&path));
                 write_private(&path, bytes)?;
                 Some(path)
             }
@@ -697,23 +784,21 @@ impl ShimSpawner {
         if first.shim.pid != shim.id() {
             return Err(io::Error::other("the record names another shim"));
         }
-        session(&first, &record, Offsets::default(), Some(shim))
+        let spawned = session(&first, &record, Offsets::default(), Some(shim))?;
+        // The shim owns the prompt now: it removes it once the child has exited.
+        if let Some(prompt) = &mut prompt {
+            prompt.disarm();
+        }
+        Ok(spawned)
     }
 }
 
-/// Writes `bytes` to a new or truncated file at `path`; on Unix readable by its owner alone
-/// (mode 0600), since a prompt may say what the task is about.
+/// Writes `bytes` to a file at `path` created fresh by [`create_private`], readable by its owner
+/// alone, since a prompt may say what the task is about.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
 
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
+    let mut file = create_private(path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }

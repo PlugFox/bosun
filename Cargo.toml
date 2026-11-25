@@ -145,6 +145,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_shim_child_shares_the_group)",
   "cfg(mutant_shim_stdin_closed)",
   "cfg(mutant_shim_accept_old_spec)",
+  "cfg(mutant_shim_stdin_default_permissions)",
+  "cfg(mutant_shim_prompt_left_on_error)",
   "cfg(mutant_runner_inline_daemon_comments)",
   "cfg(mutant_runner_auto_memory_on)",
   "cfg(mutant_runner_limit_is_crash)",

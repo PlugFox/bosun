@@ -368,3 +368,79 @@ async fn a_dirty_checkout_of_the_target_defers_the_landing_and_holds_the_queue()
         "{files:?}"
     );
 }
+
+/// The first session saves its prompt and commits `a.txt` with one content; the setup script
+/// commits `a.txt` with another content on the user's target once, before the first verdict.
+/// The rebase at landing conflicts, and the machine starts one more session of the attempt: it
+/// saves its prompt, resets its branch onto the target (the worktree shares the clone's refs)
+/// and commits `a.txt` with a merged content. The item ends Done in one attempt with two
+/// sessions and one conflict; the second prompt begins with the daemon's conflict section,
+/// naming `a.txt` and the target's commit, the first has none; the user's target head has the
+/// merged content and the target's own commit in its history (`mutant_loop_conflict_note_unread`
+/// never passes the note on).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_conflict_gets_one_session_with_the_conflict_as_its_prompt_and_then_lands() {
+    let mut scene = Scene::with_worktrees(None).await;
+    let then = commit_on_target(&scene, "a.txt", "Add a on the target");
+    setup_once(&mut scene, &then);
+    scene.write_board(&[card(1, "Conflicting", "test -f a.txt", "Item one.")]);
+    let p = |name: &str| sh_path(&scene.path(name));
+    scene.script(
+        1,
+        &[
+            format!("once {} stdin {}", p("m1"), p("prompt-1.txt")),
+            format!("once {} commit a.txt a", p("m2")),
+            format!(
+                "once {} replay {}",
+                p("m3"),
+                Scene::stream("normal-end.jsonl")
+            ),
+            format!("once {} exit 0", p("m4")),
+            format!("stdin {}", p("prompt-2.txt")),
+            "git reset -q --hard main".to_owned(),
+            "commit a.txt merged".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let it = scene.item(1).await.unwrap();
+    assert_eq!(it.conflicts, 1, "{it:?}");
+    assert_eq!(it.attempt.as_ref().unwrap().number, 1);
+    let runs = scene.runs(1).await;
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(runs.iter().all(|r| r.attempt == 1), "{runs:?}");
+
+    // The target's own commit: the parent of the item's commit on the target.
+    let onto = scene.git(&["rev-parse", "HEAD~1"]);
+    assert_eq!(
+        scene.git(&["log", "-1", "--format=%s", &onto]),
+        "Add a on the target"
+    );
+    assert_eq!(scene.git(&["show", "HEAD:a.txt"]), "merged");
+    assert_eq!(
+        scene.git(&["status", "--porcelain", "--untracked-files=all"]),
+        ""
+    );
+
+    let first = std::fs::read_to_string(scene.path("prompt-1.txt")).unwrap();
+    assert!(first.starts_with("# Task\n\n"), "{first}");
+    assert!(!first.contains("rebase conflict"), "{first}");
+    let second = std::fs::read_to_string(scene.path("prompt-2.txt")).unwrap();
+    assert!(
+        second.starts_with("# A rebase conflict (written by bosun)"),
+        "{second}"
+    );
+    let (section, rest) = second.split_once("# Task\n\n").expect("the card's text");
+    assert!(section.contains("- `a.txt`"), "{section}");
+    assert!(
+        section.contains(&format!("`git rebase {onto}`")),
+        "{section}"
+    );
+    assert!(section.contains("the target branch `main`"), "{section}");
+    assert!(rest.contains("Item one."), "{rest}");
+}

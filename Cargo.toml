@@ -316,6 +316,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_reattach_from_zero)",
   "cfg(mutant_loop_reattach_without_credential)",
   "cfg(mutant_core_reattach_counts)",
+  # #8: the session after a rebase conflict is told about it.
+  "cfg(mutant_runner_prompt_without_conflict)",
+  "cfg(mutant_runner_conflict_files_raw)",
+  "cfg(mutant_loop_conflict_note_unread)",
 ] }
 
 [workspace.lints.clippy]

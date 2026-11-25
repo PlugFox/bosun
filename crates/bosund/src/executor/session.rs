@@ -323,6 +323,64 @@ async fn prompt_of(shared: &Shared, claimed: &Claimed, run: &Run) -> prompt::Pro
             })
             .collect(),
         daemon_comment_ids: daemon,
+        conflict: conflict_of(shared, run).await,
+    })
+}
+
+/// The `conflict` note of the item as it was stored at landing (#8).
+#[derive(serde::Deserialize)]
+struct ConflictNote {
+    target: String,
+    target_head: String,
+    files: Vec<String>,
+    at_ms: i64,
+}
+
+/// The rebase conflict the session `run` was started for (#8, "Landing"): the item's
+/// `conflict` note when it is newer than the start of the item's latest earlier session, so
+/// for the one session the machine starts in answer to it and for no later one. Only landing
+/// in worktree mode (E19) writes the note. A note that does not read is ignored and reported.
+async fn conflict_of(shared: &Shared, run: &Run) -> Option<prompt::Conflict> {
+    if cfg!(mutant_loop_conflict_note_unread) {
+        // Mutant (`mutant_loop_conflict_note_unread`): the note is never passed on.
+        return None;
+    }
+    let reader = &shared.deps.reader;
+    let body = match reader
+        .item_note(&run.item, super::landing::NOTE_CONFLICT)
+        .await
+    {
+        Ok(body) => body?,
+        Err(e) => {
+            shared.trouble(format!("the conflict note of {}: {e}", run.item));
+            return None;
+        }
+    };
+    let note: ConflictNote = match serde_json::from_str(&body) {
+        Ok(note) => note,
+        Err(e) => {
+            shared.trouble(format!(
+                "the conflict note of {} is ignored, it does not read: {e}",
+                run.item
+            ));
+            return None;
+        }
+    };
+    let latest = match reader.runs(&run.item).await {
+        Ok(runs) => runs
+            .iter()
+            .filter(|r| (r.attempt, r.spawn) != (run.attempt, run.spawn))
+            .map(|r| r.started_ms)
+            .max()?,
+        Err(e) => {
+            shared.trouble(format!("the sessions of {}: {e}", run.item));
+            return None;
+        }
+    };
+    (note.at_ms > latest).then_some(prompt::Conflict {
+        target: note.target,
+        onto: note.target_head,
+        files: note.files,
     })
 }
 

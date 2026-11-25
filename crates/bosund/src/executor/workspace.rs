@@ -1553,6 +1553,7 @@ mod tests {
                 sessions: Arc::new(super::super::ThroughShim),
                 power: Arc::new(bosun_proc::FakePower::default()),
                 logins: Arc::new(GhLogins),
+                forge: Arc::new(super::super::GhForge),
                 credentials: crate::agent::Credentials::default(),
                 clock: Arc::new(SystemClock::new()),
                 alive: Arc::new(|_| true),

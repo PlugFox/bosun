@@ -94,7 +94,7 @@
 //!   method `ff` and no push onto the branch the item was claimed from (E6, E20); without a
 //!   worktree the commits stay on the current branch, as in stage 1. `merge` and `pr` need
 //!   `repo.<name>.worktree` (E19: every new path is gated on it, and without it stage 1 is
-//!   unchanged); `pr` is read but refused, it is not available yet.
+//!   unchanged). `pr` pushes the item's branch and opens a pull request into `target`.
 //!   - `target`: the branch the item is claimed from and lands on, whatever the mode; default:
 //!     the branch the item was claimed from. It is a bare name (no `refs/heads/`) that git
 //!     accepts as a branch (`git check-ref-format --branch`, checked here without running git).
@@ -151,8 +151,8 @@
 //!   `.lock`; no `..`, `@{`, `//`, control character, space, `~`, `^`, `:`, `?`, `*`, `[` or
 //!   `\`; it does not begin or end with `/`, end with `.` or begin with `-`, and is not `@` or
 //!   `HEAD`. A `refs/...` name is refused with a hint to write the bare name.
-//! - A `landing.mode` of `merge` or `pr` has a `worktree`; `pr` and `merge.push = true` are
-//!   refused as not available yet.
+//! - A `landing.mode` of `merge` or `pr` has a `worktree`; `merge.push = true` is refused as
+//!   not available yet.
 //! - The directory of each database is on a local disk, as a [`DiskProbe`] sees it.
 //! - `budget.reserve_eqv` is less than `budget.daily_eqv` when both are set.
 //!
@@ -419,7 +419,8 @@ pub enum LandingMode {
     /// `merge`: the run branch is merged into the target with [`Merge::method`]. Needs
     /// `repo.<name>.worktree`.
     Merge,
-    /// `pr`: a pull request is opened. Needs `repo.<name>.worktree`; refused in this version.
+    /// `pr`: the item's branch is pushed and a pull request into the target is opened. Needs
+    /// `repo.<name>.worktree`.
     Pr,
 }
 

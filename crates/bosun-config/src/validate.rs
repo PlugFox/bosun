@@ -155,7 +155,7 @@ fn worktree_root_outside(
 }
 
 /// Refuses a landing this version cannot carry out: `merge` and `pr` without a worktree (E19:
-/// every new path is gated on `repo.<name>.worktree`), `pr` at all, and `merge.push = true`.
+/// every new path is gated on `repo.<name>.worktree`), and `merge.push = true`.
 fn landing(repo: &DraftRepo, problems: &mut Vec<Problem>) {
     let name = &repo.name;
     let draft = &repo.landing;
@@ -174,15 +174,6 @@ fn landing(repo: &DraftRepo, problems: &mut Vec<Problem>) {
             message: format!(
                 "`repo.{name}.landing.mode` is \"{word}\", which needs `repo.{name}.worktree`: \
                  the item lands from its own worktree, e.g. `worktree = {{ root = '...' }}`"
-            ),
-        });
-    }
-    if mode == LandingMode::Pr {
-        problems.push(Problem {
-            location: draft.mode_at,
-            message: format!(
-                "`repo.{name}.landing.mode` is \"pr\", which is not available yet; use \"local\" \
-                 or \"merge\""
             ),
         });
     }

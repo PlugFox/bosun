@@ -1,8 +1,8 @@
 //! Landing in worktree mode (#8 "Landing"; E2, E6, E14, E19, E20): the one keyed
 //! [`EffectKind::Land`](bosun_core::EffectKind::Land) of an item whose repository has
 //! `repo.<name>.worktree`, in the modes `local` (`merge` with `ff`, no push, onto the branch the
-//! item was claimed from) and `merge`. Without `repo.<name>.worktree` landing is the loop's own
-//! (nothing to do) and nothing here runs.
+//! item was claimed from), `merge` and `pr`. Without `repo.<name>.worktree` landing is the
+//! loop's own (nothing to do) and nothing here runs.
 //!
 //! The task ([`land`]) reports one event, and every step is redone from the `landing` row and
 //! from git itself after a crash:
@@ -41,18 +41,42 @@
 //!    `Landing` and the repository claims nothing. A target the user committed on meanwhile
 //!    starts again from step 2, at most [`RESTARTS`] times.
 //!
+//! In `pr` mode steps 1 to 4 are the same; nothing is merged and the user's target does not
+//! move ([`Task::pull_request`]):
+//!
+//! 5. The verified head `H` is offered and fetched into the user's repository as in step 6 (the
+//!    offer is dropped again on every path), and pushed from there by name,
+//!    `git push origin <H>:refs/heads/bosun/<slug>` ([`git::pr_branch`]), under the repository
+//!    identity's tool environment (#2) with the repository's hooks disabled: a replay is a
+//!    no-op.
+//! 6. The forge ([`super::forge`]) is asked for the open pull request of that branch. None: one
+//!    is opened into the target with the card's title, the configured draft, reviewers and
+//!    labels, and [`pr::body`] of the attempt's summary, the daemon's facts and `Closes #N`. One:
+//!    only the daemon's region of its body is rewritten ([`pr::update`]), never a second one
+//!    opened. The row stores its number, URL and `open`, and the landing is [`Event::Landed`].
+//!
+//! A push or forge answer that refuses is [`Event::LandingRefused`] with the error as the
+//! item's `landing` note; no answer keeps the item in `Landing`, holding no lease (E24), and
+//! steps 5 and 6 are tried again every [`super::Options::poll`] until they work or the task is
+//! killed.
+//!
+//! [`pr::body`]: bosun_core::publish::pr::body
+//! [`pr::update`]: bosun_core::publish::pr::update
 //! [`Done::Followed`]: super::Done::Followed
 
 use std::sync::Arc;
 
 use bosun_config::{Config, LandingMode, MergeMethod, Repo};
-use bosun_core::{Event, ItemId};
+use bosun_core::publish::pr;
+use bosun_core::{Event, ItemId, RunResult};
 use bosun_git::land::{self, FastForward, Rebase};
 use bosun_git::merge::{self, Method};
 use bosun_git::{Git, Ident};
-use bosun_store::{LandingRow, Write};
+use bosun_identity::{Bundle, Env, inherited};
+use bosun_store::{LandingRow, PrState, Write};
 use tokio::sync::watch;
 
+use super::forge::{self, At, ForgeError, NewPullRequest, PullRequest};
 use super::workspace::Workspace;
 use super::{
     Claimed, ItemWorktree, Shared, Signal, blocking, git, identity, lookup, now_ms, verdict,
@@ -60,6 +84,13 @@ use super::{
 
 /// The kind of the item note a conflicting rebase leaves (`Write::ItemNote`).
 pub(crate) const NOTE_CONFLICT: &str = "conflict";
+
+/// The kind of the item note a refused pull request landing leaves (`Write::ItemNote`).
+pub(crate) const NOTE_LANDING: &str = "landing";
+
+/// The remote of the user's repository a `pr` landing pushes to: the one the identity checks
+/// read (#2).
+const REMOTE: &str = "origin";
 
 /// How many times a target the user committed on during the fast-forward starts the landing
 /// again before it is refused.
@@ -111,8 +142,10 @@ pub(crate) struct Spec {
     /// The attempt's verdict run whose pass emitted the `Land` this task answers; it keys the
     /// task's [`Event::Conflict`] to this landing pass.
     pub(crate) run: u32,
-    /// The card's title: the subject of a squash or merge commit.
+    /// The card's title: the subject of a squash or merge commit, the title of a pull request.
     pub(crate) title: String,
+    /// The card's number: the issue a pull request closes.
+    pub(crate) card: u64,
 }
 
 /// What the task reports.
@@ -177,23 +210,25 @@ impl Task<'_> {
         let Some((repo, identity)) = lookup(config, &self.shared.options.repo) else {
             return Some(self.refused("the repository is no longer configured".to_owned()));
         };
-        // The author and committer of the commits the landing makes (E26).
-        let ident = match identity::bundle(&repo.identity, identity, &repo.path) {
-            Ok(bundle) => git::ident(&bundle.author),
+        // The author and committer of the commits the landing makes (E26), and the identity
+        // its push and pull request are made as (#2).
+        let bundle = match identity::bundle(&repo.identity, identity, &repo.path) {
+            Ok(bundle) => bundle,
             Err(e) => {
                 return Some(self.refused(format!("the repository identity's author: {e}")));
             }
         };
+        let ident = git::ident(&bundle.author);
         let Some(wt) = self.claimed.worktree.clone() else {
             return Some(self.refused("the item has no worktree".to_owned()));
         };
-        let method = match method(repo) {
-            Ok(method) => method,
+        let mode = match mode(repo) {
+            Ok(mode) => mode,
             Err(e) => return Some(self.refused(e)),
         };
         let mut restarts = 0;
         loop {
-            match self.pass(repo, &wt, method, &ident).await {
+            match self.pass(repo, &wt, mode, &ident, &bundle).await {
                 Pass::Done(event) => return event,
                 Pass::Again if restarts < RESTARTS => restarts += 1,
                 Pass::Again => {
@@ -213,8 +248,9 @@ impl Task<'_> {
         &mut self,
         repo: &Repo,
         wt: &ItemWorktree,
-        method: Method,
+        how: Mode,
         ident: &Ident,
+        bundle: &Bundle,
     ) -> Pass {
         let item = &self.spec.item;
         let attempt = self.spec.attempt;
@@ -299,6 +335,13 @@ impl Task<'_> {
             }
         };
 
+        let method = match how {
+            Mode::Merge(method) => method,
+            Mode::Pr => {
+                return Pass::Done(self.pull_request(repo, wt, bundle, &target, &h).await);
+            }
+        };
+
         // 5. The commit to land.
         let (message, trailers) = match self.message(method).await {
             Ok(made) => made,
@@ -323,36 +366,12 @@ impl Task<'_> {
             Ok(landed) => landed,
             Err(e) => return self.refuse(format!("the commit to land: {e}")),
         };
-        if let Err(e) = self.row(&target, Some(landed.clone()), None).await {
+        if let Err(e) = self.row(&target, Some(landed.clone()), None, None).await {
             return self.refuse(e);
         }
 
         // 6. Delivered to the user's repository (E14), moved by E2.
-        let (clone, user, offered, commit) = (
-            wt.workspace.clone_path(),
-            repo.path.clone(),
-            git::landing_ref(item),
-            landed.clone(),
-        );
-        let fetched = blocking(move || -> Result<(), bosun_git::Error> {
-            Git::new(&clone).run(&["update-ref", &offered, &commit], None)?;
-            let from = clone.to_string_lossy();
-            // Objects only (E14): no `FETCH_HEAD`, no maintenance or gc in the user's `.git`;
-            // the configuration as well as the flags, for a git that ignores the flag.
-            let mut args = vec!["-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch"];
-            args.extend(["--quiet", "--no-tags"]);
-            args.extend(["--no-write-fetch-head", "--no-auto-maintenance"]);
-            if cfg!(mutant_loop_landing_fetch_writes_fetch_head) {
-                // Mutant (`mutant_loop_landing_fetch_writes_fetch_head`): the fetch writes the
-                // user's `FETCH_HEAD` and may start maintenance there.
-                args = vec!["fetch", "--quiet", "--no-tags"];
-            }
-            args.extend(["--", &from, &offered]);
-            Git::new(&user).run(&args, None)?;
-            Ok(())
-        })
-        .await;
-        if let Err(e) = fetched {
+        if let Err(e) = self.offer(wt, &repo.path, &landed).await {
             self.drop_offer(wt).await;
             return self.refuse(format!(
                 "the landed commit cannot be fetched into the user's repository: {e}"
@@ -421,6 +440,232 @@ impl Task<'_> {
         }
     }
 
+    /// The clone offers `commit` under [`git::landing_ref`] and the user's repository at
+    /// `user` fetches it, objects only (E14). The offer stays: the caller drops it.
+    async fn offer(
+        &self,
+        wt: &ItemWorktree,
+        user: &std::path::Path,
+        commit: &str,
+    ) -> Result<(), bosun_git::Error> {
+        let (clone, user, offered, commit) = (
+            wt.workspace.clone_path(),
+            user.to_owned(),
+            git::landing_ref(&self.spec.item),
+            commit.to_owned(),
+        );
+        blocking(move || -> Result<(), bosun_git::Error> {
+            Git::new(&clone).run(&["update-ref", &offered, &commit], None)?;
+            let from = clone.to_string_lossy();
+            // Objects only (E14): no `FETCH_HEAD`, no maintenance or gc in the user's `.git`;
+            // the configuration as well as the flags, for a git that ignores the flag.
+            let mut args = vec!["-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch"];
+            args.extend(["--quiet", "--no-tags"]);
+            args.extend(["--no-write-fetch-head", "--no-auto-maintenance"]);
+            if cfg!(mutant_loop_landing_fetch_writes_fetch_head) {
+                // Mutant (`mutant_loop_landing_fetch_writes_fetch_head`): the fetch writes the
+                // user's `FETCH_HEAD` and may start maintenance there.
+                args = vec!["fetch", "--quiet", "--no-tags"];
+            }
+            args.extend(["--", &from, &offered]);
+            Git::new(&user).run(&args, None)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Steps 5 and 6 of `pr` (see the module documentation): the verified head `h`, based on
+    /// `target`, pushed as the item's branch and proposed in one open pull request.
+    async fn pull_request(
+        &mut self,
+        repo: &Repo,
+        wt: &ItemWorktree,
+        bundle: &Bundle,
+        target: &str,
+        h: &str,
+    ) -> Option<Event> {
+        let item = self.spec.item.clone();
+        let branch = git::pr_branch(&item);
+        let facts = match self.facts(h).await {
+            Ok(facts) => facts,
+            Err(e) => return Some(self.refused(e)),
+        };
+        let summary = match self
+            .shared
+            .deps
+            .reader
+            .summary(&item, self.spec.attempt)
+            .await
+        {
+            Ok(call) => call.map_or_else(String::new, |call| call.body),
+            Err(e) => return Some(self.refused(format!("the summary of {item}: {e}"))),
+        };
+        // The daemon's own git and `gh` for the repository's identity, never an agent's (#2).
+        let at = At {
+            dir: repo.path.clone(),
+            env: Env::tool(bundle, &inherited()),
+        };
+        let new = NewPullRequest {
+            head: branch.clone(),
+            base: target.to_owned(),
+            title: self.spec.title.clone(),
+            body: String::new(),
+            draft: repo.landing.pr.draft,
+            reviewers: repo.landing.pr.reviewers.clone(),
+            labels: repo.landing.pr.labels.clone(),
+        };
+        let mut waiting = false;
+        let opened = loop {
+            let error = match self.publish(repo, wt, &at, &new, h, &summary, &facts).await {
+                Ok(opened) => break opened,
+                Err(error) => error,
+            };
+            match error {
+                // Mutant (`mutant_loop_pr_refusal_is_retried`): a refusal is waited out as if
+                // the forge had not answered.
+                ForgeError::Refused(why) if !cfg!(mutant_loop_pr_refusal_is_retried) => {
+                    return Some(self.pr_refused(&why).await);
+                }
+                ForgeError::Refused(why) | ForgeError::Unreachable(why) => {
+                    if !waiting {
+                        waiting = true;
+                        // The forge may be away for hours: the item waits holding nothing
+                        // (E24); the push and the forge need no lease.
+                        self.shared
+                            .deps
+                            .leases
+                            .release(&crate::leases::Holder::Item(item.clone()))
+                            .await;
+                        self.shared.trouble(format!(
+                            "{item}: the pull request of `{branch}` waits: {why}; it is tried \
+                             again, and the repository claims nothing meanwhile"
+                        ));
+                    }
+                    let poll = self.shared.options.poll;
+                    tokio::select! {
+                        () = tokio::time::sleep(poll) => {}
+                        () = verdict::killed(&mut self.kill) => return None,
+                    }
+                }
+            }
+        };
+        let row = self
+            .row(target, Some(h.to_owned()), None, Some(&opened))
+            .await;
+        if let Err(e) = row {
+            return Some(self.refused(e));
+        }
+        Some(Event::Landed)
+    }
+
+    /// One try of steps 5 and 6 of `pr`: `h` fetched into the user's repository and pushed as
+    /// `new.head`, then the branch's open pull request looked up and its region rewritten, or
+    /// one opened. The offer is dropped whatever happens.
+    #[allow(clippy::too_many_arguments)]
+    async fn publish(
+        &self,
+        repo: &Repo,
+        wt: &ItemWorktree,
+        at: &At,
+        new: &NewPullRequest,
+        h: &str,
+        summary: &str,
+        facts: &[(String, String)],
+    ) -> Result<PullRequest, ForgeError> {
+        let offered = self.offer(wt, &repo.path, h).await;
+        self.drop_offer(wt).await;
+        offered.map_err(|e| {
+            ForgeError::Refused(format!(
+                "the verified commit cannot be fetched into the user's repository: {e}"
+            ))
+        })?;
+        let (env, user, spec) = (
+            at.env.clone(),
+            repo.path.clone(),
+            format!("{h}:refs/heads/{}", new.head),
+        );
+        blocking(move || push(&user, &env, &spec)).await?;
+
+        let facts: Vec<(&str, &str)> = facts
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let forge = self.shared.deps.forge.clone();
+        let (looked_at, head) = (at.clone(), new.head.clone());
+        // Mutant (`mutant_loop_pr_create_without_lookup`): the pull request is opened without
+        // looking for the one a landing before a crash opened.
+        let existing = if cfg!(mutant_loop_pr_create_without_lookup) {
+            None
+        } else {
+            blocking(move || forge.open_pull_request(&looked_at, &head)).await?
+        };
+        let forge = self.shared.deps.forge.clone();
+        let at = at.clone();
+        if let Some(existing) = existing {
+            // People edit descriptions: only the daemon's region is the daemon's.
+            // Mutant (`mutant_loop_pr_body_overwritten`): the whole body is written afresh.
+            let body = if cfg!(mutant_loop_pr_body_overwritten) {
+                pr::body(summary, &facts, self.spec.card)
+            } else {
+                pr::update(&existing.body, &facts)
+            };
+            let number = existing.number;
+            let sent = body.clone();
+            blocking(move || forge.set_body(&at, number, &sent)).await?;
+            return Ok(PullRequest { body, ..existing });
+        }
+        let new = NewPullRequest {
+            body: pr::body(summary, &facts, self.spec.card),
+            ..new.clone()
+        };
+        blocking(move || forge.create(&at, &new)).await
+    }
+
+    /// The daemon's facts of a pull request: the item, its attempts, the result line of the
+    /// verdict run that passed, and the commit proposed.
+    async fn facts(&self, h: &str) -> Result<Vec<(String, String)>, String> {
+        let item = &self.spec.item;
+        let attempt = self.spec.attempt;
+        let runs = self
+            .shared
+            .deps
+            .reader
+            .verdict_runs(item)
+            .await
+            .map_err(|e| format!("the verdict runs of {item}: {e}"))?;
+        let verdict = runs
+            .iter()
+            .rev()
+            .find(|r| r.attempt == attempt && r.result == Some(RunResult::Pass))
+            .and_then(|r| r.verdict_line.clone())
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| "passed".to_owned());
+        Ok(vec![
+            ("Item".to_owned(), item.to_string()),
+            ("Attempts".to_owned(), attempt.to_string()),
+            ("Verdict".to_owned(), verdict),
+            ("Commit".to_owned(), h.to_owned()),
+        ])
+    }
+
+    /// A push or pull request the service refused: the item's `landing` note and
+    /// [`Event::LandingRefused`], not a failed attempt.
+    async fn pr_refused(&self, why: &str) -> Event {
+        let item = &self.spec.item;
+        let at_ms = now_ms();
+        let note = Write::ItemNote {
+            item: item.clone(),
+            kind: NOTE_LANDING.to_owned(),
+            body: serde_json::json!({ "error": why, "at_ms": at_ms }).to_string(),
+            at_ms,
+        };
+        if let Err(e) = self.shared.deps.writer.write(vec![note]).await {
+            self.shared
+                .trouble(format!("the landing note of {item} cannot be stored: {e}"));
+        }
+        self.refused(format!("the pull request: {why}"))
+    }
+
     /// Step 2: the target fetched into the clone, and the claim following it.
     async fn sync(&mut self, workspace: &Workspace, target: &str) -> Result<String, String> {
         let (ws, branch) = (workspace.clone(), target.to_owned());
@@ -477,7 +722,7 @@ impl Task<'_> {
     /// The fast-forward moved (now, or before a crash): the row says when, the clone's target
     /// follows, the offer goes.
     async fn delivered(&mut self, wt: &ItemWorktree, target: &str, stamp: bool) -> Option<Event> {
-        if stamp && let Err(e) = self.row(target, None, Some(now_ms())).await {
+        if stamp && let Err(e) = self.row(target, None, Some(now_ms()), None).await {
             self.shared.trouble(format!("{}: {e}", self.spec.item));
         }
         if let Err(e) = self.sync(&wt.workspace, target).await {
@@ -578,12 +823,13 @@ impl Task<'_> {
         Ok((message, trailers))
     }
 
-    /// Updates the landing row of the attempt.
+    /// Updates the landing row of the attempt; `opened`: the pull request it opened, `open`.
     async fn row(
         &self,
         target: &str,
         landed: Option<String>,
         delivered: Option<i64>,
+        opened: Option<&PullRequest>,
     ) -> Result<(), String> {
         let row = LandingRow {
             item: self.spec.item.clone(),
@@ -593,9 +839,9 @@ impl Task<'_> {
             verified_tree: None,
             landed_sha: landed,
             delivered_ms: delivered,
-            pr_number: None,
-            pr_url: None,
-            pr_state: None,
+            pr_number: opened.map(|p| p.number),
+            pr_url: opened.map(|p| p.url.clone()),
+            pr_state: opened.map(|_| PrState::Open),
             updated_ms: now_ms(),
         };
         self.shared
@@ -650,19 +896,48 @@ fn listed(files: &[String]) -> String {
     }
 }
 
-/// How `repo` lands: `local` is `ff` (E6, E20); `merge` its method. `pr` is refused by the
-/// configuration in this version.
-fn method(repo: &Repo) -> Result<Method, String> {
+/// How an item lands after its head is verified on the target.
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    /// The commit made by this method moves the user's target.
+    Merge(Method),
+    /// The head is pushed and proposed in a pull request.
+    Pr,
+}
+
+/// How `repo` lands: `local` is `ff` (E6, E20); `merge` its method; `pr` a pull request.
+fn mode(repo: &Repo) -> Result<Mode, String> {
     match repo.landing.mode {
-        LandingMode::Local => Ok(Method::Ff),
+        LandingMode::Local => Ok(Mode::Merge(Method::Ff)),
         LandingMode::Merge => match repo.landing.merge.method {
-            MergeMethod::Ff => Ok(Method::Ff),
-            MergeMethod::Squash => Ok(Method::Squash),
-            MergeMethod::NoFf => Ok(Method::NoFf),
+            MergeMethod::Ff => Ok(Mode::Merge(Method::Ff)),
+            MergeMethod::Squash => Ok(Mode::Merge(Method::Squash)),
+            MergeMethod::NoFf => Ok(Mode::Merge(Method::NoFf)),
             other => Err(format!("the merge method {other:?} is not supported")),
         },
+        LandingMode::Pr => Ok(Mode::Pr),
         other => Err(format!("the landing mode {other:?} is not supported")),
     }
+}
+
+/// Pushes `spec` (`<commit>:refs/heads/<branch>`) from the user's repository at `user` to
+/// [`REMOTE`] under `env`, the repository identity's tool environment, with the repository's
+/// hooks disabled ([`Git::command`]). The same commit pushed again is a no-op; a rejection is
+/// [`ForgeError::Refused`], a remote that does not answer [`ForgeError::Unreachable`].
+fn push(user: &std::path::Path, env: &Env, spec: &str) -> Result<(), ForgeError> {
+    let mut command = Git::new(user).command();
+    env.apply(&mut command);
+    command.args(["push", "--quiet", "--no-verify", REMOTE, spec]);
+    let out = command
+        .output()
+        .map_err(|e| ForgeError::Refused(format!("cannot run git: {e}")))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+    Err(forge::classify(format!(
+        "git push {REMOTE} {spec}: {stderr}"
+    )))
 }
 
 /// Aborts a rebase stopped in the item's worktree at `dir` (a daemon that died during the

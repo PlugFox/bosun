@@ -16,7 +16,7 @@
 //! | `Kill` | the running task's kill signal ([`Signal::Kill`]); for a blocking question, after [`Options::question_grace`] |
 //! | `CheckPreconditions` | the guards of #59 ([`guards`]: protected paths, new ignored files, git's own configuration), then the verdict preconditions of `bosun-git` |
 //! | `RunVerdict` | the verdict task ([`verdict`]): always the snapshot's command |
-//! | `Land` | without `repo.<name>.worktree`: nothing to push; it never waits for the board. In worktree mode, `local` and `merge`: the landing task ([`landing`]): rebase onto the target's head, the verdict again on a rebased head, the commit to land, the fetch into the user's repository and its fast-forward (deferred while the checkout of the target is dirty or busy) |
+//! | `Land` | without `repo.<name>.worktree`: nothing to push; it never waits for the board. In worktree mode, `local` and `merge`: the landing task ([`landing`]): rebase onto the target's head, the verdict again on a rebased head, the commit to land, the fetch into the user's repository and its fast-forward (deferred while the checkout of the target is dirty or busy); `pr`: the same up to the verified head, then the push of the item's branch and its pull request ([`forge`]) |
 //! | `Project`, `Comment`, `Report` | the store's outbox, written with the transition; sent by the drainer ([`outbox`]) |
 //!
 //! Long effects run as tasks that report back an [`Event`]; the loop applies it like any
@@ -66,8 +66,8 @@
 //! the request ([`hold_names`]). A claim that does not confirm releases them after its
 //! worktree is closed. A confirmed item holds them through its sessions, verdicts, landing and
 //! teardown, until it leaves the loop ([`Loop::finish`]), except while it waits (E24): it lets
-//! go of them when it is Parked ([`Loop::apply`]) and when its landing's fast-forward is
-//! deferred ([`landing`]). Each session and each verdict asks again ([`hold_leases`]): granted
+//! go of them when it is Parked ([`Loop::apply`]), when its landing's fast-forward is
+//! deferred and while a `pr` landing waits for an unreachable forge ([`landing`]). Each session and each verdict asks again ([`hold_leases`]): granted
 //! at once to a holder of exactly that set, else filed all or nothing and awaited, its wait
 //! written as new `lease_wait` rows. A fast-forward after a deferral takes none. A refusal (an
 //! unknown resource, another set held: the configuration changed since the daemon started) is
@@ -129,6 +129,7 @@ pub(crate) mod board;
 mod checkout;
 mod claim;
 mod commands;
+mod forge;
 mod git;
 mod hold;
 mod identity;
@@ -164,6 +165,7 @@ use tokio::task::JoinHandle;
 
 use crate::events::{self, Events};
 
+pub(crate) use forge::GhForge;
 pub(crate) use identity::{GhLogins, Logins};
 pub(crate) use park::{Alive, Clock, SystemClock};
 pub(crate) use recover::next_boot;
@@ -327,6 +329,8 @@ pub(crate) struct Deps {
     /// The free space of the disk floor of worktree mode (#8): the system's
     /// ([`workspace::Disk`]) in the daemon.
     pub(crate) free_space: Arc<dyn bosun_git::worktree::FreeSpace + Send + Sync>,
+    /// The pull requests of the `pr` landing mode (#8): `gh` ([`GhForge`]) in the daemon.
+    pub(crate) forge: Arc<dyn forge::Forge>,
 }
 
 impl fmt::Debug for Deps {
@@ -1168,6 +1172,7 @@ impl Loop {
         let config = self.config();
         let item = cur.item.id.clone();
         let title = cur.card.title.clone();
+        let card_number = cur.card.id.0;
         // The verdict run whose pass emitted this `Land`: it keys a conflict to this pass.
         let run = cur.item.attempt.as_ref().map_or(0, |a| a.run);
         let done = self.done_tx.clone();
@@ -1178,6 +1183,7 @@ impl Loop {
                 attempt,
                 run,
                 title,
+                card: card_number,
             };
             let mut landed = landing::land(&shared, &config, &claimed, &spec, kill_rx).await;
             if let Some(head) = landed.rebased.take() {

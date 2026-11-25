@@ -2581,7 +2581,41 @@ const MUTANTS: &[Mutant] = &[
         ]),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_pr_create_without_lookup",
+        issue: PR_CARD,
+        breaks: "a pull request landing opens a pull request without looking one up by its head",
+        package: "bosund",
+        check: Check::Test(PR_REDO_SCENE),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_pr_refusal_is_retried",
+        issue: PR_CARD,
+        breaks: "a refused push or pull request is retried as if the forge had not answered",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_refused_pull_request_needs_the_user_and_an_unreachable_forge_keeps_landing",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_pr_body_overwritten",
+        issue: PR_CARD,
+        breaks: "a redone pull request landing replaces the body people edited",
+        package: "bosund",
+        check: Check::Test(PR_REDO_SCENE),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that lands an item as a pull request (`landing.mode = "pr"`; its own number was
+/// not known when it was written; its parent's stands in).
+const PR_CARD: u32 = 8;
+
+/// The redo scene of the pull request card, which hosts two mutants.
+const PR_REDO_SCENE: &str =
+    "executor::tests::landing::a_landing_redone_after_the_pull_request_opened_opens_no_second_one";
 
 /// The card of #8 that shows the leases (`lease.list`, the TUI's Resources tab, what a waiting
 /// item waits for) and puts lease waits and worktree disk use in the report (its own number

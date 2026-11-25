@@ -685,3 +685,134 @@ identity = 'personal'
         "{output:?}"
     );
 }
+
+/// Appends a `device` resource `rig` to the home's configuration.
+fn add_rig(home: &Home) {
+    let mut config = std::fs::read_to_string(home.path("config.toml")).unwrap();
+    config.push_str("[resource.rig]\nkind = \"device\"\n");
+    std::fs::write(home.path("config.toml"), config).unwrap();
+}
+
+/// #156, #180: `bosun with` runs no command when the daemon refuses the lease or is down, and
+/// exits with its usual code; with a lease granted the same command runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn with_runs_no_command_when_the_daemon_refuses() {
+    let home = Home::new(&[("personal", "cache-and-models")]);
+    add_rig(&home);
+    let target = |name: &str| home.path(name).to_str().unwrap().to_owned();
+
+    let daemon = home.start().await;
+    let ran = target("ran");
+    let output = home.bosun(&["with", "no-such-resource", "--", "git", "init", &ran]);
+    assert_ne!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no-such-resource"),
+        "{output:?}"
+    );
+    assert!(!home.path("ran").exists(), "the refused command ran");
+    drop(daemon);
+
+    let ran2 = target("ran2");
+    let output = home.bosun(&["with", "rig", "--", "git", "init", &ran2]);
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
+    assert!(
+        !home.path("ran2").exists(),
+        "the command ran with no daemon"
+    );
+
+    let _daemon = home.start().await;
+    let ran3 = target("ran3");
+    let output = home.bosun(&["with", "rig", "--", "git", "init", &ran3]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(home.path("ran3").join(".git").is_dir(), "{output:?}");
+}
+
+/// #180: a SIGTERM to `bosun with` reaches its command, by the command's pid; `bosun` waits
+/// for it, exits with its code and releases the lease.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn with_passes_a_termination_on_to_its_command() {
+    let home = Home::new(&[("personal", "cache-and-models")]);
+    add_rig(&home);
+    let _daemon = home.start().await;
+    let started = home.path("started");
+    let stopped = home.path("stopped");
+    let script = format!(
+        "trap \"echo stopped > '{}'; exit 7\" TERM; echo $$ > '{}'; while :; do sleep 0.1; done",
+        stopped.display(),
+        started.display()
+    );
+    let config = home.path("config.toml");
+    let mut bosun = Command::new(env!("CARGO_BIN_EXE_bosun"))
+        .args(["with", "rig", "--", "sh", "-c", &script])
+        .env("BOSUN_CONFIG", &config)
+        .env("BOSUN_ENDPOINT", home.endpoint.path())
+        .env("BOSUN_OPERATOR_FILE", home.path("operator.token"))
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while !started.exists() {
+        if let Some(status) = bosun.try_wait().unwrap() {
+            panic!("bosun with exited before its command started: {status}");
+        }
+        assert!(Instant::now() < deadline, "the command never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The command's shell, killed at the end unless it ended: if `bosun` died without passing
+    // the signal on, it would loop on.
+    let shell = loop {
+        let text = std::fs::read_to_string(&started).unwrap();
+        if text.ends_with('\n') {
+            break Reaper(text.trim().to_owned(), stopped.clone());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    let sent = Command::new("kill")
+        .args(["-TERM", &bosun.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let deadline = Instant::now() + PATIENCE;
+    let status = loop {
+        if let Some(status) = bosun.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = bosun.kill();
+            panic!("bosun with did not end after SIGTERM");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(status.code(), Some(7), "{status:?}");
+    assert!(stopped.exists(), "the command never got SIGTERM");
+
+    let asked = Instant::now();
+    let output = home.bosun(&["with", "rig", "--", "true"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "the lease was not released: {:?}",
+        asked.elapsed()
+    );
+    drop(shell);
+}
+
+/// Kills the pid it holds (a shell a test started) when dropped, unless the file it holds
+/// says the shell already ended: its pid may then be another process's.
+#[cfg(unix)]
+struct Reaper(String, PathBuf);
+
+#[cfg(unix)]
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        if self.1.exists() {
+            return;
+        }
+        let _ = Command::new("kill")
+            .args(["-KILL", &self.0])
+            .stderr(Stdio::null())
+            .status();
+    }
+}

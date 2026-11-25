@@ -1,4 +1,4 @@
- bosun 1 Overview 2 Queue [3 Session] 4 Tokens                     bosund 0.0.0
+ bosun 1 Overview 2 Queue [3 Session] 4 Tokens 5 Resources         bosund 0.0.0
 alpha#3 (personal)  attempt 2  session 1  claude fresh  running 12m44s
 context  [###########.............] 92.4k of 200.0k (46%)  peak 120.0k
 -- tail: 13 lines --------------------------------------------------------------
@@ -21,4 +21,4 @@ context  [###########.............] 92.4k of 200.0k (46%)  peak 120.0k
 
 
 
- 1-4 tab  p pause  r resume  K kill switch  k release  R restart  q quit
+ 1-5 tab  p pause  r resume  K kill switch  k release  R restart  q quit

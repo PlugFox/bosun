@@ -69,6 +69,7 @@ async fn overview(state: &State, served: &Served) -> Result<Overview, ErrorObjec
                 detail: crate::events::reason_of(i.item.state),
                 attempt: i.item.attempt.as_ref().map_or(0, |a| a.number),
                 since_ms: i.updated_ms,
+                waiting: crate::leases::waiting_of(state, served, &i.item.id),
             }),
             last_verdict,
         });

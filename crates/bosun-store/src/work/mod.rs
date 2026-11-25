@@ -197,6 +197,22 @@ pub enum WorktreeState {
     Quarantined,
 }
 
+impl WorktreeKind {
+    /// Its name as stored: `item`, `verdict`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        codec::worktree_kind(self)
+    }
+}
+
+impl WorktreeState {
+    /// Its name as stored: `created`, `removed`, `quarantined`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        codec::worktree_state(self)
+    }
+}
+
 /// A pull request's state, as the forge reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrState {

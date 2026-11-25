@@ -51,6 +51,7 @@
 //! | `tokens.pace` | [`PaceParams`] | [`Pace`] |
 //! | `lease.acquire` | [`AcquireParams`] | [`AcquireResult`] |
 //! | `lease.release` | [`ReleaseParams`] | [`ReleaseResult`] |
+//! | `lease.list` | [`IdentityParams`] | [`Resources`] |
 //!
 //! The `agent.*` methods name no identity: their credential does ([`agent`]). `control.kill`
 //! names none either: the kill switch is daemon-wide. The `control.*` methods that change
@@ -96,9 +97,13 @@ pub use item::{
 };
 pub use items::{
     AttemptReport, Evidence, FlakyVerdict, InferredItem, InferredItems, InferredSession, ItemRow,
-    Items, ParkedTime, RefusedEdit, RetriedItem, RunCommit, RunSession, TrailerMissing, Trailers,
+    Items, LeaseWaits, ParkedTime, RefusedEdit, RetriedItem, RunCommit, RunSession, TrailerMissing,
+    Trailers, WorktreeUse,
 };
-pub use lease::{AcquireParams, AcquireResult, ReleaseParams, ReleaseResult};
+pub use lease::{
+    AcquireParams, AcquireResult, BUSY, ReleaseParams, ReleaseResult, ResourceView, Resources,
+    WaitingFor, WorktreeView,
+};
 pub use pace::{Pace, PaceParams, PaceReference};
 pub use queue::{
     CardView, ColumnView, LintFinding, LintParams, LintResult, QueueParams, QueueView, RepoQueue,
@@ -352,6 +357,13 @@ pub mod method {
         crate::ReleaseResult,
         "Releases what a process holds and withdraws its request; releasing nothing is not an      error. Takes the operator token."
     );
+    method!(
+        LeaseList,
+        "lease.list",
+        crate::IdentityParams,
+        crate::Resources,
+        "The resource instances the identity can lease, with their holders and waiting requests,      and its worktrees on disk or quarantined. Another identity's holder is shown only as      `busy`."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -384,6 +396,7 @@ pub const METHODS: &[&str] = &[
     method::TokensPace::NAME,
     method::LeaseAcquire::NAME,
     method::LeaseRelease::NAME,
+    method::LeaseList::NAME,
 ];
 
 /// The prefix of the `agent.*` group: the only methods an agent credential admits.
@@ -647,6 +660,7 @@ pub fn schema() -> Value {
     add_method::<method::TokensPace>(&mut generator, &mut methods);
     add_method::<method::LeaseAcquire>(&mut generator, &mut methods);
     add_method::<method::LeaseRelease>(&mut generator, &mut methods);
+    add_method::<method::LeaseList>(&mut generator, &mut methods);
     let notifications = json!({
         event::EVENT: {
             "description": "One event of the subscribed identity, in sequence order.",

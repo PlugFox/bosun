@@ -1,4 +1,4 @@
- bosun 1 Overview [2 Queue] 3 Session 4 Tokens                     bosund 0.0.0
+ bosun 1 Overview [2 Queue] 3 Session 4 Tokens 5 Resources         bosund 0.0.0
 alpha (personal)  local_file  board 4be1d0c9  [1/2]
 Backlog (1)
   #9    Someday: a second backend          -          -
@@ -21,4 +21,4 @@ error: no contract block
 warning: no labels
 
 
- 1-4 tab  arrows  p pause  r resume  K kill switch  k release  R restart  q quit
+ 1-5 tab  arrows  p pause  r resume  K kill switch  k release  R restart  q quit

@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bosun_api::{
     AttemptReport, Evidence, FlakyVerdict, InferredItem, InferredItems, InferredSession, ItemRow,
-    Items, ModelRow, ParkedTime, RefusedEdit, RepoRef, RetriedItem, RunCommit, RunSession,
-    TrailerMissing, Trailers,
+    Items, LeaseWaits, ModelRow, ParkedTime, RefusedEdit, RepoRef, RetriedItem, RunCommit,
+    RunSession, TrailerMissing, Trailers, WorktreeUse,
 };
 use bosun_core::{Exit, PriceTable, SpawnMode};
-use bosun_store::{ItemHistory, Reader, RunCommitRow, UsageRow};
+use bosun_store::{ItemHistory, LeaseWaitRow, Reader, RunCommitRow, UsageRow};
 
 use crate::exact::{Fold, Scope, rates};
 
@@ -218,7 +218,78 @@ pub(crate) async fn items(
         .map(|c| (c.repo.as_str(), c.commit.sha.as_str()))
         .collect();
     out.outside_runs = in_range.saturating_sub(linked.len() as u64);
+    leases_and_worktrees(reader, scope, &mut out).await?;
     Ok(out)
+}
+
+/// The lease waits of the range and the worktrees on disk or quarantined now, in `scope`'s
+/// repository when it names one (#8).
+async fn leases_and_worktrees(
+    reader: &Reader,
+    scope: Scope<'_>,
+    out: &mut Items,
+) -> Result<(), bosun_store::Error> {
+    let repos: BTreeMap<String, String> = reader
+        .items(false)
+        .await?
+        .into_iter()
+        .map(|stored| (stored.item.id.0, stored.repo))
+        .collect();
+    let holds = |item: &str| scope.holds_repo(repos.get(item).map(String::as_str));
+    out.lease_waits = lease_waits(
+        reader
+            .lease_waits(scope.from_ms, scope.to_ms)
+            .await?
+            .iter()
+            .filter(|w| match &w.item {
+                Some(item) => holds(&item.0),
+                // A command's wait is of no repository.
+                None => scope.repo.is_none(),
+            }),
+    );
+    let mut worktrees = reader.open_worktrees().await?;
+    worktrees.extend(reader.quarantined_worktrees().await?);
+    worktrees.sort_by_key(|w| w.created_ms);
+    out.worktrees = worktrees
+        .into_iter()
+        .filter(|w| holds(&w.item.0))
+        .map(|w| WorktreeUse {
+            item: w.item.0,
+            path: w.path,
+            kind: w.kind.as_str().to_owned(),
+            state: w.state.as_str().to_owned(),
+            bytes: w.bytes,
+            blocking: w.blocking,
+        })
+        .collect();
+    Ok(())
+}
+
+/// The granted waits of `rows` per resource, longest wait first, then by resource.
+fn lease_waits<'a>(rows: impl Iterator<Item = &'a LeaseWaitRow>) -> Vec<LeaseWaits> {
+    let mut by: BTreeMap<&str, LeaseWaits> = BTreeMap::new();
+    for row in rows {
+        let Some(granted) = row.granted_ms else {
+            continue;
+        };
+        let waited = duration(row.filed_ms, granted);
+        let entry = by.entry(&row.resource).or_insert_with(|| LeaseWaits {
+            resource: row.resource.clone(),
+            requests: 0,
+            total_ms: 0,
+            longest_ms: 0,
+        });
+        entry.requests += 1;
+        entry.total_ms += waited;
+        entry.longest_ms = entry.longest_ms.max(waited);
+    }
+    let mut out: Vec<LeaseWaits> = by.into_values().collect();
+    out.sort_by(|a, b| {
+        b.longest_ms
+            .cmp(&a.longest_ms)
+            .then_with(|| a.resource.cmp(&b.resource))
+    });
+    out
 }
 
 /// The row of one item as the loop's section reports it (#72), whatever its time: its runs

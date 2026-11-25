@@ -448,6 +448,8 @@
     "parked": [],
     "commits": [],
     "trailer_missing": [],
-    "outside_runs": 4
+    "outside_runs": 4,
+    "lease_waits": [],
+    "worktrees": []
   }
 }

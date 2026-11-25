@@ -17,7 +17,7 @@ use std::io::Write as _;
 use bosun_api::rpc::code;
 use bosun_api::{
     EventBody, EventFilter, IdentityParams, ItemDetail, ItemParams, LintParams, LintResult,
-    Overview, QueueParams, QueueView, SessionInfo, SessionParams, Tail, method,
+    Overview, QueueParams, QueueView, SessionInfo, SessionParams, Tail, WaitingFor, method,
 };
 use bosun_client::{Client, Delivery, Error, Subscription};
 use clap::{Args, Subcommand};
@@ -147,10 +147,7 @@ fn render_status(o: &Overview, out: &mut String) {
             .map_or_else(String::new, |h| format!(", hold {h}"));
         let _ = writeln!(out, "repo {}: {}{hold}", repo.repo, repo.state);
         if let Some(item) = &repo.current {
-            let detail = item
-                .detail
-                .as_deref()
-                .map_or_else(String::new, |d| format!(" ({d})"));
+            let detail = remark(item.detail.as_deref(), &item.waiting);
             let _ = writeln!(
                 out,
                 "  {} {}{detail}, attempt {}, {} in state",
@@ -248,11 +245,41 @@ pub(crate) async fn item(global: &Global, args: &ItemArgs) -> Result<String, Fai
     Ok(out)
 }
 
+/// What an item waits for (#8): `waiting for rig: held by item demo#3`, each full resource
+/// with its holders (`busy` for another identity's), `; ` between them.
+fn waiting_for(waiting: &[WaitingFor]) -> Option<String> {
+    if waiting.is_empty() {
+        return None;
+    }
+    let each: Vec<String> = waiting
+        .iter()
+        .map(|w| {
+            if w.holders.is_empty() {
+                format!("{}: queued", w.resource)
+            } else {
+                format!("{}: held by {}", w.resource, w.holders.join(", "))
+            }
+        })
+        .collect();
+    Some(format!("waiting for {}", each.join("; ")))
+}
+
+/// The parenthesised remark after an item's state: its detail and what it waits for, if any.
+fn remark(detail: Option<&str>, waiting: &[WaitingFor]) -> String {
+    let parts: Vec<String> = detail
+        .map(ToOwned::to_owned)
+        .into_iter()
+        .chain(waiting_for(waiting))
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join("; "))
+    }
+}
+
 fn render_item(d: &ItemDetail, out: &mut String) {
-    let detail = d
-        .detail
-        .as_deref()
-        .map_or_else(String::new, |x| format!(" ({x})"));
+    let detail = remark(d.detail.as_deref(), &d.waiting);
     let _ = writeln!(
         out,
         "{} in {}: {}{detail}, attempt {}, {} failed",
@@ -497,6 +524,70 @@ mod tests {
         assert_eq!(split_item("#3"), None);
         assert_eq!(split_item("demo"), None);
         assert_eq!(split_item("demo#x"), None);
+    }
+
+    /// #8: an item whose lease request waits says, in `bosun status` and `bosun item`, which
+    /// resource it waits for and who holds it.
+    #[test]
+    fn a_waiting_item_says_what_it_waits_for() {
+        let waiting = serde_json::json!([{"resource": "rig", "holders": ["item demo#3"]}]);
+        let overview: Overview = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "daemon_version": "0.0.0",
+            "started_ms": 0,
+            "now_ms": 120_000,
+            "killed": false,
+            "paused": false,
+            "events": {"epoch": "1-1", "head": 0, "subscribers": 0},
+            "repos": [{
+                "repo": "demo",
+                "path": "/repos/demo",
+                "queue": "local_file",
+                "state": "working",
+                "current": {
+                    "item": "demo#4",
+                    "state": "claimed",
+                    "attempt": 0,
+                    "since_ms": 0,
+                    "waiting": waiting,
+                },
+            }],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render_status(&overview, &mut out);
+        assert!(
+            out.contains("  demo#4 claimed (waiting for rig: held by item demo#3), attempt 0, "),
+            "{out}"
+        );
+
+        let detail: ItemDetail = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "item": "demo#4",
+            "repo": { "name": "demo", "path": "/repos/demo" },
+            "state": "claimed",
+            "attempt": 0,
+            "failed": 0,
+            "created_ms": 0,
+            "updated_ms": 0,
+            "waiting": [
+                {"resource": "rig", "holders": ["busy"]},
+                {"resource": "cache/demo", "holders": ["bosun with 42"]},
+            ],
+            "transitions": [],
+            "attempts": [],
+            "calls": [],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render_item(&detail, &mut out);
+        assert!(
+            out.starts_with(
+                "demo#4 in demo: claimed (waiting for rig: held by busy; cache/demo: held by \
+                 bosun with 42), attempt 0, 0 failed\n"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

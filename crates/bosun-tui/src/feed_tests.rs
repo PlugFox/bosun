@@ -433,6 +433,7 @@ async fn the_view_survives_a_daemon_restart() {
             detail: None,
             attempt: 1,
             since_ms: state.overview.now_ms,
+            waiting: Vec::new(),
         });
     }
     // While the daemon is away the view keeps what it had.

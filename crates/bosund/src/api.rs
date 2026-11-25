@@ -6,8 +6,9 @@ use bosun_api::rpc::{self, ErrorObject, Request, Response, code};
 use bosun_api::{
     AGENT_GROUP, API_VERSION, CommitScan, DaemonStatus, Estimates, EventBody, FailedFile,
     HelloResult, IngestStatus, LastPass, Method, ModelRow, PassReport, Picodollars, ReingestResult,
-    RepoRef, RepoRow, Report, ReportParams, SessionRow, TokenSums, TokensByModel, TokensByRepo,
-    TokensBySession, TokensParams, TokensSummary, UnpricedModel, Wide, method,
+    RepoRef, RepoRow, Report, ReportParams, Resources, SessionRow, TokenSums, TokensByModel,
+    TokensByRepo, TokensBySession, TokensParams, TokensSummary, UnpricedModel, Wide, WorktreeView,
+    method,
 };
 use bosun_core::{Cost, PriceTable};
 use bosun_store::{Bill, By, Group};
@@ -249,6 +250,7 @@ async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObj
             .await
         }
         method::TokensPace::NAME => crate::pace::dispatch(state, name, p).await,
+        method::LeaseList::NAME => lease_list(state, p).await,
         name if name.starts_with("control.") => crate::control::dispatch(state, name, p).await,
         name if name.starts_with("lease.") => crate::leases::dispatch(state, name, p).await,
         name if name.starts_with("status.") => crate::overview::dispatch(state, name, p).await,
@@ -282,6 +284,39 @@ async fn tokens_by_repo(state: &State, p: &TokensParams) -> Result<TokensByRepo,
         (a, b) => a.is_none().cmp(&b.is_none()),
     });
     Ok(TokensByRepo { summary, rows })
+}
+
+/// `lease.list` (#8): the resource instances the identity can lease as it may see them, and
+/// its worktrees on disk or quarantined, from its own store. Reads only.
+async fn lease_list(state: &State, p: Value) -> Result<Value, ErrorObject> {
+    call::<method::LeaseList, _, _>(p, |p| async move {
+        resources(state, state.identity(&p.identity)?).await
+    })
+    .await
+}
+
+async fn resources(state: &State, served: &Served) -> Result<Resources, ErrorObject> {
+    let repos: Vec<String> = served.repos.iter().map(|(n, _)| n.clone()).collect();
+    let seen = state.leases.seen_by(&served.name, &repos);
+    let reader = served.store.reader();
+    let mut worktrees = reader.open_worktrees().await.map_err(failed)?;
+    worktrees.extend(reader.quarantined_worktrees().await.map_err(failed)?);
+    worktrees.sort_by_key(|w| w.created_ms);
+    Ok(Resources {
+        identity: served.name.clone(),
+        resources: seen.resources,
+        worktrees: worktrees
+            .into_iter()
+            .map(|w| WorktreeView {
+                item: w.item.0,
+                path: w.path,
+                kind: w.kind.as_str().to_owned(),
+                state: w.state.as_str().to_owned(),
+                bytes: w.bytes,
+                blocking: w.blocking,
+            })
+            .collect(),
+    })
 }
 
 pub(crate) fn hello() -> HelloResult {

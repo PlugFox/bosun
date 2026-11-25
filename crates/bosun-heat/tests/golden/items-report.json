@@ -658,6 +658,32 @@
         ]
       }
     ],
-    "outside_runs": 1
+    "outside_runs": 1,
+    "lease_waits": [
+      {
+        "resource": "rig",
+        "requests": 2,
+        "total_ms": 31000,
+        "longest_ms": 30000
+      }
+    ],
+    "worktrees": [
+      {
+        "item": "local:demo#1",
+        "path": "/synthetic/worktrees/demo-1",
+        "kind": "item",
+        "state": "created",
+        "bytes": 3145728,
+        "blocking": null
+      },
+      {
+        "item": "local:demo#2",
+        "path": "/synthetic/worktrees/demo-2",
+        "kind": "item",
+        "state": "quarantined",
+        "bytes": 512,
+        "blocking": "target/lock"
+      }
+    ]
   }
 }

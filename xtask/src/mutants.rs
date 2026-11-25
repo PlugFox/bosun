@@ -2508,7 +2508,56 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("leases::tests::a_journal_that_does_not_parse_is_moved_aside"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_api_lease_holder_across_identities",
+        issue: RESOURCES_CARD,
+        breaks: "lease.list names another identity's holder instead of saying busy",
+        package: "bosund",
+        check: Check::Test(
+            "view_tests::the_resource_list_shows_another_identitys_holder_only_as_busy",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_wait_unnamed",
+        issue: RESOURCES_CARD,
+        breaks: "status.overview and item.get do not say what a waiting item waits for",
+        package: "bosund",
+        check: Check::Test("view_tests::a_waiting_item_names_the_resource_and_its_holder"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_tui_resources_tab_blank",
+        issue: RESOURCES_CARD,
+        breaks: "the TUI's Resources tab draws no row",
+        package: "bosun-tui",
+        check: Check::Test("view::tests::the_resources_tab_lists_holders_waits_and_worktrees"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_report_drop_lease_waits",
+        issue: RESOURCES_CARD,
+        breaks: "the report omits its lease waits section",
+        package: "bosun-cli",
+        check: Check::Cargo(&[
+            "test",
+            "--package",
+            "bosun-cli",
+            "--locked",
+            "--bin",
+            "bosun",
+            "--",
+            "markdown::tests::the_report_has_lease_waits_and_worktree_disk_use",
+            "--exact",
+        ]),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that shows the leases (`lease.list`, the TUI's Resources tab, what a waiting
+/// item waits for) and puts lease waits and worktree disk use in the report (its own number
+/// was not known when it was written; its parent's stands in).
+const RESOURCES_CARD: u32 = 8;
 
 /// The card of #8 that lets an item go of its leases while it is Parked or its landing is
 /// deferred, and takes a lease refusal for a configuration change (E24; its own number was not

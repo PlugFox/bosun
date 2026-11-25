@@ -45,8 +45,17 @@ struct World {
     state: State,
 }
 
+/// A machine-scope device: one holder at a time, shared by every identity.
+const RIG: &str = "[resource.rig]\nkind = 'device'\n";
+
 impl World {
     async fn new() -> Self {
+        Self::with_resources("").await
+    }
+
+    /// A world whose configuration also has `resources` (TOML): its lease manager has them,
+    /// journalled in the world's directory. With none, it has a manager of no resource.
+    async fn with_resources(resources: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         let mut config = String::new();
@@ -67,6 +76,7 @@ impl World {
                 d.join(format!("{repo}.toml")).display(),
             );
         }
+        config.push_str(resources);
         let path = d.join("config.toml");
         std::fs::write(&path, config).unwrap();
         let config = bosun_config::load(&path, &SystemProbe::new()).unwrap();
@@ -74,13 +84,19 @@ impl World {
             .await
             .map_err(|(_, e)| e)
             .unwrap();
+        let leases = if resources.is_empty() {
+            crate::leases::Leases::none()
+        } else {
+            let journal = crate::leases::journal_path(&d.join("state").join("bosun.token"));
+            crate::leases::Leases::new(&config, &journal).unwrap()
+        };
         let world = Self {
             state: State {
                 started_ms: T0,
                 identities,
                 credentials: crate::agent::Credentials::default(),
                 control: crate::control::Control::with_token(TOKEN, None),
-                leases: std::sync::Arc::new(crate::leases::Leases::none()),
+                leases: std::sync::Arc::new(leases),
             },
             dir,
         };
@@ -708,5 +724,152 @@ async fn tokens_pace_measures_against_the_configured_budget() {
     let want = (1_500_000.0 - today) / minutes;
     let got = reference["eqv_per_minute"].as_f64().unwrap();
     assert!((got - want).abs() / want < 0.01, "{got} vs {want}");
+    world.close().await;
+}
+
+/// alpha#3's request for `rig`, as its loop files it: of repository `alpha` of identity `a`.
+fn rig_for_three() -> crate::leases::Request {
+    crate::leases::Request {
+        holder: crate::leases::Holder::Item(ItemId::new("alpha#3")),
+        names: vec!["rig".to_owned()],
+        repo: "alpha".to_owned(),
+        identity: "a".to_owned(),
+        writer: None,
+    }
+}
+
+/// #8: `lease.list` shows each identity the machine-scope `rig` with its holder, named to the
+/// identity whose item holds it and only `busy` to the other, whose answer holds neither the
+/// item's id nor its repository's name; the worktree of `a` is listed for `a` alone.
+/// `mutant_api_lease_holder_across_identities` names the holder to both.
+#[tokio::test]
+async fn the_resource_list_shows_another_identitys_holder_only_as_busy() {
+    let world = World::with_resources(RIG).await;
+    world.claim_three().await;
+    let leases = world.state.leases.clone();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        leases.acquire(rig_for_three()),
+    )
+    .await
+    .expect("rig is free")
+    .unwrap();
+    let path = world.dir.path().join("worktrees").join("three");
+    world.state.identities["a"]
+        .store
+        .writer()
+        .write(vec![
+            Write::Worktree(bosun_store::NewWorktree {
+                item: ItemId::new("alpha#3"),
+                path: path.display().to_string(),
+                branch: "bosun/alpha-3".to_owned(),
+                base_sha: "base".to_owned(),
+                kind: bosun_store::WorktreeKind::Item,
+                user_base_json: None,
+                created_ms: T0,
+            }),
+            Write::WorktreeBytes {
+                path: path.display().to_string(),
+                bytes: 4096,
+            },
+        ])
+        .await
+        .unwrap();
+
+    let mine = world.ok("lease.list", json!({"identity": "a"})).await;
+    assert_eq!(
+        mine["resources"],
+        json!([{
+            "name": "rig",
+            "kind": "device",
+            "capacity": 1,
+            "scope": "machine",
+            "holders": ["item alpha#3"],
+            "waiting": 0,
+        }]),
+        "{mine}"
+    );
+    assert_eq!(mine["worktrees"].as_array().unwrap().len(), 1, "{mine}");
+    assert_eq!(mine["worktrees"][0]["item"], "alpha#3");
+    assert_eq!(mine["worktrees"][0]["state"], "created");
+    assert_eq!(mine["worktrees"][0]["bytes"], 4096);
+
+    let theirs = world.ok("lease.list", json!({"identity": "b"})).await;
+    assert_eq!(theirs["resources"][0]["name"], "rig", "{theirs}");
+    assert_eq!(
+        theirs["resources"][0]["holders"],
+        json!(["busy"]),
+        "{theirs}"
+    );
+    assert_eq!(theirs["worktrees"], json!([]), "{theirs}");
+    let text = theirs.to_string();
+    assert!(!text.contains("alpha#3"), "{text}");
+    assert!(!text.contains("alpha"), "{text}");
+
+    leases.release(&rig_for_three().holder).await;
+    world.close().await;
+}
+
+/// The `waiting` of alpha#3 in `status.overview` and `item.get` for identity `a`, once its
+/// request waits (within 5 s).
+async fn waiting_of_three(world: &World) -> (Value, Value) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let overview = world.ok("status.overview", json!({"identity": "a"})).await;
+        let waiting = overview["repos"][0]["current"]["waiting"].clone();
+        if !waiting.is_null() || std::time::Instant::now() > deadline {
+            let item = world
+                .ok("item.get", json!({"identity": "a", "item": "alpha#3"}))
+                .await;
+            return (waiting, item["waiting"].clone());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// #8: while alpha#3's request for `rig` waits behind a `bosun with` command (this test's own
+/// process), `status.overview` and `item.get` say it waits for `rig` and that the command
+/// holds it, when the command named identity `a`; when it named `b`, the holder is `busy` and
+/// its pid is not shown. Once the request is withdrawn, neither says it waits.
+/// `mutant_api_wait_unnamed` leaves `waiting` out.
+#[tokio::test]
+async fn a_waiting_item_names_the_resource_and_its_holder() {
+    let world = World::with_resources(RIG).await;
+    world.claim_three().await;
+    let pid = std::process::id();
+    for (named, shown) in [("a", format!("bosun with {pid}")), ("b", "busy".to_owned())] {
+        let granted = world
+            .ok(
+                "lease.acquire",
+                json!({"operator": TOKEN, "identity": named, "resources": ["rig"], "pid": pid}),
+            )
+            .await;
+        assert_eq!(granted, json!({"granted": true}), "{named}");
+        let leases = world.state.leases.clone();
+        let asked = tokio::spawn(async move { leases.acquire(rig_for_three()).await });
+
+        let (overview, item) = waiting_of_three(&world).await;
+        let want = json!([{"resource": "rig", "holders": [shown]}]);
+        assert_eq!(overview, want, "command named {named}: overview");
+        assert_eq!(item, want, "command named {named}: item");
+        if named == "b" {
+            for waiting in [&overview, &item] {
+                assert!(!waiting.to_string().contains(&pid.to_string()), "{waiting}");
+            }
+        }
+
+        // The request is withdrawn with its future; the command's lease is released.
+        asked.abort();
+        assert!(asked.await.unwrap_err().is_cancelled());
+        let overview = world.ok("status.overview", json!({"identity": "a"})).await;
+        assert!(
+            overview["repos"][0]["current"].get("waiting").is_none(),
+            "{overview}"
+        );
+        let released = world
+            .ok("lease.release", json!({"operator": TOKEN, "pid": pid}))
+            .await;
+        assert_eq!(released, json!({"released": true}));
+    }
     world.close().await;
 }

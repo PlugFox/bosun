@@ -410,6 +410,15 @@ impl<H: Clone + Eq> Leases<H> {
         self.slots.get(name).map_or(&[], |s| s.holders.as_slice())
     }
 
+    /// The holders whose requests wait in the queue of the resource named `name`, in filing
+    /// order: a refused request waits in the queue of every resource it needs.
+    pub fn queue(&self, name: &str) -> impl Iterator<Item = &H> {
+        self.slots
+            .get(name)
+            .into_iter()
+            .flat_map(|s| s.queue.iter().map(|(_, h)| h))
+    }
+
     /// Every granted request's wait per resource, in grant order.
     #[must_use]
     pub fn waits(&self) -> &[Wait<H>] {
@@ -487,6 +496,9 @@ mod tests {
         // It queues on the whole set: a later request for `a` alone waits behind it.
         leases.acquire("y", &["a"], 2).unwrap();
         assert_eq!(leases.serve(2), NONE);
+        assert_eq!(leases.queue("a").copied().collect::<Vec<_>>(), ["x", "y"]);
+        assert_eq!(leases.queue("b").copied().collect::<Vec<_>>(), ["x"]);
+        assert_eq!(leases.queue("none").count(), 0);
         assert_eq!(leases.holds(&"x"), NONE);
         assert_eq!(leases.holds(&"y"), NONE);
         leases.release(&"g");

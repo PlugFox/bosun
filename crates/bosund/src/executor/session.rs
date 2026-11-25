@@ -21,13 +21,26 @@
 //! `bosun-shim` at a path named by the binary's digest ([`install_shim`], E3), in a directory
 //! of its own under the session's (`shim-s<spawn>`), with the prompt in the shim's stdin file
 //! (E17) and the item's remaining wall-clock budget as the shim's cap ([`shim_cap`], E9). The
-//! shim is recorded in `process` (its pid and start time, its record, the digest of the
-//! session's credential), and how far its output has been read, in whole lines, is written to
-//! that row at most once a second and at the end (E18). While the item holds leases, the shim
-//! is on its journal entry (E16). A session the shim capped is reported as
-//! [`Event::BudgetExceeded`]. Dropping the session task leaves the session running: only the
-//! daemon's kill ends it. Without `repo.<name>.worktree` the agent is a plain child of
-//! [`Deps::spawner`] and dies with the daemon, as in stage 1.
+//! shim is recorded in `process`: the row (its record, the digest of the session's credential)
+//! is written before the spawn, so no shim runs that no row names, and the shim's pid and start
+//! time are filled in from its record after it ([`Write::ProcessStarted`]); a spawn that fails
+//! marks the row gone. How far its output has been read, in whole lines, is written to that row
+//! at most once a second and at the end (E18). While the item holds leases, the shim is on its
+//! journal entry (E16). A session the shim capped is reported as [`Event::BudgetExceeded`].
+//! Dropping the session task leaves the session running: only the daemon's kill ends it.
+//! Without `repo.<name>.worktree` the agent is a plain child of [`Deps::spawner`] and dies with
+//! the daemon, as in stage 1.
+//!
+//! A graceful stop of the daemon detaches (E22): the task's signal is
+//! [`Signal::Detach`](super::Signal::Detach), and a session under its shim stops reading,
+//! writes its offsets once more, drops its credential and returns without an event. Its tree is
+//! not killed, and its run's end, its row's `gone`, the lease journal's shim and its files
+//! (the session's directory, the shim's record and output, the tail) all stay: the next daemon
+//! finds what a crash leaves and re-attaches it. A session of a stage-1 repository takes
+//! `Detach` for a kill.
+//!
+//! The run row records HEAD when the session started ([`RunStart::start_sha`]): the start of
+//! the session's commit range, for this daemon and for one that re-attaches it.
 //!
 //! A session is run in two parts: [`session`] prepares and spawns it, and a follower reads it
 //! to its end (both streams, the live entries, the tail, the exit's classification, the run's
@@ -64,7 +77,7 @@ use tokio::sync::watch;
 
 use super::park::ChildSlot;
 use super::verdict::killed;
-use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms, workspace};
+use super::{Claimed, Shared, Signal, blocking, git, identity, lookup, now_ms, workspace};
 use crate::agent::Binding;
 use crate::events;
 use crate::leases::Holder;
@@ -439,10 +452,18 @@ impl SessionDir {
         builder.create(&path)?;
         Ok(Self(path))
     }
+
+    /// Forgets the directory: it is left, with what it holds, for the next daemon (E22).
+    fn keep(mut self) {
+        self.0 = PathBuf::new();
+    }
 }
 
 impl Drop for SessionDir {
     fn drop(&mut self) {
+        if self.0.as_os_str().is_empty() {
+            return;
+        }
         if let Err(e) = std::fs::remove_dir_all(&self.0)
             && e.kind() != std::io::ErrorKind::NotFound
         {
@@ -512,6 +533,18 @@ impl TailFile {
         (tail, kept)
     }
 
+    /// Closes the file and leaves it, as a daemon that dies does: the next daemon reads it
+    /// (E22).
+    fn keep(mut self) {
+        drop(
+            self.file
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+        self.path = PathBuf::new();
+    }
+
     fn push(&self, line: &str) {
         let mut file = self
             .file
@@ -533,6 +566,9 @@ impl Drop for TailFile {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take(),
         );
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
         if let Err(e) = std::fs::remove_file(&self.path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
@@ -606,10 +642,10 @@ pub(crate) async fn session(
     config: &Config,
     claimed: &Claimed,
     run: &Run,
-    mut kill: watch::Receiver<bool>,
+    mut kill: watch::Receiver<Signal>,
     on_blocking: Box<dyn Fn() + Send + Sync>,
-) -> Event {
-    let crash = run.exited(Exit::Crash);
+) -> Option<Event> {
+    let crash = Some(run.exited(Exit::Crash));
     let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
         return crash;
     };
@@ -646,10 +682,10 @@ pub(crate) async fn session(
         Ok(bundle) => bundle,
         Err(e) => {
             shared.trouble(format!("{}: {e}", run.item));
-            return Event::IdentityRefused {
+            return Some(Event::IdentityRefused {
                 attempt: run.attempt,
                 spawn: run.spawn,
-            };
+            });
         }
     };
 
@@ -799,6 +835,7 @@ pub(crate) async fn session(
         provider: PROVIDER.to_owned(),
         session_key: session_id.to_string(),
         started_ms: now_ms(),
+        start_sha: start_head.clone(),
     });
     if let Err(e) = shared.deps.writer.write(vec![start]).await {
         shared.trouble(format!("{}: the run cannot be recorded: {e}", run.item));
@@ -817,6 +854,19 @@ pub(crate) async fn session(
     // Mutant (`mutant_loop_sessions_without_shim`): it is a plain child of the daemon.
     let shim_dir = (claimed.worktree.is_some() && !cfg!(mutant_loop_sessions_without_shim))
         .then(|| session_dir.0.join(format!("shim-s{}", run.spawn)));
+    // The shim's row before the spawn: a daemon that dies right after it leaves a row that
+    // names the session's record, which recovery follows or reaps.
+    // Mutant (`mutant_loop_process_row_after_spawn`): the row is written after the spawn.
+    if let Some(dir) = &shim_dir
+        && !cfg!(mutant_loop_process_row_after_spawn)
+    {
+        let write = Write::Process(new_process(run, &session_id, &credential, dir, None));
+        if let Err(e) = shared.deps.writer.write(vec![write]).await {
+            shared.trouble(format!("{}: the session's shim: {e}", run.item));
+            end(shared, run, Exit::Crash, start_head.as_deref(), &git_repo).await;
+            return crash;
+        }
+    }
     let spawned = match &shim_dir {
         Some(dir) => spawn_under_shim(shared, run, &spec, dir).await,
         None => shared.deps.spawner.spawn(&spec).map_err(|e| e.to_string()),
@@ -829,6 +879,9 @@ pub(crate) async fn session(
                 run.item,
                 command.program.display()
             ));
+            if let Some(dir) = &shim_dir {
+                process_gone(shared, run, &session_record(dir)).await;
+            }
             end(shared, run, Exit::Crash, start_head.as_deref(), &git_repo).await;
             return crash;
         }
@@ -912,8 +965,8 @@ async fn follow(
     run: &Run,
     following: Following,
     spawned: bosun_proc::Spawned,
-    mut kill: watch::Receiver<bool>,
-) -> Event {
+    mut kill: watch::Receiver<Signal>,
+) -> Option<Event> {
     let Following {
         runner,
         session_id,
@@ -1045,6 +1098,31 @@ async fn follow(
     };
     // The child has exited or is being killed: no wake check may take it for dead now.
     set_child(&run.child, None);
+    // A graceful stop (E22): a session under its shim is left running for the next daemon,
+    // which re-attaches it as it would after a crash. Its tree is not killed and nothing of its
+    // end is written: not the run's end, not the row's `gone`, not the lease journal's shim
+    // (the item's leases stay held: their holder's shim is alive, E16). Its files stay. Only
+    // the offsets read so far are written once more, and its credential goes (the next daemon
+    // re-admits it from the row's digest).
+    // Mutant (`mutant_loop_stop_kills_shim_sessions`): `Detach` is taken for `Kill`.
+    let detached = status.is_none()
+        && !missed
+        && *kill.borrow() == Signal::Detach
+        && !cfg!(mutant_loop_stop_kills_shim_sessions);
+    if detached && let Some(shim_run) = shim_run.as_mut() {
+        drop((out, err));
+        shim_run.offsets(shared, consumed, true).await;
+        drop(credential);
+        session_dir.keep();
+        tail_file.keep();
+        crate::log::log!(
+            "bosund: {}: the daemon stops; session {session_id} goes on under shim pid {}",
+            run.item,
+            shim_run.shim.pid
+        );
+        drop(tree);
+        return None;
+    }
     // Whatever the session left running in its container goes with it, and so does its
     // credential.
     // A session that ended before the timeout must have said hello too.
@@ -1116,10 +1194,10 @@ async fn follow(
             spawn: run.spawn,
             exit: events::exit_name(Some(Exit::Crash)).to_owned(),
         });
-        return Event::NoHandshake {
+        return Some(Event::NoHandshake {
             attempt: run.attempt,
             spawn: run.spawn,
-        };
+        });
     }
     let (exit, published) = match status {
         Some(status) => {
@@ -1143,7 +1221,7 @@ async fn follow(
             run.item,
             run.shim_cap.as_secs()
         ));
-        return Event::BudgetExceeded;
+        return Some(Event::BudgetExceeded);
     }
     if run.mode == SpawnMode::Resume && exit == Exit::Crash && ended && !up.load(Ordering::Relaxed)
     {
@@ -1151,12 +1229,12 @@ async fn follow(
             "bosund: {}: the resume of session {session_id} failed; a fresh session follows",
             run.item
         );
-        return Event::ResumeFailed {
+        return Some(Event::ResumeFailed {
             attempt: run.attempt,
             spawn: run.spawn,
-        };
+        });
     }
-    run.exited(exit)
+    Some(run.exited(exit))
 }
 
 /// A session a previous daemon left under its shim (#8, E3), as crash recovery found it: its
@@ -1175,8 +1253,9 @@ pub(crate) struct Attached {
 /// disk: the session id from the run row (no new run row, no new id); the credential re-admitted
 /// from the row's digest with the session's binding, as having said hello (its `bosun-mcp`
 /// said it to the previous daemon), and revoked at the end; the output read so far from the
-/// tail file, appended to from here on; the start of the commit range from the attempt's
-/// previous session's end, else the item's base.
+/// tail file, appended to from here on; the start of the commit range from the run row's start
+/// head, else (a row written before it was recorded) the attempt's previous session's end,
+/// else the item's base.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn attach(
     shared: &Arc<Shared>,
@@ -1184,10 +1263,10 @@ pub(crate) async fn attach(
     claimed: &Claimed,
     run: &Run,
     attached: Attached,
-    mut kill: watch::Receiver<bool>,
+    mut kill: watch::Receiver<Signal>,
     on_blocking: Box<dyn Fn() + Send + Sync>,
-) -> Event {
-    let crash = run.exited(Exit::Crash);
+) -> Option<Event> {
+    let crash = Some(run.exited(Exit::Crash));
     let Some((repo, _)) = lookup(config, &shared.options.repo) else {
         return crash;
     };
@@ -1259,20 +1338,17 @@ pub(crate) async fn attach(
             .any(|e| matches!(e, LiveEntry::Started { .. }))
     });
     let git_repo = Git::new(&claimed.workdir);
-    let runs = shared.deps.reader.runs(&run.item).await.unwrap_or_default();
-    let start_head = runs
-        .iter()
-        .rev()
-        .filter(|r| r.attempt == run.attempt && r.spawn < run.spawn)
-        .find_map(|r| r.head_sha.clone())
-        .or_else(|| {
-            Some(
-                claimed
-                    .worktree
-                    .as_ref()
-                    .map_or_else(|| claimed.base.head.clone(), |w| w.worktree.base.clone()),
-            )
-        });
+    // Mutant (`mutant_loop_attach_range_from_base`): the run row's start head is ignored.
+    let recorded = run_row
+        .start_sha
+        .clone()
+        .filter(|_| !cfg!(mutant_loop_attach_range_from_base));
+    let start_head = match recorded {
+        Some(sha) => Some(sha),
+        // A run row from before `start_sha`: the end of the attempt's previous session, else
+        // the item's base.
+        None => fallback_start(shared, claimed, run).await,
+    };
     let key = spawned.tree.key();
     set_child(&run.child, Some(key));
     record_child(shared, run, key).await;
@@ -1309,6 +1385,25 @@ pub(crate) async fn attach(
         consumed: (process.stdout_offset, process.stderr_offset),
     };
     follow(shared, run, following, spawned, kill).await
+}
+
+/// The start of a re-attached session's commit range when its run row does not record it (a
+/// row written before `run.start_sha`): the end of the attempt's previous session, else the
+/// item's base.
+async fn fallback_start(shared: &Shared, claimed: &Claimed, run: &Run) -> Option<String> {
+    let runs = shared.deps.reader.runs(&run.item).await.unwrap_or_default();
+    runs.iter()
+        .rev()
+        .filter(|r| r.attempt == run.attempt && r.spawn < run.spawn)
+        .find_map(|r| r.head_sha.clone())
+        .or_else(|| {
+            Some(
+                claimed
+                    .worktree
+                    .as_ref()
+                    .map_or_else(|| claimed.base.head.clone(), |w| w.worktree.base.clone()),
+            )
+        })
 }
 
 /// The binding of the credential of session `id` of `run` (#63).
@@ -1360,8 +1455,42 @@ async fn spawn_under_shim(
     .await
 }
 
-/// After the spawn under the shim in `dir`: the `process` row and the lease journal's shim.
-/// `None` when the shim's record cannot be read (reported; the session goes on unrecorded).
+/// The `process` row of the session's shim in `dir`, with the shim's key once it is known; with
+/// none, pid and start time 0, written before the spawn ([`Write::ProcessStarted`] fills them).
+fn new_process(
+    run: &Run,
+    session_id: &SessionId,
+    credential: &crate::agent::Issued,
+    dir: &Path,
+    shim: Option<bosun_proc::ProcessKey>,
+) -> NewProcess {
+    NewProcess {
+        item: run.item.clone(),
+        attempt: run.attempt,
+        spawn: run.spawn,
+        session_key: session_id.to_string(),
+        pid: shim.map_or(0, |k| k.pid),
+        pid_started_ms: shim.map_or(0, |k| k.start.raw().cast_signed()),
+        record_path: session_record(dir).to_string_lossy().into_owned(),
+        credential_digest: Some(credential.digest().to_vec()),
+        started_ms: now_ms(),
+    }
+}
+
+/// Marks the `process` row of the shim whose record is `record` gone.
+async fn process_gone(shared: &Shared, run: &Run, record: &Path) {
+    let gone = Write::ProcessGone {
+        record_path: record.to_string_lossy().into_owned(),
+        at_ms: now_ms(),
+    };
+    if let Err(e) = shared.deps.writer.write(vec![gone]).await {
+        shared.trouble(format!("{}: the end of the session's shim: {e}", run.item));
+    }
+}
+
+/// After the spawn under the shim in `dir`: the shim's pid and start time on its `process` row
+/// (written before the spawn) and the lease journal's shim. `None` when the shim's record
+/// cannot be read (reported; the row is marked gone and the session goes on unrecorded).
 async fn record_shim(
     shared: &Shared,
     run: &Run,
@@ -1378,20 +1507,27 @@ async fn record_shim(
                 run.item,
                 path.display()
             ));
+            if !cfg!(mutant_loop_process_row_after_spawn) {
+                process_gone(shared, run, &path).await;
+            }
             return None;
         }
     };
-    let write = Write::Process(NewProcess {
-        item: run.item.clone(),
-        attempt: run.attempt,
-        spawn: run.spawn,
-        session_key: session_id.to_string(),
-        pid: record.shim.pid,
-        pid_started_ms: record.shim.start.raw().cast_signed(),
-        record_path: path.to_string_lossy().into_owned(),
-        credential_digest: Some(credential.digest().to_vec()),
-        started_ms: now_ms(),
-    });
+    let write = if cfg!(mutant_loop_process_row_after_spawn) {
+        Write::Process(new_process(
+            run,
+            session_id,
+            credential,
+            dir,
+            Some(record.shim),
+        ))
+    } else {
+        Write::ProcessStarted {
+            record_path: path.to_string_lossy().into_owned(),
+            pid: record.shim.pid,
+            pid_started_ms: record.shim.start.raw().cast_signed(),
+        }
+    };
     if let Err(e) = shared.deps.writer.write(vec![write]).await {
         shared.trouble(format!("{}: the session's shim: {e}", run.item));
         return None;
@@ -1420,13 +1556,7 @@ async fn shim_ended(shared: &Shared, run: &Run, shim_run: &ShimRun) -> bool {
         .deps
         .leases
         .set_shim(&Holder::Item(run.item.clone()), None);
-    let gone = Write::ProcessGone {
-        record_path: shim_run.record.to_string_lossy().into_owned(),
-        at_ms: now_ms(),
-    };
-    if let Err(e) = shared.deps.writer.write(vec![gone]).await {
-        shared.trouble(format!("{}: the end of the session's shim: {e}", run.item));
-    }
+    process_gone(shared, run, &shim_run.record).await;
     capped
 }
 

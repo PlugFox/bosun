@@ -325,6 +325,8 @@ struct Scene {
     config_more: String,
     /// The lease manager the loop gets; `None`: one of its own, built from the configuration.
     leases: Option<Arc<crate::leases::Leases>>,
+    /// The loop's spawns through the session shim; `None`: [`Scene::spawner`].
+    sessions: Option<Arc<dyn ShimSessions>>,
 }
 
 impl Scene {
@@ -519,6 +521,7 @@ impl Scene {
             worktree_more: String::new(),
             config_more: String::new(),
             leases: None,
+            sessions: None,
             dir,
         }
     }
@@ -717,7 +720,10 @@ impl Scene {
             queue,
             visibility: Arc::new(self.visibility()),
             spawner: self.spawner.clone(),
-            sessions: self.spawner.clone(),
+            sessions: self
+                .sessions
+                .clone()
+                .unwrap_or_else(|| self.spawner.clone()),
             power: Arc::new(bosun_proc::FakePower::default()),
             logins: Arc::new(FixedLogins(self.path("login"))),
             credentials: self.credentials.clone(),
@@ -791,10 +797,12 @@ async fn wait_for(what: &str, limit: Duration, mut check: impl AsyncFnMut() -> b
     }
 }
 
+/// Waits until `path` exists. The limit leaves room for a loaded machine: the whole suite runs
+/// its scenes in parallel, and a scene of several items reaches its later ones slowly then.
 async fn wait_file(path: &Path) {
     wait_for(
         &path.display().to_string(),
-        Duration::from_secs(60),
+        Duration::from_secs(120),
         async || path.exists(),
     )
     .await;

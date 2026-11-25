@@ -80,6 +80,9 @@ pub struct RunStart {
     /// The pre-assigned provider session id.
     pub session_key: String,
     pub started_ms: i64,
+    /// HEAD when the session started, the start of its commit range (#8); `None` when it could
+    /// not be read.
+    pub start_sha: Option<String>,
 }
 
 /// A verdict run that started. Keyed by (attempt, run).

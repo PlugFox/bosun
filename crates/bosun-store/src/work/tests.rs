@@ -402,6 +402,7 @@ fn run_start(attempt: u32, spawn: u32, session_key: &str) -> Write {
         provider: PROVIDER.to_owned(),
         session_key: session_key.to_owned(),
         started_ms: T0,
+        start_sha: None,
     })
 }
 
@@ -1582,4 +1583,82 @@ async fn an_item_after_a_conflict_reads_back_with_its_counter() {
     let stored = store.reader().item(&other).await.unwrap().unwrap();
     assert_eq!(stored.item, setup.item);
     store.close().await.unwrap();
+}
+
+/// #8: a run row keeps the head its session started from, and one written without it reads
+/// back without it.
+#[tokio::test]
+async fn a_run_keeps_its_start_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    let (attempt, spawn) = running(&store).await;
+    let Write::Run(mut start) = run_start(attempt, spawn, "session-a") else {
+        unreachable!()
+    };
+    start.start_sha = Some("start-head".to_owned());
+    twice(&store, vec![Write::Run(start)]).await;
+    let mut resumed = run_start(attempt, spawn + 1, "session-b");
+    if let Write::Run(run) = &mut resumed {
+        run.start_sha = None;
+    }
+    store.writer().write(vec![resumed]).await.unwrap();
+    let runs = store.reader().runs(&id()).await.unwrap();
+    let heads: Vec<Option<&str>> = runs.iter().map(|r| r.start_sha.as_deref()).collect();
+    assert_eq!(heads, [Some("start-head"), None], "{runs:?}");
+}
+
+/// #8: a `process` row written before its shim's spawn (pid 0) gets the shim's pid and start
+/// time from `ProcessStarted`, written twice to the same effect; the rest of the row stays,
+/// and an unknown record is refused.
+#[tokio::test]
+async fn a_provisional_process_row_is_filled_when_its_shim_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir).await;
+    store.writer().write(vec![register()]).await.unwrap();
+    let process = NewProcess {
+        item: id(),
+        attempt: 1,
+        spawn: 1,
+        session_key: "session-1".to_owned(),
+        pid: 0,
+        pid_started_ms: 0,
+        record_path: "/state/shims/1.json".to_owned(),
+        credential_digest: Some(vec![0xab; 32]),
+        started_ms: T0,
+    };
+    store
+        .writer()
+        .write(vec![Write::Process(process.clone())])
+        .await
+        .unwrap();
+    let started = Write::ProcessStarted {
+        record_path: process.record_path.clone(),
+        pid: 4242,
+        pid_started_ms: T0 + 1,
+    };
+    twice(&store, vec![started]).await;
+    let rows = store.reader().processes().await.unwrap();
+    assert_eq!(
+        rows,
+        [ProcessRow {
+            item: id(),
+            attempt: 1,
+            spawn: 1,
+            session_key: process.session_key.clone(),
+            pid: 4242,
+            pid_started_ms: T0 + 1,
+            record_path: process.record_path.clone(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+            credential_digest: process.credential_digest.clone(),
+            started_ms: T0,
+            gone_ms: None,
+        }]
+    );
+    let unknown = Write::ProcessStarted {
+        record_path: "/state/shims/other.json".to_owned(),
+        pid: 1,
+        pid_started_ms: 1,
+    };
+    assert!(store.writer().write(vec![unknown]).await.is_err());
 }

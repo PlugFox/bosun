@@ -821,3 +821,128 @@ async fn a_reattached_session_is_read_from_its_stored_offsets() {
         "the output before the kill is read again: {lines:?}"
     );
 }
+
+/// #8: attempt 1's session commits `one.txt` and its verdict (`test -f two.txt`) fails;
+/// attempt 2's session writes `started`, waits for `release` and commits `two.txt`. The daemon
+/// is killed while attempt 2 waits; the test's loop re-attaches the session and the release
+/// ends it. The commit range the store records for attempt 2's run starts at attempt 1's head
+/// and holds exactly the `two.txt` commit, not attempt 1's (`mutant_loop_attach_range_from_base`
+/// starts it at the item's base). The range's base is checked on the run row: a commit is
+/// listed under the first run that recorded it, so the stored list alone cannot show it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reattached_session_counts_only_its_own_commits() {
+    let scene = Scene::with_worktrees(None).await;
+    let p = |name: &str| scene.path(name).display().to_string();
+    scene.write_board(&[card(1, "Own commits", "test -f two.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            format!("once {} commit one.txt one", p("once-commit")),
+            format!(
+                "once {} replay {}",
+                p("once-replay"),
+                Scene::stream("normal-end.jsonl")
+            ),
+            format!("once {} exit 0", p("once-exit")),
+            print_text("attempt-two"),
+            format!("write {} x", p("started")),
+            format!("wait {}", p("release")),
+            "commit two.txt two".to_owned(),
+        ],
+    );
+    let mut daemon = Spawned::start(&scene, Role::Daemon);
+    wait_file(&scene.path("started")).await;
+    let mut row = None;
+    wait_for(
+        "attempt 2's shim row and its offsets",
+        Duration::from_secs(60),
+        async || {
+            row = shims(&scene, 1)
+                .await
+                .into_iter()
+                .find(|r| r.attempt == 2 && r.pid != 0);
+            row.as_ref().is_some_and(|r| r.stdout_offset > 0)
+        },
+    )
+    .await;
+    let record = bosun_proc::shim::Record::read(Path::new(&row.unwrap().record_path)).unwrap();
+    daemon.kill();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let alive = bosun_proc::is_running(record.child);
+    if !alive {
+        end_agent(&record);
+    }
+    assert!(
+        alive,
+        "the agent died with its daemon: {}",
+        child_log(&scene)
+    );
+
+    let (task, watcher) = scene.start(None);
+    reattached(&scene).await;
+    std::fs::write(scene.path("release"), "").unwrap();
+    let state = ended(&scene, 1, Duration::from_secs(120)).await;
+    task.abort();
+    watcher.abort();
+    end_agent(&record);
+    assert_eq!(state, State::Done(Outcome::Pass), "{}", child_log(&scene));
+    let item = scene.item(1).await.unwrap();
+    assert_eq!(item.attempts, 2, "{item:?}");
+
+    // The range recorded on attempt 2's run: from where its session started (attempt 1's
+    // head), so it lists the `two.txt` commit alone.
+    let runs = scene.runs(1).await;
+    let first = runs.iter().find(|r| r.attempt == 1).unwrap();
+    let second = runs.iter().find(|r| r.attempt == 2).unwrap();
+    let (base, head) = (
+        second.base_sha.clone().unwrap(),
+        second.head_sha.clone().unwrap(),
+    );
+    assert_eq!(Some(&base), first.head_sha.as_ref(), "{runs:?}");
+    assert_eq!(second.start_sha.as_ref(), Some(&base), "{runs:?}");
+    let listed = scene.git(&["log", "--format=%s", &format!("{base}..{head}")]);
+    assert_eq!(listed, "two", "{runs:?}");
+
+    let subjects_of = stored_commits(&scene).await;
+    let ranges = scene.store.reader().run_commits(0, i64::MAX).await.unwrap();
+    let subjects = |attempt: u32| -> Vec<&str> {
+        ranges
+            .iter()
+            .filter(|r| r.item == id(1) && r.attempt == attempt)
+            .map(|r| subjects_of[&r.commit.sha].as_str())
+            .collect()
+    };
+    assert_eq!(subjects(2), ["two"], "{ranges:?}");
+    assert_eq!(subjects(1), ["one"], "{ranges:?}");
+}
+
+/// Stores every commit of the scene's repository, as the ingester would, so that the store's
+/// reader of commit ranges lists them with their sessions. Returns their subjects by sha.
+async fn stored_commits(scene: &Scene) -> BTreeMap<String, String> {
+    let config = scene.config();
+    let (repo, _) = lookup(&config, "demo").unwrap();
+    let log = scene.git(&["log", "--all", "--format=%H %ct %s"]);
+    let mut subjects = BTreeMap::new();
+    let writes: Vec<Write> = log
+        .lines()
+        .map(|line| {
+            let mut parts = line.splitn(3, ' ');
+            let sha = parts.next().unwrap().to_owned();
+            let ts: i64 = parts.next().unwrap().parse().unwrap();
+            subjects.insert(sha.clone(), parts.next().unwrap_or_default().to_owned());
+            Write::Commit {
+                repo: repo.key.clone(),
+                commit: bosun_core::Commit {
+                    sha,
+                    ts_ms: ts * 1000,
+                    author: "Synthetic Agent <agent@example.com>".to_owned(),
+                    lines_added: 1,
+                    lines_removed: 0,
+                    trailers: BTreeMap::new(),
+                },
+            }
+        })
+        .collect();
+    scene.store.writer().write(writes).await.unwrap();
+    subjects
+}

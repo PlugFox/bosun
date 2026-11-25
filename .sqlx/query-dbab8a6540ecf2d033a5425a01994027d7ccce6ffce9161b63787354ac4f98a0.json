@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO run (attempt_id, spawn, mode, provider, session_key, started_ms, start_sha)\n         VALUES (?, ?, ?, ?, ?, ?, ?)\n         ON CONFLICT (attempt_id, spawn) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "dbab8a6540ecf2d033a5425a01994027d7ccce6ffce9161b63787354ac4f98a0"
+}

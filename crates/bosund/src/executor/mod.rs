@@ -11,8 +11,8 @@
 //! | Effect | Performed by |
 //! | --- | --- |
 //! | `Claim` | the claim task ([`claim`]): claim write and re-read (#5), snapshot, static lint, base capture, the verdict on the base commit (D7), the configuration and policy hashes |
-//! | `Spawn` | the session task ([`session`]): fail-closed identity checks, the prompt, the agent environment, the run row, the spawn with the power request held, the stream, the exit, the session's commit range. In worktree mode the agent runs under a copy of the session shim (`bosun-shim`, [`find_shim`], [`session::install_shim`]) capped at the item's remaining wall-clock budget, and the shim is recorded in `process` with how far its output has been read; it outlives the loop that started it |
-//! | `Kill` | the running task's kill signal; for a blocking question, after [`Options::question_grace`] |
+//! | `Spawn` | the session task ([`session`]): fail-closed identity checks, the prompt, the agent environment, the run row, the spawn with the power request held, the stream, the exit, the session's commit range. In worktree mode the agent runs under a copy of the session shim (`bosun-shim`, [`find_shim`], [`session::install_shim`]) capped at the item's remaining wall-clock budget; the shim's `process` row is written before the spawn and holds its pid once it runs and how far its output has been read; the session outlives the loop that started it, and a graceful stop ([`Signal::Detach`], E22) leaves it running for the next daemon to re-attach. The run row records the head the session started from |
+//! | `Kill` | the running task's kill signal ([`Signal::Kill`]); for a blocking question, after [`Options::question_grace`] |
 //! | `CheckPreconditions` | the guards of #59 ([`guards`]: protected paths, new ignored files, git's own configuration), then the verdict preconditions of `bosun-git` |
 //! | `RunVerdict` | the verdict task ([`verdict`]): always the snapshot's command |
 //! | `Land` | without `repo.<name>.worktree`: nothing to push; it never waits for the board. In worktree mode, `local` and `merge`: the landing task ([`landing`]): rebase onto the target's head, the verdict again on a rebased head, the commit to land, the fetch into the user's repository and its fast-forward (deferred while the checkout of the target is dirty or busy) |
@@ -455,11 +455,28 @@ pub(crate) enum Done {
     },
 }
 
+/// What the loop tells a running task (#8, E22): go on, end (the kill), or let go of what runs
+/// on by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signal {
+    /// Go on.
+    Run,
+    /// End: the task kills what it started and reports its end. Every kill but the loop's
+    /// graceful stop.
+    Kill,
+    /// The daemon stops gracefully (uninstall, upgrade): a session under its shim is left
+    /// running with its `process` row and its files, for the next daemon to re-attach (E22,
+    /// E3), and its task returns without an event. Every other task takes it for [`Kill`].
+    ///
+    /// [`Kill`]: Signal::Kill
+    Detach,
+}
+
 /// A running effect: its kill signal and its task, aborted when this is dropped: a loop that
 /// is dropped (its own task aborted) drops what its tasks hold, children and all.
 #[derive(Debug)]
 struct Task {
-    kill: watch::Sender<bool>,
+    kill: watch::Sender<Signal>,
     handle: JoinHandle<()>,
 }
 
@@ -582,7 +599,9 @@ impl Loop {
     }
 
     /// Runs until the store refuses a write (the loop cannot record what it does any more) or
-    /// the configuration channel closes. Aborting the task kills the child in flight: its
+    /// the configuration channel closes (the daemon stops). At a stop the task in flight is sent
+    /// [`Signal::Detach`] and awaited: a session under its shim is left running for the next
+    /// daemon (E22), anything else is killed. Aborting the task kills the child in flight: its
     /// container is dropped.
     pub(crate) async fn run(mut self) {
         // The drainer starts once crash recovery has read the board (#68).
@@ -609,10 +628,24 @@ impl Loop {
                 Ok(()) = self.control.changed() => self.on_control().await,
             }
         }
+        // A graceful stop detaches (E22): a session under its shim goes on for the next daemon;
+        // every other task is killed. A task killed already stays killed, and a loop the store
+        // halted kills.
+        let stop = if self.halted {
+            Signal::Kill
+        } else {
+            Signal::Detach
+        };
         if let Some(cur) = self.current.as_mut()
             && let Some(mut task) = cur.task.take()
         {
-            let _ = task.kill.send(true);
+            task.kill.send_if_modified(|signal| {
+                let running = *signal == Signal::Run;
+                if running {
+                    *signal = stop;
+                }
+                running
+            });
             let _ = (&mut task.handle).await;
         }
     }
@@ -778,7 +811,7 @@ impl Loop {
                     if !question
                         && let Some(task) = self.current.as_ref().and_then(|c| c.task.as_ref())
                     {
-                        let _ = task.kill.send(true);
+                        let _ = task.kill.send(Signal::Kill);
                     }
                 }
                 EffectKind::CheckPreconditions { attempt } => {
@@ -807,13 +840,13 @@ impl Loop {
     }
 
     /// Replaces the task in flight (the previous one has ended or is being killed).
-    async fn set_task(&mut self, kill: watch::Sender<bool>, handle: JoinHandle<()>) {
+    async fn set_task(&mut self, kill: watch::Sender<Signal>, handle: JoinHandle<()>) {
         let Some(cur) = self.current.as_mut() else {
             handle.abort();
             return;
         };
         if let Some(mut old) = cur.task.replace(Task { kill, handle }) {
-            let _ = old.kill.send(true);
+            let _ = old.kill.send(Signal::Kill);
             let _ = (&mut old.handle).await;
         }
     }
@@ -836,7 +869,7 @@ impl Loop {
                     .trouble(format!("the power request failed: {e}")),
             }
         }
-        let (kill, kill_rx) = watch::channel(false);
+        let (kill, kill_rx) = watch::channel(Signal::Run);
         let shared = self.shared.clone();
         let card = cur.card.clone();
         let item = cur.item.id.clone();
@@ -847,7 +880,7 @@ impl Loop {
             let _ = done.send(Done::Claim { item, outcome });
         });
         if let Some(old) = cur.task.replace(Task { kill, handle }) {
-            let _ = old.kill.send(true);
+            let _ = old.kill.send(Signal::Kill);
             old.handle.abort();
         }
     }
@@ -917,7 +950,7 @@ impl Loop {
         let Some(cur) = self.current.as_ref() else {
             return;
         };
-        let (kill, kill_rx) = watch::channel(false);
+        let (kill, kill_rx) = watch::channel(Signal::Run);
         let shared = self.shared.clone();
         let config = self.config();
         let item = cur.item.id.clone();
@@ -953,6 +986,7 @@ impl Loop {
                 child: slot,
                 shim_cap,
             };
+            // `None`: the session was detached at a graceful stop (E22); there is no event.
             let event = match attached {
                 Some(attached) => {
                     session::attach(
@@ -969,6 +1003,9 @@ impl Loop {
                 None => {
                     session::session(&shared, &config, &claimed, &run, kill_rx, on_blocking).await
                 }
+            };
+            let Some(event) = event else {
+                return;
             };
             let _ = done.send(Done::Event {
                 item,
@@ -1042,7 +1079,7 @@ impl Loop {
             .as_ref()
             .is_some_and(|a| a.first_run.is_some());
         let first_failing = rerun.then(|| cur.failing.clone());
-        let (kill, kill_rx) = watch::channel(false);
+        let (kill, kill_rx) = watch::channel(Signal::Run);
         let shared = self.shared.clone();
         let config = self.config();
         let item = cur.item.id.clone();
@@ -1081,7 +1118,7 @@ impl Loop {
         let Some(claimed) = cur.claimed.clone() else {
             return;
         };
-        let (kill, kill_rx) = watch::channel(false);
+        let (kill, kill_rx) = watch::channel(Signal::Run);
         let shared = self.shared.clone();
         let config = self.config();
         let item = cur.item.id.clone();
@@ -1367,7 +1404,7 @@ impl Loop {
                 Duration::ZERO
             };
             if tokio::time::timeout(grace, &mut task.handle).await.is_err() {
-                let _ = task.kill.send(true);
+                let _ = task.kill.send(Signal::Kill);
                 let _ = (&mut task.handle).await;
             }
         }
@@ -1618,7 +1655,7 @@ impl Loop {
             cur.item.id
         ));
         if let Some(mut task) = cur.task.take() {
-            let _ = task.kill.send(true);
+            let _ = task.kill.send(Signal::Kill);
             let _ = (&mut task.handle).await;
         }
         self.apply(Event::Exited {
@@ -1875,7 +1912,7 @@ pub(crate) async fn hold_leases(
     repo: &Repo,
     claimed: &Claimed,
     item: &ItemId,
-    kill: &mut watch::Receiver<bool>,
+    kill: &mut watch::Receiver<Signal>,
 ) -> Result<(), Option<String>> {
     let names = lease_names(claimed, repo);
     if names.is_empty() {

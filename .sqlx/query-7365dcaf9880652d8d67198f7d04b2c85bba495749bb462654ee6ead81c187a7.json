@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT a.number, r.spawn, r.mode, r.provider, r.session_key, r.started_ms,\n                    r.ended_ms, r.exit, r.limit_reset_ms, r.base_sha, r.head_sha\n             FROM run r JOIN attempt a ON a.id = r.attempt_id JOIN item i ON i.id = a.item_id\n             WHERE i.item_key = ? ORDER BY r.spawn",
+  "query": "SELECT a.number, r.spawn, r.mode, r.provider, r.session_key, r.started_ms,\n                    r.ended_ms, r.exit, r.limit_reset_ms, r.base_sha, r.head_sha, r.start_sha\n             FROM run r JOIN attempt a ON a.id = r.attempt_id JOIN item i ON i.id = a.item_id\n             WHERE i.item_key = ? ORDER BY r.spawn",
   "describe": {
     "columns": [
       {
@@ -123,6 +123,17 @@
             "name": "head_sha"
           }
         }
+      },
+      {
+        "name": "start_sha",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "start_sha"
+          }
+        }
       }
     ],
     "parameters": {
@@ -139,8 +150,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "9b099115b5cd701327b290d64299b70e7805915b20e2e34029b15f7ba2f5d6e3"
+  "hash": "7365dcaf9880652d8d67198f7d04b2c85bba495749bb462654ee6ead81c187a7"
 }

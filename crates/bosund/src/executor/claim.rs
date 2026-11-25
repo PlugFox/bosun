@@ -25,7 +25,9 @@ use tokio::sync::watch;
 
 use super::checkout::UserCheckout;
 use super::workspace::{Unopened, Workspace};
-use super::{ClaimOutcome, Claimed, ItemWorktree, Shared, blocking, git, identity, lookup, now_ms};
+use super::{
+    ClaimOutcome, Claimed, ItemWorktree, Shared, Signal, blocking, git, identity, lookup, now_ms,
+};
 
 /// What lint says when a card's verdict already passes on the base commit.
 pub(crate) const PASSES_ON_BASE: &str =
@@ -80,7 +82,7 @@ pub(crate) async fn claim(
     card: Card,
     item: &ItemId,
     key: &str,
-    mut kill: watch::Receiver<bool>,
+    mut kill: watch::Receiver<Signal>,
 ) -> ClaimOutcome {
     let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
         return ClaimOutcome::Failed("the repository is no longer configured".to_owned());
@@ -259,7 +261,7 @@ async fn confirm(
     snapshot: Snapshot,
     item: &ItemId,
     key: &str,
-    kill: &mut watch::Receiver<bool>,
+    kill: &mut watch::Receiver<Signal>,
     opened: Option<ItemWorktree>,
 ) -> ClaimOutcome {
     let workdir: PathBuf = opened
@@ -359,7 +361,7 @@ async fn base_verdict(
     repo: &Repo,
     workdir: &Path,
     snapshot: &Snapshot,
-    kill: &mut watch::Receiver<bool>,
+    kill: &mut watch::Receiver<Signal>,
 ) -> Result<bool, String> {
     let Some((_, identity)) = lookup(config, &shared.options.repo) else {
         return Err("the repository is no longer configured".to_owned());

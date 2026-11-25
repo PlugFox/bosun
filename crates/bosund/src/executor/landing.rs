@@ -54,7 +54,9 @@ use bosun_store::{LandingRow, Write};
 use tokio::sync::watch;
 
 use super::workspace::Workspace;
-use super::{Claimed, ItemWorktree, Shared, blocking, git, identity, lookup, now_ms, verdict};
+use super::{
+    Claimed, ItemWorktree, Shared, Signal, blocking, git, identity, lookup, now_ms, verdict,
+};
 
 /// The kind of the item note a conflicting rebase leaves (`Write::ItemNote`).
 pub(crate) const NOTE_CONFLICT: &str = "conflict";
@@ -128,7 +130,7 @@ pub(crate) async fn land(
     config: &Config,
     claimed: &Claimed,
     spec: &Spec,
-    kill: watch::Receiver<bool>,
+    kill: watch::Receiver<Signal>,
 ) -> Landed {
     let mut task = Task {
         shared,
@@ -156,7 +158,7 @@ struct Task<'a> {
     followed: bool,
     /// The head of an [`Event::Rebased`] report.
     rebased: Option<String>,
-    kill: watch::Receiver<bool>,
+    kill: watch::Receiver<Signal>,
 }
 
 /// How one pass from step 2 ended.

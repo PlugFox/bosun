@@ -1,5 +1,6 @@
 //! The forge seam of the `pr` landing mode (#8 "The pull request"): looking up the item's open
-//! pull request by its head branch, opening one, and rewriting its body. The daemon's own
+//! pull request by its head branch, opening one, rewriting its body, and asking whether it was
+//! merged or closed since the item was Done ([`super::pulls`]). The daemon's own
 //! [`GhForge`] runs `gh` in the user's checkout (`repo.path`) under [`At::env`], the
 //! environment of the repository's identity for the daemon's own tools
 //! ([`bosun_identity::Env::tool`], #2), never an agent's. The scenario tests put a fake in
@@ -9,7 +10,7 @@
 //! answered no: branch protection, token scope, a stale branch), which needs the user, and
 //! [`ForgeError::Unreachable`] (no answer: network, DNS, timeout, a 5xx), which the landing
 //! waits out. The argument lists are built by pure functions ([`list_args`], [`create_args`],
-//! [`edit_args`]); a body goes to `gh` in a file, never on its command line.
+//! [`edit_args`], [`view_args`]); a body goes to `gh` in a file, never on its command line.
 
 use std::fmt;
 use std::io::Write as _;
@@ -49,6 +50,15 @@ pub(crate) struct NewPullRequest {
     pub(crate) draft: bool,
     pub(crate) reviewers: Vec<String>,
     pub(crate) labels: Vec<String>,
+}
+
+/// Where a pull request stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PullRequestState {
+    Open,
+    Merged,
+    /// Closed without being merged.
+    Closed,
 }
 
 /// Why the forge did not do it.
@@ -95,6 +105,13 @@ pub(crate) trait Forge: Send + Sync + fmt::Debug {
     ///
     /// [`ForgeError`].
     fn set_body(&self, at: &At, number: u64, body: &str) -> Result<(), ForgeError>;
+
+    /// Where pull request `number` stands.
+    ///
+    /// # Errors
+    ///
+    /// [`ForgeError`].
+    fn state(&self, at: &At, number: u64) -> Result<PullRequestState, ForgeError>;
 }
 
 /// The daemon's forge: `gh` in [`At::dir`] under [`At::env`].
@@ -134,6 +151,11 @@ impl Forge for GhForge {
     fn set_body(&self, at: &At, number: u64, body: &str) -> Result<(), ForgeError> {
         let file = body_file(body)?;
         gh(at, &edit_args(number, file.path())).map(drop)
+    }
+
+    fn state(&self, at: &At, number: u64) -> Result<PullRequestState, ForgeError> {
+        let out = gh(at, &view_args(number))?;
+        parse_state(&out).map_err(ForgeError::Refused)
     }
 }
 
@@ -184,6 +206,44 @@ pub(crate) fn edit_args(number: u64, body_file: &Path) -> Vec<String> {
         "--body-file".to_owned(),
         body_file.to_string_lossy().into_owned(),
     ]
+}
+
+/// `gh pr view` of pull request `number`: its state and when it was merged.
+pub(crate) fn view_args(number: u64) -> Vec<String> {
+    vec![
+        "pr".to_owned(),
+        "view".to_owned(),
+        number.to_string(),
+        "--json".to_owned(),
+        "state,mergedAt".to_owned(),
+    ]
+}
+
+/// The state in `gh pr view --json state,mergedAt` output: a merge time is a merge, whatever
+/// the state says.
+fn parse_state(out: &str) -> Result<PullRequestState, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Viewed {
+        state: String,
+        #[serde(default)]
+        merged_at: Option<String>,
+    }
+    let viewed: Viewed = serde_json::from_str(out.trim())
+        .map_err(|e| format!("`gh pr view` printed what is not a pull request's state: {e}"))?;
+    if viewed
+        .merged_at
+        .as_deref()
+        .is_some_and(|m| !m.trim().is_empty())
+    {
+        return Ok(PullRequestState::Merged);
+    }
+    match viewed.state.to_ascii_uppercase().as_str() {
+        "OPEN" => Ok(PullRequestState::Open),
+        "MERGED" => Ok(PullRequestState::Merged),
+        "CLOSED" => Ok(PullRequestState::Closed),
+        other => Err(format!("`gh pr view` printed an unknown state: {other}")),
+    }
 }
 
 /// The first pull request of `gh pr list --json number,url,body` output.
@@ -368,6 +428,33 @@ mod tests {
             edit_args(12, file),
             ["pr", "edit", "12", "--body-file", file_text.as_str()]
         );
+        assert_eq!(
+            view_args(12),
+            ["pr", "view", "12", "--json", "state,mergedAt"]
+        );
+    }
+
+    #[test]
+    fn a_viewed_state_is_read_and_a_merge_time_is_a_merge() {
+        let read = |text: &str| parse_state(text).unwrap();
+        assert_eq!(
+            read(r#"{"state":"OPEN","mergedAt":null}"#),
+            PullRequestState::Open
+        );
+        assert_eq!(
+            read(r#"{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z"}"#),
+            PullRequestState::Merged
+        );
+        assert_eq!(
+            read(r#"{"state":"CLOSED","mergedAt":""}"#),
+            PullRequestState::Closed
+        );
+        assert_eq!(
+            read(r#"{"state":"CLOSED","mergedAt":"2026-01-01T00:00:00Z"}"#),
+            PullRequestState::Merged
+        );
+        assert!(parse_state(r#"{"state":"DRAFTY"}"#).is_err());
+        assert!(parse_state("nope").is_err());
     }
 
     #[test]

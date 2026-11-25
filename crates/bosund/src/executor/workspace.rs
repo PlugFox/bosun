@@ -1535,6 +1535,7 @@ mod tests {
                 idle_backoff: false,
                 recheck: Duration::from_hours(1),
                 question_grace: Duration::from_secs(1),
+                pr_poll: Duration::from_secs(1),
                 mcp: d.join("bosun-mcp"),
                 shim: d.join("bosun-shim"),
                 daemon_dir: d.join("state"),

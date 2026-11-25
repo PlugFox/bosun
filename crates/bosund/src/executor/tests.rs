@@ -784,6 +784,7 @@ impl Scene {
             idle_backoff: false,
             recheck: Duration::from_hours(1),
             question_grace: GRACE,
+            pr_poll: Duration::from_millis(100),
             mcp: self.mcp.clone(),
             shim: bosun_shim().to_owned(),
             daemon_dir: self.path("state"),

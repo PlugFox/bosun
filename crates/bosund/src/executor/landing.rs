@@ -376,12 +376,16 @@ impl Task<'_> {
             "{item}: the rebase onto {target} at {t} conflicts in {}",
             files.join(", ")
         ));
+        // `at_ms` in the body too: the session started in answer to it reads it (`prompt_of`).
+        let at_ms = now_ms();
         let note = Write::ItemNote {
             item: item.clone(),
             kind: NOTE_CONFLICT.to_owned(),
-            body: serde_json::json!({"target": target, "target_head": t, "files": files})
-                .to_string(),
-            at_ms: now_ms(),
+            body: serde_json::json!({
+                "target": target, "target_head": t, "files": files, "at_ms": at_ms,
+            })
+            .to_string(),
+            at_ms,
         };
         if let Err(e) = self.shared.deps.writer.write(vec![note]).await {
             self.shared

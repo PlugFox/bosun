@@ -2003,7 +2003,37 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("item::tests::a_reattached_item_keeps_running_and_counts_nothing"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_runner_prompt_without_conflict",
+        issue: CONFLICT_CARD,
+        breaks: "the session after a rebase conflict is not told about it",
+        package: "bosun-runner",
+        check: Check::Test("prompt::tests::a_conflict_is_the_first_thing_the_prompt_says"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_conflict_files_raw",
+        issue: CONFLICT_CARD,
+        breaks: "conflicting file names go into the prompt as they are",
+        package: "bosun-runner",
+        check: Check::Test("prompt::tests::conflicting_file_names_are_listed_as_data"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_conflict_note_unread",
+        issue: CONFLICT_CARD,
+        breaks: "the session after a rebase conflict never gets the conflict note",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_conflict_gets_one_session_with_the_conflict_as_its_prompt_and_then_lands",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that tells the session after a rebase conflict about it (its own number was
+/// not known when it was written; its parent's stands in).
+const CONFLICT_CARD: u32 = 8;
 
 /// The card of #8 that re-attaches worktree-mode sessions after a daemon restart (its own
 /// number was not known when it was written; its parent's stands in).

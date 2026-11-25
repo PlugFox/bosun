@@ -656,6 +656,25 @@ const POLL: Duration = Duration::from_millis(20);
 /// How long [`ShimSpawner`] waits for the shim's first record.
 const RECORD_PATIENCE: Duration = Duration::from_secs(30);
 
+/// Spawns `command`, retrying for up to a second while its program is busy (`ETXTBSY`, Unix):
+/// the shim is a copy the daemon has just written ([`ShimSpawner::new`]'s caller copies it),
+/// and a child the daemon's other threads forked while the copy was open for writing holds
+/// that descriptor until its own `exec`.
+fn spawn_retrying_busy(command: &mut Command) -> io::Result<std::process::Child> {
+    const ETXTBSY: i32 = 26;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match command.spawn() {
+            Err(e)
+                if cfg!(unix) && e.raw_os_error() == Some(ETXTBSY) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// The record of the session in `dir`, a session directory of [`ShimSpawner`].
 #[must_use]
 pub fn session_record(dir: &Path) -> PathBuf {
@@ -759,7 +778,7 @@ impl ShimSpawner {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut shim = command.spawn()?;
+        let mut shim = spawn_retrying_busy(&mut command)?;
         let deadline = Instant::now() + RECORD_PATIENCE;
         let first = loop {
             if let Ok(first) = Record::read(&record) {

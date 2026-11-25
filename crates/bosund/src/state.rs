@@ -234,7 +234,7 @@ pub(crate) async fn run(
         config_watch::Reported::default(),
     );
     let budget = tokio::spawn(follow_budget(state.clone(), config_rx.clone()));
-    let loops = start_loops(&config, &state, &config_rx, &endpoint, &leases);
+    let loops = start_loops(&config, &state, &config_rx, &endpoint, &leases, &lease_dir);
     drop(config_rx);
     serve(listener, &state, stop).await;
     // The watcher holds the sender: without it every loop ends, killing its child first.
@@ -537,9 +537,11 @@ fn start_loops(
     config_rx: &watch::Receiver<Arc<Config>>,
     endpoint: &Endpoint,
     leases: &Arc<crate::leases::Leases>,
+    daemon_dir: &std::path::Path,
 ) -> Vec<JoinHandle<()>> {
     let agent = bosun_config::tools::find_program("claude", std::env::var_os("PATH").as_deref());
     let mcp = executor::find_mcp();
+    let shim = executor::find_shim();
     let daemon_id = daemon_id();
     let mut loops = Vec::new();
     for (name, repo) in &config.repos {
@@ -578,6 +580,8 @@ fn start_loops(
             recheck: Duration::from_mins(1),
             question_grace: executor::QUESTION_GRACE,
             mcp: mcp.clone(),
+            shim: shim.clone(),
+            daemon_dir: daemon_dir.to_owned(),
             endpoint: endpoint.clone(),
             handshake: executor::HANDSHAKE,
             boot: Some(served.boot),
@@ -591,6 +595,7 @@ fn start_loops(
             queue: board.queue,
             visibility: board.visibility,
             spawner: Arc::new(NativeSpawner),
+            sessions: Arc::new(executor::ThroughShim),
             power: Arc::new(SystemPower),
             logins: Arc::new(executor::GhLogins),
             credentials: state.credentials.clone(),

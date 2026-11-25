@@ -13,7 +13,8 @@
 //!   same item, a recovered item asking again).
 //! - The live leases are journalled after every change to [`JOURNAL`] in the daemon's own
 //!   directory, by writing a temporary file and renaming it over the journal (E15). Each entry
-//!   names the daemon that recorded it (pid and start time) and, later, the item's shim.
+//!   names the daemon that recorded it (pid and start time) and, while one of the item's
+//!   sessions runs under the session shim, that shim ([`Leases::set_shim`]).
 //! - A lease whose holder is gone is released when the manager is built and on every tick of a
 //!   loop ([`Leases::release_stale`]): an item's lease is stale only when neither the daemon
 //!   that recorded it nor its shim still runs (E16); a command's while its process runs.
@@ -101,7 +102,7 @@ struct Entry {
     resources: Vec<String>,
     /// The daemon that recorded it.
     daemon: ProcessKey,
-    /// The item's shim, when one holds it (a later card records it).
+    /// The shim of the item's running session, in worktree mode ([`Leases::set_shim`]).
     shim: Option<ProcessKey>,
     granted_ms: i64,
     /// Where its release is written; `None` for an entry loaded from the journal.
@@ -542,6 +543,21 @@ impl Leases {
             }
         }
         known
+    }
+
+    /// Records `shim` as the session shim of `holder`'s lease (E16: the lease lives while the
+    /// shim does, whatever became of the daemon), or clears it (`None`); journalled. Nothing
+    /// happens when `holder` holds no lease.
+    pub(crate) fn set_shim(&self, holder: &Holder, shim: Option<ProcessKey>) {
+        let mut inner = self.lock();
+        let Some(entry) = inner.granted.iter_mut().find(|e| &e.holder == holder) else {
+            return;
+        };
+        if entry.shim == shim {
+            return;
+        }
+        entry.shim = shim;
+        self.save(&inner);
     }
 
     /// Releases every lease whose holder is gone (E16), and withdraws the request of a

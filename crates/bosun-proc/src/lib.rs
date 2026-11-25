@@ -19,6 +19,9 @@
 //!   container, writes its output to files and its pid and exit to a record, and enforces the
 //!   wall-clock cap, so all of that outlives the daemon. [`shim::ShimSpawner`] is the
 //!   [`Spawner`] through it, and [`shim::attach`] re-attaches to a session from its record.
+//!   The daemon runs the agent sessions of worktree-mode repositories through it (#158), from
+//!   a copy named by the binary's digest; verdict runs and setup commands, and every child of
+//!   a repository without `repo.<name>.worktree`, stay on [`NativeSpawner`].
 //! - `pipe` (Windows): `pipe::OwnerOnly` creates the daemon's named pipe with a DACL that admits
 //!   only the user it runs as, and `pipe::dacl` reads a handle's DACL back.
 //!

@@ -257,9 +257,9 @@ impl Loop {
             return;
         };
         let item = cur.item.id.clone();
-        if let Some(task) = cur.task.take() {
+        if let Some(mut task) = cur.task.take() {
             let _ = task.kill.send(true);
-            let _ = task.handle.await;
+            let _ = (&mut task.handle).await;
         }
         // Worktree mode: the old worktree is closed with its work kept; the claim opens a new one.
         if let Some(wt) = &claimed.worktree {

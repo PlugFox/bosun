@@ -306,6 +306,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_accept_pre_rebase_verdict)",
   "cfg(mutant_loop_land_while_deferred)",
   "cfg(mutant_loop_land_ref_only)",
+  # #158: worktree-mode agent sessions under the session shim.
+  "cfg(mutant_loop_shim_in_place)",
+  "cfg(mutant_loop_drop_shim_offsets)",
+  "cfg(mutant_loop_sessions_without_shim)",
+  "cfg(mutant_loop_shim_cap_unbounded)",
 ] }
 
 [workspace.lints.clippy]

@@ -1,0 +1,158 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT i.item_key, p.attempt, p.spawn, p.session_key, p.pid, p.pid_started_ms,\n                    p.record_path, p.stdout_offset, p.stderr_offset, p.credential_digest,\n                    p.started_ms, p.gone_ms\n             FROM process p JOIN item i ON i.id = p.item_id\n             WHERE i.item_key = ?\n             ORDER BY p.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "item_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "item_key"
+          }
+        }
+      },
+      {
+        "name": "attempt",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "attempt"
+          }
+        }
+      },
+      {
+        "name": "spawn",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "spawn"
+          }
+        }
+      },
+      {
+        "name": "session_key",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "session_key"
+          }
+        }
+      },
+      {
+        "name": "pid",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "pid"
+          }
+        }
+      },
+      {
+        "name": "pid_started_ms",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "pid_started_ms"
+          }
+        }
+      },
+      {
+        "name": "record_path",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "record_path"
+          }
+        }
+      },
+      {
+        "name": "stdout_offset",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "stdout_offset"
+          }
+        }
+      },
+      {
+        "name": "stderr_offset",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "stderr_offset"
+          }
+        }
+      },
+      {
+        "name": "credential_digest",
+        "ordinal": 9,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "credential_digest"
+          }
+        }
+      },
+      {
+        "name": "started_ms",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "started_ms"
+          }
+        }
+      },
+      {
+        "name": "gone_ms",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "process",
+            "name": "gone_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "4ca976b08326959475b21512c9aabe5c7a133c74057204ccf80b050ad431ecd1"
+}

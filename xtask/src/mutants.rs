@@ -1935,7 +1935,45 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_shim_in_place",
+        issue: 158,
+        breaks: "a worktree-mode session runs the shim from where it was found, not a copy",
+        package: "bosund",
+        check: Check::Test(SHIM_SCENE),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_drop_shim_offsets",
+        issue: 158,
+        breaks: "the offsets of a shim's output are never written to its process row",
+        package: "bosund",
+        check: Check::Test(SHIM_SCENE),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_sessions_without_shim",
+        issue: 158,
+        breaks: "a worktree-mode session is a plain child and dies with the loop",
+        package: "bosund",
+        check: Check::Test("executor::tests::shim::a_session_outlives_the_loop_that_started_it"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_shim_cap_unbounded",
+        issue: 158,
+        breaks: "the shim's cap is a day, whatever the item's wall-clock budget",
+        package: "bosund",
+        check: Check::Test(
+            "executor::session::tests::the_shim_cap_is_the_remaining_wall_budget_or_a_day",
+        ),
+        platform: None,
+    },
 ];
+
+/// The shim scene of #158, which hosts two mutants.
+const SHIM_SCENE: &str =
+    "executor::tests::shim::a_session_in_worktree_mode_runs_under_a_copied_shim_and_is_recorded";
 
 /// The guard and trailer scenario of #99, which hosts several mutants.
 const SCENARIO_99: &str =

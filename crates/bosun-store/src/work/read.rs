@@ -867,6 +867,43 @@ impl Reader {
             .collect()
     }
 
+    /// Every session shim of `item`, gone or not, in the order they were recorded.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn processes_of(&self, item: &ItemId) -> Result<Vec<ProcessRow>, Error> {
+        let rows = sqlx::query!(
+            "SELECT i.item_key, p.attempt, p.spawn, p.session_key, p.pid, p.pid_started_ms,
+                    p.record_path, p.stdout_offset, p.stderr_offset, p.credential_digest,
+                    p.started_ms, p.gone_ms
+             FROM process p JOIN item i ON i.id = p.item_id
+             WHERE i.item_key = ?
+             ORDER BY p.id",
+            item.0,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProcessRow {
+                    item: ItemId::new(row.item_key),
+                    attempt: number(row.attempt, "attempt number")?,
+                    spawn: number(row.spawn, "spawn number")?,
+                    session_key: row.session_key,
+                    pid: number(row.pid, "pid")?,
+                    pid_started_ms: row.pid_started_ms,
+                    record_path: row.record_path,
+                    stdout_offset: from_db(row.stdout_offset, "stdout offset")?,
+                    stderr_offset: from_db(row.stderr_offset, "stderr offset")?,
+                    credential_digest: row.credential_digest,
+                    started_ms: row.started_ms,
+                    gone_ms: row.gone_ms,
+                })
+            })
+            .collect()
+    }
+
     /// The lease waits filed with `from_ms <= filed_ms < to_ms`, in the order they were filed.
     ///
     /// # Errors

@@ -11,7 +11,7 @@
 //! | Effect | Performed by |
 //! | --- | --- |
 //! | `Claim` | the claim task ([`claim`]): claim write and re-read (#5), snapshot, static lint, base capture, the verdict on the base commit (D7), the configuration and policy hashes |
-//! | `Spawn` | the session task ([`session`]): fail-closed identity checks, the prompt, the agent environment, the run row, the spawn with the power request held, the stream, the exit, the session's commit range |
+//! | `Spawn` | the session task ([`session`]): fail-closed identity checks, the prompt, the agent environment, the run row, the spawn with the power request held, the stream, the exit, the session's commit range. In worktree mode the agent runs under a copy of the session shim (`bosun-shim`, [`find_shim`], [`session::install_shim`]) capped at the item's remaining wall-clock budget, and the shim is recorded in `process` with how far its output has been read; it outlives the loop that started it |
 //! | `Kill` | the running task's kill signal; for a blocking question, after [`Options::question_grace`] |
 //! | `CheckPreconditions` | the guards of #59 ([`guards`]: protected paths, new ignored files, git's own configuration), then the verdict preconditions of `bosun-git` |
 //! | `RunVerdict` | the verdict task ([`verdict`]): always the snapshot's command |
@@ -185,6 +185,54 @@ pub(crate) fn find_mcp() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
+/// The session shim (`bosun-shim`, #8): next to this executable, else on `PATH`, else the bare
+/// name (which the copy before a session then fails to find, and says so). Sessions run a copy
+/// of it, never this file ([`session::install_shim`]): a running executable cannot be replaced
+/// on Windows, and the shim outlives the daemon (E3).
+pub(crate) fn find_shim() -> PathBuf {
+    let name = format!("bosun-shim{}", std::env::consts::EXE_SUFFIX);
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(&name)))
+        .filter(|p| p.is_file());
+    sibling
+        .or_else(|| {
+            bosun_config::tools::find_program("bosun-shim", std::env::var_os("PATH").as_deref())
+        })
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// Starts an agent session of worktree mode through the session shim (#8): the seam through
+/// which the scenario tests observe those spawns, as they wrap [`Deps::spawner`] for the rest.
+pub(crate) trait ShimSessions: Send + Sync {
+    /// Starts `spec` through `shim` with `dir` as the shim's session directory.
+    ///
+    /// # Errors
+    ///
+    /// As [`bosun_proc::shim::ShimSpawner::spawn_in`].
+    fn spawn_in(
+        &self,
+        shim: &bosun_proc::shim::ShimSpawner,
+        spec: &bosun_proc::ChildSpec,
+        dir: &std::path::Path,
+    ) -> std::io::Result<bosun_proc::Spawned>;
+}
+
+/// The daemon's [`ShimSessions`]: the shim spawner itself.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ThroughShim;
+
+impl ShimSessions for ThroughShim {
+    fn spawn_in(
+        &self,
+        shim: &bosun_proc::shim::ShimSpawner,
+        spec: &bosun_proc::ChildSpec,
+        dir: &std::path::Path,
+    ) -> std::io::Result<bosun_proc::Spawned> {
+        shim.spawn_in(spec, dir)
+    }
+}
+
 /// The fixed parts of one repository's loop.
 pub(crate) struct Options {
     /// The repository's name in the configuration.
@@ -207,6 +255,11 @@ pub(crate) struct Options {
     pub(crate) question_grace: Duration,
     /// The MCP server every session's configuration starts ([`find_mcp`]).
     pub(crate) mcp: PathBuf,
+    /// The session shim as found ([`find_shim`]); worktree-mode sessions run a copy of it.
+    pub(crate) shim: PathBuf,
+    /// The daemon's own directory (the operator token's and the lease journal's): the copies
+    /// of the shim go under its `shim` directory.
+    pub(crate) daemon_dir: PathBuf,
     /// The daemon's endpoint, which `bosun-mcp` connects to.
     pub(crate) endpoint: bosun_client::Endpoint,
     /// How long after spawn `bosun-mcp` has to say hello ([`HANDSHAKE`]).
@@ -243,7 +296,10 @@ pub(crate) struct Deps {
     pub(crate) queue: Arc<dyn Queue + Send + Sync>,
     /// Whether the repository is public: the sticky report's verdict tails (#5, #111).
     pub(crate) visibility: Arc<board::Visibility>,
+    /// Every child the loop starts, except the agent sessions of worktree mode.
     pub(crate) spawner: Arc<dyn Spawner>,
+    /// The agent sessions of worktree mode, through the session shim (#8).
+    pub(crate) sessions: Arc<dyn ShimSessions>,
     pub(crate) power: Arc<dyn Power>,
     pub(crate) logins: Arc<dyn Logins>,
     /// The agent credentials the API admits; each session is issued one (#63).
@@ -399,11 +455,18 @@ pub(crate) enum Done {
     },
 }
 
-/// A running effect: its kill signal and its task.
+/// A running effect: its kill signal and its task, aborted when this is dropped: a loop that
+/// is dropped (its own task aborted) drops what its tasks hold, children and all.
 #[derive(Debug)]
 struct Task {
     kill: watch::Sender<bool>,
     handle: JoinHandle<()>,
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
 }
 
 /// The item in flight.
@@ -544,10 +607,10 @@ impl Loop {
             }
         }
         if let Some(cur) = self.current.as_mut()
-            && let Some(task) = cur.task.take()
+            && let Some(mut task) = cur.task.take()
         {
             let _ = task.kill.send(true);
-            let _ = task.handle.await;
+            let _ = (&mut task.handle).await;
         }
     }
 
@@ -746,9 +809,9 @@ impl Loop {
             handle.abort();
             return;
         };
-        if let Some(old) = cur.task.replace(Task { kill, handle }) {
+        if let Some(mut old) = cur.task.replace(Task { kill, handle }) {
             let _ = old.kill.send(true);
-            let _ = old.handle.await;
+            let _ = (&mut old.handle).await;
         }
     }
 
@@ -842,6 +905,15 @@ impl Loop {
         };
         let child = park::ChildSlot::default();
         let slot = child.clone();
+        // The shim's deadman (E9): what is left of the item's wall-clock budget, the figure
+        // the loop's own check compares ([`hold`]).
+        let budget = claimed
+            .snapshot
+            .contract
+            .budget
+            .wall
+            .or(config.budget.item_wall_clock);
+        let shim_cap = session::shim_cap(budget, self.active_time());
         let handle = tokio::spawn(async move {
             let run = session::Run {
                 item: item.clone(),
@@ -849,6 +921,7 @@ impl Loop {
                 spawn,
                 mode,
                 child: slot,
+                shim_cap,
             };
             let event =
                 session::session(&shared, &config, &claimed, &run, kill_rx, on_blocking).await;
@@ -1222,7 +1295,7 @@ impl Loop {
             };
             if tokio::time::timeout(grace, &mut task.handle).await.is_err() {
                 let _ = task.kill.send(true);
-                let _ = task.handle.await;
+                let _ = (&mut task.handle).await;
             }
         }
         let done = matches!(cur.item.state, State::Done(_));
@@ -1456,9 +1529,9 @@ impl Loop {
             gap.as_secs(),
             cur.item.id
         ));
-        if let Some(task) = cur.task.take() {
+        if let Some(mut task) = cur.task.take() {
             let _ = task.kill.send(true);
-            let _ = task.handle.await;
+            let _ = (&mut task.handle).await;
         }
         self.apply(Event::Exited {
             attempt: number,

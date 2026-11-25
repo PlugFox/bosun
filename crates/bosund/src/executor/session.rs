@@ -15,10 +15,26 @@
 //! the spawn. A session that has not by then, or that ends without it, is killed and reported as
 //! [`Event::NoHandshake`]: the agent CLI would otherwise run on without its tools.
 //!
+//! # Under the session shim (#8)
+//!
+//! In worktree mode (E19), and only there, the agent runs under the session shim: a copy of
+//! `bosun-shim` at a path named by the binary's digest ([`install_shim`], E3), in a directory
+//! of its own under the session's (`shim-s<spawn>`), with the prompt in the shim's stdin file
+//! (E17) and the item's remaining wall-clock budget as the shim's cap ([`shim_cap`], E9). The
+//! shim is recorded in `process` (its pid and start time, its record, the digest of the
+//! session's credential), and how far its output has been read, in whole lines, is written to
+//! that row at most once a second and at the end (E18). While the item holds leases, the shim
+//! is on its journal entry (E16). A session the shim capped is reported as
+//! [`Event::BudgetExceeded`]. Dropping the session task leaves the session running: only the
+//! daemon's kill ends it. Without `repo.<name>.worktree` the agent is a plain child of
+//! [`Deps::spawner`] and dies with the daemon, as in stage 1.
+//!
 //! [`Options::handshake`]: super::Options::handshake
+//! [`Deps::spawner`]: super::Deps::spawner
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,11 +46,12 @@ use bosun_config::{Config, Repo};
 use bosun_core::{Event, Exit, ItemId, Rules, SpawnMode};
 use bosun_git::{Git, Hooks, Trailers};
 use bosun_proc::ChildSpec;
+use bosun_proc::shim::{Record, ShimSpawner, session_record};
 use bosun_runner::claude::{ClaudeRunner, mcp_config};
 use bosun_runner::{
     LiveEntry, McpServer, ProcessExit, Runner, SessionContext, SessionId, Tail, ToolPolicy, prompt,
 };
-use bosun_store::{RunCommits, RunEnd, RunStart, Write};
+use bosun_store::{NewProcess, RunCommits, RunEnd, RunStart, Write};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::watch;
@@ -44,12 +61,132 @@ use super::verdict::killed;
 use super::{Claimed, Shared, blocking, git, identity, lookup, now_ms, workspace};
 use crate::agent::Binding;
 use crate::events;
+use crate::leases::Holder;
 
 /// The provider name of the Claude runner's sessions in the store.
 const PROVIDER: &str = "claude";
 
 /// How long the output is still read after the session's process ended.
 const DRAIN: Duration = Duration::from_secs(2);
+
+/// The shim's cap when no wall-clock budget is configured (E9: the shim is a deadman).
+pub(crate) const SHIM_CAP_UNBUDGETED: Duration = Duration::from_hours(24);
+
+/// How often, at most, the offsets of a shim's output are written to its `process` row (E18).
+const OFFSETS_EVERY: Duration = Duration::from_secs(1);
+
+/// How long the session task waits, at its end, for the shim to exit before its directory is
+/// removed.
+const SHIM_EXIT: Duration = Duration::from_secs(5);
+
+/// The session shim's wall-clock cap (E9): what is left of the item's wall-clock budget
+/// (`budget`: the card's `budget.wall`, else the configuration's `budget.item_wall_clock`)
+/// after the active time it has `used`; zero once it is spent. With no budget,
+/// [`SHIM_CAP_UNBUDGETED`].
+pub(crate) fn shim_cap(budget: Option<Duration>, used: Duration) -> Duration {
+    if cfg!(mutant_loop_shim_cap_unbounded) {
+        // Mutant (`mutant_loop_shim_cap_unbounded`): the shim is capped at a day, whatever
+        // the budget.
+        return SHIM_CAP_UNBUDGETED;
+    }
+    budget.map_or(SHIM_CAP_UNBUDGETED, |budget| budget.saturating_sub(used))
+}
+
+/// The file name of the shim binary.
+fn shim_name() -> String {
+    format!("bosun-shim{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// The copy of the shim at `found` that sessions run (E3): `<daemon_dir>/shim/<the first 16
+/// hex digits of its SHA-256>/bosun-shim[.exe]`, made unless it exists already (copied to a
+/// temporary name in the same directory, then renamed). The daemon's own `found` stays
+/// replaceable while a session runs, and a session started by an older daemon keeps its copy.
+///
+/// # Errors
+///
+/// When `found` cannot be read or the copy cannot be made.
+pub(crate) fn install_shim(found: &Path, daemon_dir: &Path) -> Result<PathBuf, String> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    if cfg!(mutant_loop_shim_in_place) {
+        // Mutant (`mutant_loop_shim_in_place`): the shim runs from where it was found.
+        return Ok(found.to_owned());
+    }
+    let bytes = std::fs::read(found).map_err(|e| format!("{}: {e}", found.display()))?;
+    let digest = Sha256::digest(&bytes);
+    let hex = digest[..8].iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    });
+    let dir = daemon_dir.join("shim").join(hex);
+    let name = shim_name();
+    let path = dir.join(&name);
+    if path.is_file() {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let temp = dir.join(format!(
+        "{name}.{}-{}.copying",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    // `copy` keeps the permissions, so the copy is executable where the original is.
+    std::fs::copy(found, &temp).map_err(|e| format!("{}: {e}", temp.display()))?;
+    match std::fs::rename(&temp, &path) {
+        Ok(()) => Ok(path),
+        // Another loop made the same copy meanwhile (it may be running already).
+        Err(_) if path.is_file() => {
+            std::fs::remove_file(&temp).ok();
+            Ok(path)
+        }
+        Err(e) => {
+            std::fs::remove_file(&temp).ok();
+            Err(format!("{}: {e}", path.display()))
+        }
+    }
+}
+
+/// The bytes of `line` that count toward a stream's offset (E18): a whole line, its end
+/// included; nothing of a line cut short.
+fn whole_line(line: &[u8]) -> u64 {
+    if line.last() == Some(&b'\n') {
+        u64::try_from(line.len()).unwrap_or(u64::MAX)
+    } else {
+        0
+    }
+}
+
+/// The session's shim, once it runs: its row and how far its output has been read.
+struct ShimRun {
+    record: PathBuf,
+    shim: bosun_proc::ProcessKey,
+    /// The offsets last written to the row.
+    written: (u64, u64),
+    written_at: Instant,
+}
+
+impl ShimRun {
+    /// Writes the offsets `read` to the row, unless they are what it holds; `force`: whatever
+    /// the time since the last write, else only [`OFFSETS_EVERY`] after it.
+    async fn offsets(&mut self, shared: &Shared, read: (u64, u64), force: bool) {
+        if cfg!(mutant_loop_drop_shim_offsets) {
+            // Mutant (`mutant_loop_drop_shim_offsets`): the offsets are never written.
+            return;
+        }
+        if read == self.written || (!force && self.written_at.elapsed() < OFFSETS_EVERY) {
+            return;
+        }
+        let write = Write::ProcessOffsets {
+            record_path: self.record.to_string_lossy().into_owned(),
+            stdout: read.0,
+            stderr: read.1,
+        };
+        if let Err(e) = shared.deps.writer.write(vec![write]).await {
+            shared.trouble(format!("the offsets of {}: {e}", self.record.display()));
+        }
+        self.written = read;
+        self.written_at = Instant::now();
+    }
+}
 
 /// Which session this is.
 #[derive(Debug, Clone)]
@@ -60,6 +197,8 @@ pub(crate) struct Run {
     pub(crate) mode: SpawnMode,
     /// Where the session's child is recorded while it runs, for the wake check (#66).
     pub(crate) child: ChildSlot,
+    /// The session shim's wall-clock cap, in worktree mode ([`shim_cap`]).
+    pub(crate) shim_cap: Duration,
 }
 
 impl Run {
@@ -587,7 +726,15 @@ pub(crate) async fn session(
         stdin: command.stdin.clone().map(String::into_bytes),
     };
     let tail_file = TailFile::open(tail_path(&shared.options.work_dir, session_id.as_str()));
-    let spawned = match shared.deps.spawner.spawn(&spec) {
+    // Worktree mode (E19): the agent runs under the session shim.
+    // Mutant (`mutant_loop_sessions_without_shim`): it is a plain child of the daemon.
+    let shim_dir = (claimed.worktree.is_some() && !cfg!(mutant_loop_sessions_without_shim))
+        .then(|| session_dir.0.join(format!("shim-s{}", run.spawn)));
+    let spawned = match &shim_dir {
+        Some(dir) => spawn_under_shim(shared, run, &spec, dir).await,
+        None => shared.deps.spawner.spawn(&spec).map_err(|e| e.to_string()),
+    };
+    let spawned = match spawned {
         Ok(spawned) => spawned,
         Err(e) => {
             shared.trouble(format!(
@@ -606,6 +753,10 @@ pub(crate) async fn session(
     } = spawned;
     let key = tree.key();
     set_child(&run.child, Some(key));
+    let mut shim_run = match &shim_dir {
+        Some(dir) => record_shim(shared, run, &session_id, &credential, dir).await,
+        None => None,
+    };
     let child = Write::SessionChild {
         item: run.item.clone(),
         attempt: run.attempt,
@@ -683,6 +834,8 @@ pub(crate) async fn session(
     tokio::pin!(handshake);
     let mut awaiting_hello = !cfg!(mutant_mcp_skip_handshake);
     let mut missed = false;
+    // The bytes of each stream consumed so far, in whole lines (E18).
+    let mut consumed = (0u64, 0u64);
     let status = {
         let mut wait = tree.wait();
         loop {
@@ -699,6 +852,7 @@ pub(crate) async fn session(
                         out_open = false;
                     }
                     if !out_line.is_empty() {
+                        consumed.0 += whole_line(&out_line);
                         on_line(OutputStream::Stdout, &out_line, &mut tail);
                         out_line.clear();
                     }
@@ -708,12 +862,16 @@ pub(crate) async fn session(
                         err_open = false;
                     }
                     if !err_line.is_empty() {
+                        consumed.1 += whole_line(&err_line);
                         on_line(OutputStream::Stderr, &err_line, &mut tail);
                         err_line.clear();
                     }
                 }
                 status = &mut wait => break Some(status),
                 () = killed(&mut kill) => break None,
+            }
+            if let Some(shim_run) = shim_run.as_mut() {
+                shim_run.offsets(shared, consumed, false).await;
             }
         }
     };
@@ -727,7 +885,13 @@ pub(crate) async fn session(
     // credential and its files.
     let _ = tree.kill_tree();
     drop(credential);
-    drop(session_dir);
+    // Under the shim its directory, which holds the shim's files, goes once the shim is gone.
+    let session_dir = if shim_dir.is_some() {
+        Some(session_dir)
+    } else {
+        drop(session_dir);
+        None
+    };
     let deadline = Instant::now() + DRAIN;
     while out_open || err_open {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -740,6 +904,7 @@ pub(crate) async fn session(
                     out_open = false;
                 }
                 if !out_line.is_empty() {
+                    consumed.0 += whole_line(&out_line);
                     on_line(OutputStream::Stdout, &out_line, &mut tail);
                     out_line.clear();
                 }
@@ -749,6 +914,7 @@ pub(crate) async fn session(
                     err_open = false;
                 }
                 if !err_line.is_empty() {
+                    consumed.1 += whole_line(&err_line);
                     on_line(OutputStream::Stderr, &err_line, &mut tail);
                     err_line.clear();
                 }
@@ -756,6 +922,16 @@ pub(crate) async fn session(
             () = tokio::time::sleep(left) => break,
         }
     }
+    // The output files are closed before the shim's directory goes.
+    drop((out, err));
+    let capped = match shim_run.as_mut() {
+        Some(shim_run) => {
+            shim_run.offsets(shared, consumed, true).await;
+            shim_ended(shared, run, shim_run).await
+        }
+        None => false,
+    };
+    drop(session_dir);
     let ended = status.is_some();
     if missed {
         shared.trouble(format!(
@@ -793,6 +969,14 @@ pub(crate) async fn session(
         spawn: run.spawn,
         exit: events::exit_name(published).to_owned(),
     });
+    if capped && ended {
+        shared.trouble(format!(
+            "{}: the session shim killed the session at the item's wall-clock cap ({} s)",
+            run.item,
+            run.shim_cap.as_secs()
+        ));
+        return Event::BudgetExceeded;
+    }
     if run.mode == SpawnMode::Resume && exit == Exit::Crash && ended && !up.load(Ordering::Relaxed)
     {
         crate::log::log!(
@@ -805,6 +989,106 @@ pub(crate) async fn session(
         };
     }
     run.exited(exit)
+}
+
+/// Starts `spec` under a copy of the session shim, in `dir` (which must not exist yet: a
+/// resumed session has a new spawn number), capped at [`Run::shim_cap`].
+async fn spawn_under_shim(
+    shared: &Arc<Shared>,
+    run: &Run,
+    spec: &ChildSpec,
+    dir: &Path,
+) -> Result<bosun_proc::Spawned, String> {
+    let (found, daemon_dir) = (
+        shared.options.shim.clone(),
+        shared.options.daemon_dir.clone(),
+    );
+    let copy = blocking(move || install_shim(&found, &daemon_dir))
+        .await
+        .map_err(|e| format!("the session shim cannot be installed: {e}"))?;
+    let shim = ShimSpawner::new(copy, dir, run.shim_cap);
+    let (sessions, spec, dir) = (
+        shared.deps.sessions.clone(),
+        spec.clone(),
+        dir.to_path_buf(),
+    );
+    blocking(move || {
+        std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        sessions
+            .spawn_in(&shim, &spec, &dir)
+            .map_err(|e| format!("through the session shim: {e}"))
+    })
+    .await
+}
+
+/// After the spawn under the shim in `dir`: the `process` row and the lease journal's shim.
+/// `None` when the shim's record cannot be read (reported; the session goes on unrecorded).
+async fn record_shim(
+    shared: &Shared,
+    run: &Run,
+    session_id: &SessionId,
+    credential: &crate::agent::Issued,
+    dir: &Path,
+) -> Option<ShimRun> {
+    let path = session_record(dir);
+    let record = match Record::read(&path) {
+        Ok(record) => record,
+        Err(e) => {
+            shared.trouble(format!(
+                "{}: the shim's record {}: {e}",
+                run.item,
+                path.display()
+            ));
+            return None;
+        }
+    };
+    let write = Write::Process(NewProcess {
+        item: run.item.clone(),
+        attempt: run.attempt,
+        spawn: run.spawn,
+        session_key: session_id.to_string(),
+        pid: record.shim.pid,
+        pid_started_ms: record.shim.start.raw().cast_signed(),
+        record_path: path.to_string_lossy().into_owned(),
+        credential_digest: Some(credential.digest().to_vec()),
+        started_ms: now_ms(),
+    });
+    if let Err(e) = shared.deps.writer.write(vec![write]).await {
+        shared.trouble(format!("{}: the session's shim: {e}", run.item));
+        return None;
+    }
+    shared
+        .deps
+        .leases
+        .set_shim(&Holder::Item(run.item.clone()), Some(record.shim));
+    Some(ShimRun {
+        record: path,
+        shim: record.shim,
+        written: (0, 0),
+        written_at: Instant::now(),
+    })
+}
+
+/// The session under the shim has ended: waits a little for the shim to exit, marks its row
+/// gone and takes it off the lease journal. Whether the shim capped the session.
+async fn shim_ended(shared: &Shared, run: &Run, shim_run: &ShimRun) -> bool {
+    let deadline = Instant::now() + SHIM_EXIT;
+    while bosun_proc::is_running(shim_run.shim) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let capped = Record::read(&shim_run.record).is_ok_and(|r| r.capped);
+    shared
+        .deps
+        .leases
+        .set_shim(&Holder::Item(run.item.clone()), None);
+    let gone = Write::ProcessGone {
+        record_path: shim_run.record.to_string_lossy().into_owned(),
+        at_ms: now_ms(),
+    };
+    if let Err(e) = shared.deps.writer.write(vec![gone]).await {
+        shared.trouble(format!("{}: the end of the session's shim: {e}", run.item));
+    }
+    capped
 }
 
 fn set_child(slot: &ChildSlot, key: Option<bosun_proc::ProcessKey>) {
@@ -856,5 +1140,32 @@ async fn end(shared: &Shared, run: &Run, exit: Exit, start_head: Option<&str>, g
     }
     if let Err(e) = shared.deps.writer.write(writes).await {
         shared.trouble(format!("{}: the end of the session: {e}", run.item));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_shim_cap_is_the_remaining_wall_budget_or_a_day() {
+        assert_eq!(
+            shim_cap(Some(Duration::from_hours(2)), Duration::from_mins(30)),
+            Duration::from_mins(90)
+        );
+        assert_eq!(
+            shim_cap(Some(Duration::from_hours(2)), Duration::from_hours(3)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            shim_cap(None, Duration::from_mins(30)),
+            Duration::from_hours(24)
+        );
+    }
+
+    #[test]
+    fn only_whole_lines_count_toward_an_offset() {
+        assert_eq!(whole_line(b"{}\r\n"), 4);
+        assert_eq!(whole_line(b"cut sho"), 0);
     }
 }

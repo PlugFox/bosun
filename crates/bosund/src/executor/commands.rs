@@ -77,7 +77,9 @@ pub(crate) fn read(state: State, card: Option<&Card>, pending: bool, restarted: 
             Read::Command(UserCommand::Requeue)
         }
         Column::Ready if matches!(state, State::Done(_)) && !pending => Read::Revert,
-        Column::Done if owned => Read::Command(UserCommand::ManualDone),
+        // A Done item whose pull request was closed unmerged (#8) is Needs you while its card
+        // is still in Done: the column write is the daemon's own, still in the outbox.
+        Column::Done if in_flight || (owned && !pending) => Read::Command(UserCommand::ManualDone),
         Column::InProgress | Column::Verify | Column::NeedsYou => {
             if in_flight && !restarted && card.labels.iter().any(|l| l == RESTART_LABEL) {
                 return Read::Command(UserCommand::Restart);
@@ -454,7 +456,22 @@ mod tests {
             ),
             Read::Nothing
         );
+        // A Done item Needs you since its pull request was closed (#8): its card is still in
+        // Done until the column write goes out.
+        let closed = State::NeedsYou(Reason::LandingRefused);
+        assert_eq!(
+            read(closed, Some(&card(Column::Done, &[])), true, false),
+            Read::Nothing
+        );
+        assert_eq!(
+            read(closed, Some(&card(Column::Done, &[])), false, false),
+            Read::Command(UserCommand::ManualDone)
+        );
         // A user's column, though, is always the user's.
+        assert_eq!(
+            read(State::Running, Some(&card(Column::Done, &[])), true, false),
+            Read::Command(UserCommand::ManualDone)
+        );
         assert_eq!(
             read(State::Running, Some(&card(Column::Ready, &[])), true, false),
             Read::Command(UserCommand::Requeue)

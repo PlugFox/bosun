@@ -8,7 +8,8 @@
 //! - **Rendered at send time.** A row holds what to write, never a body. The sticky report is
 //!   rendered from the database when it is sent ([`report_facts`]), a Needs-you comment from
 //!   its reason (a question from the agent's recorded call, lint findings, a budget's figure
-//!   and what failed to make or set up a worktree from the item's notes, #111, #8), and a column write sends the column of the item's state
+//!   and what failed to make or set up a worktree, or the pull request closed unmerged, from the
+//!   item's notes, #111, #8), and a column write sends the column of the item's state
 //!   now. So a replay can never put an older report or column on the board than the database
 //!   holds, and a row pending across a daemon restart renders as it would have before.
 //! - **Figures.** The report's cost is the item's runs, exact (#72: every session bosun spawned
@@ -44,6 +45,7 @@ use bosun_queue::{Owned, QueueError};
 use bosun_store::{AgentCallKind, OutboxOp, OutboxRow, Reader, Write};
 use tokio::sync::{Notify, watch};
 
+use super::pulls::NOTE_PR_CLOSED;
 use super::{Shared, blocking, lookup};
 
 /// Effect indexes from here up are reverts of foreign changes, not effects of a transition
@@ -475,6 +477,38 @@ impl Drainer {
             .map_err(|e| e.to_string())
     }
 
+    /// What a Needs-you row of [`Reason::LandingRefused`] says when its transition was a pull
+    /// request closed unmerged (#8): the item's [`NOTE_PR_CLOSED`] note written for that very
+    /// transition. `None` for any other refusal.
+    async fn closed_pull_request(&self, row: &OutboxRow) -> Result<Option<String>, String> {
+        #[derive(serde::Deserialize)]
+        struct Closed {
+            number: u64,
+            #[serde(default)]
+            url: Option<String>,
+            seq: u32,
+        }
+        let Some((_, seq, _)) = key_parts(&row.effect_key) else {
+            return Ok(None);
+        };
+        let Some(closed) = self
+            .note(&row.item, NOTE_PR_CLOSED)
+            .await?
+            .and_then(|text| serde_json::from_str::<Closed>(&text).ok())
+            .filter(|c| c.seq == seq)
+        else {
+            return Ok(None);
+        };
+        let mut text = format!(
+            "Pull request #{} was closed without being merged",
+            closed.number
+        );
+        if let Some(url) = closed.url.filter(|u| !u.trim().is_empty()) {
+            let _ = write!(text, " ({})", publish::sanitise_inline(&url, 200));
+        }
+        Ok(Some(text))
+    }
+
     /// The new comment of a Needs-you row: its reason; a question's own text.
     async fn comment_body(&self, row: &OutboxRow, reason: Reason) -> Result<String, String> {
         let item = &row.item;
@@ -528,6 +562,12 @@ impl Drainer {
                     body.push_str(&publish::sanitise_inline(&finding, 500));
                 }
                 body.push_str("\n\nFix the card, then move it to Ready.");
+            }
+            Reason::LandingRefused if let Some(closed) = self.closed_pull_request(row).await? => {
+                body.push_str(&closed);
+                body.push_str(
+                    ". The item report above has the facts. Move the card to Ready to retry                      with a fresh attempt counter, or to Backlog to cancel.",
+                );
             }
             other => {
                 body.push_str(reason_text(other));

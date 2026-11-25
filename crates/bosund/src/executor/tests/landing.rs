@@ -688,6 +688,10 @@ pub(super) struct FakeForge {
     pause_after_create: AtomicBool,
     paused: AtomicBool,
     released: AtomicBool,
+    /// What `state` answers for a pull request: open unless the scene set another.
+    states: std::sync::Mutex<std::collections::BTreeMap<u64, forge::PullRequestState>>,
+    /// The pull requests `state` was asked about, in order.
+    asked: std::sync::Mutex<Vec<u64>>,
 }
 
 impl FakeForge {
@@ -718,6 +722,21 @@ impl FakeForge {
 
     fn release(&self) {
         self.released.store(true, Ordering::SeqCst);
+    }
+
+    /// Pull request `number` is now `state`, as far as `state` answers.
+    fn set_state(&self, number: u64, state: forge::PullRequestState) {
+        self.states.lock().unwrap().insert(number, state);
+    }
+
+    /// How many times `state` was asked about pull request `number`.
+    fn asked(&self, number: u64) -> usize {
+        self.asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|n| **n == number)
+            .count()
     }
 }
 
@@ -775,6 +794,22 @@ impl forge::Forge for FakeForge {
         self.answer()?;
         self.edit(number, |_| body.to_owned());
         Ok(())
+    }
+
+    fn state(
+        &self,
+        _at: &forge::At,
+        number: u64,
+    ) -> Result<forge::PullRequestState, forge::ForgeError> {
+        self.asked.lock().unwrap().push(number);
+        self.answer()?;
+        Ok(self
+            .states
+            .lock()
+            .unwrap()
+            .get(&number)
+            .copied()
+            .unwrap_or(forge::PullRequestState::Open))
     }
 }
 
@@ -1047,4 +1082,139 @@ async fn a_refused_pull_request_needs_the_user_and_an_unreachable_forge_keeps_la
     assert!(matches!(state, State::Done(_)), "{state:?}");
     assert_eq!(fake.prs().len(), 1);
     assert_eq!(pushed(&scene, &remote).len(), 1);
+}
+
+/// The comments on card `n` that say its item needs the user.
+fn needs_you_comments(scene: &Scene, n: u64) -> Vec<String> {
+    scene
+        .cards()
+        .into_iter()
+        .find(|c| c.id.0 == n)
+        .expect("the card is on the board")
+        .comments
+        .into_iter()
+        .filter(|c| c.key.is_some() && c.body.contains("needs you."))
+        .map(|c| c.body)
+        .collect()
+}
+
+/// After Done in `pr` mode (#8): the item ends Done with pull request #1 open; the test has the
+/// fake forge answer that it was closed unmerged. The item is Needs you (`landing_refused`), its
+/// card holds exactly one Needs-you comment, which names the pull request; the landing row says
+/// `closed`, and over several more polls the forge is not asked about it again
+/// (`mutant_loop_pr_closed_ignored` takes it for an open one: the item stays Done).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_request_closed_unmerged_needs_the_user_with_one_comment() {
+    let (scene, fake, _remote) = pr_scene("").await;
+    scene.write_board(&[card(1, "Closed later", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    closed(&scene, 1).await;
+    // Open: asked, and nothing changes.
+    wait_for(
+        "the open pull request to be asked about",
+        LIMIT,
+        async || fake.asked(1) >= 2,
+    )
+    .await;
+    assert!(matches!(scene.state(1).await, Some(State::Done(_))));
+
+    fake.set_state(1, forge::PullRequestState::Closed);
+    let deadline = Instant::now() + LIMIT;
+    let mut state = scene.state(1).await;
+    while Instant::now() < deadline && matches!(state, Some(State::Done(_))) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        state = scene.state(1).await;
+    }
+    assert_eq!(state, Some(State::NeedsYou(Reason::LandingRefused)));
+    wait_for("the closed row", LIMIT, async || {
+        scene
+            .store
+            .reader()
+            .landing(&item(1))
+            .await
+            .unwrap()
+            .is_some_and(|r| r.pr_state == Some(bosun_store::PrState::Closed))
+    })
+    .await;
+    let asked = fake.asked(1);
+    // Several polls (every 100 ms in the scenes).
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    drained(&scene).await;
+    task.abort();
+    watcher.abort();
+
+    assert_eq!(fake.asked(1), asked, "asked again after it was closed");
+    assert_eq!(
+        scene.state(1).await,
+        Some(State::NeedsYou(Reason::LandingRefused))
+    );
+    let comments = needs_you_comments(&scene, 1);
+    assert_eq!(comments.len(), 1, "{comments:#?}");
+    assert!(
+        comments[0].contains("Pull request #1 was closed without being merged"),
+        "{}",
+        comments[0]
+    );
+    let card = scene.cards().into_iter().find(|c| c.id.0 == 1).unwrap();
+    assert_eq!(card.column, Column::NeedsYou);
+    let row = scene.store.reader().landing(&item(1)).await.unwrap();
+    let row = row.expect("the landing row");
+    assert_eq!(
+        (row.pr_number, row.pr_state),
+        (Some(1), Some(bosun_store::PrState::Closed)),
+        "{row:?}"
+    );
+    assert!(row.landed_sha.is_some(), "the other columns kept: {row:?}");
+}
+
+/// E6: card 2 is `blocked-by` card 1. Card 1 ends Done with its pull request open; while the
+/// forge says it is open card 2 is not claimed. Once the fake forge says it was merged, card 2
+/// is claimed and ends Done, and card 1's landing row says `merged`
+/// (`mutant_loop_pr_open_releases_blockers` claims card 2 while the pull request is open).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dependant_waits_for_the_merge_of_its_blockers_pull_request() {
+    let (scene, fake, _remote) = pr_scene("").await;
+    scene.write_board(&[
+        card(1, "Blocker", "test -f a.txt", "Item one."),
+        Card {
+            body: "Item two.\n\n```bosun\nverdict = 'test -f b.txt'\nblocked-by = [1]\n```\n"
+                .to_owned(),
+            ..card(2, "Dependant", "true", "")
+        },
+    ]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    scene.script(2, &["commit b.txt b".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let before = fake.asked(1);
+    wait_for(
+        "several polls of the open pull request",
+        LIMIT,
+        async || fake.asked(1) >= before + 5,
+    )
+    .await;
+    assert!(
+        matches!(scene.state(2).await, None | Some(State::Ready)),
+        "claimed while its blocker's pull request is open: {:?}",
+        scene.state(2).await
+    );
+
+    fake.set_state(1, forge::PullRequestState::Merged);
+    let state = ended(&scene, 2, LIMIT).await;
+    closed(&scene, 2).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let row = scene.store.reader().landing(&item(1)).await.unwrap();
+    let row = row.expect("the landing row of card 1");
+    assert_eq!(
+        (row.pr_number, row.pr_state),
+        (Some(1), Some(bosun_store::PrState::Merged)),
+        "{row:?}"
+    );
 }

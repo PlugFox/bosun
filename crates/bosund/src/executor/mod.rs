@@ -57,6 +57,11 @@
 //! its worktree closed; one that is not Done keeps its work in the clone under
 //! `refs/bosun/items/<item>`.
 //!
+//! In the `pr` landing mode an item is Done when its pull request is open; the loop goes on
+//! asking the forge about it every [`Options::pr_poll`] ([`pulls`]): merged is final and
+//! releases its dependants (`blocked-by`), which wait until then (E6); closed unmerged is Needs
+//! you with one comment.
+//!
 //! # Leases (#8)
 //!
 //! In worktree mode an item leases what its snapshot `needs`, plus the shared build's resource
@@ -136,6 +141,7 @@ mod identity;
 mod landing;
 mod outbox;
 mod park;
+mod pulls;
 mod recover;
 mod session;
 mod sweep;
@@ -173,6 +179,9 @@ pub(crate) use recover::next_boot;
 /// How long a session that asked a blocking question may go on before it is killed: time to
 /// write down what it has (#7).
 pub(crate) const QUESTION_GRACE: Duration = Duration::from_secs(10);
+
+/// How often the daemon asks the forge about the open pull requests of Done items (#8).
+pub(crate) const PR_POLL: Duration = Duration::from_mins(5);
 
 /// How long after spawn a session's `bosun-mcp` has to call `agent.hello` (#64). The agent
 /// CLI starts its MCP servers before its first turn; this leaves room for a slow start of the
@@ -267,6 +276,9 @@ pub(crate) struct Options {
     pub(crate) recheck: Duration,
     /// How long a session that asked a blocking question may go on before it is killed.
     pub(crate) question_grace: Duration,
+    /// How often the open pull requests of items Done in the `pr` landing mode are asked
+    /// about ([`pulls`]; [`PR_POLL`] in the daemon).
+    pub(crate) pr_poll: Duration,
     /// The MCP server every session's configuration starts ([`find_mcp`]).
     pub(crate) mcp: PathBuf,
     /// The session shim as found ([`find_shim`]); worktree-mode sessions run a copy of it.
@@ -570,6 +582,8 @@ pub(crate) struct Loop {
     absent: BTreeSet<ItemId>,
     /// When the board is read next (#106).
     pace: board::Pace,
+    /// The poll of the open pull requests of Done items (#8).
+    pulls: pulls::Watch,
 }
 
 /// Aborts its task when dropped: the drainer ends with its loop.
@@ -620,6 +634,7 @@ impl Loop {
             restarts: BTreeSet::new(),
             absent: BTreeSet::new(),
             pace,
+            pulls: pulls::Watch::default(),
         }
     }
 
@@ -1656,6 +1671,10 @@ impl Loop {
             self.revalidate(gap).await;
         }
         self.watch_tick().await;
+        self.poll_pull_requests().await;
+        if self.halted {
+            return;
+        }
         // A lease whose holder is gone (E16): one of a `bosun with` command that ended.
         self.shared.deps.leases.release_stale();
         if let Some(cur) = self.current.as_ref() {
@@ -1820,9 +1839,13 @@ impl Loop {
             self.bounce(&item, &Event::LintFailed).await;
         }
 
+        let Some(unmerged) = self.unmerged(repo).await else {
+            return;
+        };
         let satisfied: BTreeSet<ItemId> = stored
             .values()
             .filter(|s| matches!(s.item.state, State::Done(_)))
+            .filter(|s| !pulls::waits_for_merge(s.item.state, unmerged.contains(&s.item.id)))
             .map(|s| s.item.id.clone())
             .collect();
         let now = self.shared.deps.clock.wall_ms();

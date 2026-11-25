@@ -388,6 +388,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_pr_body_overwritten)",
   "cfg(mutant_loop_pr_create_without_lookup)",
   "cfg(mutant_loop_pr_refusal_is_retried)",
+  # #8: after Done in `pr` mode the pull request is polled: merged releases dependants, closed
+  # unmerged is Needs you once.
+  "cfg(mutant_loop_pr_open_releases_blockers)",
+  "cfg(mutant_loop_pr_closed_ignored)",
+  "cfg(mutant_core_pr_closed_from_anywhere)",
   # #179: the lease journal is per daemon; load adopts no other daemon's entries; a holder that
   # asks again is re-stamped; a corrupt journal is moved aside.
   "cfg(mutant_leases_one_journal_per_directory)",

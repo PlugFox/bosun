@@ -14,6 +14,8 @@
 //!             |                                          uncounted-park cap, config changed)
 //!             +-> ready                                 (user won the claim race)
 //! any daemon-owned state -> cancelled | ready | done    (user command, #5)
+//! done (pass, flaky) -> needs_you                       (`pr` mode: its pull request was
+//!                                                        closed unmerged, #8)
 //! ```
 //!
 //! [`step`] is a pure function of the item, the event and a [`Ctx`] (the time and the active
@@ -37,7 +39,9 @@
 //! before the target is fast-forwarded. A verdict that passed before the rebase is never
 //! accepted as a verdict on the target branch; a failing re-verdict is a failed attempt. A
 //! conflict gets one session of the same attempt with the conflict as its prompt; a second
-//! conflict is Needs you. A failed worktree setup is Needs you and counts nothing.
+//! conflict is Needs you. A failed worktree setup is Needs you and counts nothing. In the `pr`
+//! landing mode an item is Done when its pull request is open; one closed unmerged later
+//! ([`Event::PullRequestClosed`]) is Needs you, once.
 //!
 //! Invariant 2 of #1: an agent-originated event ([`Actor::Agent`]: a question, a summary, a
 //! note) and the text of an exit can move an item to Needs you or nowhere. Only a verdict run
@@ -433,6 +437,10 @@ pub enum Event {
         /// The daemon's boot number, increasing across starts.
         boot: u32,
     },
+    /// The pull request of an item Done in the `pr` landing mode was closed without being
+    /// merged (#8): the daemon saw it when it polled the forge. Needs you, from a Done item
+    /// whose verdict passed only.
+    PullRequestClosed,
     /// A user command.
     User(UserCommand),
 }
@@ -468,6 +476,7 @@ impl Event {
             Self::ConfigChanged => "config_changed",
             Self::Restarted { .. } => "restarted",
             Self::Reattached { .. } => "reattached",
+            Self::PullRequestClosed => "pr_closed",
             Self::User(UserCommand::Cancel) => "user_cancel",
             Self::User(UserCommand::Requeue) => "user_requeue",
             Self::User(UserCommand::Restart) => "user_restart",
@@ -851,6 +860,7 @@ impl Draft {
             }
             Event::Restarted { boot, tail } => self.restarted(*boot, *tail)?,
             Event::Reattached { boot } => self.reattached(*boot)?,
+            Event::PullRequestClosed => self.pr_closed()?,
             Event::User(command) => self.user(*command)?,
         }
         Some(())
@@ -968,6 +978,17 @@ impl Draft {
             }
             _ => return None,
         }
+        Some(())
+    }
+
+    /// After Done in the `pr` landing mode (#8): the item's pull request was closed unmerged.
+    fn pr_closed(&mut self) -> Option<()> {
+        // Mutant (`mutant_core_pr_closed_from_anywhere`): any state takes the arrow.
+        if !cfg!(mutant_core_pr_closed_from_anywhere) {
+            // Not a card the user closed by hand: its pull request is not the daemon's.
+            self.expect(&[State::Done(Outcome::Pass), State::Done(Outcome::Flaky)])?;
+        }
+        self.needs_you(Reason::LandingRefused);
         Some(())
     }
 
@@ -2115,6 +2136,38 @@ mod tests {
         // A requeue resets the conflict counter with the others.
         let requeued = go(&second.item, &Event::User(UserCommand::Requeue), &ctx()).item;
         assert_eq!(requeued.conflicts, 0);
+    }
+
+    /// #8: a pull request closed unmerged moves an item Done with a passing verdict to Needs
+    /// you once, with a comment; a second sighting, a card the user closed and an item still in
+    /// flight take no arrow.
+    #[test]
+    fn a_closed_pull_request_moves_a_done_item_to_needs_you_once() {
+        let passed = attempt(running(), &[RunResult::Pass]);
+        let done = go(&passed, &Event::Landed, &ctx()).item;
+        assert_eq!(done.state, State::Done(Outcome::Pass));
+        let closed = go(&done, &Event::PullRequestClosed, &ctx());
+        assert_eq!(closed.transition.cause, "pr_closed");
+        assert_eq!(closed.item.state, State::NeedsYou(Reason::LandingRefused));
+        let effects = kinds(&closed);
+        assert!(effects.contains(&EffectKind::Comment(Reason::LandingRefused)));
+        assert!(effects.contains(&EffectKind::Project(Column::NeedsYou)));
+        assert_eq!(step(&closed.item, &Event::PullRequestClosed, &ctx()), None);
+
+        let flaky = Item {
+            state: State::Done(Outcome::Flaky),
+            ..done.clone()
+        };
+        assert_eq!(
+            go(&flaky, &Event::PullRequestClosed, &ctx()).item.state,
+            State::NeedsYou(Reason::LandingRefused)
+        );
+        let by_hand = Item {
+            state: State::Done(Outcome::UserClosed),
+            ..done
+        };
+        assert_eq!(step(&by_hand, &Event::PullRequestClosed, &ctx()), None);
+        assert_eq!(step(&running(), &Event::PullRequestClosed, &ctx()), None);
     }
 
     #[test]

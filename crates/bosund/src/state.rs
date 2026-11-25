@@ -582,6 +582,7 @@ fn start_loops(
             idle_backoff,
             recheck: Duration::from_mins(1),
             question_grace: executor::QUESTION_GRACE,
+            pr_poll: executor::PR_POLL,
             mcp: mcp.clone(),
             shim: shim.clone(),
             daemon_dir: daemon_dir.to_owned(),

@@ -2607,7 +2607,42 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test(PR_REDO_SCENE),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_pr_open_releases_blockers",
+        issue: PR_POLL_CARD,
+        breaks: "a Done blocker in `pr` mode releases its dependants while its pull request is open",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_dependant_waits_for_the_merge_of_its_blockers_pull_request",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_pr_closed_ignored",
+        issue: PR_POLL_CARD,
+        breaks: "a pull request closed unmerged is taken for an open one: the item stays Done",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_pull_request_closed_unmerged_needs_the_user_with_one_comment",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_pr_closed_from_anywhere",
+        issue: PR_POLL_CARD,
+        breaks: "a closed pull request moves an item to Needs you from any state",
+        package: "bosun-core",
+        check: Check::Test(
+            "item::tests::a_closed_pull_request_moves_a_done_item_to_needs_you_once",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that polls the pull request of an item Done in `pr` mode (merged releases
+/// dependants, closed unmerged is Needs you; its own number was not known when it was written;
+/// its parent's stands in).
+const PR_POLL_CARD: u32 = 8;
 
 /// The card of #8 that lands an item as a pull request (`landing.mode = "pr"`; its own number was
 /// not known when it was written; its parent's stands in).

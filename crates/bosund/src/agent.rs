@@ -123,6 +123,12 @@ impl Issued {
         &self.token
     }
 
+    /// The SHA-256 digest of the credential's text: what the `process` row keeps of it (#8);
+    /// the text itself is never stored.
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+
     /// Whether the session's `bosun-mcp` has made its `agent.hello` (the handshake of #64).
     #[allow(dead_code)] // The handshake timeout is #64's.
     pub(crate) fn said_hello(&self) -> bool {

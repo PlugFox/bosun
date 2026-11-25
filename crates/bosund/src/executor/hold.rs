@@ -91,6 +91,18 @@ impl Loop {
             .map(|r| r.identity.clone())
     }
 
+    /// The active time the item in flight has used so far: what its wall-clock cap is
+    /// compared with. Zero before its meter starts.
+    pub(super) fn active_time(&self) -> Duration {
+        let now = self.shared.deps.clock.wall_ms();
+        match (&self.current, &self.watch.meter) {
+            (Some(cur), Some(meter)) if meter.item == cur.item.id => {
+                Duration::from_millis(ms_u64(meter.active_ms(now)))
+            }
+            _ => Duration::ZERO,
+        }
+    }
+
     /// The hold in force on this repository at `now_ms`.
     pub(super) fn hold(&self, now_ms: i64) -> Option<Hold> {
         let identity = self.identity_name()?;

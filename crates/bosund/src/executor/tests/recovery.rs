@@ -141,6 +141,7 @@ impl Spawned {
             .env(ROLE_VAR, role.name())
             .env(BUILT_AGENT_VAR, fake_agent())
             .env(BUILT_MCP_VAR, bosun_mcp())
+            .env(BUILT_SHIM_VAR, bosun_shim())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(log))

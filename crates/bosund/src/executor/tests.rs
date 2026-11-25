@@ -32,6 +32,7 @@ use crate::events::{Events, Options as EventOptions};
 mod landing;
 mod leases;
 mod recovery;
+mod shim;
 mod sticky;
 mod worktrees;
 
@@ -62,63 +63,92 @@ const LOGIN: &str = "synthetic-login";
 /// The repository whose issues are the cards of the fake Projects v2 board.
 const BOARD_REPO: &str = "synthetic-owner/demo";
 
-/// `fake-agent` and `bosun-mcp`, built next to this test binary.
-fn built() -> &'static (PathBuf, PathBuf) {
-    static BUILT: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        // A child test process (#68) is handed what its parent built.
-        if let (Some(agent), Some(mcp)) = (
-            std::env::var_os(BUILT_AGENT_VAR),
-            std::env::var_os(BUILT_MCP_VAR),
-        ) {
-            return (PathBuf::from(agent), PathBuf::from(mcp));
-        }
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-        let mut build = Command::new(cargo);
-        build
-            .args([
-                "build",
-                "--locked",
-                "--package",
-                "fake-agent",
-                "--package",
-                "bosun-mcp",
-                "--message-format=json",
-            ])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .stderr(std::process::Stdio::inherit());
-        if !cfg!(debug_assertions) {
-            build.arg("--release");
-        }
-        let out = build.output().unwrap();
-        assert!(
-            out.status.success(),
-            "building fake-agent and bosun-mcp failed"
-        );
-        // Where cargo put them, whatever the target and build directories are.
-        let messages = String::from_utf8_lossy(&out.stdout);
-        let executable = |name: &str| {
+/// The binaries the scenes run, built next to this test binary.
+struct Built {
+    agent: PathBuf,
+    mcp: PathBuf,
+    /// The session shim (#8), which worktree-mode sessions run a copy of.
+    shim: PathBuf,
+}
+
+/// Runs `cargo build` with `args` and returns the executables of `names`, wherever the target
+/// and build directories are.
+fn cargo_build(args: &[&str], names: &[&str]) -> Vec<PathBuf> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let mut build = Command::new(cargo);
+    build
+        .args(["build", "--locked"])
+        .args(args)
+        .arg("--message-format=json")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stderr(std::process::Stdio::inherit());
+    if !cfg!(debug_assertions) {
+        build.arg("--release");
+    }
+    let out = build.output().unwrap();
+    assert!(out.status.success(), "building {names:?} failed");
+    let messages = String::from_utf8_lossy(&out.stdout);
+    names
+        .iter()
+        .map(|name| {
             messages
                 .lines()
                 .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .filter(|m| m["target"]["name"] == name)
+                .filter(|m| m["target"]["name"] == *name)
                 .find_map(|m| m["executable"].as_str().map(PathBuf::from))
                 .unwrap_or_else(|| panic!("cargo names the {name} executable"))
-        };
-        (executable("fake-agent"), executable("bosun-mcp"))
+        })
+        .collect()
+}
+
+/// `fake-agent`, `bosun-mcp` and `bosun-shim`, built once.
+fn built() -> &'static Built {
+    static BUILT: OnceLock<Built> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        // A child test process (#68) is handed what its parent built.
+        if let (Some(agent), Some(mcp), Some(shim)) = (
+            std::env::var_os(BUILT_AGENT_VAR),
+            std::env::var_os(BUILT_MCP_VAR),
+            std::env::var_os(BUILT_SHIM_VAR),
+        ) {
+            return Built {
+                agent: PathBuf::from(agent),
+                mcp: PathBuf::from(mcp),
+                shim: PathBuf::from(shim),
+            };
+        }
+        let mut both = cargo_build(
+            &["--package", "fake-agent", "--package", "bosun-mcp"],
+            &["fake-agent", "bosun-mcp"],
+        );
+        let mut shim = cargo_build(
+            &["--package", "bosun-proc", "--bin", "bosun-shim"],
+            &["bosun-shim"],
+        );
+        let (mcp, agent) = (both.remove(1), both.remove(0));
+        Built {
+            agent,
+            mcp,
+            shim: shim.remove(0),
+        }
     })
 }
 
-/// The variables a child test process finds `fake-agent` and `bosun-mcp` in.
+/// The variables a child test process finds `fake-agent`, `bosun-mcp` and `bosun-shim` in.
 const BUILT_AGENT_VAR: &str = "BOSUN_TEST_FAKE_AGENT";
 const BUILT_MCP_VAR: &str = "BOSUN_TEST_BOSUN_MCP";
+const BUILT_SHIM_VAR: &str = "BOSUN_TEST_BOSUN_SHIM";
 
 fn fake_agent() -> &'static Path {
-    &built().0
+    &built().agent
 }
 
 fn bosun_mcp() -> &'static Path {
-    &built().1
+    &built().mcp
+}
+
+fn bosun_shim() -> &'static Path {
+    &built().shim
 }
 
 /// A fresh endpoint for one scene's API.
@@ -166,14 +196,17 @@ impl Logins for FixedLogins {
     }
 }
 
-/// The native spawner, counting the agent sessions it spawns (not the verdict shells).
+/// The native spawner, counting the agent sessions it spawns (not the verdict shells); in
+/// worktree mode it counts those started through the session shim as well.
 #[derive(Debug, Default)]
 struct Counting {
     spawns: AtomicUsize,
+    /// Of `spawns`, those through the shim.
+    shimmed: AtomicUsize,
 }
 
-impl Spawner for Counting {
-    fn spawn(&self, spec: &ChildSpec) -> std::io::Result<Spawned> {
+impl Counting {
+    fn count(&self, spec: &ChildSpec) {
         let agent = spec
             .program
             .file_stem()
@@ -181,7 +214,26 @@ impl Spawner for Counting {
         if agent {
             self.spawns.fetch_add(1, Ordering::SeqCst);
         }
+    }
+}
+
+impl Spawner for Counting {
+    fn spawn(&self, spec: &ChildSpec) -> std::io::Result<Spawned> {
+        self.count(spec);
         NativeSpawner.spawn(spec)
+    }
+}
+
+impl ShimSessions for Counting {
+    fn spawn_in(
+        &self,
+        shim: &bosun_proc::shim::ShimSpawner,
+        spec: &ChildSpec,
+        dir: &Path,
+    ) -> std::io::Result<Spawned> {
+        self.count(spec);
+        self.shimmed.fetch_add(1, Ordering::SeqCst);
+        shim.spawn_in(spec, dir)
     }
 }
 
@@ -644,6 +696,8 @@ impl Scene {
             recheck: Duration::from_hours(1),
             question_grace: GRACE,
             mcp: self.mcp.clone(),
+            shim: bosun_shim().to_owned(),
+            daemon_dir: self.path("state"),
             endpoint: self.endpoint.clone(),
             handshake: self.handshake,
             boot: None,
@@ -656,6 +710,7 @@ impl Scene {
             queue,
             visibility: Arc::new(self.visibility()),
             spawner: self.spawner.clone(),
+            sessions: self.spawner.clone(),
             power: Arc::new(bosun_proc::FakePower::default()),
             logins: Arc::new(FixedLogins(self.path("login"))),
             credentials: self.credentials.clone(),

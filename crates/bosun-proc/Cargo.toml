@@ -14,7 +14,7 @@ name = "bosun-shim"
 path = "src/bin/bosun-shim.rs"
 
 [dependencies]
-tokio = { workspace = true, features = ["process", "time"] }
+tokio = { workspace = true, features = ["io-util", "process", "rt", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

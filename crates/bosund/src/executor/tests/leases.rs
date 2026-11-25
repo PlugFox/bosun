@@ -412,3 +412,179 @@ async fn a_card_that_needs_a_resource_is_refused_without_worktree_mode() {
     let admitted = lint(&worktrees);
     assert!(admitted.claimable(), "{:?}", admitted.findings);
 }
+
+/// `[resource.target]`: the shared build directory's resource, exclusive, machine-wide.
+const TARGET: &str = "[resource.target]\nkind = \"build-dir\"\ncapacity = 1\n";
+
+/// Gives `scene` (in worktree mode) a shared build directory at `<scene>/build`, leased as
+/// `target`, with `more` appended to its `worktree` table, and its own lease manager.
+fn share_the_build(scene: &mut Scene, more: &str) -> Arc<Leases> {
+    let build = scene.path("build");
+    std::fs::create_dir_all(&build).unwrap();
+    scene.worktree_more = format!(
+        ", shared_build = {{ dir = '{}', resource = \"target\", env = \"BUILD_DIR_FOR_TEST\" }}{more}",
+        sh_path(&build)
+    );
+    scene.config_more = TARGET.to_owned();
+    configure(scene);
+    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    scene.leases = Some(leases.clone());
+    leases
+}
+
+/// Takes `names` for this process, as a `bosun with` command would.
+async fn hold_as_this_process(leases: &Leases, names: &[&str]) {
+    leases
+        .acquire(Request {
+            holder: this_process(),
+            names: names.iter().map(|n| (*n).to_owned()).collect(),
+            repo: "demo".to_owned(),
+            identity: "test".to_owned(),
+            writer: None,
+        })
+        .await
+        .unwrap();
+}
+
+/// The last component of `path`, whichever separator it is spelled with.
+fn last_component(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+}
+
+/// E1: the claim's worktree setup and its verdict on the base commit run under the shared
+/// build, so they wait for its lease. The test holds `target` itself, then a card goes to
+/// Ready: for 2 s after the item asks for `target` its setup has not run and it has no run.
+/// The test lets go: the setup runs and the item ends Done (`mutant_loop_lease_after_setup`
+/// runs the setup and the base verdict at once, and the first session takes the lease).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_setup_and_the_base_verdict_wait_for_the_shared_build() {
+    let mut scene = Scene::with_worktrees(None).await;
+    let ran = scene.path("setup-ran");
+    scene.setup = Some(format!("echo x >> \"{}\"", sh_path(&ran)));
+    let leases = share_the_build(&mut scene, "");
+    hold_as_this_process(&leases, &["target"]).await;
+
+    scene.write_board(&[card_needing(1, "test -f done.txt", &[])]);
+    scene.script(1, &["commit done.txt done".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    // From when the item asks for `target` (a claim that does not ask runs the setup instead).
+    let item = Holder::Item(ItemId::new("demo#1"));
+    wait_for("the item to wait for target", LIMIT, async || {
+        leases.is_waiting(&item) || ran.exists()
+    })
+    .await;
+    let held_until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < held_until {
+        assert!(!ran.exists(), "the setup ran while the test held target");
+        assert!(
+            scene.runs(1).await.is_empty(),
+            "the item ran while the test held target"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    leases.release(&this_process()).await;
+    let state = ended(&scene, 1, LIMIT).await;
+    task.abort();
+    watcher.abort();
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    assert!(ran.exists(), "the setup never ran");
+}
+
+/// E1: `teardown` runs under the shared build, so the item still holds its leases while the
+/// teardown of its own worktree runs; it lets go of them after. The teardown writes where it
+/// runs and sleeps 2 s; when it names the item's worktree, the item holds `target`. After the
+/// item ends Done it holds nothing and the journal is empty
+/// (`mutant_loop_release_before_teardown` releases before the teardown).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn teardown_runs_while_the_item_still_holds_its_leases() {
+    let mut scene = Scene::with_worktrees(None).await;
+    let log = scene.path("teardown-ran");
+    let leases = share_the_build(
+        &mut scene,
+        &format!(", teardown = \"pwd >> '{}'; sleep 2\"", sh_path(&log)),
+    );
+    scene.write_board(&[card_needing(1, "test -f done.txt", &[])]);
+    scene.script(1, &["commit done.txt done".to_owned()]);
+    let (task, watcher) = scene.start(None);
+
+    let item = ItemId::new("demo#1");
+    let holder = Holder::Item(item.clone());
+    let deadline = Instant::now() + LIMIT;
+    let held = loop {
+        assert!(
+            Instant::now() < deadline,
+            "the item's worktree was never torn down"
+        );
+        let rows = scene.store.reader().worktrees(&item).await.unwrap();
+        let own = rows
+            .iter()
+            .find(|r| r.kind == bosun_store::WorktreeKind::Item)
+            .map(|r| last_component(&r.path).to_owned());
+        let lines = std::fs::read_to_string(&log).unwrap_or_default();
+        if let Some(own) = own
+            && lines.lines().any(|line| last_component(line) == own)
+        {
+            break leases.holds(&holder);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        held,
+        ["target"],
+        "the item's teardown ran without its lease"
+    );
+
+    let state = ended(&scene, 1, LIMIT).await;
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    wait_for("the item to let go of target", LIMIT, async || {
+        leases.holds(&holder).is_empty() && journalled(leases.journal()).is_empty()
+    })
+    .await;
+    task.abort();
+    watcher.abort();
+}
+
+/// A loop the store halts (it refuses the transition that runs the verdict) runs nothing more
+/// for its item, so it frees the item's leases: once the loop task has ended the item holds
+/// nothing, the journal is empty, and another holder is granted `rig` at once
+/// (`mutant_loop_halt_keeps_leases` keeps them while the daemon runs).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_loop_that_halts_frees_its_items_leases() {
+    let mut scene = Scene::with_worktrees(None).await;
+    scene.config_more = RIG.to_owned();
+    configure(&scene);
+    let leases = Arc::new(Leases::new(&scene.config(), &scene.path("state")).unwrap());
+    scene.leases = Some(leases.clone());
+    scene.write_board(&[card_needing(1, "test -f done.txt", &["rig"])]);
+    scene.script(1, &["commit done.txt done".to_owned()]);
+    let failpoint: Failpoint = Arc::new(|t: &bosun_core::Transition| {
+        t.effects
+            .iter()
+            .any(|e| matches!(e.kind, EffectKind::RunVerdict { .. }))
+    });
+    let (task, watcher) = scene.start(Some(failpoint));
+    tokio::time::timeout(LIMIT, task)
+        .await
+        .expect("the loop stops after a refused transition")
+        .unwrap();
+    watcher.abort();
+
+    let item = Holder::Item(ItemId::new("demo#1"));
+    assert_eq!(leases.holds(&item), Vec::<String>::new());
+    assert!(!leases.is_waiting(&item));
+    assert_eq!(
+        journalled(leases.journal()),
+        Vec::<serde_json::Value>::new()
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        hold_as_this_process(&leases, &["rig"]),
+    )
+    .await
+    .expect("rig is free once the loop halted");
+    assert_eq!(leases.holds(&this_process()), ["rig"]);
+}

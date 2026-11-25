@@ -1,10 +1,12 @@
 //! The claim procedure (#5, #7, #62): the claim write and re-read, the snapshot, the static
 //! lint, the base, the verdict on the base commit (D7), the hashes.
 //!
-//! In worktree mode (#8, E19), after the static lint: the daemon's clone is made or checked,
-//! the target (`landing.target`, else the branch the user's checkout is on) is fetched into it
-//! (E14), the user's checkout is captured for the guard of E4/E21, and the item's worktree is
-//! opened and set up. The rest of the claim runs in the worktree, except the verdict on the base
+//! In worktree mode (#8, E19), after the static lint: the item's leases are taken
+//! ([`super::lease_names_of`]; a claim that does not confirm releases them after its worktree
+//! is closed, a confirmed one keeps them for its first session), then the daemon's clone is
+//! made or checked, the target (`landing.target`, else the branch the user's checkout is on) is
+//! fetched into it (E14), the user's checkout is captured for the guard of E4/E21, and the
+//! item's worktree is opened and set up. The rest of the claim runs in the worktree, except the verdict on the base
 //! commit: that runs in a throwaway checkout of the base commit of its own (kind `verdict`, set
 //! up as every verdict checkout, closed right after the run), so what `setup` made in the item's
 //! worktree is there for its first session and the worktree is never restored. A setup that
@@ -162,19 +164,38 @@ pub(crate) async fn claim(
         return ClaimOutcome::Lint(lint.findings.iter().map(ToString::to_string).collect());
     }
 
-    // Worktree mode (#8, E19): the item's worktree off the daemon's clone, else the checkout.
-    let opened = match Workspace::of(repo) {
-        None => None,
-        Some(workspace) => {
-            match open_worktree(shared, identity, repo, &workspace, item, &mut kill).await {
-                Ok(opened) => Some(opened),
-                Err(outcome) => return outcome,
-            }
+    // Worktree mode (#8, E19): the item's leases, then its worktree off the daemon's clone;
+    // else the checkout.
+    let Some(workspace) = Workspace::of(repo) else {
+        return confirm(shared, config, repo, snapshot, item, key, &mut kill, None).await;
+    };
+    // E1: the setup, the base verdict and every teardown of the claim run under the shared
+    // build, so they run under the item's leases; a confirmed claim keeps them for its first
+    // session (whose own request is then granted at once).
+    // Mutant (`mutant_loop_lease_after_setup`): the claim takes nothing; the first session
+    // takes the leases, after the setup and the base verdict ran.
+    let names = if cfg!(mutant_loop_lease_after_setup) {
+        Vec::new()
+    } else {
+        super::lease_names_of(&snapshot, repo)
+    };
+    match super::hold_names(shared, repo, names, item, &mut kill).await {
+        Ok(()) => {}
+        Err(None) => return ClaimOutcome::Failed("killed".to_owned()),
+        Err(Some(e)) => {
+            release(shared, item).await;
+            return ClaimOutcome::Failed(format!("the item's leases: {e}"));
+        }
+    }
+    let opened = match open_worktree(shared, identity, repo, &workspace, item, &mut kill).await {
+        Ok(opened) => opened,
+        Err(outcome) => {
+            release(shared, item).await;
+            return outcome;
         }
     };
-    let close = opened
-        .as_ref()
-        .map(|o| (o.workspace.clone(), o.worktree.clone()));
+    let close = Some((opened.workspace.clone(), opened.worktree.clone()));
+    let opened = Some(opened);
     let mut outcome = confirm(shared, config, repo, snapshot, item, key, &mut kill, opened).await;
     // Confirmed after the kill was raised (a cancel past the base verdict): the loop let go of
     // the item and drops this outcome, so nobody else would close its worktree.
@@ -191,8 +212,19 @@ pub(crate) async fn claim(
         workspace
             .close(shared, identity, &worktree, aside, Some(&mut kill))
             .await;
+        // After the teardown, which ran under them.
+        release(shared, item).await;
     }
     outcome
+}
+
+/// Releases the leases a claim of `item` took (#8); nothing happens when it took none.
+async fn release(shared: &Shared, item: &ItemId) {
+    shared
+        .deps
+        .leases
+        .release(&crate::leases::Holder::Item(item.clone()))
+        .await;
 }
 
 /// Worktree mode: the clone, the target, the user's checkout, the item's worktree and its

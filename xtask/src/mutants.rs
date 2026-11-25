@@ -2321,7 +2321,40 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_lease_after_setup",
+        issue: LEASE_WINDOW_CARD,
+        breaks: "the claim runs setup and the base verdict under the shared build without the lease",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::leases::the_setup_and_the_base_verdict_wait_for_the_shared_build",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_release_before_teardown",
+        issue: LEASE_WINDOW_CARD,
+        breaks: "an item's teardown runs after its leases are released",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::leases::teardown_runs_while_the_item_still_holds_its_leases",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_halt_keeps_leases",
+        issue: LEASE_WINDOW_CARD,
+        breaks: "a loop halted by the store keeps its item's leases while the daemon runs",
+        package: "bosund",
+        check: Check::Test("executor::tests::leases::a_loop_that_halts_frees_its_items_leases"),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that leases an item's resources from before its worktree's setup to after
+/// its teardown, and frees them when the loop halts (its own number was not known when it was
+/// written; its parent's stands in).
+const LEASE_WINDOW_CARD: u32 = 8;
 
 /// The card of #8 that sweeps the worktrees no item owns, retries quarantines and records the
 /// children of `setup` and `teardown` (its own number was not known when it was written; its

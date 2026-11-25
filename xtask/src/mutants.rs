@@ -1907,8 +1907,10 @@ const MUTANTS: &[Mutant] = &[
         issue: 155,
         breaks: "a session starts without waiting for its lease",
         package: "bosund",
+        // In worktree mode the claim takes the item's leases and keeps them for its first
+        // session, so only a session after a park has to wait for them itself.
         check: Check::Test(
-            "executor::tests::leases::two_items_that_need_the_same_resource_never_overlap_and_the_wait_is_recorded",
+            "executor::tests::leases::a_parked_item_holds_no_lease_and_takes_it_again_to_resume",
         ),
         platform: None,
     },

@@ -8,6 +8,12 @@
 -- SQLite cannot change a CHECK constraint, so `item` is rebuilt as migration 9 does it: outside
 -- sqlx's transaction, foreign keys off, the rebuild in a transaction of its own, every id
 -- copied, keys on again.
+--
+-- Outside sqlx's transaction, the script commits before sqlx records it in `_sqlx_migrations`:
+-- a daemon that dies in between leaves the tables without the record, and the next open runs
+-- this script again. So it must re-run cleanly. The `item` rebuild does (it copies every id;
+-- `conflicts` is still 0 that early), and the new tables and their indexes are created
+-- `IF NOT EXISTS`, keeping the rows the first run's tables already hold.
 PRAGMA foreign_keys = OFF;
 
 BEGIN;
@@ -73,7 +79,7 @@ CREATE INDEX item_state ON item (state);
 
 -- One git worktree the daemon made for an item (#8): the item's own, or a throwaway checkout a
 -- verdict ran in. A path is never reused, so it is the key.
-CREATE TABLE worktree (
+CREATE TABLE IF NOT EXISTS worktree (
     id INTEGER PRIMARY KEY,
     item_id INTEGER NOT NULL REFERENCES item (id),
     path TEXT NOT NULL UNIQUE,
@@ -93,11 +99,11 @@ CREATE TABLE worktree (
     ended_ms INTEGER,
     CHECK ((state = 'created') = (ended_ms IS NULL))
 ) STRICT;
-CREATE INDEX worktree_item ON worktree (item_id);
+CREATE INDEX IF NOT EXISTS worktree_item ON worktree (item_id);
 
 -- One session shim the daemon started (#8): where its record is, how far the daemon has read
 -- its output files, and the digest of the agent credential its session was issued.
-CREATE TABLE process (
+CREATE TABLE IF NOT EXISTS process (
     id INTEGER PRIMARY KEY,
     item_id INTEGER NOT NULL REFERENCES item (id),
     attempt INTEGER NOT NULL CHECK (attempt >= 1),
@@ -112,11 +118,11 @@ CREATE TABLE process (
     started_ms INTEGER NOT NULL,
     gone_ms INTEGER
 ) STRICT;
-CREATE INDEX process_item ON process (item_id);
+CREATE INDEX IF NOT EXISTS process_item ON process (item_id);
 
 -- The history of waits for leased resources (#8, E15): one row per request and resource.
 -- `item_id` is NULL for a `bosun with` command. `holder` is the holder's label.
-CREATE TABLE lease_wait (
+CREATE TABLE IF NOT EXISTS lease_wait (
     id INTEGER PRIMARY KEY,
     item_id INTEGER REFERENCES item (id),
     holder TEXT NOT NULL,
@@ -128,7 +134,7 @@ CREATE TABLE lease_wait (
 ) STRICT;
 
 -- Where an item's landing stands (#8): every step of landing is redone from this row.
-CREATE TABLE landing (
+CREATE TABLE IF NOT EXISTS landing (
     id INTEGER PRIMARY KEY,
     item_id INTEGER NOT NULL UNIQUE REFERENCES item (id),
     attempt INTEGER NOT NULL CHECK (attempt >= 1),

@@ -341,6 +341,13 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_git_ff_race_is_failure)",
   "cfg(mutant_loop_rebased_unbounded)",
   "cfg(mutant_runner_conflict_files_keep_format_chars)",
+  # #173: what `setup` made survives the claim and a reset; setup and teardown end at a kill;
+  # the disk floor waits; a setup failure's comment says what failed.
+  "cfg(mutant_loop_base_verdict_in_item_worktree)",
+  "cfg(mutant_loop_reset_without_setup)",
+  "cfg(mutant_loop_setup_ignores_kill)",
+  "cfg(mutant_loop_floor_is_setup_failure)",
+  "cfg(mutant_loop_setup_comment_without_cause)",
 ] }
 
 [workspace.lints.clippy]

@@ -712,6 +712,38 @@ pub(crate) async fn session(
             ));
             return crash;
         }
+        // Worktree mode (#8): the reset took what `setup` made with it; it is made again
+        // before the session starts. A failure is Needs you, not the session.
+        // Mutant (`mutant_loop_reset_without_setup`): the session starts without it.
+        if let Some(wt) = &claimed.worktree
+            && !cfg!(mutant_loop_reset_without_setup)
+        {
+            match wt
+                .workspace
+                .setup(shared, identity, &wt.worktree, &mut kill)
+                .await
+            {
+                Ok(()) => {}
+                Err(super::workspace::Unopened::Killed) => return crash,
+                Err(super::workspace::Unopened::Setup(failed)) => {
+                    shared.trouble(format!(
+                        "{}: the setup after the reset before a fresh session failed: {failed}",
+                        run.item
+                    ));
+                    super::outbox::note_setup(shared, &run.item, &failed.cause(), &failed.tail)
+                        .await;
+                    return Some(Event::SetupFailed);
+                }
+                Err(super::workspace::Unopened::Error(e)) => {
+                    shared.trouble(format!(
+                        "{}: the setup after the reset before a fresh session: {e}",
+                        run.item
+                    ));
+                    super::outbox::note_setup(shared, &run.item, &e.to_string(), "").await;
+                    return Some(Event::SetupFailed);
+                }
+            }
+        }
     }
 
     // The session's credential (#63), revoked when `credential` is dropped: when the process

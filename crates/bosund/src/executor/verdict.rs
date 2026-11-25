@@ -95,8 +95,11 @@ pub(crate) fn run_result(outcome: Outcome) -> RunResult {
 /// In worktree mode (#8, E19) the run judges the commit, not the directory: it runs in a
 /// throwaway checkout of the head of the item's worktree
 /// ([`super::workspace::Workspace::checkout`], set up as the item's worktree is), closed when
-/// the run is over however it ended. A checkout that
-/// cannot be made or set up is [`Event::SetupFailed`], not a failed run. A run that passes
+/// the run is over however it ended. Below the disk floor the run waits for space: reported once,
+/// tried again every poll, until the checkout is made or the run is killed; the item stays where
+/// it is. A checkout that cannot be made or set up otherwise is [`Event::SetupFailed`], not a
+/// failed run, with its cause stored as the item's `setup` note. A setup killed by a cancel or
+/// the kill switch is a killed run. A run that passes
 /// records the commit it judged and its tree in the item's `landing` row: what landing accepts
 /// as verified ([`super::landing`]). Without worktree mode it runs in the checkout, as in
 /// stage 1.
@@ -143,26 +146,10 @@ pub(crate) async fn verdict(
         }
     };
     let name = format!("{}-v{}", run.item, run.number);
-    let checkout = match wt
-        .workspace
-        .checkout(shared, identity, &run.item, &name, &head)
-        .await
-    {
+    let checkout = match make_checkout(shared, wt, identity, run, &name, &head, &mut kill).await {
         Ok(checkout) => checkout,
-        Err(Unopened::Setup(failed)) => {
-            shared.trouble(format!(
-                "the setup of the verdict checkout of {} failed: {failed}",
-                run.item
-            ));
-            return (Event::SetupFailed, Vec::new());
-        }
-        Err(Unopened::Error(e)) => {
-            shared.trouble(format!(
-                "the verdict checkout of {} cannot be made: {e}",
-                run.item
-            ));
-            return (Event::SetupFailed, Vec::new());
-        }
+        Err(None) => return fail(),
+        Err(Some(event)) => return (event, Vec::new()),
     };
     // Mutant (`mutant_loop_verdict_in_item_worktree`): the verdict runs among what the session
     // left in the item's worktree.
@@ -171,11 +158,12 @@ pub(crate) async fn verdict(
     } else {
         checkout.path()
     };
-    let ran = run_in(shared, config, claimed, run, kill, cwd).await;
+    let ran = run_in(shared, config, claimed, run, kill.clone(), cwd).await;
     // Mutant (`mutant_loop_keep_verdict_checkout`): the checkout is left behind.
     if !cfg!(mutant_loop_keep_verdict_checkout) {
-        // A quarantine is reported by the workspace; the run's result stands.
-        checkout.close(shared, identity).await;
+        // A quarantine is reported by the workspace; the run's result stands. A kill of the run
+        // ends its teardown too.
+        checkout.close(shared, identity, Some(&mut kill)).await;
     }
     if matches!(
         ran.0,
@@ -192,6 +180,68 @@ pub(crate) async fn verdict(
         ));
     }
     ran
+}
+
+/// Worktree mode: the verdict checkout of `run`, named `name`, at `head`. Below the disk floor
+/// it waits (reported once, tried again every poll). `Err(None)`: `kill` was raised (a killed
+/// run); `Err(Some(event))`: it cannot be made or set up, with its cause stored as the item's
+/// `setup` note.
+async fn make_checkout(
+    shared: &Shared,
+    wt: &super::ItemWorktree,
+    identity: &bosun_config::Identity,
+    run: &Run,
+    name: &str,
+    head: &str,
+    kill: &mut watch::Receiver<Signal>,
+) -> Result<workspace::Checkout, Option<Event>> {
+    let mut waiting = false;
+    loop {
+        let made = wt
+            .workspace
+            .checkout(shared, identity, &run.item, name, head, kill)
+            .await;
+        match made {
+            Ok(checkout) => return Ok(checkout),
+            // Killed: as a killed run; the kill moved the item.
+            Err(Unopened::Killed) => return Err(None),
+            // Below the disk floor: no Needs you, the run waits for space.
+            // Mutant (`mutant_loop_floor_is_setup_failure`): it is a setup failure.
+            Err(Unopened::Error(workspace::Error::Worktree(
+                bosun_git::worktree::Error::BelowFloor { free, floor, .. },
+            ))) if !cfg!(mutant_loop_floor_is_setup_failure) => {
+                if !waiting {
+                    waiting = true;
+                    shared.trouble(format!(
+                        "{}: no verdict checkout below the disk floor: {free} free, {floor} \
+                         needed; waiting",
+                        run.item
+                    ));
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(shared.options.poll) => {}
+                    () = killed(kill) => return Err(None),
+                }
+            }
+            Err(Unopened::Setup(failed)) => {
+                shared.trouble(format!(
+                    "the setup of the verdict checkout of {} failed: {failed}",
+                    run.item
+                ));
+                super::outbox::note_setup(shared, &run.item, &failed.cause(), &failed.tail).await;
+                return Err(Some(Event::SetupFailed));
+            }
+            Err(Unopened::Error(e)) => {
+                shared.trouble(format!(
+                    "the verdict checkout of {} cannot be made: {e}",
+                    run.item
+                ));
+                let cause = format!("the verdict checkout cannot be made: {e}");
+                super::outbox::note_setup(shared, &run.item, &cause, "").await;
+                return Err(Some(Event::SetupFailed));
+            }
+        }
+    }
 }
 
 /// Worktree mode (#8): records `head` as the commit a passing run of `run`'s attempt verified,

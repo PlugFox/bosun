@@ -413,7 +413,8 @@ async fn the_verdict_sees_only_what_was_committed() {
 }
 
 /// With `setup = "echo ready > setup-ran"` the verdict checkout is set up too: a verdict that
-/// needs `setup-ran` and the committed `a.txt` passes, and the item ends Done
+/// needs `setup-ran` and the committed `a.txt` passes, and the item ends Done, with two verdict
+/// checkouts: the base commit's (D7) and the attempt's
 /// (`mutant_loop_verdict_checkout_without_setup` skips the setup there: it fails).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_setup_command_runs_in_the_verdict_checkout() {
@@ -433,11 +434,12 @@ async fn the_setup_command_runs_in_the_verdict_checkout() {
 
     assert!(matches!(state, State::Done(_)), "{state:?}");
     let rows = verdict_rows(&scene, 1).await;
-    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows.len(), 2, "{rows:?}");
 }
 
 /// A verdict that fails its first run and passes when re-run: each run had its own checkout,
-/// and both are gone once the item is Done. Two rows of kind `verdict`, both `removed`; the
+/// and both are gone once the item is Done, as is the checkout of the verdict on the base
+/// commit. Three rows of kind `verdict`, all `removed`; the
 /// worktree root holds only the clone, and the clone no `bosun/*-v*` branch
 /// (`mutant_loop_keep_verdict_checkout` leaves them behind).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -466,7 +468,7 @@ async fn the_verdict_checkout_is_removed_after_each_run() {
     let verdicts = scene.store.reader().verdict_runs(&item(1)).await.unwrap();
     assert_eq!(verdicts.len(), 2, "{verdicts:?}");
     let rows = verdict_rows(&scene, 1).await;
-    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows.len(), 3, "{rows:?}");
     for row in &rows {
         assert_eq!(row.state, WorktreeState::Removed, "{row:?}");
         assert!(!Path::new(&row.path).exists(), "{}", row.path);
@@ -477,4 +479,214 @@ async fn the_verdict_checkout_is_removed_after_each_run() {
         git_in(&scene, &clone, &["branch", "--list", "bosun/*-v*"]),
         ""
     );
+}
+
+/// With `setup = "echo ready > setup-ran"` the session stages and commits `setup-ran`, which
+/// only `setup` made; the verdict asks git whether it is tracked. The verdict on the base
+/// commit ran in a checkout of its own, so the item's worktree still has the file for the first
+/// session: the item ends Done after that one session, and the worktree root holds only the
+/// clone
+/// (`mutant_loop_base_verdict_in_item_worktree` runs it in the item's worktree and restores that
+/// after it: the file is gone and the item never passes).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_setup_output_is_there_for_the_first_session() {
+    let scene = Scene::with_worktrees(Some("echo ready > setup-ran")).await;
+    scene.write_board(&[card(
+        1,
+        "Takes what setup made",
+        "git ls-files --error-unmatch setup-ran",
+        "Item one.",
+    )]);
+    scene.script(
+        1,
+        &[
+            "git add setup-ran".to_owned(),
+            "git commit -q -m took-setup".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    // The first session took it: no crash, no reset (whose setup would make it again).
+    let runs = scene.runs(1).await;
+    assert_eq!(modes(&runs), [(1, SpawnMode::Fresh)]);
+    assert_eq!(state, State::Done(Outcome::Pass));
+    assert_eq!(root_entries(&scene), [workspace::CLONE]);
+}
+
+/// The same setup and verdict; the first session crashes, its resume crashes before it comes
+/// up, so the attempt's next spawn is a fresh session after a reset of the worktree to its
+/// head, which takes `setup-ran` with it. Only that session stages and commits the file: the
+/// setup ran again after the reset, so the item ends Done, and one spawn was a `reset`
+/// (`mutant_loop_reset_without_setup` starts the session without it: it never passes).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_session_after_a_reset_finds_the_setup_output() {
+    let scene = Scene::with_worktrees(Some("echo ready > setup-ran")).await;
+    let m = |name: &str| sh_path(&scene.path(name));
+    scene.write_board(&[card(
+        1,
+        "Takes what setup made after a reset",
+        "git ls-files --error-unmatch setup-ran",
+        "Item one.",
+    )]);
+    scene.script(
+        1,
+        &[
+            // The first session crashes; its resume crashes before it comes up.
+            format!("once {} exit 1", m("crashed")),
+            format!("once {} exit 1", m("resume-failed")),
+            "git add setup-ran".to_owned(),
+            "git commit -q -m took-setup".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    let runs = scene.runs(1).await;
+    assert!(
+        modes(&runs).contains(&(1, SpawnMode::Reset)),
+        "{:?}",
+        modes(&runs)
+    );
+    assert_eq!(state, State::Done(Outcome::Pass), "{:?}", modes(&runs));
+}
+
+/// The setup marks its start outside the repository and sleeps for two minutes. Once it runs,
+/// the card goes to Backlog: the item is Cancelled and its worktree closed within 20 seconds,
+/// and no worktree directory is left (`mutant_loop_setup_ignores_kill` lets the setup run to
+/// the verdict timeout first).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_during_setup_ends_it_at_once() {
+    let mut scene = Scene::with_worktrees(None).await;
+    let started = scene.path("setup-started");
+    scene.setup = Some(format!("echo x > {}; sleep 120", sh_path(&started)));
+    std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();
+    scene.write_board(&[card(1, "Cancelled in setup", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    wait_file(&started).await;
+
+    let mut cards = scene.cards();
+    cards[0].column = Column::Backlog;
+    scene.write_board(&cards);
+    let mut state = None;
+    wait_for(
+        "the cancelled item's worktree to close",
+        Duration::from_secs(20),
+        async || {
+            state = scene.state(1).await;
+            let rows = rows(&scene, 1).await;
+            state == Some(State::Cancelled)
+                && !rows.is_empty()
+                && rows.iter().all(|r| r.state != WorktreeState::Created)
+        },
+    )
+    .await;
+    task.abort();
+    watcher.abort();
+
+    assert_eq!(state, Some(State::Cancelled));
+    assert_eq!(root_entries(&scene), [workspace::CLONE]);
+    assert_eq!(scene.spawner.spawns.load(Ordering::SeqCst), 0);
+}
+
+/// With a disk floor of 1 GB and plenty of space at claim, the session marks its start and
+/// waits; the test takes the free space to nothing and lets it commit. The verdict's checkout
+/// cannot be made: the item stays `verifying` for many polls, with one trouble line naming the
+/// floor and no Needs you; once the space is back the item ends Done
+/// (`mutant_loop_floor_is_setup_failure` sends it to Needs you as a setup failure).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_verdict_below_the_disk_floor_waits_instead_of_needing_the_user() {
+    let mut scene = Scene::with_worktrees(None).await;
+    scene.worktree_more = ", disk_floor = '1GB'".to_owned();
+    std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();
+    let mut sub = subscribe_trouble(&scene);
+    let (session, go) = (scene.path("session-started"), scene.path("go"));
+    scene.write_board(&[card(1, "Waits for space", "test -f a.txt", "Item one.")]);
+    scene.script(
+        1,
+        &[
+            format!("write {} x", sh_path(&session)),
+            format!("wait {}", sh_path(&go)),
+            "commit a.txt a".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    wait_file(&session).await;
+    scene.free_space.set(0);
+    std::fs::write(&go, "").unwrap();
+
+    let floor = |seen: &[String]| {
+        seen.iter()
+            .filter(|t| t.contains("below the disk floor"))
+            .count()
+    };
+    let mut seen = Vec::new();
+    wait_for("the wait below the floor", LIMIT, async || {
+        seen.extend(trouble(&mut sub));
+        floor(&seen) > 0 || terminal(scene.state(1).await)
+    })
+    .await;
+    // Many polls (50 ms each) later it still waits.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    seen.extend(trouble(&mut sub));
+    assert_eq!(scene.state(1).await, Some(State::Verifying), "{seen:#?}");
+    assert_eq!(floor(&seen), 1, "{seen:#?}");
+    let line = seen
+        .iter()
+        .find(|t| t.contains("below the disk floor"))
+        .unwrap();
+    assert!(line.contains("1000000000"), "{line}");
+
+    scene.free_space.set(u64::MAX);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert_eq!(state, State::Done(Outcome::Pass));
+    let transitions = scene.store.reader().transitions(&item(1)).await.unwrap();
+    assert!(
+        transitions.iter().all(|t| t.to != "needs_you"),
+        "{transitions:?}"
+    );
+}
+
+/// With `setup = "echo no; exit 3"` the item ends Needs you (`setup`), and its Needs-you
+/// comment says what failed: that the worktree could not be made or set up, and how the command
+/// ended (`mutant_loop_setup_comment_without_cause` stores no cause: the comment does not say).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_setup_says_what_failed_in_its_comment() {
+    let scene = Scene::with_worktrees(Some("echo no; exit 3")).await;
+    scene.write_board(&[card(1, "Set up fails", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    assert_eq!(state, State::NeedsYou(Reason::Setup));
+
+    let mut body = String::new();
+    wait_for("the Needs-you comment", LIMIT, async || {
+        let card = scene.cards().into_iter().find(|c| c.id.0 == 1).unwrap();
+        if let Some(c) = card
+            .comments
+            .iter()
+            .find(|c| c.key.is_some() && c.body.contains("needs you"))
+        {
+            body.clone_from(&c.body);
+        }
+        !body.is_empty()
+    })
+    .await;
+    task.abort();
+    watcher.abort();
+
+    assert!(body.contains("could not be made or set up"), "{body}");
+    assert!(body.contains("exited 3"), "{body}");
 }

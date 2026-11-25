@@ -4,9 +4,14 @@
 //! In worktree mode (#8, E19), after the static lint: the daemon's clone is made or checked,
 //! the target (`landing.target`, else the branch the user's checkout is on) is fetched into it
 //! (E14), the user's checkout is captured for the guard of E4/E21, and the item's worktree is
-//! opened and set up. The rest of the claim runs in the worktree. A setup that fails is
-//! [`ClaimOutcome::Setup`] (Needs you); a claim that ends any other way than confirmed after
-//! the worktree was opened closes it again.
+//! opened and set up. The rest of the claim runs in the worktree, except the verdict on the base
+//! commit: that runs in a throwaway checkout of the base commit of its own (kind `verdict`, set
+//! up as every verdict checkout, closed right after the run), so what `setup` made in the item's
+//! worktree is there for its first session and the worktree is never restored. A setup that
+//! fails (of the item's worktree or of that checkout) is [`ClaimOutcome::Setup`] (Needs you),
+//! with its cause stored as the item's `setup` note; one killed by a cancel or the kill switch
+//! ends the claim as a killed base verdict does. A claim that ends any other way than confirmed
+//! after the worktree was opened closes it again.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -160,10 +165,12 @@ pub(crate) async fn claim(
     // Worktree mode (#8, E19): the item's worktree off the daemon's clone, else the checkout.
     let opened = match Workspace::of(repo) {
         None => None,
-        Some(workspace) => match open_worktree(shared, identity, repo, &workspace, item).await {
-            Ok(opened) => Some(opened),
-            Err(outcome) => return outcome,
-        },
+        Some(workspace) => {
+            match open_worktree(shared, identity, repo, &workspace, item, &mut kill).await {
+                Ok(opened) => Some(opened),
+                Err(outcome) => return outcome,
+            }
+        }
     };
     let close = opened
         .as_ref()
@@ -172,7 +179,9 @@ pub(crate) async fn claim(
     if !matches!(outcome, ClaimOutcome::Confirmed(_))
         && let Some((workspace, worktree)) = close
     {
-        workspace.close(shared, identity, &worktree, None).await;
+        workspace
+            .close(shared, identity, &worktree, None, Some(&mut kill))
+            .await;
     }
     outcome
 }
@@ -185,6 +194,7 @@ async fn open_worktree(
     repo: &Repo,
     workspace: &Workspace,
     item: &ItemId,
+    kill: &mut watch::Receiver<Signal>,
 ) -> Result<ItemWorktree, ClaimOutcome> {
     let (ws, user, target) = (
         workspace.clone(),
@@ -232,6 +242,7 @@ async fn open_worktree(
             &at,
             WorktreeKind::Item,
             Some(user.to_json()),
+            kill,
         )
         .await;
     match opened {
@@ -246,9 +257,21 @@ async fn open_worktree(
         Err(Unopened::Setup(failed)) if cfg!(mutant_loop_setup_failure_is_claim_failure) => {
             Err(ClaimOutcome::Failed(failed.to_string()))
         }
-        Err(Unopened::Setup(failed)) => Err(ClaimOutcome::Setup(failed.to_string())),
+        Err(Unopened::Setup(failed)) => Err(setup_failed(shared, item, &failed).await),
         Err(Unopened::Error(e)) => Err(ClaimOutcome::Failed(format!("the item's worktree: {e}"))),
+        Err(Unopened::Killed) => Err(ClaimOutcome::Failed("killed".to_owned())),
     }
+}
+
+/// A `setup` of the claim failed: its cause is stored as the item's `setup` note, and the claim
+/// is [`ClaimOutcome::Setup`] (Needs you).
+async fn setup_failed(
+    shared: &Shared,
+    item: &ItemId,
+    failed: &super::workspace::SetupFailed,
+) -> ClaimOutcome {
+    super::outbox::note_setup(shared, item, &failed.cause(), &failed.tail).await;
+    ClaimOutcome::Setup(failed.to_string())
 }
 
 /// The rest of the claim, in `opened`'s worktree or else in the checkout: the base, the
@@ -275,11 +298,43 @@ async fn confirm(
 
     // D7: a verdict that already passes on the base commit is wrongly specified.
     if !cfg!(mutant_loop_skip_base_verdict) {
-        let passes = base_verdict(shared, config, repo, &workdir, &snapshot, kill).await;
-        let (path, at) = (workdir.clone(), base.clone());
-        if let Err(e) = blocking(move || git::restore_if_dirty(&path, &at)).await {
-            return ClaimOutcome::Failed(format!("the checkout after the base verdict: {e}"));
-        }
+        // Worktree mode: in a checkout of the base commit of its own; the item's worktree, with
+        // what its setup made, is not touched.
+        // Mutant (`mutant_loop_base_verdict_in_item_worktree`): it runs in the item's worktree,
+        // which is restored after it, what `setup` made with it.
+        let own = opened
+            .as_ref()
+            .filter(|_| !cfg!(mutant_loop_base_verdict_in_item_worktree));
+        let passes = if let Some(wt) = own {
+            let Some((_, identity)) = lookup(config, &shared.options.repo) else {
+                return ClaimOutcome::Failed("the repository is no longer configured".to_owned());
+            };
+            let name = format!("{item}-base");
+            let checkout = match wt
+                .workspace
+                .checkout(shared, identity, item, &name, &base.head, kill)
+                .await
+            {
+                Ok(checkout) => checkout,
+                Err(Unopened::Setup(failed)) => return setup_failed(shared, item, &failed).await,
+                Err(Unopened::Killed) => return ClaimOutcome::Failed("killed".to_owned()),
+                Err(Unopened::Error(e)) => {
+                    return ClaimOutcome::Failed(format!(
+                        "the checkout of the base commit for its verdict: {e}"
+                    ));
+                }
+            };
+            let passes = base_verdict(shared, config, repo, checkout.path(), &snapshot, kill).await;
+            checkout.close(shared, identity, Some(kill)).await;
+            passes
+        } else {
+            let passes = base_verdict(shared, config, repo, &workdir, &snapshot, kill).await;
+            let (path, at) = (workdir.clone(), base.clone());
+            if let Err(e) = blocking(move || git::restore_if_dirty(&path, &at)).await {
+                return ClaimOutcome::Failed(format!("the checkout after the base verdict: {e}"));
+            }
+            passes
+        };
         match passes {
             Ok(true) => return ClaimOutcome::Lint(vec![PASSES_ON_BASE.to_owned()]),
             Ok(false) => {}

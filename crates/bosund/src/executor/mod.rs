@@ -133,6 +133,8 @@ mod tests;
 mod verdict;
 mod workspace;
 
+pub(crate) use workspace::Disk;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
@@ -312,6 +314,9 @@ pub(crate) struct Deps {
     pub(crate) control: crate::control::Control,
     /// The daemon's lease manager, shared by every repository's loop (#8).
     pub(crate) leases: Arc<crate::leases::Leases>,
+    /// The free space of the disk floor of worktree mode (#8): the system's
+    /// ([`workspace::Disk`]) in the daemon.
+    pub(crate) free_space: Arc<dyn bosun_git::worktree::FreeSpace + Send + Sync>,
 }
 
 impl fmt::Debug for Deps {
@@ -1469,7 +1474,7 @@ impl Loop {
             return;
         };
         wt.workspace
-            .close(&self.shared, identity, &wt.worktree, aside)
+            .close(&self.shared, identity, &wt.worktree, aside, None)
             .await;
     }
 
@@ -1508,8 +1513,9 @@ impl Loop {
                         Event::LintFailed
                     }
                     ClaimOutcome::Setup(e) => {
-                        self.shared
-                            .trouble(format!("the worktree's setup for {item} failed: {e}"));
+                        self.shared.trouble(format!(
+                            "the worktree of {item} could not be made or set up: {e}"
+                        ));
                         Event::SetupFailed
                     }
                     ClaimOutcome::Failed(e) => {

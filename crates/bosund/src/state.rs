@@ -603,6 +603,7 @@ fn start_loops(
             alive: Arc::new(bosun_proc::is_running),
             control: state.control.clone(),
             leases: leases.clone(),
+            free_space: Arc::new(executor::Disk),
         };
         crate::log::log!("bosund: repository {name}: the loop runs");
         loops.push(tokio::spawn(

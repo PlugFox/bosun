@@ -19,7 +19,8 @@
 //! A card missing from the board counts once a second poll confirms it, so a board read
 //! mid-save is not a cancel. A card whose column write is still in the outbox is not compared:
 //! the board has not caught up yet (an outage), and the difference is the daemon's own. An item
-//! being claimed is left to the claim, which re-reads the card itself (#5). An item in flight
+//! being claimed is left to the claim, which re-reads the card itself (#5), except in worktree
+//! mode (#8), where a move to Backlog cancels it: its `setup` may run long. An item in flight
 //! that is not the loop's (found at start) is crash recovery's (#68).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -174,6 +175,16 @@ impl Loop {
             };
             let restarted = self.restarts.contains(id);
             let mut read = read(item.state, card, pending.contains(id), restarted);
+            // Worktree mode (#8, E19): a claim may spend long in the worktree's `setup`; the
+            // card moved to Backlog meanwhile (only the user moves it there: the claim found it
+            // in Ready) cancels it, and the kill ends the setup at once. Without worktree mode
+            // nothing is read during a claim.
+            if item.state == State::Claimed
+                && repo.worktree.is_some()
+                && card.is_some_and(|c| c.column == Column::Backlog)
+            {
+                read = Read::Command(UserCommand::Cancel);
+            }
             // A card missing from one poll may be a board caught mid-save (an editor that
             // writes in place): only a second poll without it is a cancel.
             if card.is_some() {

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -270,6 +270,29 @@ struct Probe {
     calls: AtomicUsize,
 }
 
+/// The free space the disk floor of worktree mode reads (#8): what the test sets, on every
+/// volume; plenty unless a scenario lowers it.
+#[derive(Debug)]
+struct FakeSpace(AtomicU64);
+
+impl Default for FakeSpace {
+    fn default() -> Self {
+        Self(AtomicU64::new(u64::MAX))
+    }
+}
+
+impl FakeSpace {
+    fn set(&self, bytes: u64) {
+        self.0.store(bytes, Ordering::SeqCst);
+    }
+}
+
+impl bosun_git::worktree::FreeSpace for FakeSpace {
+    fn free(&self, _: &Path) -> std::io::Result<u64> {
+        Ok(self.0.load(Ordering::SeqCst))
+    }
+}
+
 /// Where a scene lives: a temporary directory it owns, or one a parent test process owns (the
 /// child daemon of the crash tests, #68).
 enum Root {
@@ -327,6 +350,8 @@ struct Scene {
     leases: Option<Arc<crate::leases::Leases>>,
     /// The loop's spawns through the session shim; `None`: [`Scene::spawner`].
     sessions: Option<Arc<dyn ShimSessions>>,
+    /// The free space the disk floor reads.
+    free_space: Arc<FakeSpace>,
 }
 
 impl Scene {
@@ -522,6 +547,7 @@ impl Scene {
             config_more: String::new(),
             leases: None,
             sessions: None,
+            free_space: Arc::new(FakeSpace::default()),
             dir,
         }
     }
@@ -739,6 +765,7 @@ impl Scene {
             leases: self.leases.clone().unwrap_or_else(|| {
                 Arc::new(crate::leases::Leases::new(&self.config(), &self.path("state")).unwrap())
             }),
+            free_space: self.free_space.clone(),
         };
         let task = tokio::spawn(Loop::new(options, deps, rx).run());
         (task, watcher)

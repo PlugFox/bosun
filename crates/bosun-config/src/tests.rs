@@ -1162,3 +1162,57 @@ verdict = { timeout = '5m' }
     ));
     assert_ne!(hash(&worktree), bare);
 }
+
+#[test]
+fn a_sweep_lists_process_names_and_refuses_anything_else() {
+    let text =
+        with_repo("sweep = { processes = ['devserver', 'emu-1.exe', 'a_b', 'devserver'] }\n");
+    let config = parse(&text, &Local).unwrap();
+    let sweep = config.repos["bosun"].sweep.as_ref().expect("a sweep");
+    assert_eq!(
+        sweep.processes,
+        BTreeSet::from(["a_b", "devserver", "emu-1.exe"].map(String::from))
+    );
+    let bare = parse(&with_repo(""), &Local).unwrap();
+    assert_eq!(bare.repos["bosun"].sweep, None);
+    let name = "a process name is a file name";
+    for (rest, expected) in [
+        (
+            "sweep = { process = ['x'] }\n",
+            "unknown key `repo.bosun.sweep.process`",
+        ),
+        ("sweep = { processes = [''] }\n", name),
+        ("sweep = { processes = ['bin/x'] }\n", name),
+        ("sweep = { processes = ['a\\b'] }\n", name),
+        ("sweep = { processes = ['..'] }\n", name),
+        ("sweep = { processes = ['dev server'] }\n", name),
+        ("sweep = { processes = [1] }\n", "must hold strings only"),
+        (
+            "sweep = { processes = 'x' }\n",
+            "must be an array of strings",
+        ),
+        ("sweep = 'x'\n", "repo.bosun.sweep"),
+    ] {
+        let found = problems(&with_repo(rest));
+        assert!(
+            found.iter().any(|p| p.contains(expected)),
+            "{rest}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn the_repository_hash_covers_the_sweep_only_when_it_is_set() {
+    let hash = |text: &str| parse(text, &Local).unwrap().repo_hash("bosun").unwrap();
+    let bare = hash(&with_repo(""));
+    let swept = hash(&with_repo("sweep = { processes = ['devserver'] }\n"));
+    assert_ne!(swept, bare);
+    let twice = with_repo("sweep = { processes = ['devserver', 'devserver'] }\n");
+    assert_eq!(hash(&twice), swept);
+    let other = with_repo("sweep = { processes = ['emulator'] }\n");
+    assert_ne!(hash(&other), swept);
+    assert_ne!(hash(&with_repo("sweep = {}\n")), bare);
+    let worktree = format!("worktree = {{ root = '{}' }}\n", abs("wt/bosun"));
+    let both = format!("{worktree}sweep = {{ processes = ['devserver'] }}\n");
+    assert_ne!(hash(&with_repo(&both)), hash(&with_repo(&worktree)));
+}

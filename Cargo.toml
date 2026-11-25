@@ -312,6 +312,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_keep_stale_leases)",
   "cfg(mutant_loop_skip_mtime_touch)",
   "cfg(mutant_loop_no_build_env)",
+  # #162: the process sweep of named strays after an attempt.
+  "cfg(mutant_loop_sweep_ignores_start_time)",
+  "cfg(mutant_loop_sweep_unlogged)",
+  "cfg(mutant_proc_named_matches_every_process)",
   "cfg(mutant_api_lease_acquire_always_grants)",
   "cfg(mutant_api_lease_without_operator)",
   "cfg(mutant_cli_with_exit_zero)",

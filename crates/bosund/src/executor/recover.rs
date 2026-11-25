@@ -602,6 +602,15 @@ impl Loop {
             .filter(|c| !(attaching && session_child == Some(key_of(c))))
             .cloned()
             .collect();
+        // The session lost with the previous daemon has ended (it is not re-attached): the
+        // process sweep runs before the item's next step, as after any session (E12).
+        if item.state == State::Running
+            && !attaching
+            && let Some(attempt) = &item.attempt
+        {
+            let config = self.config();
+            super::sweep::after_session(&self.shared, &config, &id, attempt.number).await;
+        }
         let mut reaped = false;
         let mut followed: Option<String> = None;
         for action in plan {

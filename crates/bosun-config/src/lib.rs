@@ -88,7 +88,7 @@
 //! - Identity, repository and MCP server names are ASCII letters, digits, `-` and `_`.
 //! - An unknown key of a `policy` is refused, so that a misspelt `protected` cannot leave paths
 //!   unprotected; so is an unknown key of a `resource`, a `worktree`, a
-//!   `worktree.shared_build`, a `landing.merge` or a `landing.pr`.
+//!   `worktree.shared_build`, a `landing.merge`, a `landing.pr` or a `sweep`.
 //! - `repo.<name>.landing` (#8): how an item's commits land. `mode` is `local` (the default),
 //!   `merge` or `pr`. `local` is not "stage 1 only": it is the dogfood mode, `merge` with the
 //!   method `ff` and no push onto the branch the item was claimed from (E6, E20); without a
@@ -118,6 +118,14 @@
 //!     `cargo clean` deletes it whole. It is the default for Rust: per-worktree
 //!     targets cost 12-15 GB each, and are the opt-in (no `shared_build`) of a repository that
 //!     raises concurrency.
+//! - `repo.<name>.sweep` (#8, E12): the process sweep, opt-in per repository. `processes` names
+//!   the known strays of the repository: after each attempt's session has ended, every running
+//!   process of the user with one of these executable file names that started at or after the
+//!   attempt began is killed, logged and noted on the item. A name is a file name without a
+//!   directory: ASCII letters, digits, `.`, `-` and `_`, not empty and not only dots; on
+//!   Windows it matches with or without `.exe`, case-insensitively. Default: no sweep. The key
+//!   is its own opt-in, independent of `worktree`. (Not the worktree sweep, which closes item
+//!   worktrees nobody owns.)
 //! - `[resource.<name>]` (#8): a resource items may name in `needs`. `kind` is required. They
 //!   are read at daemon start (an edit takes effect at the next start) and leased in worktree
 //!   mode: a card of a repository with `repo.<name>.worktree` may need them, and holds them from
@@ -267,6 +275,17 @@ pub struct Repo {
     pub mcp_servers: BTreeMap<String, McpServer>,
     /// `worktree`: where the repository's item worktrees go (#8). Default `None`.
     pub worktree: Option<Worktree>,
+    /// `sweep`: the process sweep after each attempt (#8, E12). Default `None`: no sweep.
+    pub sweep: Option<Sweep>,
+}
+
+/// `repo.<name>.sweep` (#8, E12): what is killed after an attempt's session has ended.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Sweep {
+    /// `processes`: executable file names of known strays, without a directory: ASCII letters,
+    /// digits, `.`, `-` and `_`. Order and duplicates do not matter. Default empty.
+    pub processes: BTreeSet<String>,
 }
 
 /// `repo.<name>.worktree` (#8).
@@ -619,6 +638,7 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
                             }),
                         })
                     }),
+                    sweep: r.sweep,
                 },
             ))
         })

@@ -887,22 +887,29 @@ fn scope_name(scope: Scope) -> &'static str {
     }
 }
 
-/// What item `item` of `served`'s identity waits for (`status.overview`, `item.get`): the
-/// full instances its request is not granted for, with their holders as the identity may see
-/// them; empty when it waits for nothing.
-pub(crate) fn waiting_of(state: &State, served: &Served, item: &ItemId) -> Vec<WaitingFor> {
+/// What the items of `served`'s identity wait for (`status.overview`, `item.get`): for each
+/// item whose request is not granted, the full instances it waits for, with their holders as
+/// the identity may see them. One read of the lease manager, under its lock.
+pub(crate) fn waits_of(state: &State, served: &Served) -> Vec<(ItemId, Vec<WaitingFor>)> {
     if cfg!(mutant_api_wait_unnamed) {
         // Mutant (`mutant_api_wait_unnamed`): what an item waits for is left out.
         return Vec::new();
     }
     let repos: Vec<String> = served.repos.iter().map(|(n, _)| n.clone()).collect();
-    state
-        .leases
-        .seen_by(&served.name, &repos)
-        .waiting
-        .into_iter()
+    state.leases.seen_by(&served.name, &repos).waiting
+}
+
+/// What `item` waits for in `waits` ([`waits_of`]); empty when it waits for nothing.
+pub(crate) fn waiting_in(waits: &[(ItemId, Vec<WaitingFor>)], item: &ItemId) -> Vec<WaitingFor> {
+    waits
+        .iter()
         .find(|(id, _)| id == item)
-        .map_or_else(Vec::new, |(_, waits)| waits)
+        .map_or_else(Vec::new, |(_, waits)| waits.clone())
+}
+
+/// What item `item` of `served`'s identity waits for ([`waits_of`]).
+pub(crate) fn waiting_of(state: &State, served: &Served, item: &ItemId) -> Vec<WaitingFor> {
+    waiting_in(&waits_of(state, served), item)
 }
 
 /// Where a journal that does not parse is moved: `<journal>.corrupt`.

@@ -47,6 +47,8 @@ async fn overview(state: &State, served: &Served) -> Result<Overview, ErrorObjec
     let names: Vec<String> = served.repos.iter().map(|(name, _)| name.clone()).collect();
     let control = state.control.status(&served.name, &names, now);
     let items = served.store.reader().items(false).await.map_err(failed)?;
+    // The lease manager, read once for every repository of the identity.
+    let waits = crate::leases::waits_of(state, served);
     let mut repos = Vec::new();
     for ((name, repo), held) in served.repos.iter().zip(&control.repos) {
         let mine: Vec<&StoredItem> = items.iter().filter(|i| i.repo == repo.key).collect();
@@ -69,7 +71,7 @@ async fn overview(state: &State, served: &Served) -> Result<Overview, ErrorObjec
                 detail: crate::events::reason_of(i.item.state),
                 attempt: i.item.attempt.as_ref().map_or(0, |a| a.number),
                 since_ms: i.updated_ms,
-                waiting: crate::leases::waiting_of(state, served, &i.item.id),
+                waiting: crate::leases::waiting_in(&waits, &i.item.id),
             }),
             last_verdict,
         });

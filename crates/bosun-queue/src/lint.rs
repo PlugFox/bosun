@@ -378,7 +378,8 @@ fn is_provenance(line: &str) -> bool {
     if starts("part of") {
         return true;
     }
-    starts("parent") && {
+    // Mutant (`mutant_queue_lint_parent_scanned`): a `Parent:` line is not provenance.
+    !cfg!(mutant_queue_lint_parent_scanned) && starts("parent") && {
         let rest = &line["parent".len()..];
         rest.strip_prefix("**").unwrap_or(rest).starts_with(':')
     }
@@ -796,6 +797,8 @@ mod tests {
                      ## Acceptance\n\n\
                      Part of #7 (found in a run).\n\
                      - **Part of** #7\n\
+                     Parent: #9, see #9 there.\n\
+                     - **Parent:** #9\n\
                      - [ ] The fix keeps `see #4` working.\n\
                      - [ ] owner/repo#3 is untouched; so is &#39; and #4a.\n\n\
                      ```text\n#2 inside a fence\n```\n\n\

@@ -930,7 +930,16 @@ fn slowdown() -> u32 {
 
 /// A scene deadline, stretched by `BOSUN_TEST_SLOWDOWN`.
 fn scaled(limit: Duration) -> Duration {
-    limit * slowdown()
+    scaled_by(limit, slowdown())
+}
+
+/// `limit` stretched by `factor`: every scene deadline ([`scaled`], [`wait_until`]) is one.
+fn scaled_by(limit: Duration, factor: u32) -> Duration {
+    // Mutant (`mutant_test_slowdown_ignored`): the factor is ignored.
+    if cfg!(mutant_test_slowdown_ignored) {
+        return limit;
+    }
+    limit * factor
 }
 
 /// Waits until `check` holds; panics after `limit`, stretched by `BOSUN_TEST_SLOWDOWN`.
@@ -945,13 +954,7 @@ async fn wait_until(
     factor: u32,
     mut check: impl AsyncFnMut() -> bool,
 ) {
-    // Mutant (`mutant_test_slowdown_ignored`): the factor is ignored.
-    let factor = if cfg!(mutant_test_slowdown_ignored) {
-        1
-    } else {
-        factor
-    };
-    let deadline = Instant::now() + limit * factor;
+    let deadline = Instant::now() + scaled_by(limit, factor);
     while !check().await {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(50)).await;

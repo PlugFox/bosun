@@ -2845,6 +2845,16 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_queue_lint_parent_scanned",
+        issue: 139,
+        breaks: "a `Parent:` line in the acceptance section warns like a reference the card leans on",
+        package: "bosun-queue",
+        check: Check::Test(
+            "lint::tests::provenance_lines_and_references_outside_the_acceptance_do_not_warn",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_runner_prompt_without_provenance_rule",
         issue: 139,
         breaks: "the session is not told that it cannot read GitHub and that a `#N` is provenance only",
@@ -2859,6 +2869,16 @@ const MUTANTS: &[Mutant] = &[
         name: "mutant_loop_claim_refusal_every_poll",
         issue: 189,
         breaks: "a claim refusal is logged at every poll while it lasts",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::refusals::a_repeated_claim_refusal_is_logged_once_until_its_text_changes",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_refusal_kept_after_a_pass",
+        issue: 189,
+        breaks: "a claim refusal that returns after a claim passed is not logged",
         package: "bosund",
         check: Check::Test(
             "executor::tests::refusals::a_repeated_claim_refusal_is_logged_once_until_its_text_changes",

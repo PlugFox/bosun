@@ -1,6 +1,6 @@
 //! A claim refusal in the log (#186): the loop refuses the claim at every poll while its cause
 //! lasts, and logs the refusal (one `board_sync_error` each) when it starts and when its text
-//! changes, not at every poll.
+//! changes, not at every poll; once a claim passes, the same text is logged again.
 
 use super::worktrees::{subscribe_trouble, trouble};
 use super::*;
@@ -31,15 +31,19 @@ async fn refused(sub: &mut Subscriber, seen: &mut Vec<String>, count: usize) {
 }
 
 /// #186: the identity check refuses for another login, then for an unreadable remote, over
-/// about thirty polls each with the check run again every 100 ms: one line for each text.
-/// Fixed, the card is claimed and ends Done. `mutant_loop_claim_refusal_every_poll` logs one
-/// line per poll.
+/// about thirty polls each with the check run again every 100 ms: one line for each text (the
+/// login fixed, the remote alone is a third). Fixed, the card is claimed and ends Done; that
+/// last refusal again, for a second card, is a line again, and fixed once more that card ends
+/// Done. `mutant_loop_claim_refusal_every_poll` logs one line per poll;
+/// `mutant_loop_refusal_kept_after_a_pass` keeps the last text across the pass, so the second
+/// card's refusal is not logged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_repeated_claim_refusal_is_logged_once_until_its_text_changes() {
     let scene = Scene::new().await;
     std::fs::write(scene.path("login"), "someone-else").unwrap();
     scene.write_board(&[card(1, "Refused first", "test -f one.txt", "Item one.")]);
     scene.script(1, &["commit one.txt one".to_owned()]);
+    scene.script(2, &["commit two.txt two".to_owned()]);
     let mut sub = subscribe_trouble(&scene);
 
     let (tx, rx) = watch::channel(Arc::new(scene.config()));
@@ -67,17 +71,44 @@ async fn a_repeated_claim_refusal_is_logged_once_until_its_text_changes() {
     assert_eq!(both.len(), 2, "{seen:#?}");
     assert!(both[1].contains("remote URL could not be read"), "{both:?}");
 
-    scene.git(&[
-        "remote",
-        "add",
-        "origin",
-        "https://github.com/synthetic-owner/demo.git",
-    ]);
+    // The login fixed first: the remote alone is the last refusal before the pass.
     std::fs::write(scene.path("login"), LOGIN).unwrap();
+    refused(&mut sub, &mut seen, 3).await;
+    let remote = refusals(&seen);
+    assert_eq!(remote.len(), 3, "{seen:#?}");
+    assert!(!remote[2].contains("another login"), "{remote:?}");
+    let remote = remote[2].clone();
+
+    let add_origin = || {
+        scene.git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/synthetic-owner/demo.git",
+        ]);
+    };
+    add_origin();
     let state = ended(&scene, 1, Duration::from_secs(120)).await;
+    seen.extend(trouble(&mut sub));
+    assert_eq!(state, State::Done(Outcome::Pass));
+    assert_eq!(refusals(&seen).len(), 3, "{seen:#?}");
+
+    // The refusal the pass ended, again (the same text), for a new card: said again.
+    scene.git(&["remote", "remove", "origin"]);
+    scene.write_board(&[
+        card(1, "Refused first", "test -f one.txt", "Item one."),
+        card(2, "Refused again", "test -f two.txt", "Item two."),
+    ]);
+    refused(&mut sub, &mut seen, 4).await;
+    let again = refusals(&seen);
+    assert_eq!(again.len(), 4, "{seen:#?}");
+    assert_eq!(*again[3], remote, "{again:?}");
+
+    add_origin();
+    let state = ended(&scene, 2, Duration::from_secs(120)).await;
     seen.extend(trouble(&mut sub));
     task.abort();
     watcher.abort();
     assert_eq!(state, State::Done(Outcome::Pass));
-    assert_eq!(refusals(&seen).len(), 2, "{seen:#?}");
+    assert_eq!(refusals(&seen).len(), 4, "{seen:#?}");
 }

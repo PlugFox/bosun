@@ -4,12 +4,17 @@
 use super::*;
 
 /// A wait stretches by its factor: a check that holds only after 500 ms passes a 200 ms wait
-/// slowed four times (`mutant_test_slowdown_ignored` ignores the factor: the wait times out).
+/// slowed four times, and so does every other deadline (`mutant_test_slowdown_ignored` ignores
+/// the factor: the wait times out, and a deadline is not stretched).
 #[tokio::test]
 async fn the_slowdown_factor_stretches_a_scene_wait() {
     assert_eq!(slowdown_of(None), 1);
     assert_eq!(slowdown_of(Some("")), 1);
     assert_eq!(slowdown_of(Some("3")), 3);
+    assert_eq!(
+        scaled_by(Duration::from_secs(15), 3),
+        Duration::from_secs(45)
+    );
 
     let start = Instant::now();
     wait_until("the flag", Duration::from_millis(200), 4, async || {

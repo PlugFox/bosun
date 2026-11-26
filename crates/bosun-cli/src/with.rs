@@ -9,15 +9,21 @@
 //!   releases the lease (`lease.release`) and exits with the command's exit code; a command
 //!   killed by a signal is 128 + the signal, as a shell reports it.
 //! - A daemon that cannot be reached, or that refuses, is an error of its usual exit code, and
-//!   the command is not run. Ctrl-C while waiting withdraws the request and exits 130; while
-//!   the command runs it is the command's to handle (a terminal sends it to the command too).
+//!   the command is not run. Ctrl-C while waiting withdraws the request and exits 130: one
+//!   `lease.release` on a connection of its own (the one in use may hold the unread reply of
+//!   the call the Ctrl-C cut short), for at most [`WITHDRAW_TIMEOUT`] and without reconnecting;
+//!   it says "withdrawn" only when the daemon answered, and a second Ctrl-C stops it. While the
+//!   command runs Ctrl-C is the command's to handle (a terminal sends it to the command too).
 //! - A daemon restart while waiting or while the command runs is survived: a call that loses
 //!   its connection, or whose operator token the daemon no longer knows (a restart came
 //!   between), connects again, re-reads the operator token and is sent again (the restarted
-//!   daemon reloads a granted lease from its journal and files a wait anew). Failed reconnects
-//!   are retried every [`POLL`] for at most [`RECONNECT_PATIENCE`]; then a wait ends with exit
-//!   code 4 and the command is not run, and a release after the command is reported on stderr
-//!   while the command's exit code stands.
+//!   daemon reloads a granted lease from its journal and files a wait anew). From the first
+//!   failure on, every reconnect and every call sent again is [`POLL`] apart, for at most
+//!   [`RECONNECT_PATIENCE`] in all, also when the reconnects succeed and the call keeps failing
+//!   (a daemon that answers `hello` but drops the lease call); then a wait ends with exit code 4
+//!   and the command is not run, and a release after the command is reported on stderr while
+//!   the command's exit code stands. "The daemon restarted" is said only when the operator
+//!   token changed.
 //! - On Unix, while the command runs, a SIGTERM or SIGHUP to `bosun` (`timeout`, a
 //!   supervisor's `kill`, a hang-up) is passed on to the command, by its pid only, through the
 //!   POSIX `kill` utility (the client crates have no `unsafe`); `bosun` keeps waiting for it,
@@ -53,6 +59,9 @@ const POLL: Duration = Duration::from_millis(500);
 
 /// How long failed reconnects to a daemon that went away are tried before `with` gives up.
 const RECONNECT_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How long the withdrawal after Ctrl-C (connect and `lease.release`) may take.
+const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The exit code of an interrupt while waiting, as a shell reports SIGINT.
 const INTERRUPTED: i32 = 130;
@@ -95,17 +104,20 @@ pub(crate) async fn with(global: &Global, args: &WithArgs) -> Result<i32, Failur
         identity,
         || crate::control::connect_operator(global),
         RECONNECT_PATIENCE,
+        Interrupts::new,
     )
     .await
 }
 
 /// [`with`] against the daemon `connect` reaches (it yields a client and the operator token,
-/// read anew at each connect), with `patience` for failed reconnects.
-async fn with_daemon<C, F>(
+/// read anew at each connect), with `patience` for a lost daemon and Ctrl-C from what
+/// `interrupts` makes (once connected, so Ctrl-C before that still ends `bosun` at once).
+async fn with_daemon<C, F, I: Interrupt>(
     args: &WithArgs,
     identity: String,
     mut connect: C,
     patience: Duration,
+    interrupts: impl FnOnce() -> Result<I, Failure>,
 ) -> Result<i32, Failure>
 where
     C: FnMut() -> F,
@@ -119,6 +131,7 @@ where
         connect,
         patience,
         names: names.clone(),
+        restarts: 0,
     };
     let pid = std::process::id();
     let ask = |operator: &str| AcquireParams {
@@ -132,7 +145,7 @@ where
         operator: operator.to_owned(),
         pid,
     };
-    let mut interrupts = Interrupts::new()?;
+    let mut interrupts = interrupts()?;
     let started = Instant::now();
     let first = match daemon.call::<method::LeaseAcquire>(&ask).await {
         Ok(answer) => answer,
@@ -167,8 +180,22 @@ where
                 () = interrupts.recv() => None,
             };
             let Some(polled) = polled else {
-                let _ = daemon.call::<method::LeaseRelease>(&release).await;
-                eprintln!("bosun: interrupted; the request for {names} is withdrawn");
+                let withdrawn = if cfg!(mutant_cli_with_withdraw_reconnects) {
+                    // Mutant (`mutant_cli_with_withdraw_reconnects`): the withdrawal goes over
+                    // the connection the Ctrl-C cut a call short on, reconnecting for as long as
+                    // a lost daemon is waited for.
+                    daemon
+                        .call::<method::LeaseRelease>(&release)
+                        .await
+                        .map(drop)
+                        .map_err(|e| e.message)
+                } else {
+                    tokio::select! {
+                        withdrawn = daemon.withdraw(&release) => withdrawn,
+                        () = interrupts.recv() => Err("interrupted again".to_owned()),
+                    }
+                };
+                eprintln!("bosun: {}", withdrawal_note(&names, &withdrawn));
                 return Ok(INTERRUPTED);
             };
             match polled {
@@ -225,6 +252,19 @@ struct Daemon<C> {
     patience: Duration,
     /// The resources, for the messages.
     names: String,
+    /// How many times a restart (a new operator token) was said.
+    restarts: u32,
+}
+
+/// What `bosun` says after Ctrl-C while waiting, given how the withdrawal went.
+fn withdrawal_note(names: &str, withdrawn: &Result<(), String>) -> String {
+    match withdrawn {
+        Ok(()) => format!("interrupted; the request for {names} is withdrawn"),
+        Err(e) => format!(
+            "interrupted; the request for {names} may not be withdrawn ({e}); the daemon drops \
+             it as this process ends"
+        ),
+    }
 }
 
 impl<C, F> Daemon<C>
@@ -239,7 +279,7 @@ where
         &mut self,
         params: impl Fn(&str) -> M::Params,
     ) -> Result<M::Result, Failure> {
-        let mut lost_since = None;
+        let mut lost_since: Option<Instant> = None;
         loop {
             let error = match self.client.call::<M>(&params(&self.operator)).await {
                 Ok(result) => return Ok(result),
@@ -250,14 +290,66 @@ where
             if !stale && !lost {
                 return Err(Failure::from(error));
             }
+            // Mutant (`mutant_cli_with_retry_unbounded`): a call that fails again after a
+            // reconnect that succeeded is sent again at once and for ever.
+            if let Some(since) = lost_since
+                && !cfg!(mutant_cli_with_retry_unbounded)
+            {
+                // A reconnect succeeded and the call failed again: the patience bounds that
+                // too, and the next try waits its turn.
+                if since.elapsed() >= self.patience {
+                    return Err(self.gave_up(&error.to_string()));
+                }
+                tokio::time::sleep(POLL).await;
+            }
             let since = *lost_since.get_or_insert_with(Instant::now);
             let before = std::mem::take(&mut self.operator);
             self.reconnect(since).await?;
-            if stale && self.operator == before {
+            if self.operator != before {
+                self.restarts += 1;
+                eprintln!(
+                    "bosun: the daemon restarted; asking it again for {}",
+                    self.names
+                );
+            } else if stale {
                 // The daemon did not restart: the token is simply refused.
                 return Err(Failure::from(error));
             }
         }
+    }
+
+    /// Withdraws a waiting request after Ctrl-C: one `lease.release` on a connection of its
+    /// own (the current one may hold the reply of the call the Ctrl-C cut short, which the
+    /// release would read as its own), within [`WITHDRAW_TIMEOUT`], with no reconnects.
+    async fn withdraw(&mut self, release: impl Fn(&str) -> ReleaseParams) -> Result<(), String> {
+        let once = async {
+            let (mut client, operator) = (self.connect)().await.map_err(|e| e.message)?;
+            client
+                .call::<method::LeaseRelease>(&release(&operator))
+                .await
+                .map(drop)
+                .map_err(|e| e.to_string())
+        };
+        tokio::time::timeout(WITHDRAW_TIMEOUT, once)
+            .await
+            .map_err(|_| {
+                format!(
+                    "the daemon did not answer within {} s",
+                    WITHDRAW_TIMEOUT.as_secs()
+                )
+            })?
+    }
+
+    /// The failure of a daemon that did not come back within the patience.
+    fn gave_up(&self, why: &str) -> Failure {
+        Failure::new(
+            exit::NOT_RUNNING,
+            format!(
+                "the daemon did not come back within {} s, so {} is not asked for again ({why})",
+                self.patience.as_secs(),
+                self.names,
+            ),
+        )
     }
 
     /// Connects again, every [`POLL`], until `patience` has passed since `since`.
@@ -267,26 +359,11 @@ where
                 Ok((client, operator)) => {
                     self.client = client;
                     self.operator = operator;
-                    eprintln!(
-                        "bosun: the daemon restarted; asking it again for {}",
-                        self.names
-                    );
                     return Ok(());
                 }
                 // A daemon that answers but speaks another API version will not change.
                 Err(e) if e.code == exit::VERSION => return Err(e),
-                Err(e) if since.elapsed() >= self.patience => {
-                    return Err(Failure::new(
-                        exit::NOT_RUNNING,
-                        format!(
-                            "the daemon did not come back within {} s, so {} is not asked for \
-                             again ({})",
-                            self.patience.as_secs(),
-                            self.names,
-                            e.message
-                        ),
-                    ));
-                }
+                Err(e) if since.elapsed() >= self.patience => return Err(self.gave_up(&e.message)),
                 Err(_) => tokio::time::sleep(POLL).await,
             }
         }
@@ -497,6 +574,12 @@ fn exit_code(status: ExitStatus) -> i32 {
     i32::from(exit::FAILED)
 }
 
+/// Where Ctrl-C comes from: [`Interrupts`], or a test's stand-in.
+trait Interrupt {
+    /// The next Ctrl-C. Cancel-safe: dropping the future loses no interrupt.
+    fn recv(&mut self) -> impl Future<Output = ()>;
+}
+
 /// Ctrl-C, taken from the default handler for the whole run: while the command runs it gets
 /// the interrupt itself, and `bosun` stays to release the lease.
 struct Interrupts {
@@ -516,7 +599,9 @@ impl Interrupts {
         let inner = tokio::signal::windows::ctrl_c().map_err(failed)?;
         Ok(Self { inner })
     }
+}
 
+impl Interrupt for Interrupts {
     async fn recv(&mut self) {
         if self.inner.recv().await.is_none() {
             std::future::pending::<()>().await;
@@ -599,7 +684,8 @@ mod tests {
 
     /// A stand-in daemon, in process: it answers `hello`, `lease.acquire` from a script and
     /// `lease.release`, refuses a lease call without the current generation's operator token,
-    /// and restarts (drops every connection, bumps its generation) when the script says so.
+    /// and restarts (drops every connection, bumps its generation) when the script says so. It
+    /// can also drop every lease call unanswered, answer `lease.acquire` late, or stop.
     mod stand_in {
         use std::collections::VecDeque;
         use std::sync::{Arc, Mutex};
@@ -625,6 +711,8 @@ mod tests {
         pub(super) struct Received {
             /// The generation of the daemon that received it.
             pub(super) generation: u32,
+            /// The connection it came on, counted from 1 across generations.
+            pub(super) connection: u32,
             pub(super) method: String,
             pub(super) operator: String,
             pub(super) pid: u32,
@@ -637,6 +725,11 @@ mod tests {
             down: usize,
             script: VecDeque<Answer>,
             log: Vec<Received>,
+            connections: u32,
+            /// Close the connection on a lease call instead of answering it.
+            drop_leases: bool,
+            /// Answer `lease.acquire` this late.
+            late: Duration,
         }
 
         #[derive(Clone)]
@@ -655,7 +748,27 @@ mod tests {
                     down: 0,
                     script: script.iter().copied().collect(),
                     log: Vec::new(),
+                    connections: 0,
+                    drop_leases: false,
+                    late: Duration::ZERO,
                 })))
+            }
+
+            /// From now on every lease call is dropped unanswered (`hello` still is answered).
+            pub(super) fn drop_leases(&self) {
+                self.0.lock().unwrap().drop_leases = true;
+            }
+
+            /// From now on `lease.acquire` is answered `late`.
+            pub(super) fn answer_late(&self, late: Duration) {
+                self.0.lock().unwrap().late = late;
+            }
+
+            /// Goes away for good: every connection drops and no connect succeeds.
+            pub(super) fn stop(&self) {
+                let mut state = self.0.lock().unwrap();
+                state.generation += 1;
+                state.down = usize::MAX;
             }
 
             pub(super) fn log(&self) -> Vec<Received> {
@@ -672,29 +785,41 @@ mod tests {
                             endpoint: "the stand-in".to_owned(),
                         }));
                     }
-                    state.generation
+                    state.connections += 1;
+                    (state.generation, state.connections)
                 };
                 let (near, far) = tokio::io::duplex(64 * 1024);
                 tokio::spawn(self.serve(generation, far));
                 let client = Client::over(Box::new(near)).await?;
-                Ok((client, token(generation)))
+                Ok((client, token(generation.0)))
             }
 
-            /// Serves one connection of `generation` until the client goes or it restarts.
-            async fn serve(self, generation: u32, far: DuplexStream) {
+            /// Serves one connection (of a generation, and its number) until the client goes or
+            /// the daemon restarts.
+            async fn serve(self, (generation, connection): (u32, u32), far: DuplexStream) {
                 let (read, mut write) = tokio::io::split(far);
                 let mut read = BufReader::new(read);
                 while let Ok(Some(line)) = framing::read_line(&mut read).await {
                     let request: Request = serde_json::from_str(&line).unwrap();
                     let id = request.id.clone().unwrap();
-                    let (response, restart) = {
+                    let (response, restart, late) = {
                         let mut state = self.0.lock().unwrap();
-                        if state.generation != generation {
-                            // This daemon is gone.
+                        if state.generation != generation
+                            || (state.drop_leases && request.method.starts_with("lease."))
+                        {
+                            // This daemon is gone, or drops the call.
                             return;
                         }
-                        Self::answer(&mut state, generation, &request, id)
+                        let late = if request.method == "lease.acquire" {
+                            state.late
+                        } else {
+                            Duration::ZERO
+                        };
+                        let (response, restart) =
+                            Self::answer(&mut state, (generation, connection), &request, id);
+                        (response, restart, late)
                     };
+                    tokio::time::sleep(late).await;
                     if framing::write_message(&mut write, &response).await.is_err() {
                         return;
                     }
@@ -708,7 +833,7 @@ mod tests {
             /// The response to `request`, and whether the daemon restarts after it.
             fn answer(
                 state: &mut State,
-                generation: u32,
+                (generation, connection): (u32, u32),
                 request: &Request,
                 id: serde_json::Value,
             ) -> (Response, bool) {
@@ -736,6 +861,7 @@ mod tests {
                 let accepted = operator == token(generation);
                 state.log.push(Received {
                     generation,
+                    connection,
                     method: method.to_owned(),
                     operator,
                     pid: u32::try_from(pid).unwrap(),
@@ -783,11 +909,36 @@ mod tests {
         }
     }
 
-    /// Runs `with_daemon` against `daemon` with `patience`.
+    /// A Ctrl-C when a future is done (never, without one).
+    struct CtrlC(Option<std::pin::Pin<Box<dyn Future<Output = ()>>>>);
+
+    impl Interrupt for CtrlC {
+        async fn recv(&mut self) {
+            match &mut self.0 {
+                Some(when) => {
+                    when.await;
+                    self.0 = None;
+                }
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    /// Runs `with_daemon` against `daemon` with `patience` and no Ctrl-C.
     async fn with_stand_in(
         daemon: &StandIn,
         command: &[&str],
         patience: Duration,
+    ) -> Result<i32, Failure> {
+        with_ctrl_c(daemon, command, patience, CtrlC(None)).await
+    }
+
+    /// Runs `with_daemon` against `daemon` with `patience` and Ctrl-C from `ctrl_c`.
+    async fn with_ctrl_c(
+        daemon: &StandIn,
+        command: &[&str],
+        patience: Duration,
+        ctrl_c: CtrlC,
     ) -> Result<i32, Failure> {
         let args = with_args(command);
         let daemon = daemon.clone();
@@ -796,8 +947,144 @@ mod tests {
             "demo".to_owned(),
             move || daemon.clone().connect(),
             patience,
+            || Ok(ctrl_c),
         )
         .await
+    }
+
+    /// Never granted: the script refuses `n` asks.
+    fn refused(n: usize) -> Vec<Answer> {
+        vec![
+            Answer {
+                granted: false,
+                restart: None,
+            };
+            n
+        ]
+    }
+
+    /// #191: a daemon that answers `hello` but drops every lease call makes every reconnect
+    /// succeed; the patience still ends the wait with exit code 4, the command not run.
+    #[tokio::test]
+    async fn a_daemon_that_keeps_dropping_the_call_ends_the_wait_within_the_patience() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let daemon = StandIn::new(&[]);
+        daemon.drop_leases();
+        let started = Instant::now();
+        let ran_arg = ran.to_str().unwrap();
+        let ended = tokio::time::timeout(
+            Duration::from_secs(10),
+            with_stand_in(
+                &daemon,
+                &["git", "init", "-q", ran_arg],
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("the patience ends the retries");
+        let failure = ended.unwrap_err();
+        assert_eq!(failure.code, exit::NOT_RUNNING, "{failure:?}");
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert!(!ran.exists(), "the command did not run");
+    }
+
+    /// #191: Ctrl-C while a poll's reply is still unread withdraws the request on a connection
+    /// of its own, and the daemon accepts it there.
+    #[tokio::test]
+    async fn ctrl_c_mid_call_withdraws_on_a_connection_of_its_own() {
+        let daemon = StandIn::new(&refused(100));
+        daemon.answer_late(Duration::from_millis(500));
+        let watched = daemon.clone();
+        // Ctrl-C once the second ask has arrived: its reply is late, so still unread.
+        let ctrl_c = CtrlC(Some(Box::pin(async move {
+            while accepted(&watched.log(), 1, "lease.acquire").len() < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })));
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            with_ctrl_c(&daemon, &["git", "--version"], RECONNECT_PATIENCE, ctrl_c),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(code, INTERRUPTED);
+        let log = daemon.log();
+        let asked = accepted(&log, 1, "lease.acquire");
+        let released = accepted(&log, 1, "lease.release");
+        assert_eq!(released.len(), 1, "{log:#?}");
+        assert!(
+            asked.iter().all(|a| a.connection != released[0].connection),
+            "{log:#?}"
+        );
+    }
+
+    /// #191: Ctrl-C while waiting on a daemon that then goes away ends `bosun` within the
+    /// withdrawal's few seconds, not the patience for a lost daemon, and does not claim the
+    /// request was withdrawn.
+    #[tokio::test]
+    async fn ctrl_c_with_the_daemon_gone_ends_within_the_withdrawal_timeout() {
+        let daemon = StandIn::new(&refused(100));
+        let gone = daemon.clone();
+        let ctrl_c = CtrlC(Some(Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            gone.stop();
+        })));
+        let started = Instant::now();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            with_ctrl_c(&daemon, &["git", "--version"], RECONNECT_PATIENCE, ctrl_c),
+        )
+        .await
+        .expect("the withdrawal is one short attempt")
+        .unwrap();
+        assert_eq!(code, INTERRUPTED);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(accepted(&daemon.log(), 2, "lease.release").is_empty());
+    }
+
+    #[test]
+    fn withdrawn_is_said_only_when_the_daemon_answered() {
+        assert_eq!(
+            withdrawal_note("rig", &Ok(())),
+            "interrupted; the request for rig is withdrawn"
+        );
+        let failed = withdrawal_note("rig", &Err("the daemon is not running".to_owned()));
+        assert!(failed.contains("may not be withdrawn"), "{failed}");
+        assert!(failed.contains("the daemon is not running"), "{failed}");
+    }
+
+    /// #191: a token refused although the daemon did not restart (the token read again is the
+    /// same) is the refusal, and no restart is said.
+    #[tokio::test]
+    async fn a_refused_token_that_did_not_change_says_no_restart() {
+        let stand_in = StandIn::new(&[]);
+        let connect = move || {
+            let stand_in = stand_in.clone();
+            async move {
+                let (client, _) = stand_in.connect().await?;
+                Ok((client, "bosun-operator-stale".to_owned()))
+            }
+        };
+        let (client, operator) = connect().await.unwrap();
+        let mut daemon = Daemon {
+            client,
+            operator,
+            connect,
+            patience: RECONNECT_PATIENCE,
+            names: "rig".to_owned(),
+            restarts: 0,
+        };
+        let failure = daemon
+            .call::<method::LeaseRelease>(|operator| ReleaseParams {
+                operator: operator.to_owned(),
+                pid: 1,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(daemon.restarts, 0);
+        assert!(failure.message.contains("not valid"), "{failure:?}");
     }
 
     fn accepted(log: &[Received], generation: u32, method: &str) -> Vec<Received> {
@@ -823,6 +1110,7 @@ mod tests {
             released,
             [Received {
                 generation: 2,
+                connection: 2,
                 method: "lease.release".to_owned(),
                 operator: token(2),
                 pid: std::process::id(),

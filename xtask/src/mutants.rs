@@ -2943,6 +2943,24 @@ const MUTANTS: &[Mutant] = &[
             "with::tests::a_daemon_that_does_not_come_back_ends_the_wait_without_running_the_command",
         ),
         platform: None,
+    },
+    Mutant {
+        name: "mutant_cli_with_retry_unbounded",
+        issue: WITH_RECONNECT_CARD,
+        breaks: "a daemon that answers hello but drops the lease call keeps bosun with retrying for ever",
+        package: "bosun-cli",
+        check: Check::Test(
+            "with::tests::a_daemon_that_keeps_dropping_the_call_ends_the_wait_within_the_patience",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_cli_with_withdraw_reconnects",
+        issue: WITH_RECONNECT_CARD,
+        breaks: "Ctrl-C while bosun with waits withdraws over a cut-short connection, or waits a minute",
+        package: "bosun-cli",
+        check: Check::Test("with::tests::ctrl_c_mid_call_withdraws_on_a_connection_of_its_own"),
+        platform: None,
     }, // `bosun doctor` asks the daemon to start its `gh` (#131, part 2).
     Mutant {
         name: "mutant_api_probe_always_ok",

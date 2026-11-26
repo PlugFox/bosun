@@ -336,6 +336,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_api_lease_without_operator)",
   "cfg(mutant_cli_with_exit_zero)",
   # #180: `bosun with` on refusal, through PATHEXT, and under SIGTERM.
+  "cfg(mutant_cli_with_retry_unbounded)",
+  "cfg(mutant_cli_with_withdraw_reconnects)",
   "cfg(mutant_cli_with_runs_on_refusal)",
   "cfg(mutant_cli_with_no_pathext)",
   "cfg(mutant_cli_with_no_signal_forward)",

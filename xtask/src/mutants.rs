@@ -2969,7 +2969,8 @@ const MUTANTS: &[Mutant] = &[
         package: "bosun-cli",
         check: Check::Test("with::tests::ctrl_c_mid_call_withdraws_on_a_connection_of_its_own"),
         platform: None,
-    }, // `bosun doctor` asks the daemon to start its `gh` (#131, part 2).
+    },
+    // `bosun doctor` asks the daemon to start its `gh` (#131, part 2).
     Mutant {
         name: "mutant_api_probe_always_ok",
         issue: 192,
@@ -3057,14 +3058,13 @@ const MUTANTS: &[Mutant] = &[
     },
 ];
 
-/// The card of #8 that keeps `bosun-mcp` working while the daemon restarts: retried calls, a
-/// retryable refusal while loops recover, caps and blocking questions across the restart (its
-/// own number was not known when it was written; its parent's stands in).
-const BUFFERED_CALLS_CARD: u32 = 8;
+/// #193, the card of #8 that keeps `bosun-mcp` working while the daemon restarts: retried
+/// calls, a retryable refusal while loops recover, caps and blocking questions across the
+/// restart.
+const BUFFERED_CALLS_CARD: u32 = 193;
 
-/// The card of #186 (its finding 4) that lets `bosun with` survive a daemon restart (its own
-/// number was not known when it was written; its parent's stands in).
-const WITH_RECONNECT_CARD: u32 = 186;
+/// #191, the card of #186 (its finding 4) that lets `bosun with` survive a daemon restart.
+const WITH_RECONNECT_CARD: u32 = 191;
 
 /// #164, the card of #8 that polls the pull request of an item Done in `pr` mode (merged
 /// releases dependants, closed unmerged is Needs you).

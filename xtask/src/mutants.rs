@@ -2914,7 +2914,71 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // bosun-mcp keeps working while the daemon restarts (#8, buffered calls).
+    Mutant {
+        name: "mutant_mcp_no_retry",
+        issue: BUFFERED_CALLS_CARD,
+        breaks: "bosun-mcp returns the first error of a call made while the daemon restarts",
+        package: "bosun-mcp",
+        check: Check::Test(
+            "tests::a_call_during_a_daemon_restart_is_retried_until_the_daemon_answers",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_mcp_retry_unauthorized",
+        issue: BUFFERED_CALLS_CARD,
+        breaks: "bosun-mcp retries an UNAUTHORIZED refusal like RECOVERING",
+        package: "bosun-mcp",
+        check: Check::Test("tests::an_unauthorized_call_is_returned_at_once_and_not_retried"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_agent_recovering_unauthorized",
+        issue: BUFFERED_CALLS_CARD,
+        breaks: "an unknown agent credential is UNAUTHORIZED while a loop recovers",
+        package: "bosund",
+        check: Check::Test(
+            "agent::tests::an_unknown_credential_is_retryable_only_while_a_loop_recovers",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_agent_recovering_never_ends",
+        issue: BUFFERED_CALLS_CARD,
+        breaks: "a loop's recovery guard is never dropped, so an unknown credential stays RECOVERING",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::restart::an_unknown_credential_is_retryable_until_the_loop_has_re_attached_its_session",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_agent_caps_reset_on_readmit",
+        issue: BUFFERED_CALLS_CARD,
+        breaks: "a re-attached attempt's call counts start from zero after a restart",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::restart::a_reattached_session_keeps_the_calls_its_attempt_made_before_the_restart",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_agent_blocking_question_twice",
+        issue: BUFFERED_CALLS_CARD,
+        breaks: "a retried blocking question is a second row and moves the item twice",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::restart::a_repeated_blocking_question_is_recorded_once",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that keeps `bosun-mcp` working while the daemon restarts: retried calls, a
+/// retryable refusal while loops recover, caps and blocking questions across the restart (its
+/// own number was not known when it was written; its parent's stands in).
+const BUFFERED_CALLS_CARD: u32 = 8;
 
 /// The card of #186 (its finding 4) that lets `bosun with` survive a daemon restart (its own
 /// number was not known when it was written; its parent's stands in).

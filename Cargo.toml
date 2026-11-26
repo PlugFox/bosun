@@ -219,6 +219,13 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_mcp_skip_handshake)",
   "cfg(mutant_mcp_extra_tool)",
   "cfg(mutant_mcp_config_in_tree)",
+  # #8: bosun-mcp across a daemon restart (buffered calls).
+  "cfg(mutant_mcp_no_retry)",
+  "cfg(mutant_mcp_retry_unauthorized)",
+  "cfg(mutant_agent_recovering_unauthorized)",
+  "cfg(mutant_agent_recovering_never_ends)",
+  "cfg(mutant_agent_caps_reset_on_readmit)",
+  "cfg(mutant_agent_blocking_question_twice)",
   "cfg(mutant_control_pause_kills)",
   "cfg(mutant_control_kill_keeps_writing)",
   "cfg(mutant_budget_ignore_item_cap)",

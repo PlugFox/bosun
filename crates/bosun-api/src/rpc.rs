@@ -41,6 +41,9 @@ pub mod code {
     pub const RATE_CAPPED: i32 = -32004;
     /// The item, session or card the request names is not known (#70).
     pub const NOT_FOUND: i32 = -32005;
+    /// The daemon has just started and has not re-admitted every surviving session's
+    /// credential yet; the call may be made again (#8, E10).
+    pub const RECOVERING: i32 = -32006;
 }
 
 /// A request or notification.

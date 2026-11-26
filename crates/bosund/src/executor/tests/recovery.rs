@@ -196,7 +196,7 @@ async fn children(scene: &Scene) -> Vec<bosun_store::RecordedChild> {
 }
 
 /// The scene's child log, for a failure message.
-fn child_log(scene: &Scene) -> String {
+pub(super) fn child_log(scene: &Scene) -> String {
     std::fs::read_to_string(scene.path("child.log")).unwrap_or_default()
 }
 
@@ -237,7 +237,7 @@ fn one_of_each(scene: &Scene, n: u64) {
     assert_eq!(markers, 1, "one claim marker: {keys:?}");
 }
 
-async fn causes(scene: &Scene, n: u64) -> Vec<String> {
+pub(super) async fn causes(scene: &Scene, n: u64) -> Vec<String> {
     scene
         .store
         .reader()
@@ -735,7 +735,7 @@ fn print_text(text: &str) -> String {
 
 /// A worktree-mode scene (#8) whose card 1 prints `before-the-kill`, writes `started`, waits
 /// for `release`, prints `after-the-release`, commits `one.txt` and ends normally.
-async fn shimmed_session() -> Scene {
+pub(super) async fn shimmed_session() -> Scene {
     let scene = Scene::with_worktrees(None).await;
     let p = |name: &str| scene.path(name).display().to_string();
     scene.write_board(&[card(1, "Under the shim", "test -f one.txt", "Item one.")]);
@@ -754,7 +754,7 @@ async fn shimmed_session() -> Scene {
 
 /// Runs a child daemon until card 1's session waits under its shim and its row holds the
 /// offsets past the first line, then kills it. Returns the shim's record; the agent runs on.
-async fn kill_under_shim(scene: &Scene) -> bosun_proc::shim::Record {
+pub(super) async fn kill_under_shim(scene: &Scene) -> bosun_proc::shim::Record {
     let mut daemon = Spawned::start(scene, Role::Daemon);
     wait_file(&scene.path("started")).await;
     let mut row = None;
@@ -780,12 +780,12 @@ async fn kill_under_shim(scene: &Scene) -> bosun_proc::shim::Record {
 }
 
 /// Ends the agent of `record` if it still runs, so that nothing outlives the scene.
-fn end_agent(record: &bosun_proc::shim::Record) {
+pub(super) fn end_agent(record: &bosun_proc::shim::Record) {
     let _ = bosun_proc::reap(record.child);
 }
 
 /// The test loop's API over the scene's credentials, as `bosun-mcp` calls it.
-fn api_of(scene: &Scene) -> crate::state::State {
+pub(super) fn api_of(scene: &Scene) -> crate::state::State {
     crate::state::State {
         started_ms: 0,
         identities: BTreeMap::new(),
@@ -797,7 +797,7 @@ fn api_of(scene: &Scene) -> crate::state::State {
 }
 
 /// Waits until the item's re-attach is recorded.
-async fn reattached(scene: &Scene) {
+pub(super) async fn reattached(scene: &Scene) {
     wait_for("the re-attach", Duration::from_secs(60), async || {
         causes(scene, 1).await.iter().any(|c| c == "reattached")
     })

@@ -701,6 +701,7 @@ fn reason_text(reason: Reason) -> &'static str {
         Reason::Setup => "the item's worktree could not be made or set up",
         Reason::Handshake => "the session's bosun MCP server did not start, twice",
         Reason::Identity => "the identity checks refused the session",
+        Reason::Stale => "the daemon's view of the item was older than its stored history",
     }
 }
 

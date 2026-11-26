@@ -42,6 +42,7 @@ mod refusals;
 mod removal;
 mod restart;
 mod shim;
+mod stale;
 mod sticky;
 mod sweep;
 mod timing;
@@ -1242,7 +1243,9 @@ async fn seven_items(scene: Scene) {
 }
 
 /// Every transition is written before its effects: when the store refuses the transition that
-/// carries the claim, the board is not written and nothing is spawned
+/// carries the claim (a refusal other than a stale transition halts the loop;
+/// `mutant_loop_stale_on_any_refusal` sends the item to Needs you and goes on instead), the
+/// board is not written and nothing is spawned
 /// (`mutant_loop_effect_before_transition` performs the claim first: the card moves to In
 /// progress and gets its claim marker with no row behind them). The claim is the effect
 /// observed because the store itself refuses a session's run row without its attempt, which
@@ -1262,7 +1265,7 @@ async fn a_refused_transition_leaves_no_effect_without_its_row() {
         if claims {
             seen.fetch_add(1, Ordering::SeqCst);
         }
-        claims
+        claims.then_some(bosun_store::Error::Closed)
     });
     let (task, watcher) = scene.start(Some(failpoint));
     // The loop halts once the store refuses a transition.

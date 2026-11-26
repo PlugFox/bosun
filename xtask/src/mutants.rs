@@ -2486,6 +2486,26 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_loop_halt_on_stale",
+        issue: STALE_CARD,
+        breaks: "a stale transition halts the repository's loop: one card stops every other",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::stale::a_stale_transition_of_the_item_in_flight_sends_it_to_needs_you_and_the_next_card_runs",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_stale_on_any_refusal",
+        issue: STALE_CARD,
+        breaks: "every refused transition costs its item only: the loop never halts",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::a_refused_transition_leaves_no_effect_without_its_row",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_loop_hold_leases_while_parked",
         issue: LEASE_WAIT_CARD,
         breaks: "a parked item keeps its leases until its limit resets",
@@ -3009,6 +3029,9 @@ const LEASE_WAIT_CARD: u32 = 8;
 /// its teardown, and frees them when the loop halts (its own number was not known when it was
 /// written; its parent's stands in).
 const LEASE_WINDOW_CARD: u32 = 8;
+
+/// #194, the second card of #132: a stale transition costs its card, not the repository.
+const STALE_CARD: u32 = 194;
 
 /// The card of #8 that sweeps the worktrees no item owns, retries quarantines and records the
 /// children of `setup` and `teardown` (its own number was not known when it was written; its

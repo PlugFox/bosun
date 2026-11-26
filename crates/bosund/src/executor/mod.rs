@@ -296,14 +296,16 @@ pub(crate) struct Options {
     /// This start's boot number ([`recover::next_boot`], one per store); `None`: the loop
     /// records one itself before it recovers.
     pub(crate) boot: Option<u32>,
-    /// Test only: a transition this returns `true` for fails to be written.
+    /// Test only: a transition this returns an error for fails to be written, refused with it.
     #[cfg(test)]
     pub(crate) failpoint: Option<Failpoint>,
 }
 
-/// A transition write that fails on purpose (the failpoint test).
+/// A transition write that fails on purpose (the failpoint test): `None` writes it, `Some(e)`
+/// refuses it with `e`.
 #[cfg(test)]
-pub(crate) type Failpoint = Arc<dyn Fn(&bosun_core::Transition) -> bool + Send + Sync>;
+pub(crate) type Failpoint =
+    Arc<dyn Fn(&bosun_core::Transition) -> Option<bosun_store::Error> + Send + Sync>;
 
 impl fmt::Debug for Options {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -709,7 +711,9 @@ impl Loop {
         }
     }
 
-    /// Runs until the store refuses a write (the loop cannot record what it does any more) or
+    /// Runs until the store refuses a write other than a stale transition (the loop cannot
+    /// record what it does any more; a stale transition costs its item only,
+    /// [`Loop::stale_refused`]) or
     /// the configuration channel closes (the daemon stops). At a stop the task in flight is sent
     /// [`Signal::Detach`] and awaited: a session under its shim is left running for the next
     /// daemon (E22), anything else is killed. Aborting the task kills the child in flight: its
@@ -797,12 +801,12 @@ impl Loop {
     }
 
     /// Writes one arrow and publishes it. The row is written before any effect (#1).
-    async fn record(&self, stepped: &Stepped) -> Result<(), String> {
+    async fn record(&self, stepped: &Stepped) -> Result<(), bosun_store::Error> {
         #[cfg(test)]
         if let Some(failpoint) = &self.shared.options.failpoint
-            && failpoint(&stepped.transition)
+            && let Some(e) = failpoint(&stepped.transition)
         {
-            return Err("the failpoint refused the transition".to_owned());
+            return Err(e);
         }
         self.shared
             .deps
@@ -811,8 +815,7 @@ impl Loop {
                 stepped: stepped.clone(),
                 at_ms: now_ms(),
             }])
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
         self.board.wake();
         for body in events::transition(&stepped.item.id, &stepped.transition) {
             self.shared.publish(body);
@@ -827,10 +830,79 @@ impl Loop {
             return;
         };
         if let Err(e) = self.record(&stepped).await {
-            self.halt(&e);
+            // A stale one sends the item to Needs you; the arrow of that is a bounce too, its
+            // effects the board writes queued with its row.
+            let _ = self.stale_refused(&stepped.item.id, e).await;
         }
     }
 
+    /// The store refused a transition of `id` with `error` (#132). A stale transition (the
+    /// loop's view of the item was older than its stored history) costs the item only: the
+    /// refusal is logged and stored as the item's [`outbox::NOTE_STALE`] note, the item is read
+    /// again, and [`Event::Stale`] is stepped from the stored item and recorded, so it goes to
+    /// Needs you with the refusal in its comment. A stored item that cannot move (already Needs
+    /// you, Done or Cancelled), or whose arrow is refused as stale again, is skipped: nothing
+    /// more is written for it, and the stale arrow is never retried. Any other refusal, of the
+    /// transition or of what this writes and reads, halts the loop ([`Loop::halt`]).
+    ///
+    /// Returns `None` when the loop halts; else the stored item (`None` when it has no row)
+    /// and the arrow [`Event::Stale`] took from it, recorded, whose effects the caller performs.
+    async fn stale_refused(
+        &mut self,
+        id: &ItemId,
+        error: bosun_store::Error,
+    ) -> Option<(Option<Item>, Option<Stepped>)> {
+        let stale = if cfg!(mutant_loop_stale_on_any_refusal) {
+            // Mutant (`mutant_loop_stale_on_any_refusal`): every refusal costs its item only.
+            true
+        } else {
+            // Mutant (`mutant_loop_halt_on_stale`): a stale transition halts the loop too.
+            matches!(error, bosun_store::Error::Stale(_)) && !cfg!(mutant_loop_halt_on_stale)
+        };
+        if !stale {
+            self.halt(&error.to_string());
+            return None;
+        }
+        let error = error.to_string();
+        self.shared
+            .trouble(format!("{id}: {error}; the item goes to Needs you"));
+        let note = Write::ItemNote {
+            item: id.clone(),
+            kind: outbox::NOTE_STALE.to_owned(),
+            body: error,
+            at_ms: now_ms(),
+        };
+        if let Err(e) = self.shared.deps.writer.write(vec![note]).await {
+            self.halt(&e.to_string());
+            return None;
+        }
+        let stored = match self.shared.deps.reader.item(id).await {
+            Ok(Some(stored)) => stored.item,
+            Ok(None) => return Some((None, None)),
+            Err(e) => {
+                self.halt(&e.to_string());
+                return None;
+            }
+        };
+        let Some(stepped) = step(&stored, &Event::Stale, &self.ctx()) else {
+            return Some((Some(stored), None));
+        };
+        match self.record(&stepped).await {
+            Ok(()) => Some((Some(stored), Some(stepped))),
+            // No third try: the item is skipped.
+            Err(e @ bosun_store::Error::Stale(_)) => {
+                self.shared
+                    .trouble(format!("{id}: {e}; the item is skipped"));
+                Some((Some(stored), None))
+            }
+            Err(e) => {
+                self.halt(&e.to_string());
+                None
+            }
+        }
+    }
+
+    /// The store refused a write the loop cannot go on without: the loop stops.
     fn halt(&mut self, error: &str) {
         self.shared.trouble(format!(
             "the store refused a transition, the loop stops: {error}"
@@ -880,7 +952,7 @@ impl Loop {
                 // Mutant: the effects are performed first and the row written after.
                 let follow = self.perform(&stepped.transition.effects).await;
                 if let Err(e) = self.record(&stepped).await {
-                    self.halt(&e);
+                    self.halt(&e.to_string());
                     return;
                 }
                 if let Some(cur) = self.current.as_mut() {
@@ -889,7 +961,7 @@ impl Loop {
                 pending.extend(follow);
             } else {
                 if let Err(e) = self.record(&stepped).await {
-                    self.halt(&e);
+                    self.refused_in_flight(e).await;
                     return;
                 }
                 if let Some(cur) = self.current.as_mut() {
@@ -913,6 +985,28 @@ impl Loop {
                 return;
             }
         }
+    }
+
+    /// A transition of the item in flight was refused with `error` ([`Loop::stale_refused`]).
+    /// Unless the loop halts, the stored item replaces the loop's view of it, the effects of the arrow
+    /// [`Event::Stale`] took are performed (its child is killed), and the item leaves the loop
+    /// ([`Loop::finish`]) whether it stepped or not: the loop is free for the next card.
+    async fn refused_in_flight(&mut self, error: bosun_store::Error) {
+        let Some(id) = self.current.as_ref().map(|c| c.item.id.clone()) else {
+            return;
+        };
+        let Some((stored, stepped)) = self.stale_refused(&id, error).await else {
+            return;
+        };
+        let item = stepped.as_ref().map(|s| s.item.clone()).or(stored);
+        if let (Some(cur), Some(item)) = (self.current.as_mut(), item) {
+            cur.item = item;
+        }
+        if let Some(stepped) = stepped {
+            // The arrow ends the item: what its effects would start next is dropped.
+            let _ = self.perform(&stepped.transition.effects).await;
+        }
+        self.finish().await;
     }
 
     /// Performs `effects` in order; returns the events of those that complete at once.

@@ -402,6 +402,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_lease_after_setup)",
   "cfg(mutant_loop_release_before_teardown)",
   "cfg(mutant_loop_halt_keeps_leases)",
+  "cfg(mutant_loop_halt_on_stale)",
+  "cfg(mutant_loop_stale_on_any_refusal)",
   # #8, E24: an item holds no lease while it waits; a lease refusal is a configuration change.
   "cfg(mutant_loop_hold_leases_while_parked)",
   "cfg(mutant_loop_hold_leases_while_deferred)",

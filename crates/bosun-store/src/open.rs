@@ -819,6 +819,123 @@ mod tests {
         store.close().await.unwrap();
     }
 
+    /// #132: migration 17 rebuilds `item` to allow the reason `stale`. A database of version 16
+    /// with an item that needs the user and its attempt migrates: both read back the same, the
+    /// foreign keys hold, the new reason is accepted, an unknown one refused; and the migration
+    /// runs again cleanly when its record was lost (it runs outside sqlx's transaction).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn migration_17_accepts_the_stale_reason_and_keeps_every_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = open(&path, &Options::default(), &up_to(16)).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO repo (id, path, name) VALUES (1, '/fixture/demo', 'demo');
+             INSERT INTO item (id, item_key, repo_id, card_key, state, reason, attempt_number,
+                               seq, attempts, spawns, runs, failed, uncounted, boot, created_ms,
+                               updated_ms, conflicts)
+             VALUES (3, 'demo#1', 1, 'card-1', 'needs_you', 'lint', 1, 4, 1, 2, 1, 0, 1, 2, 10,
+                     20, 1);
+             INSERT INTO attempt (id, item_id, number, state, spawn, started_ms)
+             VALUES (1, 3, 1, 'exited', 1, 10);
+             INSERT INTO transition (transition_key, item_id, seq, attempt, from_state, to_state,
+                                     cause, ts_ms)
+             VALUES ('demo#1/t4', 3, 4, 1, 'ready', 'needs_you', 'lint_failed', 20);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        let item_columns = "SELECT id, item_key, repo_id, card_key, state, park_reason,
+                                   park_until_ms, park_next, outcome, reason, attempt_number,
+                                   snapshot_id, seq, attempts, spawns, runs, failed, uncounted,
+                                   boot, created_ms, updated_ms, conflicts
+                            FROM item ORDER BY id";
+        let attempt_columns =
+            "SELECT id, item_id, number, state, spawn, started_ms FROM attempt ORDER BY id";
+        let items_before = items(&mut conn, item_columns).await;
+        let attempts_before = items(&mut conn, attempt_columns).await;
+        assert_eq!(items_before.len(), 1);
+        assert_eq!(attempts_before.len(), 1);
+        conn.close().await.unwrap();
+
+        for pass in 0..2 {
+            let store = Store::open(&path, Options::default()).await.unwrap();
+            let mut conn = store.reader().pool.acquire().await.unwrap();
+            assert_eq!(items(&mut conn, item_columns).await, items_before, "{pass}");
+            assert_eq!(
+                items(&mut conn, attempt_columns).await,
+                attempts_before,
+                "{pass}"
+            );
+            let broken: Vec<(String, i64)> =
+                sqlx::query_as("SELECT \"table\", rowid FROM pragma_foreign_key_check")
+                    .fetch_all(&mut *conn)
+                    .await
+                    .unwrap();
+            assert!(broken.is_empty(), "{broken:?}");
+            let indexes: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index'
+                   AND name IN ('item_repo', 'item_state')",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+            assert_eq!(indexes, 2);
+            drop(conn);
+            store.close().await.unwrap();
+            if pass == 0 {
+                // As a crash between the migration's `COMMIT` and sqlx's insert leaves it.
+                let mut conn =
+                    SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+                        .await
+                        .unwrap();
+                sqlx::raw_sql("DELETE FROM _sqlx_migrations WHERE version = 17")
+                    .execute(&mut conn)
+                    .await
+                    .unwrap();
+                conn.close().await.unwrap();
+            }
+        }
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let id = bosun_core::ItemId::new("demo#1");
+        let stored = store.reader().item(&id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.item.state,
+            bosun_core::State::NeedsYou(bosun_core::Reason::Lint)
+        );
+        store.close().await.unwrap();
+
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE item SET reason = 'stale' WHERE id = 3")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let refused = sqlx::query("UPDATE item SET reason = 'unknown' WHERE id = 3")
+            .execute(&mut conn)
+            .await;
+        assert!(refused.is_err());
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let stored = store.reader().item(&id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.item.state,
+            bosun_core::State::NeedsYou(bosun_core::Reason::Stale)
+        );
+        store.close().await.unwrap();
+    }
+
     /// Every row of `query` as text, column by column, to compare a table before and after.
     async fn items(conn: &mut SqliteConnection, query: &'static str) -> Vec<Vec<Option<String>>> {
         use sqlx::Row;

@@ -11,6 +11,13 @@
 //! - A daemon that cannot be reached, or that refuses, is an error of its usual exit code, and
 //!   the command is not run. Ctrl-C while waiting withdraws the request and exits 130; while
 //!   the command runs it is the command's to handle (a terminal sends it to the command too).
+//! - A daemon restart while waiting or while the command runs is survived: a call that loses
+//!   its connection, or whose operator token the daemon no longer knows (a restart came
+//!   between), connects again, re-reads the operator token and is sent again (the restarted
+//!   daemon reloads a granted lease from its journal and files a wait anew). Failed reconnects
+//!   are retried every [`POLL`] for at most [`RECONNECT_PATIENCE`]; then a wait ends with exit
+//!   code 4 and the command is not run, and a release after the command is reported on stderr
+//!   while the command's exit code stands.
 //! - On Unix, while the command runs, a SIGTERM or SIGHUP to `bosun` (`timeout`, a
 //!   supervisor's `kill`, a hang-up) is passed on to the command, by its pid only, through the
 //!   POSIX `kill` utility (the client crates have no `unsafe`); `bosun` keeps waiting for it,
@@ -34,14 +41,18 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-use bosun_api::{AcquireParams, ReleaseParams, method};
-use bosun_client::Client;
+use bosun_api::rpc::code;
+use bosun_api::{AcquireParams, Method, ReleaseParams, method};
+use bosun_client::{Client, Error};
 use clap::Args;
 
 use crate::{Failure, Global, exit, identities};
 
-/// How often a waiting request is asked about.
+/// How often a waiting request is asked about, and how often a lost daemon is reconnected to.
 const POLL: Duration = Duration::from_millis(500);
+
+/// How long failed reconnects to a daemon that went away are tried before `with` gives up.
+const RECONNECT_PATIENCE: Duration = Duration::from_secs(60);
 
 /// The exit code of an interrupt while waiting, as a shell reports SIGINT.
 const INTERRUPTED: i32 = 130;
@@ -79,23 +90,53 @@ fn identity(global: &Global, args: &WithArgs) -> Result<String, Failure> {
 /// `with`: the command's exit code, or why it was not run.
 pub(crate) async fn with(global: &Global, args: &WithArgs) -> Result<i32, Failure> {
     let identity = identity(global, args)?;
-    let (mut client, operator) = crate::control::connect_operator(global).await?;
-    let pid = std::process::id();
-    let ask = AcquireParams {
-        operator: operator.clone(),
+    with_daemon(
+        args,
         identity,
+        || crate::control::connect_operator(global),
+        RECONNECT_PATIENCE,
+    )
+    .await
+}
+
+/// [`with`] against the daemon `connect` reaches (it yields a client and the operator token,
+/// read anew at each connect), with `patience` for failed reconnects.
+async fn with_daemon<C, F>(
+    args: &WithArgs,
+    identity: String,
+    mut connect: C,
+    patience: Duration,
+) -> Result<i32, Failure>
+where
+    C: FnMut() -> F,
+    F: Future<Output = Result<(Client, String), Failure>>,
+{
+    let (client, operator) = connect().await?;
+    let names = args.resources.join(", ");
+    let mut daemon = Daemon {
+        client,
+        operator,
+        connect,
+        patience,
+        names: names.clone(),
+    };
+    let pid = std::process::id();
+    let ask = |operator: &str| AcquireParams {
+        operator: operator.to_owned(),
+        identity: identity.clone(),
         repo: args.repo.clone(),
         resources: args.resources.clone(),
         pid,
     };
-    let release = ReleaseParams { operator, pid };
-    let names = args.resources.join(", ");
+    let release = |operator: &str| ReleaseParams {
+        operator: operator.to_owned(),
+        pid,
+    };
     let mut interrupts = Interrupts::new()?;
     let started = Instant::now();
-    let first = match client.call::<method::LeaseAcquire>(&ask).await {
+    let first = match daemon.call::<method::LeaseAcquire>(&ask).await {
         Ok(answer) => answer,
-        Err(e) => {
-            let refused = Failure::from(e);
+        Err(refused) => {
             if cfg!(mutant_cli_with_runs_on_refusal) {
                 // Mutant (`mutant_cli_with_runs_on_refusal`): the command runs although the
                 // daemon refused the lease.
@@ -107,16 +148,42 @@ pub(crate) async fn with(global: &Global, args: &WithArgs) -> Result<i32, Failur
     if !first.granted {
         eprintln!("bosun: waiting for {names}");
         loop {
-            tokio::select! {
-                () = tokio::time::sleep(POLL) => {}
-                () = interrupts.recv() => {
-                    let _ = client.call::<method::LeaseRelease>(&release).await;
-                    eprintln!("bosun: interrupted; the request for {names} is withdrawn");
-                    return Ok(INTERRUPTED);
+            let polled = tokio::select! {
+                polled = async {
+                    tokio::time::sleep(POLL).await;
+                    if cfg!(mutant_cli_with_wait_not_reconnected) {
+                        // Mutant (`mutant_cli_with_wait_not_reconnected`): a poll is asked on
+                        // the connection it has, so a daemon restart ends the wait with an
+                        // error.
+                        daemon
+                            .client
+                            .call::<method::LeaseAcquire>(&ask(&daemon.operator))
+                            .await
+                            .map_err(Failure::from)
+                    } else {
+                        daemon.call::<method::LeaseAcquire>(&ask).await
+                    }
+                } => Some(polled),
+                () = interrupts.recv() => None,
+            };
+            let Some(polled) = polled else {
+                let _ = daemon.call::<method::LeaseRelease>(&release).await;
+                eprintln!("bosun: interrupted; the request for {names} is withdrawn");
+                return Ok(INTERRUPTED);
+            };
+            match polled {
+                Ok(answer) if answer.granted => break,
+                Ok(_) => {}
+                Err(lost) => {
+                    if cfg!(mutant_cli_with_runs_after_daemon_lost)
+                        && lost.code == exit::NOT_RUNNING
+                    {
+                        // Mutant (`mutant_cli_with_runs_after_daemon_lost`): the command runs
+                        // although the daemon never came back to grant the lease.
+                        let _ = run_command(&args.command);
+                    }
+                    return Err(lost);
                 }
-            }
-            if client.call::<method::LeaseAcquire>(&ask).await?.granted {
-                break;
             }
         }
         eprintln!(
@@ -125,7 +192,23 @@ pub(crate) async fn with(global: &Global, args: &WithArgs) -> Result<i32, Failur
         );
     }
     let ran = run_under_lease(&args.command).await;
-    if let Err(e) = release_lease(&mut client, &release).await {
+    let released = if cfg!(mutant_cli_with_release_not_reconnected) {
+        // Mutant (`mutant_cli_with_release_not_reconnected`): the release is sent once on the
+        // connection it has, so a restarted daemon never hears it.
+        daemon
+            .client
+            .call::<method::LeaseRelease>(&release(&daemon.operator))
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    } else {
+        daemon
+            .call::<method::LeaseRelease>(&release)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.message)
+    };
+    if let Err(e) = released {
         eprintln!(
             "bosun: the lease of {names} is not released ({e}); the daemon releases it as this process ends"
         );
@@ -133,12 +216,81 @@ pub(crate) async fn with(global: &Global, args: &WithArgs) -> Result<i32, Failur
     ran
 }
 
-async fn release_lease(client: &mut Client, release: &ReleaseParams) -> Result<(), String> {
-    client
-        .call::<method::LeaseRelease>(release)
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+/// The connection `with` talks over, and how to make it again when the daemon restarts.
+struct Daemon<C> {
+    client: Client,
+    /// The operator token of the daemon `client` reaches.
+    operator: String,
+    connect: C,
+    patience: Duration,
+    /// The resources, for the messages.
+    names: String,
+}
+
+impl<C, F> Daemon<C>
+where
+    C: FnMut() -> F,
+    F: Future<Output = Result<(Client, String), Failure>>,
+{
+    /// Calls `M` with the params `params` builds from the operator token. A lost connection, or
+    /// a token the daemon no longer knows (a restart came between), reconnects and sends the
+    /// call again, with the new token.
+    async fn call<M: Method>(
+        &mut self,
+        params: impl Fn(&str) -> M::Params,
+    ) -> Result<M::Result, Failure> {
+        let mut lost_since = None;
+        loop {
+            let error = match self.client.call::<M>(&params(&self.operator)).await {
+                Ok(result) => return Ok(result),
+                Err(e) => e,
+            };
+            let stale = matches!(&error, Error::Rpc(rpc) if rpc.code == code::UNAUTHORIZED);
+            let lost = matches!(error, Error::Io(_) | Error::Closed | Error::Timeout);
+            if !stale && !lost {
+                return Err(Failure::from(error));
+            }
+            let since = *lost_since.get_or_insert_with(Instant::now);
+            let before = std::mem::take(&mut self.operator);
+            self.reconnect(since).await?;
+            if stale && self.operator == before {
+                // The daemon did not restart: the token is simply refused.
+                return Err(Failure::from(error));
+            }
+        }
+    }
+
+    /// Connects again, every [`POLL`], until `patience` has passed since `since`.
+    async fn reconnect(&mut self, since: Instant) -> Result<(), Failure> {
+        loop {
+            match (self.connect)().await {
+                Ok((client, operator)) => {
+                    self.client = client;
+                    self.operator = operator;
+                    eprintln!(
+                        "bosun: the daemon restarted; asking it again for {}",
+                        self.names
+                    );
+                    return Ok(());
+                }
+                // A daemon that answers but speaks another API version will not change.
+                Err(e) if e.code == exit::VERSION => return Err(e),
+                Err(e) if since.elapsed() >= self.patience => {
+                    return Err(Failure::new(
+                        exit::NOT_RUNNING,
+                        format!(
+                            "the daemon did not come back within {} s, so {} is not asked for \
+                             again ({})",
+                            self.patience.as_secs(),
+                            self.names,
+                            e.message
+                        ),
+                    ));
+                }
+                Err(_) => tokio::time::sleep(POLL).await,
+            }
+        }
+    }
 }
 
 /// Runs `command` while the lease is held: its exit code. On Unix a SIGTERM or SIGHUP to
@@ -443,6 +595,302 @@ mod tests {
         assert_eq!(Some(failing), direct.status.code(), "the child's own code");
         assert_eq!(run_command(&git(&["--version"])).unwrap(), 0);
         assert!(run_command(&["no-such-program-of-bosun".to_owned()]).is_err());
+    }
+
+    /// A stand-in daemon, in process: it answers `hello`, `lease.acquire` from a script and
+    /// `lease.release`, refuses a lease call without the current generation's operator token,
+    /// and restarts (drops every connection, bumps its generation) when the script says so.
+    mod stand_in {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+
+        use bosun_api::rpc::{ErrorObject, Request, Response};
+        use bosun_api::{API_VERSION, AcquireResult, HelloResult, ReleaseResult};
+        use bosun_client::framing;
+        use tokio::io::{BufReader, DuplexStream};
+
+        use super::*;
+
+        /// One answer to `lease.acquire`.
+        #[derive(Debug, Clone, Copy)]
+        pub(super) struct Answer {
+            pub(super) granted: bool,
+            /// Restart after answering, then refuse this many connects (`usize::MAX`: it never
+            /// comes back).
+            pub(super) restart: Option<usize>,
+        }
+
+        /// A lease call the stand-in received.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub(super) struct Received {
+            /// The generation of the daemon that received it.
+            pub(super) generation: u32,
+            pub(super) method: String,
+            pub(super) operator: String,
+            pub(super) pid: u32,
+            pub(super) accepted: bool,
+        }
+
+        struct State {
+            generation: u32,
+            /// Connects still refused.
+            down: usize,
+            script: VecDeque<Answer>,
+            log: Vec<Received>,
+        }
+
+        #[derive(Clone)]
+        pub(super) struct StandIn(Arc<Mutex<State>>);
+
+        /// The operator token of a generation.
+        pub(super) fn token(generation: u32) -> String {
+            format!("bosun-operator-gen{generation}")
+        }
+
+        impl StandIn {
+            /// Generation 1, up, with `script` (once it is spent every ask is granted).
+            pub(super) fn new(script: &[Answer]) -> Self {
+                Self(Arc::new(Mutex::new(State {
+                    generation: 1,
+                    down: 0,
+                    script: script.iter().copied().collect(),
+                    log: Vec::new(),
+                })))
+            }
+
+            pub(super) fn log(&self) -> Vec<Received> {
+                self.0.lock().unwrap().log.clone()
+            }
+
+            /// The connector `with_daemon` takes.
+            pub(super) async fn connect(self) -> Result<(Client, String), Failure> {
+                let generation = {
+                    let mut state = self.0.lock().unwrap();
+                    if state.down > 0 {
+                        state.down -= 1;
+                        return Err(Failure::from(Error::NotRunning {
+                            endpoint: "the stand-in".to_owned(),
+                        }));
+                    }
+                    state.generation
+                };
+                let (near, far) = tokio::io::duplex(64 * 1024);
+                tokio::spawn(self.serve(generation, far));
+                let client = Client::over(Box::new(near)).await?;
+                Ok((client, token(generation)))
+            }
+
+            /// Serves one connection of `generation` until the client goes or it restarts.
+            async fn serve(self, generation: u32, far: DuplexStream) {
+                let (read, mut write) = tokio::io::split(far);
+                let mut read = BufReader::new(read);
+                while let Ok(Some(line)) = framing::read_line(&mut read).await {
+                    let request: Request = serde_json::from_str(&line).unwrap();
+                    let id = request.id.clone().unwrap();
+                    let (response, restart) = {
+                        let mut state = self.0.lock().unwrap();
+                        if state.generation != generation {
+                            // This daemon is gone.
+                            return;
+                        }
+                        Self::answer(&mut state, generation, &request, id)
+                    };
+                    if framing::write_message(&mut write, &response).await.is_err() {
+                        return;
+                    }
+                    if restart {
+                        // Dropping both halves closes the connection.
+                        return;
+                    }
+                }
+            }
+
+            /// The response to `request`, and whether the daemon restarts after it.
+            fn answer(
+                state: &mut State,
+                generation: u32,
+                request: &Request,
+                id: serde_json::Value,
+            ) -> (Response, bool) {
+                let method = request.method.as_str();
+                if method == "hello" {
+                    let hello = HelloResult {
+                        api_version: API_VERSION,
+                        daemon_version: "0.0.0".to_owned(),
+                        pid: 1,
+                    };
+                    return (
+                        Response::result(id, serde_json::to_value(hello).unwrap()),
+                        false,
+                    );
+                }
+                if method != "lease.acquire" && method != "lease.release" {
+                    let unknown = ErrorObject::new(code::METHOD_NOT_FOUND, "not served here");
+                    return (Response::error(id, unknown), false);
+                }
+                let operator = request.params["operator"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let pid = request.params["pid"].as_u64().unwrap_or_default();
+                let accepted = operator == token(generation);
+                state.log.push(Received {
+                    generation,
+                    method: method.to_owned(),
+                    operator,
+                    pid: u32::try_from(pid).unwrap(),
+                    accepted,
+                });
+                if !accepted {
+                    let refused =
+                        ErrorObject::new(code::UNAUTHORIZED, "the operator token is not valid");
+                    return (Response::error(id, refused), false);
+                }
+                if method == "lease.release" {
+                    let released = ReleaseResult { released: true };
+                    return (
+                        Response::result(id, serde_json::to_value(released).unwrap()),
+                        false,
+                    );
+                }
+                let answer = state.script.pop_front().unwrap_or(Answer {
+                    granted: true,
+                    restart: None,
+                });
+                if let Some(down) = answer.restart {
+                    state.generation += 1;
+                    state.down = down;
+                }
+                let result = AcquireResult {
+                    granted: answer.granted,
+                };
+                (
+                    Response::result(id, serde_json::to_value(result).unwrap()),
+                    answer.restart.is_some(),
+                )
+            }
+        }
+    }
+
+    use stand_in::{Answer, Received, StandIn, token};
+
+    /// `with rig -- <command>`.
+    fn with_args(command: &[&str]) -> WithArgs {
+        WithArgs {
+            repo: None,
+            resources: vec!["rig".to_owned()],
+            command: command.iter().map(|&s| s.to_owned()).collect(),
+        }
+    }
+
+    /// Runs `with_daemon` against `daemon` with `patience`.
+    async fn with_stand_in(
+        daemon: &StandIn,
+        command: &[&str],
+        patience: Duration,
+    ) -> Result<i32, Failure> {
+        let args = with_args(command);
+        let daemon = daemon.clone();
+        with_daemon(
+            &args,
+            "demo".to_owned(),
+            move || daemon.clone().connect(),
+            patience,
+        )
+        .await
+    }
+
+    fn accepted(log: &[Received], generation: u32, method: &str) -> Vec<Received> {
+        log.iter()
+            .filter(|r| r.generation == generation && r.method == method && r.accepted)
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_release_after_a_daemon_restart_reaches_the_new_daemon_with_its_token() {
+        let daemon = StandIn::new(&[Answer {
+            granted: true,
+            restart: Some(0),
+        }]);
+        let code = with_stand_in(&daemon, &["git", "--version"], RECONNECT_PATIENCE)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        let log = daemon.log();
+        let released = accepted(&log, 2, "lease.release");
+        assert_eq!(
+            released,
+            [Received {
+                generation: 2,
+                method: "lease.release".to_owned(),
+                operator: token(2),
+                pid: std::process::id(),
+                accepted: true,
+            }],
+            "{log:#?}"
+        );
+        assert!(
+            !log.iter()
+                .any(|r| r.generation == 2 && r.operator == token(1) && r.accepted),
+            "{log:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wait_that_loses_the_daemon_asks_the_restarted_one_and_runs_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let daemon = StandIn::new(&[
+            Answer {
+                granted: false,
+                restart: None,
+            },
+            Answer {
+                granted: false,
+                restart: Some(3),
+            },
+        ]);
+        let ran_arg = ran.to_str().unwrap();
+        let code = with_stand_in(&daemon, &["git", "init", "-q", ran_arg], RECONNECT_PATIENCE)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        assert!(ran.join(".git").is_dir(), "the command ran");
+        let log = daemon.log();
+        let asked = accepted(&log, 2, "lease.acquire");
+        assert!(
+            !asked.is_empty() && asked.iter().all(|r| r.operator == token(2)),
+            "{log:#?}"
+        );
+        let released = accepted(&log, 2, "lease.release");
+        assert_eq!(released.len(), 1, "{log:#?}");
+        assert_eq!(released[0].operator, token(2));
+        assert_eq!(released[0].pid, std::process::id());
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_does_not_come_back_ends_the_wait_without_running_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let daemon = StandIn::new(&[Answer {
+            granted: false,
+            restart: Some(usize::MAX),
+        }]);
+        let started = Instant::now();
+        let ran_arg = ran.to_str().unwrap();
+        let failure = with_stand_in(
+            &daemon,
+            &["git", "init", "-q", ran_arg],
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(failure.code, exit::NOT_RUNNING, "{failure:?}");
+        assert!(failure.message.contains("rig"), "{failure:?}");
+        assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+        assert!(!ran.exists(), "the command did not run");
     }
 
     #[cfg(windows)]

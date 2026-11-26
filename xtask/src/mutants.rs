@@ -2865,7 +2865,42 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("doctor::tests::the_doctor_names_what_waits_for_the_next_daemon_start"),
         platform: None,
     },
+    // `bosun with` across a daemon restart (finding 4 of #186).
+    Mutant {
+        name: "mutant_cli_with_release_not_reconnected",
+        issue: WITH_RECONNECT_CARD,
+        breaks: "the release after the command never reaches a restarted daemon",
+        package: "bosun-cli",
+        check: Check::Test(
+            "with::tests::the_release_after_a_daemon_restart_reaches_the_new_daemon_with_its_token",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_cli_with_wait_not_reconnected",
+        issue: WITH_RECONNECT_CARD,
+        breaks: "a daemon restart while bosun with waits ends it with an error, the command unrun",
+        package: "bosun-cli",
+        check: Check::Test(
+            "with::tests::a_wait_that_loses_the_daemon_asks_the_restarted_one_and_runs_the_command",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_cli_with_runs_after_daemon_lost",
+        issue: WITH_RECONNECT_CARD,
+        breaks: "bosun with runs its command although the daemon never came back to grant the lease",
+        package: "bosun-cli",
+        check: Check::Test(
+            "with::tests::a_daemon_that_does_not_come_back_ends_the_wait_without_running_the_command",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #186 (its finding 4) that lets `bosun with` survive a daemon restart (its own
+/// number was not known when it was written; its parent's stands in).
+const WITH_RECONNECT_CARD: u32 = 186;
 
 /// #164, the card of #8 that polls the pull request of an item Done in `pr` mode (merged
 /// releases dependants, closed unmerged is Needs you).

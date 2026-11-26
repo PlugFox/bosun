@@ -48,7 +48,11 @@
 //!    offer is dropped again on every path), and pushed from there by name,
 //!    `git push origin <H>:refs/heads/bosun/<slug>` ([`git::pr_branch`]), under the repository
 //!    identity's tool environment (#2) with the repository's hooks disabled: a replay is a
-//!    no-op.
+//!    no-op. The `bosun/` branches are the daemon's: a head rebased since an earlier push (a
+//!    crash with a moved target, a card reworked after its pull request closed) is pushed over
+//!    it, with a lease (`--force-with-lease=refs/heads/<branch>:<expected>`) on the commit the
+//!    daemon last pushed there (the item's [`NOTE_PR_PUSH`] note), else on what the remote has
+//!    now ([`push`]): a branch someone else pushed to since is a refusal, never overwritten.
 //! 6. The forge ([`super::forge`]) is asked for the open pull request of that branch. None: one
 //!    is opened into the target with the card's title, the configured draft, reviewers and
 //!    labels, and [`pr::body`] of the attempt's summary, the daemon's facts and `Closes #N`. One:
@@ -87,6 +91,10 @@ pub(crate) const NOTE_CONFLICT: &str = "conflict";
 
 /// The kind of the item note a refused pull request landing leaves (`Write::ItemNote`).
 pub(crate) const NOTE_LANDING: &str = "landing";
+
+/// The kind of the item note that holds the last commit a `pr` landing pushed, and to which
+/// branch (`Write::ItemNote`): the lease of the next push ([`push`]).
+pub(crate) const NOTE_PR_PUSH: &str = "pr_push";
 
 /// The remote of the user's repository a `pr` landing pushes to: the one the identity checks
 /// read (#2).
@@ -579,12 +587,15 @@ impl Task<'_> {
                 "the verified commit cannot be fetched into the user's repository: {e}"
             ))
         })?;
-        let (env, user, spec) = (
+        let recorded = self.last_push(&new.head).await;
+        let (env, user, branch, head) = (
             at.env.clone(),
             repo.path.clone(),
-            format!("{h}:refs/heads/{}", new.head),
+            new.head.clone(),
+            h.to_owned(),
         );
-        blocking(move || push(&user, &env, &spec)).await?;
+        blocking(move || push(&user, &env, &branch, &head, recorded.as_deref())).await?;
+        self.note_push(&new.head, h).await;
 
         let facts: Vec<(&str, &str)> = facts
             .iter()
@@ -619,6 +630,44 @@ impl Task<'_> {
             ..new.clone()
         };
         blocking(move || forge.create(&at, &new)).await
+    }
+
+    /// The commit the daemon last pushed to `branch` for this item ([`NOTE_PR_PUSH`]); `None`
+    /// when none is recorded, or the note does not read.
+    async fn last_push(&self, branch: &str) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct Pushed {
+            branch: String,
+            sha: String,
+        }
+        let body = self
+            .shared
+            .deps
+            .reader
+            .item_note(&self.spec.item, NOTE_PR_PUSH)
+            .await
+            .ok()
+            .flatten()?;
+        serde_json::from_str::<Pushed>(&body)
+            .ok()
+            .filter(|p| p.branch == branch)
+            .map(|p| p.sha)
+    }
+
+    /// Records `sha` as the commit the daemon last pushed to `branch` ([`NOTE_PR_PUSH`]).
+    async fn note_push(&self, branch: &str, sha: &str) {
+        let item = &self.spec.item;
+        let note = Write::ItemNote {
+            item: item.clone(),
+            kind: NOTE_PR_PUSH.to_owned(),
+            body: serde_json::json!({ "branch": branch, "sha": sha }).to_string(),
+            at_ms: now_ms(),
+        };
+        if let Err(e) = self.shared.deps.writer.write(vec![note]).await {
+            self.shared.trouble(format!(
+                "the pushed commit of {item} cannot be recorded: {e}"
+            ));
+        }
     }
 
     /// The daemon's facts of a pull request: the item, its attempts, the result line of the
@@ -920,14 +969,42 @@ fn mode(repo: &Repo) -> Result<Mode, String> {
     }
 }
 
-/// Pushes `spec` (`<commit>:refs/heads/<branch>`) from the user's repository at `user` to
+/// Pushes `head` by name (`<head>:refs/heads/<branch>`) from the user's repository at `user` to
 /// [`REMOTE`] under `env`, the repository identity's tool environment, with the repository's
-/// hooks disabled ([`Git::command`]). The same commit pushed again is a no-op; a rejection is
-/// [`ForgeError::Refused`], a remote that does not answer [`ForgeError::Unreachable`].
-fn push(user: &std::path::Path, env: &Env, spec: &str) -> Result<(), ForgeError> {
-    let mut command = Git::new(user).command();
+/// hooks disabled ([`Git::command`]).
+///
+/// The branch is the daemon's (`bosun/<slug>`), so a head rebased since an earlier push goes
+/// over it, with a lease: `--force-with-lease=refs/heads/<branch>:<expected>`, where
+/// `expected` is `recorded`, the commit the daemon last pushed there, or when none is
+/// recorded what the remote has now (nothing: the branch must not exist). A remote already at
+/// `head` is not pushed to again: a replay is a no-op, even one whose push was not recorded. A
+/// rejection (another push since: the lease does not hold) is [`ForgeError::Refused`], a
+/// remote that does not answer [`ForgeError::Unreachable`].
+fn push(
+    user: &std::path::Path,
+    env: &Env,
+    branch: &str,
+    head: &str,
+    recorded: Option<&str>,
+) -> Result<(), ForgeError> {
+    let git = Git::new(user);
+    let remote_ref = format!("refs/heads/{branch}");
+    let url = push_url(&git, env)?;
+    let now = remote_head(&git, env, &url, &remote_ref)?;
+    if now.as_deref() == Some(head) {
+        return Ok(());
+    }
+    let expected = recorded.map(str::to_owned).or(now).unwrap_or_default();
+    let spec = format!("{head}:{remote_ref}");
+    let mut command = git.command();
     env.apply(&mut command);
-    command.args(["push", "--quiet", "--no-verify", REMOTE, spec]);
+    command.args(["push", "--quiet", "--no-verify"]);
+    // Mutant (`mutant_loop_pr_push_without_lease`): a plain push, which a head rebased since
+    // the branch was pushed cannot make.
+    if !cfg!(mutant_loop_pr_push_without_lease) {
+        command.arg(format!("--force-with-lease={remote_ref}:{expected}"));
+    }
+    command.args([REMOTE, &spec]);
     let out = command
         .output()
         .map_err(|e| ForgeError::Refused(format!("cannot run git: {e}")))?;
@@ -938,6 +1015,51 @@ fn push(user: &std::path::Path, env: &Env, spec: &str) -> Result<(), ForgeError>
     Err(forge::classify(format!(
         "git push {REMOTE} {spec}: {stderr}"
     )))
+}
+
+/// The URL a push to [`REMOTE`] goes to, `pushInsteadOf` and `pushurl` applied under `env`:
+/// what [`remote_head`] reads, so the lease is taken on the remote the push goes to.
+fn push_url(git: &Git, env: &Env) -> Result<String, ForgeError> {
+    let mut command = git.command();
+    env.apply(&mut command);
+    command.args(["remote", "get-url", "--push", REMOTE]);
+    let out = command
+        .output()
+        .map_err(|e| ForgeError::Refused(format!("cannot run git: {e}")))?;
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if !out.status.success() || url.is_empty() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        return Err(ForgeError::Refused(format!(
+            "the push URL of `{REMOTE}`: {stderr}"
+        )));
+    }
+    Ok(url)
+}
+
+/// The commit `remote_ref` names at `url` now (`git ls-remote`); `None` when it does not exist.
+fn remote_head(
+    git: &Git,
+    env: &Env,
+    url: &str,
+    remote_ref: &str,
+) -> Result<Option<String>, ForgeError> {
+    let mut command = git.command();
+    env.apply(&mut command);
+    command.args(["ls-remote", "--quiet", "--", url, remote_ref]);
+    let out = command
+        .output()
+        .map_err(|e| ForgeError::Refused(format!("cannot run git: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        return Err(forge::classify(format!(
+            "git ls-remote {REMOTE} {remote_ref}: {stderr}"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(_, name)| name.trim() == remote_ref)
+        .map(|(sha, _)| sha.trim().to_owned()))
 }
 
 /// Aborts a rebase stopped in the item's worktree at `dir` (a daemon that died during the

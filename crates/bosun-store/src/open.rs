@@ -733,6 +733,92 @@ mod tests {
         store.close().await.unwrap();
     }
 
+    /// #132: migration 16 names each repository row after the prefix of its items' ids
+    /// (`<repo name>#<card>`), leaves a row without items unnamed, and adds an empty
+    /// `repo_alias`.
+    #[tokio::test]
+    async fn migration_16_names_each_repository_after_its_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = open(&path, &Options::default(), &up_to(15)).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO repo (id, path) VALUES (1, '/fixture/demo'), (2, '/fixture/other'),
+                                                (3, '/fixture/plain');
+             INSERT INTO item (item_key, repo_id, state, created_ms, updated_ms)
+             VALUES ('demo#1', 1, 'ready', 10, 20), ('demo#2', 1, 'ready', 10, 30),
+                    ('other#5', 2, 'ready', 10, 25);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let mut conn = store.reader().pool.acquire().await.unwrap();
+        let names: Vec<(i64, Option<String>)> =
+            sqlx::query_as("SELECT id, name FROM repo ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(
+            names,
+            [
+                (1, Some("demo".to_owned())),
+                (2, Some("other".to_owned())),
+                (3, None)
+            ]
+        );
+        let aliases: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_alias")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(aliases, 0);
+        drop(conn);
+        store.close().await.unwrap();
+    }
+
+    /// A name whose items sit on two rows (a move before migration 16) goes to the row of the
+    /// most recently updated item; the other row stays unnamed.
+    #[tokio::test]
+    async fn migration_16_gives_a_split_name_to_the_row_of_its_latest_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = open(&path, &Options::default(), &up_to(15)).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO repo (id, path) VALUES (1, '/fixture/old'), (2, '/fixture/new');
+             INSERT INTO item (item_key, repo_id, state, created_ms, updated_ms)
+             VALUES ('demo#1', 1, 'ready', 10, 20), ('demo#2', 2, 'ready', 10, 40),
+                    ('demo#3', 1, 'ready', 10, 30);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let mut conn = store.reader().pool.acquire().await.unwrap();
+        let names: Vec<(i64, Option<String>)> =
+            sqlx::query_as("SELECT id, name FROM repo ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(names, [(1, None), (2, Some("demo".to_owned()))]);
+        drop(conn);
+        store.close().await.unwrap();
+    }
+
     /// Every row of `query` as text, column by column, to compare a table before and after.
     async fn items(conn: &mut SqliteConnection, query: &'static str) -> Vec<Vec<Option<String>>> {
         use sqlx::Row;

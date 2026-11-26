@@ -36,6 +36,7 @@ use crate::events::{Events, Options as EventOptions};
 
 mod landing;
 mod leases;
+mod moved;
 mod recovery;
 mod shim;
 mod sticky;

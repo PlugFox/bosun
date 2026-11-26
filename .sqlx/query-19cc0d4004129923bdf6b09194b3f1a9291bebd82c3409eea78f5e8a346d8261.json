@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT c.sha FROM \"commit\" c JOIN repo r ON r.id = c.repo_id\n               WHERE r.path = ? ORDER BY c.sha",
+  "query": "SELECT c.sha FROM \"commit\" c\n               WHERE c.repo_id IN (SELECT id FROM repo WHERE path = ?1\n                                   UNION ALL SELECT repo_id FROM repo_alias WHERE path = ?1)\n               ORDER BY c.sha",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "a5ee870ce9fae9a0564f85193c952964076d1f59fdbe7cd7adbbcd35ccce7c75"
+  "hash": "19cc0d4004129923bdf6b09194b3f1a9291bebd82c3409eea78f5e8a346d8261"
 }

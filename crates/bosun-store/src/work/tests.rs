@@ -23,6 +23,7 @@ fn id() -> ItemId {
 fn register() -> Write {
     Write::Item(NewItem {
         item: id(),
+        name: "demo".to_owned(),
         repo: REPO.to_owned(),
         card_key: Some("card-1".to_owned()),
         at_ms: T0,
@@ -1605,6 +1606,7 @@ async fn an_item_after_a_conflict_reads_back_with_its_counter() {
         .writer()
         .write(vec![Write::Item(NewItem {
             item: other.clone(),
+            name: "demo".to_owned(),
             repo: REPO.to_owned(),
             card_key: Some("card-2".to_owned()),
             at_ms: T0,

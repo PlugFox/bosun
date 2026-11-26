@@ -65,16 +65,19 @@ struct Span {
 }
 
 impl Reader {
-    /// The shas of the commits stored for the repository with path key `repo`, ascending: the
-    /// cursor a commit reader resumes from after a restart.
+    /// The shas of the commits stored for the repository with path key `repo` (or the one
+    /// `repo` is an alias of), ascending: the cursor a commit reader resumes from after a
+    /// restart.
     ///
     /// # Errors
     ///
     /// A database error.
     pub async fn commit_shas(&self, repo: &str) -> Result<Vec<String>, Error> {
         Ok(sqlx::query_scalar!(
-            r#"SELECT c.sha FROM "commit" c JOIN repo r ON r.id = c.repo_id
-               WHERE r.path = ? ORDER BY c.sha"#,
+            r#"SELECT c.sha FROM "commit" c
+               WHERE c.repo_id IN (SELECT id FROM repo WHERE path = ?1
+                                   UNION ALL SELECT repo_id FROM repo_alias WHERE path = ?1)
+               ORDER BY c.sha"#,
             repo,
         )
         .fetch_all(&self.pool)
@@ -127,9 +130,7 @@ impl Reader {
         )
         .fetch_all(&mut *tx)
         .await?;
-        let repos = sqlx::query!(r#"SELECT id AS "id!: i64", path FROM repo"#)
-            .fetch_all(&mut *tx)
-            .await?;
+        let repos = crate::writer::repos(&mut tx).await?;
         tx.commit().await?;
 
         let mut by_session: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
@@ -139,7 +140,6 @@ impl Reader {
                 .or_default()
                 .insert(row.repo_id);
         }
-        let repos: Vec<(i64, String)> = repos.into_iter().map(|r| (r.id, r.path)).collect();
         let spans: Vec<Span> = sessions
             .into_iter()
             .map(|s| {
@@ -271,6 +271,7 @@ mod tests {
         changed.author = "Someone Else <else@example.invalid>".to_owned();
         let batch = vec![
             Write::Repo(Repo {
+                name: None,
                 path: a.clone(),
                 remote: Some("https://example.invalid/a.git".to_owned()),
                 default_branch: Some("main".to_owned()),

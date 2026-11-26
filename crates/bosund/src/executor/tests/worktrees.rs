@@ -675,6 +675,7 @@ async fn plant(
         .write(vec![Write::Item(bosun_store::NewItem {
             item: item(card),
             // Not the repository's key: recovery never takes it for one of its items.
+            name: "planted".to_owned(),
             repo: "planted".to_owned(),
             card_key: Some(card.to_string()),
             at_ms: 1,

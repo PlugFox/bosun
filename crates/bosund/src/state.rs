@@ -267,6 +267,39 @@ fn operator_token(config: &Config, file: PathBuf) -> Result<Control, String> {
     Ok(Control::with_token(&token, Some(file)))
 }
 
+/// Registers every configured repository of `identity` by its name (#132): a repository whose
+/// configured path differs from its stored one has moved, and its row (with its items and
+/// history) follows it. Says so once: afterwards the stored path is the configured one.
+async fn register_named(
+    store: &Store,
+    config: &Config,
+    identity: &str,
+) -> Result<(), bosun_store::Error> {
+    let stored = store.reader().repos().await?;
+    let mut batch = Vec::new();
+    for (name, repo) in config.repos.iter().filter(|(_, r)| r.identity == identity) {
+        let moved = stored
+            .iter()
+            .find(|row| row.name.as_deref() == Some(name.as_str()))
+            .filter(|row| row.path != repo.key);
+        if let Some(row) = moved {
+            crate::log::log!(
+                "bosund: repository {name}: its path moved from {} to {}; its items and \
+                 history follow it",
+                row.path,
+                repo.key
+            );
+        }
+        batch.push(bosun_store::Write::Repo(bosun_store::Repo {
+            name: Some(name.clone()),
+            path: repo.key.clone(),
+            remote: None,
+            default_branch: None,
+        }));
+    }
+    store.writer().write(batch).await
+}
+
 /// Opens each identity's store and starts its ingest. On failure, what was opened is returned
 /// with the error so it can be closed.
 pub(crate) async fn open(
@@ -293,6 +326,10 @@ pub(crate) async fn open(
             &store,
             IngestOptions::default(),
         );
+        if let Err(e) = register_named(&store, config, &plan.identity).await {
+            let _ = store.close().await;
+            return Err((identities, format!("identity {}: {e}", plan.identity)));
+        }
         if let Err(e) = ingest.register_repos(&plan.repo_roots).await {
             let _ = store.close().await;
             return Err((identities, format!("identity {}: {e}", plan.identity)));

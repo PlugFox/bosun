@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO item (item_key, repo_id, card_key, created_ms, updated_ms)\n         VALUES (?, ?, ?, ?, ?)\n         ON CONFLICT (item_key) DO UPDATE SET\n             repo_id = excluded.repo_id,\n             card_key = coalesce(excluded.card_key, card_key)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c9d1b53f8779266f5e163882c1c69de7ded65ac169ce2a324dc91befcb22508d"
+}

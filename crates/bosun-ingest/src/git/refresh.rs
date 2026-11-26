@@ -68,6 +68,7 @@ pub async fn refresh(reader: &Reader, writer: &Writer, root: &Path) -> Result<us
         .map_err(RefreshError::Git)?;
     let read = found.commits.len();
     let mut batch = vec![Write::Repo(Repo {
+        name: None,
         path: path.clone(),
         remote: found.remote,
         default_branch: found.default_branch,

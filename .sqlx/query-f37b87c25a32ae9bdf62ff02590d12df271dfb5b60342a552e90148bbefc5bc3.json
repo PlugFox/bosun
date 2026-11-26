@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: i64\" FROM repo WHERE path = ?",
+  "query": "INSERT INTO repo (path, name) VALUES (?, ?) RETURNING id AS \"id!: i64\"",
   "describe": {
     "columns": [
       {
@@ -16,11 +16,11 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false
     ]
   },
-  "hash": "6d5336b32ca08f79fb285d4f464b094c33303efb4d884af51181818e6de78737"
+  "hash": "f37b87c25a32ae9bdf62ff02590d12df271dfb5b60342a552e90148bbefc5bc3"
 }

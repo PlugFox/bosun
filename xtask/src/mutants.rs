@@ -2756,6 +2756,26 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("console_tests::children_start_after_the_hosting_console_has_ended"),
         platform: Some(Platform::Windows),
     },
+    Mutant {
+        name: "mutant_store_repo_by_path",
+        issue: 132,
+        breaks: "a loop matches stored items by path: a moved repository's items are lost and a                  card of one is claimed as new, against its stored transitions",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::moved::a_moved_repository_keeps_its_items_and_their_history",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_repo_new_row_on_move",
+        issue: 132,
+        breaks: "a configured repository at a new path gets a second row: its history splits",
+        package: "bosun-store",
+        check: Check::Test(
+            "writer::tests::a_moved_repository_keeps_its_row_and_both_paths_attribute_to_it",
+        ),
+        platform: None,
+    },
 ];
 
 /// #164, the card of #8 that polls the pull request of an item Done in `pr` mode (merged

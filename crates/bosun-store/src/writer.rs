@@ -51,11 +51,16 @@ pub enum Write {
     /// A new price for a model from a time on. Closes the current row; never touches a message.
     ChangePrice(PriceChange),
     /// Registers a repository root or records its origin and default branch. Keyed by the
-    /// canonical path. Messages are attributed to the longest root that contains their cwd
-    /// ([`bosun_core::repo_root`]); a root seen for the first time re-attributes every stored
-    /// message.
+    /// configuration name when it has one, else by the canonical path (a path a named
+    /// repository was configured at before resolves to it and creates nothing). A named
+    /// repository written at a new path moves: its row's path is updated in place, the old
+    /// path stays an alias of the row, and an unnamed row the new path had is merged into it;
+    /// a row of another name at the path is refused. Messages are attributed to the longest
+    /// root or alias that contains their cwd ([`bosun_core::repo_root`]); a root seen for the
+    /// first time re-attributes every stored message.
     Repo(Repo),
-    /// A commit of the repository with path key `repo`, which is registered if it is not yet.
+    /// A commit of the repository with path key `repo` (or the repository `repo` is an alias
+    /// of), which is registered by path if it is not yet.
     /// Keyed by (repository, sha): a stored commit is never changed, so writing it again
     /// changes nothing.
     Commit { repo: String, commit: Commit },
@@ -74,8 +79,9 @@ pub enum Write {
         /// When bosun recorded it.
         recorded_ms: i64,
     },
-    /// Registers an item of a repository (registered if it is not yet), or updates its card
-    /// key. Its state is changed by transitions only.
+    /// Registers an item of the repository of its name (registered as [`Write::Repo`] with that
+    /// name and path), or updates its card key and links it to that repository. Its state is
+    /// changed by transitions only.
     Item(NewItem),
     /// The item's snapshot at claim; it becomes the item's current snapshot. Keyed by its key.
     Snapshot(Snapshot),
@@ -249,9 +255,13 @@ pub enum Write {
     Truncate,
 }
 
-/// A configured repository. Keyed by `path`: writing it again updates the row.
+/// A repository root. Keyed by `name` when it has one (a configured repository), else by
+/// `path`: writing it again updates the row, and a named one written at another path moves its
+/// row there ([`Write::Repo`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repo {
+    /// The configuration name (`repo.<name>`); `None` for a root registered by path only.
+    pub name: Option<String>,
     /// The canonical path key (`bosun_core::canonical_path`), as the configuration holds it.
     pub path: String,
     /// The origin URL, without credentials.
@@ -419,7 +429,7 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             parser_version,
         } => upsert_gap(conn, &provider, &file_key, &gap, parser_version).await,
         Write::ChangePrice(change) => change_price(conn, &change).await,
-        Write::Repo(repo) => upsert_repo(conn, &repo).await,
+        Write::Repo(repo) => upsert_repo(conn, &repo).await.map(drop),
         Write::Commit { repo, commit } => insert_commit(conn, &repo, &commit).await,
         Write::Session { provider, meta } => upsert_session(conn, &provider, &meta).await,
         Write::ToolResult(result) => apply_tool_result(conn, &result).await,
@@ -560,14 +570,19 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
     }
 }
 
-/// Every repository root: its id and canonical key.
-async fn repos(conn: &mut SqliteConnection) -> Result<Vec<(i64, String)>, Error> {
-    Ok(sqlx::query!(r#"SELECT id AS "id!: i64", path FROM repo"#)
-        .fetch_all(conn)
-        .await?
-        .into_iter()
-        .map(|r| (r.id, r.path))
-        .collect())
+/// Every repository root a working directory can attribute to: each row's id with its
+/// canonical key, and with every alias of it (a path it was configured at before).
+pub(crate) async fn repos(conn: &mut SqliteConnection) -> Result<Vec<(i64, String)>, Error> {
+    Ok(sqlx::query!(
+        r#"SELECT id AS "id!: i64", path AS "path!: String" FROM repo
+           UNION ALL
+           SELECT repo_id AS "id!: i64", path AS "path!: String" FROM repo_alias"#
+    )
+    .fetch_all(conn)
+    .await?
+    .into_iter()
+    .map(|r| (r.id, r.path))
+    .collect())
 }
 
 /// The id of the repository whose root `cwd` belongs to, if any.
@@ -579,27 +594,192 @@ fn repo_of(cwd: &str, repos: &[(i64, String)]) -> Option<i64> {
         .map(|(id, _)| *id)
 }
 
-pub(crate) async fn upsert_repo(conn: &mut SqliteConnection, repo: &Repo) -> Result<(), Error> {
-    let key = canonical_path(&repo.path, style_of(&repo.path));
-    let known = sqlx::query_scalar!(r#"SELECT id AS "id!: i64" FROM repo WHERE path = ?"#, key)
-        .fetch_optional(&mut *conn)
-        .await?
-        .is_some();
-    sqlx::query!(
-        "INSERT INTO repo (path, remote, default_branch) VALUES (?, ?, ?)
-         ON CONFLICT (path) DO UPDATE SET
-             remote = coalesce(excluded.remote, remote),
-             default_branch = coalesce(excluded.default_branch, default_branch)",
+/// The id of the repository at canonical key `key`: the row with that path, or the row that
+/// was configured there before (an alias).
+pub(crate) async fn repo_at(conn: &mut SqliteConnection, key: &str) -> Result<Option<i64>, Error> {
+    Ok(sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM (
+               SELECT id, 0 AS rank FROM repo WHERE path = ?1
+               UNION ALL
+               SELECT repo_id AS id, 1 AS rank FROM repo_alias WHERE path = ?1)
+           ORDER BY rank LIMIT 1"#,
         key,
+    )
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Registers `repo` and returns its row's id.
+///
+/// Without a name, a path that is a row's or an alias of one resolves to it, and a new path is
+/// a new (unnamed) row. With a name, the row of that name is the repository: a path that
+/// differs from its stored one is a move, so the old path becomes an alias of the row and the
+/// row's path is updated in place (every message, commit and item on the row follows it). An
+/// unnamed row that already holds the new path (registered by path before the move) is merged
+/// into the named one. A row of another name at the path is refused: two configured
+/// repositories never share one path.
+pub(crate) async fn upsert_repo(conn: &mut SqliteConnection, repo: &Repo) -> Result<i64, Error> {
+    let key = canonical_path(&repo.path, style_of(&repo.path));
+    let (id, new_root) = match &repo.name {
+        Some(name) => named_repo(conn, name, &key).await?,
+        None => unnamed_repo(conn, &key).await?,
+    };
+    sqlx::query!(
+        "UPDATE repo SET
+             remote = coalesce(?, remote),
+             default_branch = coalesce(?, default_branch)
+         WHERE id = ?",
         repo.remote,
         repo.default_branch,
+        id,
     )
     .execute(&mut *conn)
     .await?;
-    if known {
-        return Ok(());
+    if new_root {
+        reattribute(conn).await?;
     }
-    // A new root may contain, or lie deeper than, the roots messages were attributed to.
+    Ok(id)
+}
+
+/// The row at `key` (or the row `key` is an alias of), inserted unnamed if there is none, and
+/// whether the root is new.
+async fn unnamed_repo(conn: &mut SqliteConnection, key: &str) -> Result<(i64, bool), Error> {
+    if let Some(id) = repo_at(conn, key).await? {
+        return Ok((id, false));
+    }
+    let id = sqlx::query_scalar!(
+        r#"INSERT INTO repo (path) VALUES (?) RETURNING id AS "id!: i64""#,
+        key
+    )
+    .fetch_one(conn)
+    .await?;
+    Ok((id, true))
+}
+
+/// The row of `name`, at `key` once written, and whether a root is new (messages attribute
+/// differently).
+async fn named_repo(
+    conn: &mut SqliteConnection,
+    name: &str,
+    key: &str,
+) -> Result<(i64, bool), Error> {
+    let at_path = sqlx::query!(
+        r#"SELECT id AS "id!: i64", name FROM repo WHERE path = ?"#,
+        key
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(other) = at_path.as_ref().and_then(|row| row.name.as_deref())
+        && other != name
+    {
+        return Err(Error::Corrupt(format!(
+            "repositories {other} and {name} are both configured at {key}"
+        )));
+    }
+    let of_name = sqlx::query!(
+        r#"SELECT id AS "id!: i64", path FROM repo WHERE name = ?"#,
+        name
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(of_name) = of_name else {
+        // A configured path wins over an alias of another row.
+        let dropped = sqlx::query!("DELETE FROM repo_alias WHERE path = ?", key)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected()
+            > 0;
+        if let Some(row) = at_path {
+            sqlx::query!("UPDATE repo SET name = ? WHERE id = ?", name, row.id)
+                .execute(&mut *conn)
+                .await?;
+            return Ok((row.id, dropped));
+        }
+        let id = sqlx::query_scalar!(
+            r#"INSERT INTO repo (path, name) VALUES (?, ?) RETURNING id AS "id!: i64""#,
+            key,
+            name,
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        return Ok((id, true));
+    };
+    if of_name.path == key {
+        return Ok((of_name.id, false));
+    }
+    // Mutant (`mutant_store_repo_new_row_on_move`): the name is ignored when the path differs,
+    // so the new path keeps or gets its own row and the old row keeps the name.
+    if cfg!(mutant_store_repo_new_row_on_move) {
+        return unnamed_repo(conn, key).await;
+    }
+    let id = of_name.id;
+    sqlx::query!(
+        "INSERT INTO repo_alias (path, repo_id) VALUES (?, ?)
+         ON CONFLICT (path) DO UPDATE SET repo_id = excluded.repo_id",
+        of_name.path,
+        id,
+    )
+    .execute(&mut *conn)
+    .await?;
+    if let Some(row) = at_path {
+        merge_repo(conn, row.id, id).await?;
+    }
+    sqlx::query!("DELETE FROM repo_alias WHERE path = ?", key)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query!("UPDATE repo SET path = ? WHERE id = ?", key, id)
+        .execute(&mut *conn)
+        .await?;
+    Ok((id, true))
+}
+
+/// Moves every row that points at repository `from` over to `into`, then deletes `from`. A
+/// commit `into` holds already (by sha) is not duplicated: `from`'s copy is dropped.
+async fn merge_repo(conn: &mut SqliteConnection, from: i64, into: i64) -> Result<(), Error> {
+    sqlx::query!(
+        r#"UPDATE repo SET
+               remote = coalesce(remote, (SELECT remote FROM repo WHERE id = ?1)),
+               default_branch = coalesce(default_branch,
+                                         (SELECT default_branch FROM repo WHERE id = ?1))
+           WHERE id = ?2"#,
+        from,
+        into,
+    )
+    .execute(&mut *conn)
+    .await?;
+    // Every table with a `repo_id`. `"commit"` and `run_commit` are unique by (repository,
+    // sha): a sha `into` holds already keeps its row, and `from`'s copy is deleted below.
+    for statement in [
+        "UPDATE message SET repo_id = ?2 WHERE repo_id = ?1",
+        "UPDATE annotation SET repo_id = ?2 WHERE repo_id = ?1",
+        "UPDATE item SET repo_id = ?2 WHERE repo_id = ?1",
+        "UPDATE flaky_test SET repo_id = ?2 WHERE repo_id = ?1",
+        r#"UPDATE OR IGNORE "commit" SET repo_id = ?2 WHERE repo_id = ?1"#,
+        "UPDATE OR IGNORE run_commit SET repo_id = ?2 WHERE repo_id = ?1",
+        "UPDATE repo_alias SET repo_id = ?2 WHERE repo_id = ?1",
+    ] {
+        sqlx::query(statement)
+            .bind(from)
+            .bind(into)
+            .execute(&mut *conn)
+            .await?;
+    }
+    for statement in [
+        r#"DELETE FROM "commit" WHERE repo_id = ?"#,
+        "DELETE FROM run_commit WHERE repo_id = ?",
+        "DELETE FROM repo WHERE id = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(from)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Attributes every stored message to its root again: a new root may contain, or lie deeper
+/// than, the roots messages were attributed to.
+async fn reattribute(conn: &mut SqliteConnection) -> Result<(), Error> {
     let repos = repos(conn).await?;
     let messages = sqlx::query!(r#"SELECT id AS "id!: i64", cwd, repo_id FROM message"#)
         .fetch_all(&mut *conn)
@@ -624,19 +804,16 @@ async fn insert_commit(
     repo: &str,
     commit: &Commit,
 ) -> Result<(), Error> {
-    upsert_repo(
+    let repo_id = upsert_repo(
         conn,
         &Repo {
+            name: None,
             path: repo.to_owned(),
             remote: None,
             default_branch: None,
         },
     )
     .await?;
-    let key = canonical_path(repo, style_of(repo));
-    let repo_id = sqlx::query_scalar!(r#"SELECT id AS "id!: i64" FROM repo WHERE path = ?"#, key)
-        .fetch_one(&mut *conn)
-        .await?;
     let added = to_db(commit.lines_added, "lines added")?;
     let removed = to_db(commit.lines_removed, "lines removed")?;
     let trailers = serde_json::to_string(&commit.trailers)
@@ -1463,6 +1640,7 @@ pub(crate) mod tests {
             .writer()
             .write(vec![
                 Write::Repo(Repo {
+                    name: None,
                     path: "/work/repo".to_owned(),
                     remote: None,
                     default_branch: None,
@@ -1495,6 +1673,7 @@ pub(crate) mod tests {
         // A deeper root, registered later, takes the messages under it; registering it again
         // changes nothing.
         let deeper = Write::Repo(Repo {
+            name: None,
             path: "/work//repo/sub/".to_owned(),
             remote: None,
             default_branch: None,
@@ -1507,6 +1686,147 @@ pub(crate) mod tests {
                 ("m1".to_owned(), Some("/work/repo".to_owned())),
                 ("m2".to_owned(), Some("/work/repo/sub".to_owned())),
             ]
+        );
+        store.close().await.unwrap();
+    }
+
+    /// #132: a configured repository is its name. Written at a new path, its row moves there:
+    /// an unnamed row the new path had (registered by path before the move) is merged into it
+    /// without a duplicate commit, and the old path stays an alias, so a working directory
+    /// under either path attributes to the one repository, and neither path makes a new row.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn a_moved_repository_keeps_its_row_and_both_paths_attribute_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("bosun.db"), Options::default())
+            .await
+            .unwrap();
+        let named = |path: &str| {
+            Write::Repo(Repo {
+                name: Some("demo".to_owned()),
+                path: path.to_owned(),
+                remote: None,
+                default_branch: None,
+            })
+        };
+        let unnamed = |path: &str| {
+            Write::Repo(Repo {
+                name: None,
+                path: path.to_owned(),
+                remote: None,
+                default_branch: None,
+            })
+        };
+        let commit = |repo: &str, sha: &str| Write::Commit {
+            repo: repo.to_owned(),
+            commit: Commit {
+                sha: sha.to_owned(),
+                ts_ms: 1_000,
+                author: "A <a@example.com>".to_owned(),
+                lines_added: 1,
+                lines_removed: 0,
+                trailers: std::collections::BTreeMap::new(),
+            },
+        };
+        let message = |id: &str, cwd: &str| {
+            let mut message = record(id, "f1", 1, 1, &[]);
+            message.cwd = cwd.to_owned();
+            write(message)
+        };
+        store
+            .writer()
+            .write(vec![
+                named("/w/old"),
+                Write::Item(crate::NewItem {
+                    item: ItemId::new("demo#1"),
+                    name: "demo".to_owned(),
+                    repo: "/w/old".to_owned(),
+                    card_key: None,
+                    at_ms: 1,
+                }),
+                source_file("f1"),
+                message("m-old", "/w/old/src"),
+                commit("/w/old", "aaa"),
+                commit("/w/old", "both"),
+                unnamed("/w/new"),
+                message("m-new", "/w/new"),
+                commit("/w/new", "bbb"),
+                commit("/w/new", "both"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(store.reader().repos().await.unwrap().len(), 2);
+
+        store.writer().write(vec![named("/w/new")]).await.unwrap();
+        let demo = vec![crate::RepoRow {
+            name: Some("demo".to_owned()),
+            path: "/w/new".to_owned(),
+        }];
+        assert_eq!(store.reader().repos().await.unwrap(), demo);
+        let of_messages = || async {
+            sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT m.message_key, r.name FROM message m LEFT JOIN repo r ON r.id = m.repo_id
+                 ORDER BY m.message_key",
+            )
+            .fetch_all(store.reader().pool())
+            .await
+            .unwrap()
+        };
+        let on_demo = |keys: &[&str]| {
+            keys.iter()
+                .map(|k| ((*k).to_owned(), Some("demo".to_owned())))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(of_messages().await, on_demo(&["m-new", "m-old"]));
+        let items = store.reader().items(false).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].repo, "/w/new");
+        assert_eq!(items[0].repo_name.as_deref(), Some("demo"));
+        assert_eq!(
+            store.reader().commit_shas("/w/new").await.unwrap(),
+            ["aaa", "bbb", "both"]
+        );
+        let commits: i64 = sqlx::query_scalar(r#"SELECT count(*) FROM "commit""#)
+            .fetch_one(store.reader().pool())
+            .await
+            .unwrap();
+        assert_eq!(commits, 3);
+
+        // A working directory under the old path still attributes to the repository, and so
+        // does every message once an unrelated root re-attributes them all.
+        store
+            .writer()
+            .write(vec![message("m-later", "/w/old/x")])
+            .await
+            .unwrap();
+        assert_eq!(of_messages().await, on_demo(&["m-later", "m-new", "m-old"]));
+        store
+            .writer()
+            .write(vec![unnamed("/w/other")])
+            .await
+            .unwrap();
+        assert_eq!(of_messages().await, on_demo(&["m-later", "m-new", "m-old"]));
+
+        // The old path, by path, is the repository: it creates no row.
+        store
+            .writer()
+            .write(vec![commit("/w/old", "ccc"), unnamed("/w/old")])
+            .await
+            .unwrap();
+        let repos = store.reader().repos().await.unwrap();
+        assert_eq!(
+            repos,
+            [
+                demo[0].clone(),
+                crate::RepoRow {
+                    name: None,
+                    path: "/w/other".to_owned(),
+                }
+            ]
+        );
+        assert_eq!(
+            store.reader().commit_shas("/w/new").await.unwrap(),
+            ["aaa", "bbb", "both", "ccc"]
         );
         store.close().await.unwrap();
     }
@@ -1534,6 +1854,7 @@ pub(crate) mod tests {
             .writer()
             .write(vec![
                 Write::Repo(Repo {
+                    name: None,
                     path: "/work/repo".to_owned(),
                     remote: None,
                     default_branch: None,

@@ -166,7 +166,7 @@ use bosun_core::{
 };
 use bosun_proc::{Power, PowerGuard, Spawner};
 use bosun_queue::{Card, Column, Cursor, Queue};
-use bosun_store::{NewItem, Reader, Write, Writer};
+use bosun_store::{NewItem, Reader, StoredItem, Write, Writer};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -387,6 +387,21 @@ pub(crate) fn lookup<'a>(config: &'a Config, repo: &str) -> Option<(&'a Repo, &'
     let repo = config.repos.get(repo)?;
     let identity = config.identities.get(&repo.identity)?;
     Some((repo, identity))
+}
+
+/// Whether `stored` is an item of the configured repository `name` (`repo`): its row has that
+/// name, wherever its path is now (a moved repository keeps its items, #132). A row without a
+/// name (nothing registered it by name yet) is matched by its path.
+pub(crate) fn of_repo(stored: &StoredItem, name: &str, repo: &Repo) -> bool {
+    // Mutant (`mutant_store_repo_by_path`): items are matched by path, so a moved repository's
+    // items are lost to its loop.
+    if cfg!(mutant_store_repo_by_path) {
+        return stored.repo == repo.key;
+    }
+    match &stored.repo_name {
+        Some(stored_name) => stored_name == name,
+        None => stored.repo == repo.key,
+    }
 }
 
 /// The item id of card `n` of repository `repo`: unique across repositories.
@@ -1948,6 +1963,7 @@ impl Loop {
     async fn register(&mut self, repo: &Repo, card: &Card, id: &ItemId) -> bool {
         let write = Write::Item(NewItem {
             item: id.clone(),
+            name: self.shared.options.repo.clone(),
             repo: repo.key.clone(),
             card_key: Some(card.id.to_string()),
             at_ms: now_ms(),

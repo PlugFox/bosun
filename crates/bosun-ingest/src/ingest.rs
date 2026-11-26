@@ -224,6 +224,7 @@ impl<P: Provider> Ingest<P> {
             .iter()
             .map(|path| {
                 Write::Repo(Repo {
+                    name: None,
                     path: path.clone(),
                     remote: None,
                     default_branch: None,

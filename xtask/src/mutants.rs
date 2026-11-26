@@ -1972,6 +1972,16 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_loop_sweep_kills_other_sessions",
+        issue: 162,
+        breaks: "the process sweep kills a listed process of another live session (#2)",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::sweep::a_stray_of_another_live_session_is_spared_by_the_sweep",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_api_lease_acquire_always_grants",
         issue: 156,
         breaks: "lease.acquire answers granted without asking the lease manager",

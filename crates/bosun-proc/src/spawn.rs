@@ -68,6 +68,30 @@ pub trait Tree: Send + fmt::Debug {
     /// Waits for the child itself to exit. Its descendants may outlive it, still inside the
     /// container until [`Tree::kill_tree`] or the drop.
     fn wait(&mut self) -> WaitFuture<'_>;
+
+    /// The container, as another thread lists it while this tree lives
+    /// ([`ContainerId::members`]); `None` when it cannot be named (a fake tree).
+    fn container(&self) -> Option<ContainerId> {
+        None
+    }
+}
+
+/// A tree's container by name, listed from any thread: what [`Tree::members`] reads, without
+/// the tree. Windows: the job, through the process that holds it and the handle's value there.
+/// Unix: the process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContainerId(pub(crate) sys::ContainerId);
+
+impl ContainerId {
+    /// The pids of the processes in the container, as [`Tree::members`] lists them; none on
+    /// Windows once the job's holder is gone.
+    ///
+    /// # Errors
+    ///
+    /// When the operating system refuses the query.
+    pub fn members(self) -> io::Result<Vec<u32>> {
+        sys::container_members(self.0)
+    }
 }
 
 /// A child as [`Spawner::spawn`] returns it: the tree, and its stdout and stderr as separate
@@ -196,6 +220,10 @@ impl Tree for NativeTree {
 
     fn wait(&mut self) -> WaitFuture<'_> {
         Box::pin(self.child.wait())
+    }
+
+    fn container(&self) -> Option<ContainerId> {
+        self.container.id().ok().map(ContainerId)
     }
 }
 

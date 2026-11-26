@@ -69,8 +69,10 @@ mod sys;
 #[cfg(test)]
 mod helper;
 
-pub use key::{ProcessKey, StartTime, is_running, reap, start_time};
+pub use key::{ProcessKey, StartTime, ancestors, is_running, kill_process, reap, start_time};
 pub use local_time::{last_local_midnight, next_local_midnight, utc_offset_ms};
 pub use named::{Named, processes_named};
 pub use power::{FakePower, Power, PowerGuard, SystemPower};
-pub use spawn::{ChildSpec, NativeSpawner, Output, Spawned, Spawner, Tree, WaitFuture};
+pub use spawn::{
+    ChildSpec, ContainerId, NativeSpawner, Output, Spawned, Spawner, Tree, WaitFuture,
+};

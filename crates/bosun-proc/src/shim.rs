@@ -148,6 +148,31 @@ pub struct Record {
     pub capped: bool,
 }
 
+impl Record {
+    /// The session's container by name ([`crate::Tree::container`]): on Unix the child's
+    /// process group, on Windows the shim's job; `None` on Windows when the record names no
+    /// job.
+    #[must_use]
+    pub fn container(&self) -> Option<crate::ContainerId> {
+        #[cfg(unix)]
+        {
+            Some(crate::ContainerId(sys::ContainerId {
+                pgid: self.child.pid,
+            }))
+        }
+        #[cfg(windows)]
+        {
+            self.job.map(|job| {
+                crate::ContainerId(sys::ContainerId {
+                    holder: self.shim.pid,
+                    start: self.shim.start.raw(),
+                    job,
+                })
+            })
+        }
+    }
+}
+
 /// The record of the spec at `spec`: the spec's file name with `.record` appended, in the same
 /// directory.
 #[must_use]
@@ -1049,6 +1074,25 @@ impl Tree for ShimTree {
                 tokio::time::sleep(POLL).await;
             }
         })
+    }
+
+    fn container(&self) -> Option<crate::ContainerId> {
+        #[cfg(unix)]
+        {
+            Some(crate::ContainerId(sys::ContainerId {
+                pgid: self.child.pid,
+            }))
+        }
+        #[cfg(windows)]
+        {
+            self.job.map(|job| {
+                crate::ContainerId(sys::ContainerId {
+                    holder: self.shim_key.pid,
+                    start: self.shim_key.start.raw(),
+                    job,
+                })
+            })
+        }
     }
 }
 

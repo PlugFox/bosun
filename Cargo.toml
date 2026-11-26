@@ -316,6 +316,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_sweep_ignores_start_time)",
   "cfg(mutant_loop_sweep_unlogged)",
   "cfg(mutant_proc_named_matches_every_process)",
+  "cfg(mutant_loop_sweep_kills_other_sessions)",
   "cfg(mutant_api_lease_acquire_always_grants)",
   "cfg(mutant_api_lease_without_operator)",
   "cfg(mutant_cli_with_exit_zero)",

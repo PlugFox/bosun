@@ -70,6 +70,56 @@ pub fn reap(recorded: ProcessKey) -> io::Result<bool> {
     sys::reap(recorded.pid, recorded.start.raw())
 }
 
+/// Kills the one process `recorded` names, only if its pid and start time both still match:
+/// never its group or its tree, so a process that leads a group of the user's own is killed
+/// alone. Returns whether it killed anything.
+///
+/// # Errors
+///
+/// When the operating system refuses the inspection or the kill.
+pub fn kill_process(recorded: ProcessKey) -> io::Result<bool> {
+    sys::kill_one(recorded.pid, recorded.start.raw())
+}
+
+/// How many parents [`ancestors`] follows at most: deeper than any real process tree, and a
+/// bound on a table that changes while it is read.
+const MAX_ANCESTORS: usize = 64;
+
+/// The live ancestors of the process `key`, nearest first: its parent, the parent's parent and
+/// so on, as long as each started no later than its child. A parent that has exited ends the
+/// chain, and so does a pid that names a process started after its child: the parent exited
+/// and its pid changed hands. The chain also ends at pid 0 and at a process that names itself.
+///
+/// # Errors
+///
+/// When the operating system refuses the inspection, or on a Unix that is neither Linux nor
+/// macOS.
+pub fn ancestors(key: ProcessKey) -> io::Result<Vec<ProcessKey>> {
+    let mut chain = Vec::new();
+    let mut child = key;
+    while chain.len() < MAX_ANCESTORS {
+        let Some(parent) = sys::parent_of(child.pid)? else {
+            break;
+        };
+        if parent == 0 || parent == child.pid {
+            break;
+        }
+        let Some(start) = sys::start_time(parent)? else {
+            break;
+        };
+        if start > child.start.raw() {
+            break;
+        }
+        let parent = ProcessKey {
+            pid: parent,
+            start: StartTime(start),
+        };
+        chain.push(parent);
+        child = parent;
+    }
+    Ok(chain)
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Child;
@@ -119,6 +169,48 @@ mod tests {
             child.kill().ok();
         }
         assert!(killed && exited, "killed {killed}, exited {exited}");
+    }
+
+    #[test]
+    fn a_child_has_this_process_among_its_ancestors() {
+        let mut child = helper::std_command(helper::Role::Sleep)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        let start = start_time(pid).expect("start time").expect("live");
+        let found = ancestors(ProcessKey { pid, start });
+        child.kill().ok();
+        child.wait().ok();
+        let me = std::process::id();
+        let me = ProcessKey {
+            pid: me,
+            start: start_time(me).expect("start time").expect("live"),
+        };
+        let found = found.expect("ancestors");
+        assert_eq!(found.first(), Some(&me), "{found:?}");
+    }
+
+    #[test]
+    fn kill_process_kills_the_one_process_whose_pid_and_start_time_match() {
+        let mut child = helper::std_command(helper::Role::Sleep)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        let start = start_time(pid).expect("start time").expect("live");
+        let other = ProcessKey {
+            pid,
+            start: StartTime::from_raw(start.raw() ^ 1),
+        };
+        let spared = !kill_process(other).expect("kill");
+        let killed = kill_process(ProcessKey { pid, start }).expect("kill");
+        let exited = exits_within(&mut child, Duration::from_secs(5));
+        if !exited {
+            child.kill().ok();
+        }
+        assert!(
+            spared && killed && exited,
+            "spared {spared}, killed {killed}, exited {exited}"
+        );
     }
 
     /// The pid-reuse case: the pid is live, but the process started at another time than the

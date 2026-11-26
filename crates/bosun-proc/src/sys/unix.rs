@@ -50,9 +50,25 @@ impl Container {
     /// table is read one process at a time, so a process that starts or exits meanwhile may be
     /// missed or listed; a process that left the group with `setsid` is not listed at all.
     pub(crate) fn members(&self) -> io::Result<Vec<u32>> {
-        let pgid = u32::try_from(self.pgid).map_err(|_| io::Error::other("a negative pgid"))?;
-        group_members(pgid)
+        group_members(self.id()?.pgid)
     }
+
+    /// The group as another thread lists it.
+    pub(crate) fn id(&self) -> io::Result<ContainerId> {
+        let pgid = u32::try_from(self.pgid).map_err(|_| io::Error::other("a negative pgid"))?;
+        Ok(ContainerId { pgid })
+    }
+}
+
+/// A process group, by its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ContainerId {
+    pub(crate) pgid: u32,
+}
+
+/// The members of the group `id` names, as [`group_members`] lists them.
+pub(crate) fn container_members(id: ContainerId) -> io::Result<Vec<u32>> {
+    group_members(id.pgid)
 }
 
 /// Linux: the processes of `/proc` whose group (field 5 of `stat`) is `pgid`.
@@ -449,6 +465,62 @@ pub(crate) fn start_time(pid: u32) -> io::Result<Option<u64>> {
     read_start(pid, false)
 }
 
+/// Kills the one process `pid`, never its group, if it started at `start`. The check and the
+/// kill are two system calls, as in [`reap`].
+pub(crate) fn kill_one(pid: u32, start: u64) -> io::Result<bool> {
+    match start_time(pid)? {
+        Some(found) if found == start => sigkill(pid_t(pid)?),
+        _ => Ok(false),
+    }
+}
+
+/// Linux: the parent (field 4 of `/proc/<pid>/stat`); `None` when there is no such process.
+#[cfg(target_os = "linux")]
+pub(crate) fn parent_of(pid: u32) -> io::Result<Option<u32>> {
+    let text = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    parse_stat_parent(&text)
+        .map(Some)
+        .ok_or_else(|| io::Error::other("malformed /proc/<pid>/stat"))
+}
+
+/// The parent (field 4) of a `/proc/<pid>/stat` line, counted from the command name's last `)`
+/// as in [`parse_stat`].
+#[cfg(any(target_os = "linux", test))]
+fn parse_stat_parent(line: &str) -> Option<u32> {
+    let rest = &line[line.rfind(')')? + 1..];
+    rest.split_ascii_whitespace().nth(1)?.parse().ok()
+}
+
+/// macOS: the parent of the BSD info (`pbi_ppid`); `None` when there is no such process.
+#[cfg(target_os = "macos")]
+pub(crate) fn parent_of(pid: u32) -> io::Result<Option<u32>> {
+    let pid = pid_t(pid)?;
+    // SAFETY: `proc_bsdinfo` is plain C data; all zeros is a valid value.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+        .expect("proc_bsdinfo is small");
+    // SAFETY: the buffer is `info`, writable, and `size` is its length.
+    let written =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    if written != size {
+        let e = io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ESRCH | libc::EPERM | 0) | None => Ok(None),
+            _ => Err(e),
+        };
+    }
+    Ok(Some(info.pbi_ppid))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn parent_of(_pid: u32) -> io::Result<Option<u32>> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 pub(crate) fn reap(pid: u32, start: u64) -> io::Result<bool> {
     match start_time(pid)? {
         None => Ok(false),
@@ -557,7 +629,14 @@ pub(crate) fn free_space(path: &std::path::Path) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_stat, parse_stat_group};
+    use super::{parse_stat, parse_stat_group, parse_stat_parent};
+
+    #[test]
+    fn the_parent_is_field_four_counted_from_the_last_parenthesis() {
+        let stat = "4242 (a (b) c) S 17 4200 4242 0\n";
+        assert_eq!(parse_stat_parent(stat), Some(17));
+        assert_eq!(parse_stat_parent("4242 (x) S"), None);
+    }
 
     #[test]
     fn the_group_is_field_five_counted_from_the_last_parenthesis() {

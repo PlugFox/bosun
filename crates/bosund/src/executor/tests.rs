@@ -381,6 +381,9 @@ struct Scene {
     free_space: Arc<FakeSpace>,
     /// The forge of the `pr` landing mode; `None`: a fake of its own nobody looks at.
     forge: Option<Arc<dyn forge::Forge>>,
+    /// The daemon's live trees, which the process sweep spares: the loop's, and any a scene
+    /// guards as another repository's.
+    live: Arc<crate::executor::Live>,
 }
 
 impl Scene {
@@ -585,6 +588,7 @@ impl Scene {
             sessions: None,
             free_space: Arc::new(FakeSpace::default()),
             forge: None,
+            live: Arc::default(),
             dir,
         }
     }
@@ -825,6 +829,7 @@ impl Scene {
                     .unwrap(),
                 )
             }),
+            live: self.live.clone(),
             free_space: self.free_space.clone(),
             forge: self
                 .forge

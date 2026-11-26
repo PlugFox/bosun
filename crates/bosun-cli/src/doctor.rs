@@ -1,7 +1,8 @@
 //! `bosun doctor` (#4, #28): checks what the daemon needs, with the daemon up or down.
 //!
 //! It reads the configuration through `bosun-config` and asks the OS; the daemon is asked
-//! `hello`, then `status.overview` of each identity for `served_config`. Each check is `ok`,
+//! `hello`, then `doctor.probe` of each identity for `daemon_gh`, then `status.overview` of
+//! each identity for `served_config`. Each check is `ok`,
 //! `warn`, `fail` or `skip` (it could not run because an earlier check failed), and each
 //! warning and failure carries a fix.
 //!
@@ -23,6 +24,7 @@
 //! | `endpoint` | nothing listens at the endpoint (fail) |
 //! | `endpoint_acl` | Unix: the socket's mode is not 0600 (fail). Windows: skipped, see below |
 //! | `daemon` | the daemon does not answer `hello`, or speaks another API version (fail) |
+//! | `daemon_gh` | the daemon cannot start its `gh` (`doctor.probe` of each identity, run in the daemon's own process: fail, #131); the daemon does not know `doctor.probe` (warn); skipped when the daemon did not answer |
 //! | `served_config` | the configuration differs from what the daemon serves (`status.overview` of each identity) in a way that waits for the next daemon start: a repository added, removed, moved to another identity, or with another `path` or queue (its kind or `queue_source`); an identity the daemon does not serve (warn, #186); skipped when the daemon did not answer |
 //! | `log` | never fails: names the daemon's log file (`bosun_client::log`, #137), ok when it exists, skipped when the daemon has not written it yet |
 //!
@@ -63,7 +65,7 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use bosun_api::rpc::code;
-use bosun_api::{IdentityParams, RepoOverview, method};
+use bosun_api::{IdentityParams, ProbeResult, RepoOverview, method};
 use bosun_client::{Client, Endpoint, Error};
 use bosun_config::{Config, Disk, DiskProbe, Queue, SystemProbe, tools};
 use serde::Serialize;
@@ -203,7 +205,10 @@ pub(crate) async fn run(inputs: &Inputs) -> Vec<Check> {
         (Ok(platform), Some(Ok(found))) => registration_check(platform, &inputs.name, found),
         (Ok(_), None) => Check::skip("registration", "not queried"),
     });
-    let client = daemon(&inputs.endpoint, &mut checks).await;
+    let mut client = daemon(&inputs.endpoint, &mut checks).await;
+    if let Some(config) = &config {
+        checks.extend(probes(inputs, config, client.as_mut()).await);
+    }
     if let Some(config) = &config {
         checks.extend(match client {
             Some(mut client) => served_config(config, &served(inputs, config, &mut client).await),
@@ -998,6 +1003,64 @@ async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) ->
     answered
 }
 
+/// How long `doctor.probe` may take: the daemon gives its `gh --version` 30 s.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// `daemon_gh` of each configured identity (of `--identity` only, when given): `doctor.probe`
+/// on the client that answered `hello`, or skipped when none did.
+async fn probes(inputs: &Inputs, config: &Config, mut client: Option<&mut Client>) -> Vec<Check> {
+    let mut checks = Vec::new();
+    for name in config.identities.keys() {
+        if inputs.identity.as_ref().is_some_and(|only| only != name) {
+            continue;
+        }
+        let Some(client) = client.as_deref_mut() else {
+            checks.push(Check::skip("daemon_gh", "the daemon did not answer").of(name));
+            continue;
+        };
+        let answer = tokio::time::timeout(
+            PROBE_TIMEOUT,
+            client.call::<method::DoctorProbe>(&IdentityParams {
+                identity: name.clone(),
+            }),
+        )
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        checks.push(daemon_gh(name, answer));
+    }
+    checks
+}
+
+/// `daemon_gh` (#131) of `identity` from the daemon's answer to `doctor.probe`: whether the
+/// daemon itself could start a child, which a check run in this process cannot tell.
+pub(crate) fn daemon_gh(identity: &str, answer: Result<ProbeResult, Error>) -> Check {
+    // Mutant (`mutant_doctor_daemon_gh_ignored`): the check is ok whatever the daemon answered.
+    if cfg!(mutant_doctor_daemon_gh_ignored) {
+        return Check::ok("daemon_gh", "bosund was asked to start gh").of(identity);
+    }
+    let check = match answer {
+        Ok(probe) if probe.ok => {
+            Check::ok("daemon_gh", format!("bosund started gh: {}", probe.detail))
+        }
+        Ok(probe) => Check::fail(
+            "daemon_gh",
+            format!("bosund cannot start {}: {}", probe.program, probe.detail),
+            "the daemon cannot start a child process (for one, a daemon whose console host was              ended): run `bosun install`, which stops it by its pid and starts it again",
+        ),
+        Err(Error::Rpc(e)) if e.code == code::METHOD_NOT_FOUND => Check::warn(
+            "daemon_gh",
+            format!("this bosund does not know doctor.probe: {}", e.message),
+            "install bosun and bosund of one release",
+        ),
+        Err(e) => Check::fail(
+            "daemon_gh",
+            format!("doctor.probe: {e}"),
+            "run bosund in a terminal to see why it does not answer",
+        ),
+    };
+    check.of(identity)
+}
+
 /// What [`served_config`] takes for an identity the daemon answers it does not serve.
 pub(crate) const NOT_SERVED: &str = "the daemon serves no such identity";
 
@@ -1334,6 +1397,48 @@ mod tests {
             }
         }
         assert_eq!(stop_hook("app", &root.join("absent")).status, Status::Skip);
+    }
+
+    /// #131: `daemon_gh` fails, with the identity, the daemon's reason and `bosun install` as
+    /// the fix, when the daemon could not start its `gh`; it warns for a daemon that does not
+    /// know `doctor.probe` (`mutant_doctor_daemon_gh_ignored` makes it ok whatever the answer).
+    #[test]
+    fn the_daemon_gh_check_fails_when_the_daemon_cannot_start_gh() {
+        let probe = |ok: bool, detail: &str| ProbeResult {
+            identity: "a".to_owned(),
+            program: "gh".to_owned(),
+            ok,
+            detail: detail.to_owned(),
+        };
+        let failed = daemon_gh(
+            "a",
+            Ok(probe(false, "gh --version ended with exit code 3: gone")),
+        );
+        assert_eq!(failed.status, Status::Fail, "{failed:?}");
+        assert_eq!(failed.identity.as_deref(), Some("a"));
+        assert!(failed.detail.contains("exit code 3: gone"), "{failed:?}");
+        assert!(
+            failed
+                .fix
+                .as_deref()
+                .is_some_and(|f| f.contains("bosun install")),
+            "{failed:?}"
+        );
+
+        let ran = daemon_gh("a", Ok(probe(true, "gh version 2.0.0 (demo)")));
+        assert_eq!(ran.status, Status::Ok, "{ran:?}");
+        assert!(ran.detail.contains("gh version 2.0.0 (demo)"), "{ran:?}");
+
+        let unknown = daemon_gh(
+            "a",
+            Err(Error::Rpc(bosun_api::rpc::ErrorObject::new(
+                code::METHOD_NOT_FOUND,
+                "no method doctor.probe",
+            ))),
+        );
+        assert_eq!(unknown.status, Status::Warn, "{unknown:?}");
+
+        assert_eq!(overall(&[ran, unknown, failed]), Status::Fail);
     }
 
     /// #186: what the daemon serves against the file, through `served_config` alone (no

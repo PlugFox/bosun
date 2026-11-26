@@ -52,6 +52,7 @@
 //! | `lease.acquire` | [`AcquireParams`] | [`AcquireResult`] |
 //! | `lease.release` | [`ReleaseParams`] | [`ReleaseResult`] |
 //! | `lease.list` | [`IdentityParams`] | [`Resources`] |
+//! | `doctor.probe` | [`IdentityParams`] | [`ProbeResult`] |
 //!
 //! The `agent.*` methods name no identity: their credential does ([`agent`]). `control.kill`
 //! names none either: the kill switch is daemon-wide. The `control.*` methods that change
@@ -60,6 +61,7 @@
 
 pub mod agent;
 pub mod control;
+pub mod doctor;
 mod estimates;
 pub mod event;
 pub mod item;
@@ -83,6 +85,7 @@ pub use agent::{
     SubmitSummaryParams,
 };
 pub use control::{ControlStatus, KillParams, KillResult, PauseParams, RepoControl};
+pub use doctor::ProbeResult;
 pub use estimates::{
     ByFile, ByTool, Estimates, FileRow, Finding, FindingRow, RepeatedRead, RepeatedReads,
     ResultCost, ToolRow,
@@ -364,6 +367,13 @@ pub mod method {
         crate::Resources,
         "The resource instances the identity can lease, with their holders and waiting requests,      and its worktrees on disk or quarantined. Another identity's holder is shown only as      `busy`."
     );
+    method!(
+        DoctorProbe,
+        "doctor.probe",
+        crate::IdentityParams,
+        crate::ProbeResult,
+        "Starts the daemon's `gh` once (`gh --version`) and says whether it ran: a daemon that      cannot start children fails here (#131). Reads nothing of the identity's; needs no      operator token."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -397,6 +407,7 @@ pub const METHODS: &[&str] = &[
     method::LeaseAcquire::NAME,
     method::LeaseRelease::NAME,
     method::LeaseList::NAME,
+    method::DoctorProbe::NAME,
 ];
 
 /// The prefix of the `agent.*` group: the only methods an agent credential admits.
@@ -661,6 +672,7 @@ pub fn schema() -> Value {
     add_method::<method::LeaseAcquire>(&mut generator, &mut methods);
     add_method::<method::LeaseRelease>(&mut generator, &mut methods);
     add_method::<method::LeaseList>(&mut generator, &mut methods);
+    add_method::<method::DoctorProbe>(&mut generator, &mut methods);
     let notifications = json!({
         event::EVENT: {
             "description": "One event of the subscribed identity, in sequence order.",

@@ -189,6 +189,7 @@ async fn lease_api(scene: &Scene, leases: &Arc<Leases>) -> crate::state::State {
         credentials: scene.credentials.clone(),
         control: scene.control.clone(),
         leases: leases.clone(),
+        gh: std::path::PathBuf::from("gh"),
     }
 }
 

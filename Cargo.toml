@@ -336,6 +336,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_cli_with_release_not_reconnected)",
   "cfg(mutant_cli_with_wait_not_reconnected)",
   "cfg(mutant_cli_with_runs_after_daemon_lost)",
+  # #192 (#131, part 2): `bosun doctor` asks the daemon to start its `gh`.
+  "cfg(mutant_api_probe_always_ok)",
+  "cfg(mutant_doctor_daemon_gh_ignored)",
   # #157: landing in worktree mode.
   "cfg(mutant_loop_accept_pre_rebase_verdict)",
   "cfg(mutant_loop_land_while_deferred)",

@@ -147,6 +147,7 @@ async fn a_pause_lets_the_attempt_finish_and_starts_nothing_until_resume() {
         credentials: scene.credentials.clone(),
         control: scene.control.clone(),
         leases: Arc::new(crate::leases::Leases::none()),
+        gh: std::path::PathBuf::from("gh"),
     };
     let pause = serde_json::json!({"identity": "test", "repo": "demo"});
     let mut agent_conn = crate::api::Connection::default();

@@ -252,6 +252,7 @@ async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObj
         method::TokensPace::NAME => crate::pace::dispatch(state, name, p).await,
         method::LeaseList::NAME => lease_list(state, p).await,
         name if name.starts_with("control.") => crate::control::dispatch(state, name, p).await,
+        name if name.starts_with("doctor.") => crate::doctor::dispatch(state, name, p).await,
         name if name.starts_with("lease.") => crate::leases::dispatch(state, name, p).await,
         name if name.starts_with("status.") => crate::overview::dispatch(state, name, p).await,
         name if name.starts_with("queue.") => crate::board::dispatch(state, name, p).await,

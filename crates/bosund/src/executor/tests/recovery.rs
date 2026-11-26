@@ -792,6 +792,7 @@ fn api_of(scene: &Scene) -> crate::state::State {
         credentials: scene.credentials.clone(),
         control: scene.control.clone(),
         leases: Arc::new(crate::leases::Leases::none()),
+        gh: std::path::PathBuf::from("gh"),
     }
 }
 

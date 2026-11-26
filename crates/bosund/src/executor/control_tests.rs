@@ -455,6 +455,9 @@ pub(super) async fn daily_cap_scene(start_minutes: i64) {
     ));
     scene.write_board(&[card(1, "One", "test -f one.txt", "Item one.")]);
     scene.script(1, &["commit one.txt one".to_owned()]);
+    // The checkout is a known root before the usage is written, so the interactive session is
+    // attributed to it on every platform, and the automatic pause (when on) sees it.
+    scene.register_root().await;
     // Interactive work today: 1.6 M eqv, over the 1.5 M left to bosun.
     scene.usage(1, "interactive-session", 1_600_000).await;
     let mut events = scene.subscribe("budget_exceeded");

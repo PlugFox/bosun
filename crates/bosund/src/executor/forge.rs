@@ -24,14 +24,64 @@ use std::time::{Duration, Instant};
 
 use bosun_identity::Env;
 
-/// Where and as whom the forge is asked: the user's checkout and the identity's tool
-/// environment.
+/// Where and as whom the forge is asked: the user's checkout, the identity's tool environment
+/// and the GitHub repository its `origin` names.
 #[derive(Debug, Clone)]
 pub(crate) struct At {
-    /// The repository `gh` runs in (`repo.path`): its `origin` names the GitHub repository.
+    /// The repository `gh` runs in (`repo.path`).
     pub(crate) dir: PathBuf,
     /// The environment `gh` runs with.
     pub(crate) env: Env,
+    /// `[HOST/]OWNER/NAME` of the repository `origin` names: every `gh` call is pinned to it
+    /// (`-R`), so the lookup and the pull request go to the repository the push went to, not
+    /// one `gh` would pick on its own (another remote, a default it was told).
+    pub(crate) repo: String,
+}
+
+impl At {
+    /// [`At`] of the user's checkout `dir` under `env`: `origin`, as the identity's git reads
+    /// it (`git remote get-url origin`), must name a GitHub repository as owner and name.
+    ///
+    /// # Errors
+    ///
+    /// [`ForgeError::Refused`] when `origin` cannot be read or names no such repository.
+    pub(crate) fn new(dir: PathBuf, env: Env) -> Result<Self, ForgeError> {
+        let mut command = bosun_git::Git::new(&dir).command();
+        env.apply(&mut command);
+        command.args(["remote", "get-url", "origin"]);
+        let out = output_within(&mut command, TOOL_TIMEOUT, "git remote")?;
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            return Err(ForgeError::Refused(format!(
+                "the repository's origin: {stderr}"
+            )));
+        }
+        let repo = repo_spec(&url).ok_or_else(|| {
+            ForgeError::Refused(format!(
+                "the origin `{url}` names no GitHub repository as owner/name"
+            ))
+        })?;
+        Ok(Self { dir, env, repo })
+    }
+
+    /// The owner of [`At::repo`].
+    fn owner(&self) -> &str {
+        let mut parts = self.repo.rsplit('/');
+        parts.next();
+        parts.next().unwrap_or_default()
+    }
+}
+
+/// `gh -R` of the remote URL `url`: `OWNER/NAME` on github.com, `HOST/OWNER/NAME` elsewhere.
+pub(crate) fn repo_spec(url: &str) -> Option<String> {
+    let (host, _) = bosun_identity::host_and_owner(url)?;
+    let repo = super::board::repository_of(url)?;
+    Some(if host == "github.com" {
+        repo
+    } else {
+        format!("{host}/{repo}")
+    })
 }
 
 /// A pull request as the forge reports it.
@@ -129,13 +179,13 @@ impl Forge for GhForge {
         at: &At,
         head_branch: &str,
     ) -> Result<Option<PullRequest>, ForgeError> {
-        let out = gh(at, &list_args(head_branch))?;
-        parse_list(&out).map_err(ForgeError::Refused)
+        let out = gh(at, &list_args(&at.repo, head_branch))?;
+        parse_list(&out, at.owner()).map_err(ForgeError::Refused)
     }
 
     fn create(&self, at: &At, new: &NewPullRequest) -> Result<PullRequest, ForgeError> {
         let file = body_file(&new.body)?;
-        let out = gh(at, &create_args(new, file.path()))?;
+        let out = gh(at, &create_args(&at.repo, new, file.path()))?;
         let url = out
             .trim()
             .lines()
@@ -155,20 +205,22 @@ impl Forge for GhForge {
 
     fn set_body(&self, at: &At, number: u64, body: &str) -> Result<(), ForgeError> {
         let file = body_file(body)?;
-        gh(at, &edit_args(number, file.path())).map(drop)
+        gh(at, &edit_args(&at.repo, number, file.path())).map(drop)
     }
 
     fn state(&self, at: &At, number: u64) -> Result<PullRequestState, ForgeError> {
-        let out = gh(at, &view_args(number))?;
+        let out = gh(at, &view_args(&at.repo, number))?;
         parse_state(&out).map_err(ForgeError::Refused)
     }
 }
 
-/// `gh pr list` for the open pull request of `head`.
-pub(crate) fn list_args(head: &str) -> Vec<String> {
+/// `gh pr list` of the repository `repo` for the open pull request of `head`.
+pub(crate) fn list_args(repo: &str, head: &str) -> Vec<String> {
     [
         "pr",
         "list",
+        "-R",
+        repo,
         "--head",
         head,
         "--state",
@@ -184,11 +236,13 @@ pub(crate) fn list_args(head: &str) -> Vec<String> {
 /// [`parse_list`] keeps them apart by.
 const LIST_FIELDS: &str = "number,url,body,isCrossRepository,headRepositoryOwner";
 
-/// `gh pr create` for `new`, its body read from `body_file`.
-pub(crate) fn create_args(new: &NewPullRequest, body_file: &Path) -> Vec<String> {
-    let mut args: Vec<String> = ["pr", "create", "--head", &new.head, "--base", &new.base]
-        .map(str::to_owned)
-        .to_vec();
+/// `gh pr create` in the repository `repo` for `new`, its body read from `body_file`.
+pub(crate) fn create_args(repo: &str, new: &NewPullRequest, body_file: &Path) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "pr", "create", "-R", repo, "--head", &new.head, "--base", &new.base,
+    ]
+    .map(str::to_owned)
+    .to_vec();
     args.extend(["--title".to_owned(), new.title.clone()]);
     args.extend([
         "--body-file".to_owned(),
@@ -206,22 +260,26 @@ pub(crate) fn create_args(new: &NewPullRequest, body_file: &Path) -> Vec<String>
     args
 }
 
-/// `gh pr edit` of pull request `number`, its body read from `body_file`.
-pub(crate) fn edit_args(number: u64, body_file: &Path) -> Vec<String> {
+/// `gh pr edit` of pull request `number` of `repo`, its body read from `body_file`.
+pub(crate) fn edit_args(repo: &str, number: u64, body_file: &Path) -> Vec<String> {
     vec![
         "pr".to_owned(),
         "edit".to_owned(),
+        "-R".to_owned(),
+        repo.to_owned(),
         number.to_string(),
         "--body-file".to_owned(),
         body_file.to_string_lossy().into_owned(),
     ]
 }
 
-/// `gh pr view` of pull request `number`: its state and when it was merged.
-pub(crate) fn view_args(number: u64) -> Vec<String> {
+/// `gh pr view` of pull request `number` of `repo`: its state and when it was merged.
+pub(crate) fn view_args(repo: &str, number: u64) -> Vec<String> {
     vec![
         "pr".to_owned(),
         "view".to_owned(),
+        "-R".to_owned(),
+        repo.to_owned(),
         number.to_string(),
         "--json".to_owned(),
         "state,mergedAt".to_owned(),
@@ -258,8 +316,14 @@ fn parse_state(out: &str) -> Result<PullRequestState, String> {
 /// The first pull request of `gh pr list --json` [`LIST_FIELDS`] output whose head branch is
 /// in the repository itself. `--head` matches the branch name only, so on a public repository
 /// anyone may open a pull request from `bosun/<slug>` of a fork before the daemon does: one
-/// whose head is in another repository (or that does not say) is never taken for the item's.
-fn parse_list(out: &str) -> Result<Option<PullRequest>, String> {
+/// whose head is in another repository (or that does not say), or whose head repository's
+/// owner is not `owner`, is never taken for the item's.
+fn parse_list(out: &str, owner: &str) -> Result<Option<PullRequest>, String> {
+    #[derive(serde::Deserialize)]
+    struct Owner {
+        #[serde(default)]
+        login: String,
+    }
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Listed {
@@ -270,13 +334,19 @@ fn parse_list(out: &str) -> Result<Option<PullRequest>, String> {
         /// `None` when `gh` did not say: taken for a fork's.
         #[serde(default)]
         is_cross_repository: Option<bool>,
+        #[serde(default)]
+        head_repository_owner: Option<Owner>,
     }
     let listed: Vec<Listed> = serde_json::from_str(out.trim())
         .map_err(|e| format!("`gh pr list` printed what is not a list of pull requests: {e}"))?;
     // Mutant (`mutant_forge_adopts_fork_pull_request`): a fork's pull request of the same
     // branch name is taken for the item's.
     let own = |l: &Listed| {
-        cfg!(mutant_forge_adopts_fork_pull_request) || l.is_cross_repository == Some(false)
+        cfg!(mutant_forge_adopts_fork_pull_request)
+            || (l.is_cross_repository == Some(false)
+                && l.head_repository_owner
+                    .as_ref()
+                    .is_some_and(|o| o.login.eq_ignore_ascii_case(owner)))
     };
     Ok(listed.into_iter().find(own).map(|l| PullRequest {
         number: l.number,
@@ -448,10 +518,12 @@ mod tests {
     #[test]
     fn gh_is_asked_with_the_head_branch_and_a_body_file() {
         assert_eq!(
-            list_args("bosun/demo-1"),
+            list_args("o/r", "bosun/demo-1"),
             [
                 "pr",
                 "list",
+                "-R",
+                "o/r",
                 "--head",
                 "bosun/demo-1",
                 "--state",
@@ -466,6 +538,8 @@ mod tests {
         let mut expected = vec![
             "pr",
             "create",
+            "-R",
+            "o/r",
             "--head",
             "bosun/demo-1",
             "--base",
@@ -482,11 +556,11 @@ mod tests {
             "--label",
             "bosun",
         ];
-        assert_eq!(create_args(&new(true), file), expected);
+        assert_eq!(create_args("o/r", &new(true), file), expected);
         expected.retain(|a| *a != "--draft");
-        assert_eq!(create_args(&new(false), file), expected);
+        assert_eq!(create_args("o/r", &new(false), file), expected);
         for draft in [true, false] {
-            let args = create_args(&new(draft), file);
+            let args = create_args("o/r", &new(draft), file);
             assert!(
                 !args.iter().any(|a| a.contains("must not be"))
                     && !args.contains(&"--body".to_owned()),
@@ -495,13 +569,41 @@ mod tests {
         }
 
         assert_eq!(
-            edit_args(12, file),
-            ["pr", "edit", "12", "--body-file", file_text.as_str()]
+            edit_args("o/r", 12, file),
+            [
+                "pr",
+                "edit",
+                "-R",
+                "o/r",
+                "12",
+                "--body-file",
+                file_text.as_str()
+            ]
         );
         assert_eq!(
-            view_args(12),
-            ["pr", "view", "12", "--json", "state,mergedAt"]
+            view_args("o/r", 12),
+            ["pr", "view", "-R", "o/r", "12", "--json", "state,mergedAt"]
         );
+    }
+
+    /// #8: every `gh` call names the repository of `origin`: `OWNER/NAME` on github.com, with
+    /// the host elsewhere; a local path or a URL without owner and name names none.
+    #[test]
+    fn the_repository_of_origin_pins_every_gh_call() {
+        for url in [
+            "https://github.com/o/r.git",
+            "git@github.com:o/r.git",
+            "ssh://git@github.com/o/r",
+        ] {
+            assert_eq!(repo_spec(url).as_deref(), Some("o/r"), "{url}");
+        }
+        assert_eq!(
+            repo_spec("https://ghe.example.com/o/r.git").as_deref(),
+            Some("ghe.example.com/o/r")
+        );
+        for url in ["/srv/git/r.git", "C:/git/r", "https://github.com/o"] {
+            assert_eq!(repo_spec(url), None, "{url}");
+        }
     }
 
     #[test]
@@ -530,13 +632,15 @@ mod tests {
     #[test]
     fn a_listed_pull_request_and_a_created_url_are_read() {
         let listed = parse_list(
-            r#"[{"number":7,"url":"https://x/o/r/pull/7","body":"b","isCrossRepository":false}]"#,
+            r#"[{"number":7,"url":"https://x/o/r/pull/7","body":"b","isCrossRepository":false,
+                "headRepositoryOwner":{"login":"o"}}]"#,
+            "o",
         )
         .unwrap()
         .unwrap();
         assert_eq!((listed.number, listed.body.as_str()), (7, "b"));
-        assert_eq!(parse_list("[]\n").unwrap(), None);
-        assert!(parse_list("nope").is_err());
+        assert_eq!(parse_list("[]\n", "o").unwrap(), None);
+        assert!(parse_list("nope", "o").is_err());
         assert_eq!(number_of("https://github.com/o/r/pull/42"), Some(42));
         assert_eq!(number_of("https://github.com/o/r"), None);
     }
@@ -551,9 +655,14 @@ mod tests {
         let silent = r#"{"number":4,"url":"https://x/o/r/pull/4","body":"silent"}"#;
         let own = r#"{"number":5,"url":"https://x/o/r/pull/5","body":"own",
             "isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#;
-        let found = parse_list(&format!("[{fork},{silent},{own}]")).unwrap();
+        let found = parse_list(&format!("[{fork},{silent},{own}]"), "o").unwrap();
         assert_eq!(found.map(|p| p.number), Some(5));
-        assert_eq!(parse_list(&format!("[{fork},{silent}]")).unwrap(), None);
+        assert_eq!(
+            parse_list(&format!("[{fork},{silent}]"), "o").unwrap(),
+            None
+        );
+        // Not a fork by its flag, yet another owner's head: passed over all the same.
+        assert_eq!(parse_list(&format!("[{own}]"), "p").unwrap(), None);
     }
 
     /// #8: a call that hangs is killed at its limit and taken for no answer, so the loop and

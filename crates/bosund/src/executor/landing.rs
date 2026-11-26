@@ -509,9 +509,10 @@ impl Task<'_> {
             Err(e) => return Some(self.refused(format!("the summary of {item}: {e}"))),
         };
         // The daemon's own git and `gh` for the repository's identity, never an agent's (#2).
-        let at = At {
-            dir: repo.path.clone(),
-            env: Env::tool(bundle, &inherited()),
+        let (dir, env) = (repo.path.clone(), Env::tool(bundle, &inherited()));
+        let at = match blocking(move || At::new(dir, env)).await {
+            Ok(at) => at,
+            Err(e) => return Some(self.pr_refused(&e.to_string()).await),
         };
         let new = NewPullRequest {
             head: branch.clone(),

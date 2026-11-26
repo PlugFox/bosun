@@ -119,8 +119,15 @@ impl Loop {
             return;
         };
         // The daemon's own `gh` for the repository's identity, never an agent's (#2).
-        let bundle = match identity::bundle(&repo.identity, identity, &repo.path) {
-            Ok(bundle) => bundle,
+        let at = match identity::bundle(&repo.identity, identity, &repo.path) {
+            Ok(bundle) => {
+                let (dir, env) = (repo.path.clone(), Env::tool(&bundle, &inherited()));
+                blocking(move || At::new(dir, env).map_err(|e| e.to_string())).await
+            }
+            Err(e) => Err(e),
+        };
+        let at = match at {
+            Ok(at) => at,
             Err(e) => {
                 for row in &rows {
                     if self.pulls.troubled.insert(row.item.clone()) {
@@ -132,10 +139,6 @@ impl Loop {
                 }
                 return;
             }
-        };
-        let at = At {
-            dir: repo.path.clone(),
-            env: Env::tool(&bundle, &inherited()),
         };
         for row in rows {
             let Some(number) = row.pr_number else {

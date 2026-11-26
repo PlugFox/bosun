@@ -51,7 +51,7 @@
 //! [`Options::handshake`]: super::Options::handshake
 //! [`Deps::spawner`]: super::Deps::spawner
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -78,7 +78,7 @@ use tokio::sync::watch;
 use super::park::ChildSlot;
 use super::verdict::killed;
 use super::{Claimed, Shared, Signal, blocking, git, identity, lookup, now_ms, workspace};
-use crate::agent::Binding;
+use crate::agent::{Binding, Recovering, Tool, tool_of};
 use crate::events;
 use crate::leases::Holder;
 
@@ -1290,7 +1290,11 @@ pub(crate) struct Attached {
 /// tail file, appended to from here on; the start of the commit range from the run row's start
 /// head, else (a row written before it was recorded) the attempt's previous session's end,
 /// else the item's base.
-#[allow(clippy::too_many_lines)]
+///
+/// `recovering` is the loop's guard of its recovery (#8, E10): until the credential is
+/// re-admitted, with its attempt's call counts read back from the store, an unknown credential
+/// is refused as retryable. It is dropped right after, or at any return before.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) async fn attach(
     shared: &Arc<Shared>,
     config: &Config,
@@ -1299,6 +1303,7 @@ pub(crate) async fn attach(
     attached: Attached,
     mut kill: watch::Receiver<Signal>,
     on_blocking: Box<dyn Fn() + Send + Sync>,
+    recovering: Option<Recovering>,
 ) -> Option<Event> {
     let crash = Some(run.exited(Exit::Crash));
     let Some((repo, _)) = lookup(config, &shared.options.repo) else {
@@ -1333,6 +1338,9 @@ pub(crate) async fn attach(
         .credential_digest
         .as_deref()
         .and_then(|d| <[u8; 32]>::try_from(d).ok());
+    if digest.is_some() {
+        restore_calls(shared, run).await;
+    }
     let credential = if cfg!(mutant_loop_reattach_without_credential) {
         // Mutant (`mutant_loop_reattach_without_credential`): the stored digest is not
         // re-admitted; the session's agent calls are refused.
@@ -1345,6 +1353,8 @@ pub(crate) async fn attach(
                 .readmit(digest, binding(shared, repo, run, &session_id, on_blocking))
         })
     };
+    // The loop's recovery has re-admitted what it re-attached.
+    drop(recovering);
     if credential.is_none() {
         shared.trouble(format!(
             "{}: the credential of session {session_id} cannot be re-admitted",
@@ -1422,6 +1432,32 @@ pub(crate) async fn attach(
     follow(shared, run, following, spawned, kill).await
 }
 
+/// Restores the per-tool call counts `run`'s attempt made before the restart, from its stored
+/// `agent_call` rows (refused ones count, as they did when made): the caps go on across the
+/// restart (#8). A store that cannot be read is trouble, and the caps start from zero.
+async fn restore_calls(shared: &Shared, run: &Run) {
+    // Mutant (`mutant_agent_caps_reset_on_readmit`): the stored counts are not restored.
+    if cfg!(mutant_agent_caps_reset_on_readmit) {
+        return;
+    }
+    match shared.deps.reader.agent_calls(&run.item).await {
+        Ok(rows) => {
+            let mut counts: HashMap<Tool, u32> = HashMap::new();
+            for row in rows.iter().filter(|r| r.attempt == run.attempt) {
+                *counts.entry(tool_of(&row.kind)).or_insert(0) += 1;
+            }
+            shared
+                .deps
+                .credentials
+                .restore_calls(&run.item, run.attempt, counts);
+        }
+        Err(e) => shared.trouble(format!(
+            "{}: the agent calls of attempt {} cannot be read, its caps start from zero: {e}",
+            run.item, run.attempt
+        )),
+    }
+}
+
 /// The start of a re-attached session's commit range when its run row does not record it (a
 /// row written before `run.start_sha`): the end of the attempt's previous session, else the
 /// item's base.
@@ -1456,6 +1492,7 @@ fn binding(
         session: id.to_string(),
         repo: repo.path.clone(),
         writer: shared.deps.writer.clone(),
+        reader: shared.deps.reader.clone(),
         on_blocking,
     }
 }

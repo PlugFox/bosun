@@ -7,8 +7,10 @@
 //! answer. Responses the client sends (to requests this server never makes) are ignored.
 //!
 //! A tool call that the daemon refuses (an unauthorized credential, a rate cap) or that cannot
-//! reach it is a tool result with `isError: true`, so the model sees why; a call of an unknown
-//! tool, or with arguments that do not match its schema, is a JSON-RPC error.
+//! reach it within the retry window (the daemon gone, or restarting and not confirming the
+//! call: see the crate's docs) is a tool result with `isError: true`, so the model sees why; a
+//! call of an unknown tool, or with arguments that do not match its schema, is a JSON-RPC
+//! error.
 
 use bosun_api::AgentAck;
 use serde_json::{Map, Value, json};

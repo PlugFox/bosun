@@ -609,6 +609,10 @@ pub(crate) struct Loop {
     waiting: bool,
     /// Crash recovery has run ([`recover`]); nothing is claimed or sent before.
     recovered: bool,
+    /// Held until recovery has ended: while any loop holds one, an unknown agent credential is
+    /// refused as retryable (#8, E10). A re-attached session takes it and drops it once its
+    /// credential is admitted again.
+    recovering: Option<crate::agent::Recovering>,
     /// The store refused a transition: the loop stops.
     halted: bool,
     /// The sleep detector.
@@ -653,6 +657,16 @@ impl Loop {
         let gaps = park::Gaps::new(options.poll);
         let control = deps.control.subscribe();
         let pace = board::Pace::new(options.idle_backoff, options.poll);
+        // Raised before the API serves, so no call meets a credential not re-admitted yet as
+        // unknown.
+        let recovering = deps.credentials.recovering();
+        let recovering = if cfg!(mutant_agent_recovering_never_ends) {
+            // Mutant (`mutant_agent_recovering_never_ends`): the guard is leaked, never dropped.
+            std::mem::forget(recovering);
+            None
+        } else {
+            Some(recovering)
+        };
         // Every tree the loop starts is guarded from the other loops' process sweeps.
         let deps = Deps {
             spawner: Arc::new(sweep::Tracking {
@@ -682,6 +696,7 @@ impl Loop {
             backoff: None,
             waiting: false,
             recovered: false,
+            recovering,
             halted: false,
             gaps,
             watch: hold::Watch::default(),
@@ -1057,7 +1072,9 @@ impl Loop {
             return;
         };
         let (attempt, spawn, mode) = (attached.run.attempt, attached.run.spawn, attached.run.mode);
-        self.start_session_task(attempt, spawn, mode, claimed, Some(attached))
+        // The guard of recovery goes with the session, dropped once its credential is admitted.
+        let recovering = self.recovering.take();
+        self.start_session_task(attempt, spawn, mode, claimed, Some((attached, recovering)))
             .await;
     }
 
@@ -1068,7 +1085,7 @@ impl Loop {
         spawn: u32,
         mode: SpawnMode,
         claimed: Arc<Claimed>,
-        attached: Option<session::Attached>,
+        attached: Option<(session::Attached, Option<crate::agent::Recovering>)>,
     ) {
         let Some(cur) = self.current.as_ref() else {
             return;
@@ -1111,7 +1128,7 @@ impl Loop {
             };
             // `None`: the session was detached at a graceful stop (E22); there is no event.
             let event = match attached {
-                Some(attached) => {
+                Some((attached, recovering)) => {
                     session::attach(
                         &shared,
                         &config,
@@ -1120,6 +1137,7 @@ impl Loop {
                         attached,
                         kill_rx,
                         on_blocking,
+                        recovering,
                     )
                     .await
                 }
@@ -1729,6 +1747,10 @@ impl Loop {
     async fn on_tick(&mut self) {
         if !self.recovered {
             self.recovered = self.recover().await;
+            if self.recovered {
+                // Recovery has ended; a session it re-attached took the guard already.
+                self.recovering = None;
+            }
             return;
         }
         let clock = &self.shared.deps.clock;

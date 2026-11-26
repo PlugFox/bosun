@@ -5,6 +5,10 @@
 //! credential does. The credential admits `agent.*` only, and `agent.*` admits nothing else: a
 //! request without a live credential, or naming another item than the credential's, is refused
 //! with [`crate::rpc::code::UNAUTHORIZED`]. The credential is revoked when its session ends.
+//! While a daemon that has just started has not re-admitted every session that went on under
+//! its shim (#8, E10), an unknown credential is refused with
+//! [`crate::rpc::code::RECOVERING`] instead: the call may be made again, and `bosun-mcp`
+//! retries it.
 //!
 //! There is no `done` and no `report_verdict`: nothing the agent says moves its item to Done
 //! (#1, invariant 2). A call is recorded with the attempt and the commit HEAD resolves to when

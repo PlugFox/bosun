@@ -40,6 +40,7 @@ mod moved;
 mod recovery;
 mod refusals;
 mod removal;
+mod restart;
 mod shim;
 mod sticky;
 mod sweep;

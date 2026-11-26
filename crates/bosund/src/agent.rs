@@ -9,8 +9,17 @@
 //! daemon restart kills the session in stage 1 (#7), so nothing needs to survive one there. In
 //! worktree mode (#8, E10) a session goes on under its shim across a restart: the digest is
 //! also on its `process` row, and the restarted daemon admits it again with the session's
-//! binding ([`Credentials::readmit`]). The [`Issued`] handle revokes it when dropped, which the
-//! session does as soon as its process is gone, on every path.
+//! binding ([`Credentials::readmit`]), with the per-tool counts its attempt made before the
+//! restart read back from the store ([`Credentials::restore_calls`]). The [`Issued`] handle
+//! revokes it when dropped, which the session does as soon as its process is gone, on every
+//! path.
+//!
+//! Between the restarted daemon's start and that re-admission the session's `bosun-mcp` may
+//! call: every loop holds a [`Recovering`] guard from its creation until its recovery has
+//! ended (and re-admitted the session it re-attached), and while any guard is held an unknown
+//! credential is refused with `RECOVERING`, which `bosun-mcp` retries, instead of
+//! `UNAUTHORIZED`, which it does not. A live credential naming another item is `UNAUTHORIZED`
+//! whatever the guards.
 //!
 //! A request carrying a credential may call `agent.*` only, and `agent.*` admits nothing but a
 //! live credential naming its own item ([`crate::api`] refuses the rest).
@@ -24,8 +33,16 @@
 //! recorded, is handed to the repository's loop, which records the transition to Needs you and
 //! ends the session after its grace period. A summary is recorded and nothing else: whatever it
 //! says, it moves nothing.
+//!
+//! `bosun-mcp` retries a call whose answer it did not get (#8), so a call may arrive twice. A
+//! blocking question the store already holds for the attempt, with the same text, is
+//! acknowledged without a second row; and the loop is handed a blocking question at most once
+//! per item and attempt in this daemon (a deduplicated one included, when this daemon has not
+//! handed it yet: after a restart the previous daemon's transition was not recorded). Notes and
+//! summaries are not deduplicated: a retried one may be a second row (of a summary, the last
+//! call wins anyway).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,7 +54,7 @@ use bosun_api::{
     SubmitSummaryParams, method,
 };
 use bosun_core::ItemId;
-use bosun_store::{AgentCall, AgentCallKind, Write, Writer};
+use bosun_store::{AgentCall, AgentCallKind, Reader, Write, Writer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -74,6 +91,8 @@ pub(crate) struct Binding {
     pub(crate) repo: PathBuf,
     /// The identity's store.
     pub(crate) writer: Writer,
+    /// The identity's store, read: a retried blocking question is found there.
+    pub(crate) reader: Reader,
     /// Hands a recorded blocking question to the repository's loop.
     pub(crate) on_blocking: Box<dyn Fn() + Send + Sync>,
 }
@@ -102,6 +121,10 @@ struct Inner {
     live: HashMap<[u8; 32], Live>,
     /// Calls per item, attempt and tool, across the attempt's sessions.
     calls: HashMap<(ItemId, u32, Tool), u32>,
+    /// Loops whose recovery has not ended yet ([`Recovering`]).
+    recovering: usize,
+    /// The items and attempts whose blocking question was handed to the loop.
+    fired: HashSet<(ItemId, u32)>,
 }
 
 /// The daemon's live agent credentials; cloning shares them.
@@ -141,6 +164,29 @@ impl Issued {
 impl Drop for Issued {
     fn drop(&mut self) {
         self.credentials.lock().live.remove(&self.digest);
+    }
+}
+
+/// A loop that has not ended its recovery yet: while one is held, an unknown credential is
+/// refused as retryable (`RECOVERING`). Dropping it lowers the count.
+#[derive(Debug)]
+pub(crate) struct Recovering {
+    credentials: Credentials,
+}
+
+impl Drop for Recovering {
+    fn drop(&mut self) {
+        let mut inner = self.credentials.lock();
+        inner.recovering = inner.recovering.saturating_sub(1);
+    }
+}
+
+/// The tool a stored call is a call of.
+pub(crate) const fn tool_of(kind: &AgentCallKind) -> Tool {
+    match kind {
+        AgentCallKind::Question { .. } => Tool::Question,
+        AgentCallKind::Summary { .. } => Tool::Summary,
+        AgentCallKind::Note => Tool::Note,
     }
 }
 
@@ -210,6 +256,41 @@ impl Credentials {
         }
     }
 
+    /// Raises the count of loops still recovering until the guard is dropped.
+    pub(crate) fn recovering(&self) -> Recovering {
+        self.lock().recovering += 1;
+        Recovering {
+            credentials: self.clone(),
+        }
+    }
+
+    /// Sets the call counts of `item`'s `attempt` to the larger of `counts` (what the store
+    /// holds, refused calls included) and what this daemon counted: the caps of a re-attached
+    /// session go on from where they were before the restart (#8).
+    pub(crate) fn restore_calls(
+        &self,
+        item: &ItemId,
+        attempt: u32,
+        counts: impl IntoIterator<Item = (Tool, u32)>,
+    ) {
+        let mut inner = self.lock();
+        for (tool, stored) in counts {
+            let n = inner
+                .calls
+                .entry((item.clone(), attempt, tool))
+                .or_insert(0);
+            *n = (*n).max(stored);
+        }
+    }
+
+    /// Whether the blocking question of `item`'s `attempt` is to be handed to the loop: `true`
+    /// the first time only.
+    fn fire_once(&self, item: &ItemId, attempt: u32) -> bool {
+        // Mutant (`mutant_agent_blocking_question_twice`): every blocking question fires.
+        cfg!(mutant_agent_blocking_question_twice)
+            || self.lock().fired.insert((item.clone(), attempt))
+    }
+
     /// The binding of a live `credential` that names `item`; refused otherwise.
     fn admit(
         &self,
@@ -217,10 +298,20 @@ impl Credentials {
         item: &str,
     ) -> Result<(Arc<Binding>, Arc<AtomicBool>), ErrorObject> {
         let inner = self.lock();
-        let live = inner
-            .live
-            .get(&digest(credential))
-            .ok_or_else(|| unauthorized("the agent credential is not live (unknown or revoked)"))?;
+        let Some(live) = inner.live.get(&digest(credential)) else {
+            // Mutant (`mutant_agent_recovering_unauthorized`): the loops still recovering are
+            // not looked at.
+            if inner.recovering > 0 && !cfg!(mutant_agent_recovering_unauthorized) {
+                return Err(ErrorObject::new(
+                    code::RECOVERING,
+                    "the daemon is recovering its sessions and has not admitted this \
+                     credential yet: retry the call",
+                ));
+            }
+            return Err(unauthorized(
+                "the agent credential is not live (unknown or revoked)",
+            ));
+        };
         // Mutant `mutant_agent_any_item`: the item the call names is not checked.
         if !cfg!(mutant_agent_any_item) && live.binding.item.0 != item {
             return Err(unauthorized(format!(
@@ -306,6 +397,28 @@ async fn record(
     })
 }
 
+/// The acknowledgement of a blocking question with `text` that the store already holds for
+/// `binding`'s attempt, not refused: a retry of a call whose answer was lost (#8). `None` when
+/// there is none, or when the store cannot be read (the question is recorded again).
+async fn asked_already(binding: &Binding, text: &str) -> Option<AgentAck> {
+    // Mutant (`mutant_agent_blocking_question_twice`): no repeated question is looked for.
+    if cfg!(mutant_agent_blocking_question_twice) {
+        return None;
+    }
+    let rows = binding.reader.agent_calls(&binding.item).await.ok()?;
+    rows.into_iter()
+        .find(|row| {
+            row.attempt == binding.attempt
+                && row.kind == (AgentCallKind::Question { blocking: true })
+                && !row.refused
+                && row.body == text
+        })
+        .map(|row| AgentAck {
+            attempt: binding.attempt,
+            head_sha: row.head_sha,
+        })
+}
+
 /// The credential and item of `agent.*` params, before they are parsed in full.
 fn credential_of(p: &Value) -> Result<(&str, &str), ErrorObject> {
     let field = |name| {
@@ -343,15 +456,25 @@ pub(crate) async fn dispatch(
         method::AgentAskQuestion::NAME => {
             call::<method::AgentAskQuestion, _, _>(p, |p: AskQuestionParams| async move {
                 let blocking = p.blocking;
-                let ack = record(
-                    credentials,
-                    &binding,
-                    Tool::Question,
-                    AgentCallKind::Question { blocking },
-                    p.text,
-                )
-                .await?;
-                if blocking {
+                let repeated = if blocking {
+                    asked_already(&binding, &p.text).await
+                } else {
+                    None
+                };
+                let ack = match repeated {
+                    Some(ack) => ack,
+                    None => {
+                        record(
+                            credentials,
+                            &binding,
+                            Tool::Question,
+                            AgentCallKind::Question { blocking },
+                            p.text,
+                        )
+                        .await?
+                    }
+                };
+                if blocking && credentials.fire_once(&binding.item, binding.attempt) {
                     (binding.on_blocking)();
                 }
                 Ok(ack)
@@ -385,5 +508,36 @@ pub(crate) async fn dispatch(
             code::METHOD_NOT_FOUND,
             format!("no method {name}"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    async fn note(credentials: &Credentials) -> i32 {
+        dispatch(
+            credentials,
+            method::AgentNote::NAME,
+            json!({"credential": "bosun-agent-00", "item": "demo#1", "text": "x"}),
+        )
+        .await
+        .unwrap_err()
+        .code
+    }
+
+    #[tokio::test]
+    async fn an_unknown_credential_is_retryable_only_while_a_loop_recovers() {
+        let credentials = Credentials::default();
+        assert_eq!(note(&credentials).await, code::UNAUTHORIZED);
+        let first = credentials.recovering();
+        assert_eq!(note(&credentials).await, code::RECOVERING);
+        let second = credentials.recovering();
+        drop(first);
+        assert_eq!(note(&credentials).await, code::RECOVERING);
+        drop(second);
+        assert_eq!(note(&credentials).await, code::UNAUTHORIZED);
     }
 }

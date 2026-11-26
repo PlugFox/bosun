@@ -414,6 +414,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_api_wait_unnamed)",
   "cfg(mutant_tui_resources_tab_blank)",
   "cfg(mutant_report_drop_lease_waits)",
+  # #165: the scene harness's timing: a slowdown factor for its waits; the daily-cap scene
+  # starts at a fixed local time without the automatic pause.
+  "cfg(mutant_test_slowdown_ignored)",
+  "cfg(mutant_test_daily_cap_auto_pause)",
 ] }
 
 [workspace.lints.clippy]

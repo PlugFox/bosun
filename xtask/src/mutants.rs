@@ -2721,6 +2721,24 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_test_slowdown_ignored",
+        issue: 165,
+        breaks: "a scene wait ignores `BOSUN_TEST_SLOWDOWN`: a slowed run times out",
+        package: "bosund",
+        check: Check::Test("executor::tests::timing::the_slowdown_factor_stretches_a_scene_wait"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_test_daily_cap_auto_pause",
+        issue: 165,
+        breaks: "the daily-cap scene keeps the automatic pause: started near midnight, it times out",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::timing::the_daily_cap_scene_started_at_23_59_local_runs_after_midnight",
+        ),
+        platform: None,
+    },
 ];
 
 /// #164, the card of #8 that polls the pull request of an item Done in `pr` mode (merged

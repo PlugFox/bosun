@@ -427,11 +427,30 @@ async fn the_sticky_report_of_a_finished_item_shows_its_eqv_and_model() {
 }
 
 /// #67: reaching the daily cap (less the reserve) parks the queue; the loop's clock passing
-/// local midnight releases it.
+/// local midnight releases it. The scene runs at noon local, whenever the test runs (#165).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_daily_cap_parks_the_queue_until_local_midnight() {
+    daily_cap_scene(12 * 60).await;
+}
+
+/// The daily-cap scene, started at `start_minutes` past local midnight: 1.6 M eqv of
+/// interactive work parks the queue under the daily cap; a jump to one minute past the next
+/// local midnight releases it, and item 1 is Done.
+pub(super) async fn daily_cap_scene(start_minutes: i64) {
     let scene = Scene::new().await;
-    scene.configure("[budget]\ndaily_eqv = 2_000_000\nreserve_eqv = 500_000\n");
+    scene.clock.start_at_local(start_minutes);
+    // The scene is about the daily cap. Its interactive usage is a session in the checkout,
+    // which would also pause the repository automatically for `auto_pause_idle` (30 minutes):
+    // longer than the jump past midnight when the scene starts after 23:30.
+    // Mutant (`mutant_test_daily_cap_auto_pause`): the automatic pause stays at its default.
+    let daemon = if cfg!(mutant_test_daily_cap_auto_pause) {
+        ""
+    } else {
+        "[daemon]\nauto_pause = false\n"
+    };
+    scene.configure(&format!(
+        "{daemon}[budget]\ndaily_eqv = 2_000_000\nreserve_eqv = 500_000\n"
+    ));
     scene.write_board(&[card(1, "One", "test -f one.txt", "Item one.")]);
     scene.script(1, &["commit one.txt one".to_owned()]);
     // Interactive work today: 1.6 M eqv, over the 1.5 M left to bosun.

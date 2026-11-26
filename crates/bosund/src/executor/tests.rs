@@ -6,6 +6,11 @@
 //! As the agent CLI does, `fake-agent` starts the session's MCP servers from `--mcp-config`:
 //! the real `bosun-mcp`, which calls the scene's own endpoint, served with the scene's
 //! credentials (#64).
+//!
+//! Every deadline of a scene (a wait for a file, a state, a drained outbox) is multiplied by
+//! `BOSUN_TEST_SLOWDOWN` (#165), a positive integer, 1 when unset: a loaded machine or CI shard
+//! sets `BOSUN_TEST_SLOWDOWN=3`. The sleeps that define a scene ("nothing happens within 2 s")
+//! do not scale.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -35,6 +40,7 @@ mod recovery;
 mod shim;
 mod sticky;
 mod sweep;
+mod timing;
 mod worktrees;
 
 /// Removes from `command` every variable it would inherit from a bosun session (#134): each
@@ -276,6 +282,15 @@ impl TestClock {
     fn advance(&self, by: Duration) {
         let ms = i64::try_from(by.as_millis()).unwrap();
         self.ahead_ms.fetch_add(ms, Ordering::SeqCst);
+    }
+
+    /// Moves the wall clock to `minutes` past the next local midnight after the real time
+    /// (tomorrow at that local time), so a scene runs at a fixed local time of day and never
+    /// behind the real clock (#165). Call it before anything is written at the scene's time.
+    fn start_at_local(&self, minutes: i64) {
+        let real = self.system.wall_ms();
+        let target = bosun_proc::next_local_midnight(real) + minutes * 60_000;
+        self.ahead_ms.store(target - real, Ordering::SeqCst);
     }
 }
 
@@ -884,8 +899,53 @@ fn card(id: u64, title: &str, verdict: &str, prose: &str) -> Card {
     }
 }
 
-async fn wait_for(what: &str, limit: Duration, mut check: impl AsyncFnMut() -> bool) {
-    let deadline = Instant::now() + limit;
+/// The factor of `BOSUN_TEST_SLOWDOWN` for a value of the variable: 1 when it is unset or
+/// empty, else the positive integer it holds. Anything else panics, naming the variable and the
+/// value.
+fn slowdown_of(value: Option<&str>) -> u32 {
+    match value {
+        None | Some("") => 1,
+        Some(text) => match text.parse::<u32>() {
+            Ok(factor) if factor > 0 => factor,
+            _ => panic!("BOSUN_TEST_SLOWDOWN must be a positive integer, not {text:?}"),
+        },
+    }
+}
+
+/// The factor every scene deadline is multiplied by: `BOSUN_TEST_SLOWDOWN`, read once.
+fn slowdown() -> u32 {
+    static FACTOR: OnceLock<u32> = OnceLock::new();
+    *FACTOR.get_or_init(|| {
+        let value = std::env::var_os("BOSUN_TEST_SLOWDOWN")
+            .map(|v| v.into_string().expect("BOSUN_TEST_SLOWDOWN is not Unicode"));
+        slowdown_of(value.as_deref())
+    })
+}
+
+/// A scene deadline, stretched by `BOSUN_TEST_SLOWDOWN`.
+fn scaled(limit: Duration) -> Duration {
+    limit * slowdown()
+}
+
+/// Waits until `check` holds; panics after `limit`, stretched by `BOSUN_TEST_SLOWDOWN`.
+async fn wait_for(what: &str, limit: Duration, check: impl AsyncFnMut() -> bool) {
+    wait_until(what, limit, slowdown(), check).await;
+}
+
+/// Waits until `check` holds; panics after `limit` times `factor`.
+async fn wait_until(
+    what: &str,
+    limit: Duration,
+    factor: u32,
+    mut check: impl AsyncFnMut() -> bool,
+) {
+    // Mutant (`mutant_test_slowdown_ignored`): the factor is ignored.
+    let factor = if cfg!(mutant_test_slowdown_ignored) {
+        1
+    } else {
+        factor
+    };
+    let deadline = Instant::now() + limit * factor;
     while !check().await {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1056,7 +1116,7 @@ async fn seven_items(scene: Scene) {
         scene.config_text("'docs/frozen', 'tests/harness'"),
     )
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + scaled(Duration::from_secs(15));
     while Instant::now() < deadline && !terminal(scene.state(7).await) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -1201,7 +1261,7 @@ async fn a_refused_transition_leaves_no_effect_without_its_row() {
     });
     let (task, watcher) = scene.start(Some(failpoint));
     // The loop halts once the store refuses a transition.
-    tokio::time::timeout(Duration::from_secs(60), task)
+    tokio::time::timeout(scaled(Duration::from_secs(60)), task)
         .await
         .expect("the loop stops after a refused transition")
         .unwrap();
@@ -1501,7 +1561,7 @@ async fn agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_
 /// Waits until the outbox of the scene's repository is empty; names the rows left when it
 /// times out.
 async fn drained(scene: &Scene) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + scaled(Duration::from_secs(60));
     loop {
         let rows = outbox::pending(scene.store.reader(), "demo").await.unwrap();
         if rows.is_empty() {

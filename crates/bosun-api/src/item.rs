@@ -41,6 +41,10 @@ pub struct ItemDetail {
     /// in [`crate::CurrentItem::waiting`]. Absent when it waits for nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting: Vec<crate::WaitingFor>,
+    /// Its open `blocked-by` blockers while it waits in Ready on them (#5). Absent unless it
+    /// waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<crate::OpenBlocker>,
     /// The snapshot its next attempt runs from, once claimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<SnapshotView>,

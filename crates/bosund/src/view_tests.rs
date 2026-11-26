@@ -98,6 +98,7 @@ impl World {
                 control: crate::control::Control::with_token(TOKEN, None),
                 leases: std::sync::Arc::new(leases),
                 gh: std::path::PathBuf::from("gh"),
+                blockers: std::sync::Arc::default(),
             },
             dir,
         };
@@ -956,5 +957,79 @@ async fn the_doctor_probe_fails_when_the_daemon_cannot_start_gh() {
             .await,
         i64::from(code::UNKNOWN_IDENTITY)
     );
+    world.close().await;
+}
+
+/// #5: alpha#1 is stored Needs you, alpha#2 stored ready and on the board, and the loop's list
+/// says alpha#2 waits on alpha#1. `status.overview` lists it with its blocker's state,
+/// `item.get` names the blocker, `queue.get` marks the card; identity `b` sees none of it
+/// (`mutant_api_waiting_across_identities` lists alpha#2 under `beta`).
+#[tokio::test]
+async fn status_item_and_queue_show_a_waiting_card_and_its_open_blocker() {
+    let world = World::new().await;
+    let served = &world.state.identities["a"];
+    let (one, two) = (ItemId::new("alpha#1"), ItemId::new("alpha#2"));
+    let new = |id: &ItemId, card: &str| {
+        Write::Item(NewItem {
+            item: id.clone(),
+            name: served.repos[0].0.clone(),
+            repo: served.repos[0].1.key.clone(),
+            card_key: Some(card.to_owned()),
+            at_ms: T0,
+        })
+    };
+    let bounced = step(&Item::new(one.clone()), &Event::LintFailed, &Ctx::at(T0)).unwrap();
+    served
+        .store
+        .writer()
+        .write(vec![
+            new(&one, "1"),
+            Write::Transition {
+                stepped: bounced,
+                at_ms: T0 + 1,
+            },
+            new(&two, "2"),
+        ])
+        .await
+        .unwrap();
+    world.state.blockers.set(
+        "alpha",
+        vec![bosun_core::Blocked {
+            item: two.clone(),
+            open: vec![one.clone()],
+        }],
+    );
+
+    let view = world.ok("status.overview", json!({"identity": "a"})).await;
+    assert_eq!(
+        view["repos"][0]["waiting"],
+        json!([{"item": "alpha#2", "blockers": [{"item": "alpha#1", "state": "needs_you"}]}]),
+        "{view}"
+    );
+    let detail = world
+        .ok("item.get", json!({"identity": "a", "item": "alpha#2"}))
+        .await;
+    assert_eq!(
+        detail["blocked_by"],
+        json!([{"item": "alpha#1", "state": "needs_you"}]),
+        "{detail}"
+    );
+    let queue = world.ok("queue.get", json!({"identity": "a"})).await;
+    assert_eq!(
+        card_of(&queue, "Ready", 2)["waiting_on"],
+        json!(["alpha#1"]),
+        "{queue}"
+    );
+
+    let other = world.ok("status.overview", json!({"identity": "b"})).await;
+    assert!(
+        other["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("waiting").is_none()),
+        "{other}"
+    );
+    assert!(!other.to_string().contains("alpha#2"), "{other}");
     world.close().await;
 }

@@ -34,6 +34,7 @@ use super::*;
 use crate::config_watch;
 use crate::events::{Events, Options as EventOptions};
 
+mod blocked;
 mod fast_death;
 mod landing;
 mod leases;
@@ -405,6 +406,8 @@ struct Scene {
     /// The daemon's live trees, which the process sweep spares: the loop's, and any a scene
     /// guards as another repository's.
     live: Arc<crate::executor::Live>,
+    /// The waiting cards the loop publishes (#5).
+    blockers: Arc<crate::blockers::Blockers>,
 }
 
 impl Scene {
@@ -576,6 +579,7 @@ impl Scene {
             control: control.clone(),
             leases: Arc::new(crate::leases::Leases::none()),
             gh: std::path::PathBuf::from("gh"),
+            blockers: std::sync::Arc::default(),
         });
         tokio::spawn(async move {
             crate::state::serve(listener, &api, std::future::pending()).await;
@@ -611,6 +615,7 @@ impl Scene {
             free_space: Arc::new(FakeSpace::default()),
             forge: None,
             live: Arc::default(),
+            blockers: Arc::default(),
             dir,
         }
     }
@@ -852,6 +857,7 @@ impl Scene {
                 )
             }),
             live: self.live.clone(),
+            blockers: self.blockers.clone(),
             free_space: self.free_space.clone(),
             forge: self
                 .forge
@@ -1369,6 +1375,7 @@ async fn agent_calls_are_bound_capped_recorded_and_a_blocking_question_ends_the_
         control: scene.control.clone(),
         leases: Arc::new(crate::leases::Leases::none()),
         gh: std::path::PathBuf::from("gh"),
+        blockers: std::sync::Arc::default(),
     };
     let mut conn = crate::api::Connection::default();
     let own = |extra: serde_json::Value| {

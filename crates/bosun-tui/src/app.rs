@@ -429,6 +429,7 @@ pub(crate) mod tests {
                         result: "fail".to_owned(),
                         ended_ms: now_ms - 800_000,
                     }),
+                    waiting: Vec::new(),
                 },
                 RepoOverview {
                     repo: "beta".to_owned(),
@@ -446,6 +447,7 @@ pub(crate) mod tests {
                         result: "pass".to_owned(),
                         ended_ms: now_ms - 9_000_000,
                     }),
+                    waiting: Vec::new(),
                 },
             ],
         }
@@ -462,6 +464,7 @@ pub(crate) mod tests {
             snapshot_hash: None,
             edit_pending: false,
             lint: Vec::new(),
+            waiting_on: Vec::new(),
         }
     }
 

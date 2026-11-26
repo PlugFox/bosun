@@ -302,6 +302,7 @@ async fn one_sticky_report_holds_the_summary_and_each_question_is_one_comment() 
         control: scene.control.clone(),
         leases: Arc::new(crate::leases::Leases::none()),
         gh: std::path::PathBuf::from("gh"),
+        blockers: std::sync::Arc::default(),
     };
     let mut conn = crate::api::Connection::default();
     let call = async |conn: &mut crate::api::Connection,
@@ -431,6 +432,7 @@ async fn the_sticky_report_of_a_done_item_holds_the_agents_summary() {
         control: scene.control.clone(),
         leases: Arc::new(crate::leases::Leases::none()),
         gh: std::path::PathBuf::from("gh"),
+        blockers: std::sync::Arc::default(),
     };
     let mut conn = crate::api::Connection::default();
     let response = rpc(

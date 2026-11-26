@@ -3125,7 +3125,50 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::the_fast_death_keys_change_the_hash_only_when_not_default"),
         platform: None,
     },
+    // The cards that wait on a blocker (#5, #7): shown, and named in the blocker's comment.
+    Mutant {
+        name: "mutant_loop_blockers_unpublished",
+        issue: WAITING_CARDS_CARD,
+        breaks: "the plan's waiting cards are ignored: nothing says a dependant waits",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::blocked::a_card_waiting_on_a_needs_you_blocker_is_listed_and_named_in_its_comment",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_outbox_comment_without_dependants",
+        issue: WAITING_CARDS_CARD,
+        breaks: "a blocker's Needs-you comment does not name the cards waiting on it",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::blocked::a_card_waiting_on_a_needs_you_blocker_is_listed_and_named_in_its_comment",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_waiting_across_identities",
+        issue: WAITING_CARDS_CARD,
+        breaks: "status.overview lists the waiting cards of another identity's repositories",
+        package: "bosund",
+        check: Check::Test(
+            "view_tests::status_item_and_queue_show_a_waiting_card_and_its_open_blocker",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_tui_queue_hides_waits",
+        issue: WAITING_CARDS_CARD,
+        breaks: "the TUI Queue does not mark a waiting card nor say what it waits on",
+        package: "bosun-tui",
+        check: Check::Test("view::tests::the_queue_says_what_a_waiting_card_waits_on"),
+        platform: None,
+    },
 ];
+
+/// #199, the card of #5 that shows the Ready cards waiting on an open blocker and names them
+/// in the blocker's Needs-you comment.
+const WAITING_CARDS_CARD: u32 = 199;
 
 /// #193, the card of #8 that keeps `bosun-mcp` working while the daemon restarts: retried
 /// calls, a retryable refusal while loops recover, caps and blocking questions across the

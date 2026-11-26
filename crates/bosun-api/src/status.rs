@@ -68,6 +68,29 @@ pub struct RepoOverview {
     /// the item updated last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_verdict: Option<LastVerdict>,
+    /// The Ready cards that wait on an open blocker (#5), in board order, as the loop's last
+    /// plan left them. Absent when none waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<WaitingCard>,
+}
+
+/// A Ready card that is not claimed because a blocker of it is open (#5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WaitingCard {
+    /// The waiting card's item id, `<repo>#<card>`.
+    pub item: String,
+    /// Its open blockers, in its `blocked-by` order.
+    pub blockers: Vec<OpenBlocker>,
+}
+
+/// An open `blocked-by` blocker of a waiting card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OpenBlocker {
+    /// The blocker's item id, `<repo>#<card>`.
+    pub item: String,
+    /// Its state in the store (`needs_you`, `running`, ...); absent when the store has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// The item a repository is working on.

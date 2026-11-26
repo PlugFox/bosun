@@ -469,6 +469,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_fast_death_counts_kills)",
   "cfg(mutant_core_fast_death_charges_a_crash)",
   "cfg(mutant_config_fast_death_always_hashed)",
+  # #199: the cards that wait on a blocker, shown and named in the blocker's comment.
+  "cfg(mutant_loop_blockers_unpublished)",
+  "cfg(mutant_outbox_comment_without_dependants)",
+  "cfg(mutant_api_waiting_across_identities)",
+  "cfg(mutant_tui_queue_hides_waits)",
 ] }
 
 [workspace.lints.clippy]

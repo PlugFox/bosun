@@ -627,7 +627,30 @@ impl Drainer {
                 );
             }
         }
+        body.push_str(&self.dependants(item));
         Ok(body)
+    }
+
+    /// The last paragraph of a Needs-you comment: the cards of the repository waiting on
+    /// `item` (#5), from the loop's last plan, so one answer visibly unblocks a chain. Empty
+    /// when none waits.
+    fn dependants(&self, item: &ItemId) -> String {
+        let waiting = self
+            .shared
+            .deps
+            .blockers
+            .dependants_of(&self.shared.options.repo, item);
+        // Mutant (`mutant_outbox_comment_without_dependants`): the paragraph is left out.
+        if waiting.is_empty() || cfg!(mutant_outbox_comment_without_dependants) {
+            return String::new();
+        }
+        let names: Vec<String> = waiting.iter().map(ToString::to_string).collect();
+        format!(
+            "
+
+Waiting on this item: {}. They are claimed once it is Done.",
+            names.join(", ")
+        )
     }
 }
 

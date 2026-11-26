@@ -1511,6 +1511,7 @@ mod tests {
             tripped: None,
             current: None,
             last_verdict: None,
+            waiting: Vec::new(),
         };
         let moved = d.join("moved.toml").display().to_string();
         let served = BTreeMap::from([

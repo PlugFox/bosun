@@ -793,6 +793,7 @@ pub(super) fn api_of(scene: &Scene) -> crate::state::State {
         control: scene.control.clone(),
         leases: Arc::new(crate::leases::Leases::none()),
         gh: std::path::PathBuf::from("gh"),
+        blockers: std::sync::Arc::default(),
     }
 }
 

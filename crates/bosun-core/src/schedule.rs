@@ -60,10 +60,19 @@ pub struct Plan {
     pub claim: Vec<ItemId>,
     /// Ready cards in a `blocked-by` cycle: to Needs you.
     pub cycles: Vec<ItemId>,
-    /// Ready cards waiting on an open blocker.
-    pub blocked: Vec<ItemId>,
+    /// Ready cards waiting on an open blocker, each with its open blockers.
+    pub blocked: Vec<Blocked>,
     /// Claimable cards held back by a hold.
     pub held: Vec<ItemId>,
+}
+
+/// A Ready card waiting on open blockers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocked {
+    /// The waiting card.
+    pub item: ItemId,
+    /// Its open blockers, in the card's `blocked-by` order.
+    pub open: Vec<ItemId>,
 }
 
 /// Plans the next claims over `cards` in board order. `satisfied` holds the blockers whose
@@ -92,7 +101,10 @@ pub fn plan(cards: &[Card], satisfied: &BTreeSet<ItemId>, gates: &Gates, now_ms:
         if in_cycle(&card.item, &open) {
             plan.cycles.push(card.item.clone());
         } else if !cfg!(mutant_core_ignore_blockers) && !open[&card.item].is_empty() {
-            plan.blocked.push(card.item.clone());
+            plan.blocked.push(Blocked {
+                item: card.item.clone(),
+                open: open[&card.item].iter().map(|b| (*b).clone()).collect(),
+            });
         } else if busy.contains(&card.repo) {
             // One item at a time per repository; the card waits its turn.
         } else if gates.hold(&card.repo, now_ms).is_some() {
@@ -143,6 +155,30 @@ mod tests {
         ns.iter().map(|&n| id(n)).collect()
     }
 
+    fn waiting(p: &Plan) -> Vec<ItemId> {
+        p.blocked.iter().map(|b| b.item.clone()).collect()
+    }
+
+    #[test]
+    fn a_blocked_card_carries_its_open_blockers() {
+        // #1 waits on #9 (open) and #8 (satisfied); #2 on #9 and #7 (both open).
+        let cards = [card(1, &[9, 8]), card(2, &[9, 7])];
+        let p = plan(&cards, &BTreeSet::from([id(8)]), &Gates::default(), 0);
+        assert_eq!(
+            p.blocked,
+            vec![
+                Blocked {
+                    item: id(1),
+                    open: ids(&[9]),
+                },
+                Blocked {
+                    item: id(2),
+                    open: ids(&[9, 7]),
+                },
+            ]
+        );
+    }
+
     #[test]
     fn order_is_board_order_skipping_open_blockers() {
         // #1 waits on #9 (not Done); #2 waits on #8 (Done); #3 is free.
@@ -150,7 +186,7 @@ mod tests {
         let satisfied = BTreeSet::from([id(8)]);
         let p = plan(&cards, &satisfied, &Gates::default(), 0);
         assert_eq!(p.claim, ids(&[2]), "board order, one per repository");
-        assert_eq!(p.blocked, ids(&[1]));
+        assert_eq!(waiting(&p), ids(&[1]));
 
         let p = plan(&cards[..1], &satisfied, &Gates::default(), 0);
         assert_eq!(p.claim, ids(&[]), "an open blocker is never claimed");
@@ -169,7 +205,7 @@ mod tests {
         ];
         let p = plan(&cards, &BTreeSet::new(), &Gates::default(), 0);
         assert_eq!(p.cycles, ids(&[1, 2, 3, 5]));
-        assert_eq!(p.blocked, ids(&[4]));
+        assert_eq!(waiting(&p), ids(&[4]));
         assert_eq!(p.claim, ids(&[6]));
     }
 

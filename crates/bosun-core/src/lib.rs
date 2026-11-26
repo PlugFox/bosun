@@ -37,4 +37,4 @@ pub use price::{
     TableError, UnknownModel, default_table,
 };
 pub use recover::{Action, Child, Facts, recover};
-pub use schedule::{Card, Gates, Plan, plan};
+pub use schedule::{Blocked, Card, Gates, Plan, plan};

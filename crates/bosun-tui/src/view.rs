@@ -314,6 +314,10 @@ fn card_row(card: &CardView, width: u16) -> String {
     if card.edit_pending {
         marks.push_str(" EDIT");
     }
+    // Mutant (`mutant_tui_queue_hides_waits`): a waiting card is not marked.
+    if !card.waiting_on.is_empty() && !cfg!(mutant_tui_queue_hides_waits) {
+        marks.push_str(" WAITS");
+    }
     let errors = card.lint.iter().filter(|f| f.severity == "error").count();
     let warnings = card.lint.len() - errors;
     if !card.lint.is_empty() {
@@ -397,6 +401,10 @@ fn queue(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let text = match cards.get(app.card) {
         Some((column, card)) => {
             let mut text = vec![format!("{} in {column}: {}", card.item, card.title)];
+            // Its open blockers (#5), while it waits in Ready on them.
+            if !card.waiting_on.is_empty() && !cfg!(mutant_tui_queue_hides_waits) {
+                text.push(format!("waits on {}", card.waiting_on.join(", ")));
+            }
             if card.edit_pending {
                 text.push(
                     "edited since its snapshot: the edit applies at the next claim".to_owned(),
@@ -585,6 +593,22 @@ pub(crate) mod tests {
         snapshot("queue", &screen(&app, NOW));
         let _ = app.on_key(Key::Right);
         snapshot("queue-unread-board", &screen(&app, NOW));
+    }
+
+    #[test]
+    fn the_queue_says_what_a_waiting_card_waits_on() {
+        let mut app = app();
+        let queue = app.identities[0].1.queue.as_mut().unwrap();
+        let ready = &mut queue.repos[0].columns[1].cards;
+        assert_eq!(ready[1].item, "alpha#6");
+        ready[1].waiting_on = vec!["alpha#1".to_owned()];
+        let _ = app.on_key(Key::Char('2'));
+        let _ = app.on_key(Key::Down);
+        let _ = app.on_key(Key::Down);
+        let text = screen(&app, NOW);
+        assert!(text.contains("WAITS"), "{text}");
+        assert!(text.contains("alpha#6 in Ready"), "{text}");
+        assert!(text.contains("waits on alpha#1"), "{text}");
     }
 
     #[test]

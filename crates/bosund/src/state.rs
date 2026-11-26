@@ -104,6 +104,8 @@ pub(crate) struct State {
     pub(crate) control: Control,
     /// The lease manager every loop shares (#8), which `lease.*` reaches too.
     pub(crate) leases: Arc<Leases>,
+    /// The Ready cards waiting on an open blocker, set by every loop (#5).
+    pub(crate) blockers: Arc<crate::blockers::Blockers>,
     /// The program the daemon runs as `gh` for `doctor.probe`: `gh`, found on its `PATH`; a
     /// stand-in in tests.
     pub(crate) gh: PathBuf,
@@ -119,6 +121,7 @@ impl State {
             control: Control::default(),
             leases: Arc::new(Leases::none()),
             gh: PathBuf::from("gh"),
+            blockers: std::sync::Arc::default(),
         }
     }
 
@@ -229,6 +232,7 @@ pub(crate) async fn run(
         control: operator,
         leases: leases.clone(),
         gh: PathBuf::from("gh"),
+        blockers: std::sync::Arc::default(),
     });
 
     let progress = tokio::spawn(watch_ingest(state.clone()));
@@ -661,6 +665,7 @@ fn start_loops(
             alive: Arc::new(bosun_proc::is_running),
             control: state.control.clone(),
             leases: leases.clone(),
+            blockers: state.blockers.clone(),
             live: live.clone(),
             free_space: Arc::new(executor::Disk),
             forge: Arc::new(executor::GhForge),

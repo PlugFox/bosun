@@ -518,6 +518,13 @@
         },
         "title": {
           "type": "string"
+        },
+        "waiting_on": {
+          "description": "While it waits in Ready on open blockers (#5): their item ids, in its `blocked-by`\norder. Absent when it does not wait.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -2085,6 +2092,13 @@
           },
           "type": "array"
         },
+        "blocked_by": {
+          "description": "Its open `blocked-by` blockers while it waits in Ready on them (#5). Absent unless it\nwaits.",
+          "items": {
+            "$ref": "#/$defs/OpenBlocker"
+          },
+          "type": "array"
+        },
         "calls": {
           "description": "What its agents said through `bosun-mcp` (questions, summaries, notes), in order.",
           "items": {
@@ -2644,6 +2658,26 @@
       "required": [
         "sessions",
         "sums"
+      ],
+      "type": "object"
+    },
+    "OpenBlocker": {
+      "description": "An open `blocked-by` blocker of a waiting card.",
+      "properties": {
+        "item": {
+          "description": "The blocker's item id, `<repo>#<card>`.",
+          "type": "string"
+        },
+        "state": {
+          "description": "Its state in the store (`needs_you`, `running`, ...); absent when the store has none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "item"
       ],
       "type": "object"
     },
@@ -3323,6 +3357,13 @@
             "string",
             "null"
           ]
+        },
+        "waiting": {
+          "description": "The Ready cards that wait on an open blocker (#5), in board order, as the loop's last\nplan left them. Absent when none waits.",
+          "items": {
+            "$ref": "#/$defs/WaitingCard"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -4886,6 +4927,27 @@
         "files_counted",
         "lines",
         "gaps"
+      ],
+      "type": "object"
+    },
+    "WaitingCard": {
+      "description": "A Ready card that is not claimed because a blocker of it is open (#5).",
+      "properties": {
+        "blockers": {
+          "description": "Its open blockers, in its `blocked-by` order.",
+          "items": {
+            "$ref": "#/$defs/OpenBlocker"
+          },
+          "type": "array"
+        },
+        "item": {
+          "description": "The waiting card's item id, `<repo>#<card>`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "blockers"
       ],
       "type": "object"
     },

@@ -344,6 +344,8 @@ pub(crate) struct Deps {
     pub(crate) control: crate::control::Control,
     /// The daemon's lease manager, shared by every repository's loop (#8).
     pub(crate) leases: Arc<crate::leases::Leases>,
+    /// The waiting cards of every repository, which the loop sets after each plan (#5).
+    pub(crate) blockers: Arc<crate::blockers::Blockers>,
     /// The trees every repository's loop runs, shared as the lease manager is: the process
     /// sweep spares them (#2). [`Loop::new`] makes [`Deps::spawner`] and [`Deps::sessions`]
     /// guard theirs in it.
@@ -2025,6 +2027,43 @@ impl Loop {
                     .collect(),
             });
         }
+        let Some(unmerged) = self.unmerged(repo).await else {
+            return;
+        };
+        let satisfied: BTreeSet<ItemId> = stored
+            .values()
+            .filter(|s| matches!(s.item.state, State::Done(_)))
+            .filter(|s| !pulls::waits_for_merge(s.item.state, unmerged.contains(&s.item.id)))
+            .map(|s| s.item.id.clone())
+            .collect();
+        let now = self.shared.deps.clock.wall_ms();
+        let plan = bosun_core::plan(&cards, &satisfied, &self.gates(now), now);
+        // Published before the bounces below are written, so a Needs-you comment rendered for
+        // one of them already names the cards waiting on it (the bounces change no blocker's
+        // `satisfied`).
+        // Mutant (`mutant_loop_blockers_unpublished`): the plan's waiting cards are ignored.
+        if !cfg!(mutant_loop_blockers_unpublished) {
+            self.shared
+                .deps
+                .blockers
+                .set(&repo_name, plan.blocked.clone());
+        }
+        // A waiting card gets its row, so `item.get` answers for it.
+        for waiting in &plan.blocked {
+            if stored.contains_key(&waiting.item) {
+                continue;
+            }
+            let Some(card) = changes
+                .cards
+                .iter()
+                .find(|c| item_id(&repo_name, c.id) == waiting.item)
+            else {
+                continue;
+            };
+            if !self.register(repo, card, &waiting.item).await {
+                return;
+            }
+        }
         for (card, findings) in bounced {
             let id = item_id(&repo_name, card.id);
             if !self.register(repo, &card, &id).await {
@@ -2046,18 +2085,6 @@ impl Loop {
                 .map_or_else(|| Item::new(id.clone()), |s| s.item.clone());
             self.bounce(&item, &Event::LintFailed).await;
         }
-
-        let Some(unmerged) = self.unmerged(repo).await else {
-            return;
-        };
-        let satisfied: BTreeSet<ItemId> = stored
-            .values()
-            .filter(|s| matches!(s.item.state, State::Done(_)))
-            .filter(|s| !pulls::waits_for_merge(s.item.state, unmerged.contains(&s.item.id)))
-            .map(|s| s.item.id.clone())
-            .collect();
-        let now = self.shared.deps.clock.wall_ms();
-        let plan = bosun_core::plan(&cards, &satisfied, &self.gates(now), now);
         for id in &plan.cycles {
             let Some(card) = changes
                 .cards

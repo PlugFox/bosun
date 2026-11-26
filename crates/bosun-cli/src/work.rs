@@ -173,7 +173,22 @@ fn render_status(o: &Overview, out: &mut String) {
                 time::format(v.ended_ms)
             );
         }
+        // The Ready cards waiting on an open blocker (#5).
+        for w in &repo.waiting {
+            let _ = writeln!(out, "  waiting: {} on {}", w.item, blockers(&w.blockers));
+        }
     }
+}
+
+/// Open blockers as `demo#1 (needs_you), demo#3`: each with its state when the store has one.
+fn blockers(list: &[bosun_api::OpenBlocker]) -> String {
+    list.iter()
+        .map(|b| match &b.state {
+            Some(state) => format!("{} ({state})", b.item),
+            None => b.item.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `queue [--repo]`.
@@ -294,6 +309,9 @@ fn render_item(d: &ItemDetail, out: &mut String) {
         d.attempt,
         d.failed
     );
+    if !d.blocked_by.is_empty() {
+        let _ = writeln!(out, "waits on {}", blockers(&d.blocked_by));
+    }
     if let Some(s) = &d.snapshot {
         let model = s
             .model
@@ -533,6 +551,66 @@ mod tests {
 
     /// #8: an item whose lease request waits says, in `bosun status` and `bosun item`, which
     /// resource it waits for and who holds it.
+    #[test]
+    fn a_card_waiting_on_a_blocker_says_which_and_its_state() {
+        let overview: Overview = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "daemon_version": "0.0.0",
+            "started_ms": 0,
+            "now_ms": 0,
+            "killed": false,
+            "paused": false,
+            "events": {"epoch": "1-1", "head": 0, "subscribers": 0},
+            "repos": [{
+                "repo": "demo",
+                "path": "/repos/demo",
+                "queue": "local_file",
+                "state": "idle",
+                "waiting": [{"item": "demo#2", "blockers": [
+                    {"item": "demo#1", "state": "needs_you"},
+                    {"item": "demo#5"},
+                ]}],
+            }],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render_status(&overview, &mut out);
+        assert!(
+            out.contains(
+                "repo demo: idle
+  waiting: demo#2 on demo#1 (needs_you), demo#5
+"
+            ),
+            "{out}"
+        );
+
+        let detail: ItemDetail = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "item": "demo#2",
+            "repo": { "name": "demo", "path": "/repos/demo" },
+            "state": "ready",
+            "attempt": 0,
+            "failed": 0,
+            "created_ms": 0,
+            "updated_ms": 0,
+            "blocked_by": [{"item": "demo#1", "state": "needs_you"}],
+            "transitions": [],
+            "attempts": [],
+            "calls": [],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render_item(&detail, &mut out);
+        assert!(
+            out.contains(
+                "
+waits on demo#1 (needs_you)
+"
+            ),
+            "{out}"
+        );
+    }
+
     #[test]
     fn a_waiting_item_says_what_it_waits_for() {
         let waiting = serde_json::json!([{"resource": "rig", "holders": ["item demo#3"]}]);

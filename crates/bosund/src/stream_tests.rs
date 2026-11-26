@@ -54,6 +54,7 @@ impl Served {
             control: crate::control::Control::default(),
             leases: std::sync::Arc::new(crate::leases::Leases::none()),
             gh: std::path::PathBuf::from("gh"),
+            blockers: std::sync::Arc::default(),
         });
         let endpoint = if cfg!(windows) {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);

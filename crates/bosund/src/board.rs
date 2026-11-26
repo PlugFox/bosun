@@ -77,7 +77,7 @@ pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Valu
                 let items = served.store.reader().items(false).await.map_err(failed)?;
                 let mut out = Vec::new();
                 for named in repos {
-                    out.push(repo_queue(served, named, &items).await);
+                    out.push(repo_queue(state, served, named, &items).await);
                 }
                 Ok(QueueView {
                     identity: served.name.clone(),
@@ -149,7 +149,12 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 }
 
 /// The board of one repository, with what the store and the lint say of each card.
-async fn repo_queue(served: &Served, (name, repo): &NamedRepo, items: &[StoredItem]) -> RepoQueue {
+async fn repo_queue(
+    state: &State,
+    served: &Served,
+    (name, repo): &NamedRepo,
+    items: &[StoredItem],
+) -> RepoQueue {
     let mut view = RepoQueue {
         repo: name.clone(),
         queue: queue_kind(repo.queue.as_ref()).to_owned(),
@@ -198,6 +203,18 @@ async fn repo_queue(served: &Served, (name, repo): &NamedRepo, items: &[StoredIt
             .collect()
     })
     .await;
+    // The cards the loop's last plan left waiting on open blockers (#5).
+    let waiting: BTreeMap<String, Vec<String>> = state
+        .blockers
+        .of(name)
+        .into_iter()
+        .map(|b| {
+            (
+                b.item.to_string(),
+                b.open.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect();
     for column in Column::ALL {
         let cards = changes
             .cards
@@ -215,6 +232,7 @@ async fn repo_queue(served: &Served, (name, repo): &NamedRepo, items: &[StoredIt
                     snapshot_hash: known.and_then(|i| i.snapshot_hash.clone()),
                     edit_pending: known.is_some_and(|i| edit_pending(served, card, i)),
                     lint: lints.get(&card.id.0).cloned().unwrap_or_default(),
+                    waiting_on: waiting.get(item.as_str()).cloned().unwrap_or_default(),
                     item,
                 }
             })

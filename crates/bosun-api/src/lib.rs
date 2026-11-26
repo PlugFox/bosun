@@ -116,7 +116,9 @@ pub use report::{
     Comparison, ContextCurve, Health, KindRow, OldMethod, PerCommit, Report, ReportParams,
     ScanState, SessionAgreement, Trend, Undercount, VersionRow, WindowCurve,
 };
-pub use status::{CurrentItem, LastVerdict, Overview, RepoOverview, StreamStatus};
+pub use status::{
+    CurrentItem, LastVerdict, OpenBlocker, Overview, RepoOverview, StreamStatus, WaitingCard,
+};
 pub use wire::{Picodollars, Wide};
 
 /// The version of this API. A client refuses a daemon that answers [`method::Hello`] with a version it

@@ -89,6 +89,7 @@ async fn overview(state: &State, served: &Served) -> Result<Overview, ErrorObjec
                 waiting: crate::leases::waiting_in(&waits, &i.item.id),
             }),
             last_verdict,
+            waiting: crate::blockers::waiting_in(state, name, &items),
         });
     }
     Ok(Overview {

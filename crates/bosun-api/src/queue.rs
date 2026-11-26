@@ -76,6 +76,10 @@ pub struct CardView {
     /// The static lint of a card in Ready (empty elsewhere): errors keep it from being
     /// claimed, warnings do not.
     pub lint: Vec<LintFinding>,
+    /// While it waits in Ready on open blockers (#5): their item ids, in its `blocked-by`
+    /// order. Absent when it does not wait.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting_on: Vec<String>,
 }
 
 /// One lint finding.

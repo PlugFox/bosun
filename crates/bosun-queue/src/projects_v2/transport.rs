@@ -264,7 +264,7 @@ impl GhCli {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(&self.program);
+        let mut command = crate::child::command(&self.program);
         command.args(["api", "graphql", "--include", "--input", "-"]);
         if let Some(host) = &self.hostname {
             command.args(["--hostname", host]);

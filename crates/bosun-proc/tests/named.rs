@@ -3,6 +3,7 @@
 //! variable, as `tests/shim.rs` does), under its own name and as a copy under a unique random
 //! name in a temporary directory. Only the copy's name is ever listed; only pids this test
 //! spawned are ever killed.
+#![allow(clippy::disallowed_methods, reason = "a test's own children")]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

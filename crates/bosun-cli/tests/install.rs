@@ -5,6 +5,7 @@
 //! user's own registration, and removes it even when it fails. It skips, saying why, where the
 //! platform's user service manager is not reachable (a CI runner without a login session); with
 //! `BOSUN_REQUIRE_PLATFORM_TEST` set, a skip is a failure instead.
+#![allow(clippy::disallowed_methods, reason = "a test's own children")]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

@@ -36,7 +36,7 @@ impl Git {
     /// Callers that need more than [`Git::run`] and [`Git::optional`] start from this.
     #[must_use]
     pub fn command(&self) -> Command {
-        let mut command = Command::new("git");
+        let mut command = crate::child::command("git");
         command.arg("-C").arg(&self.repo);
         #[cfg(not(mutant_git_repo_hooks))]
         command

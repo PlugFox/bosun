@@ -717,6 +717,10 @@ const GH_OVERRIDES: &[&str] = &[
 
 /// The `gh` command that names the login of `gh_config_dir` on `host`.
 fn login_command(gh: &Path, host: &str, gh_config_dir: &Path, path: &DaemonPath) -> Command {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the CLI's children share the user's console on purpose"
+    )]
     let mut command = Command::new(gh);
     command
         .args(["api", "graphql", "--hostname", host, "-f"])

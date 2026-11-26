@@ -271,6 +271,10 @@ fn write_file(path: &Path, text: &str) -> Result<(), String> {
 }
 
 fn git(args: &[&str]) -> Result<(), String> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a test stand-in for an agent, never the daemon's own child"
+    )]
     let mut command = Command::new("git");
     for name in UNSET.lock().unwrap_or_else(PoisonError::into_inner).iter() {
         command.env_remove(name);

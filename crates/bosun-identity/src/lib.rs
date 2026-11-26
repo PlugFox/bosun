@@ -27,9 +27,14 @@
 //! text is the Needs-you reason.
 //!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "a test's own children")
+)]
 
 mod bundle;
 mod check;
+mod child;
 mod env;
 #[cfg(test)]
 mod tests;

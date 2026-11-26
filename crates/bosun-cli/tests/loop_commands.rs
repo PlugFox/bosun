@@ -10,6 +10,7 @@
 //!
 //! `bosund`, `bosun-mcp` and `fake-agent` are binaries of other packages, built by the test
 //! with `cargo build` into the target directory it runs from; none is linked.
+#![allow(clippy::disallowed_methods, reason = "a test's own children")]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};

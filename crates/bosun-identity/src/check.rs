@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::{Author, Bundle, Env};
 
@@ -256,7 +256,7 @@ impl GhLogin {
 
 impl TokenLogin for GhLogin {
     fn login(&self, host: &str) -> Result<String, ProbeError> {
-        let mut command = Command::new("gh");
+        let mut command = crate::child::command("gh");
         command.args(["api", "graphql", "--hostname", host]).args([
             "-f",
             "query={viewer{login}}",

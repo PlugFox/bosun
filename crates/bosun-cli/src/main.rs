@@ -154,6 +154,10 @@
 //! Errors go to stderr, prefixed `bosun: `; nothing is printed on stdout then, except by
 //! `doctor`, which prints its checks with 0 and with 7 alike, and `lint`, which prints the
 //! findings of a card that is not claimable with 1.
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "a test's own children")
+)]
 
 mod admin;
 mod artefact;

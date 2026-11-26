@@ -40,12 +40,19 @@
 //! With code 4 the message on stderr is
 //! `bosund: another instance is already running at <endpoint> (pid <pid>)`, the pid omitted
 //! when the other instance did not answer `hello` in time.
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "a test's own children")
+)]
 
 mod agent;
 mod api;
 mod board;
+mod child;
 mod commits;
 mod config_watch;
+#[cfg(all(test, windows))]
+mod console_tests;
 mod control;
 mod events;
 mod executor;

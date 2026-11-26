@@ -72,6 +72,10 @@ impl SystemProbe {
     pub fn new() -> Self {
         let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
         let read = |path: &Path| std::fs::read_to_string(path).ok();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "`/sbin/mount` runs on macOS only, where no console can be gone"
+        )]
         let mounts = if cfg!(target_os = "linux") {
             read(Path::new("/proc/self/mounts")).map(|text| linux_mounts(&text))
         } else if cfg!(target_os = "macos") {

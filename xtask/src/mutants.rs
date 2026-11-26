@@ -2806,6 +2806,27 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #189: a claim refusal and a visibility failure are logged once per text (#186).
+    Mutant {
+        name: "mutant_loop_claim_refusal_every_poll",
+        issue: 189,
+        breaks: "a claim refusal is logged at every poll while it lasts",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::refusals::a_repeated_claim_refusal_is_logged_once_until_its_text_changes",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_board_visibility_every_failure",
+        issue: 189,
+        breaks: "a failing visibility question is logged at every call",
+        package: "bosund",
+        check: Check::Test(
+            "executor::board::tests::a_failing_visibility_is_logged_once_until_its_text_changes",
+        ),
+        platform: None,
+    },
 ];
 
 /// #164, the card of #8 that polls the pull request of an item Done in `pr` mode (merged

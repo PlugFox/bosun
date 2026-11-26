@@ -431,6 +431,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_queue_lint_references_unwarned)",
   "cfg(mutant_queue_lint_provenance_warns)",
   "cfg(mutant_runner_prompt_without_provenance_rule)",
+  # #189: a claim refusal and a visibility failure logged once per text.
+  "cfg(mutant_loop_claim_refusal_every_poll)",
+  "cfg(mutant_board_visibility_every_failure)",
 ] }
 
 [workspace.lints.clippy]

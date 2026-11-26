@@ -167,10 +167,17 @@ impl Board {
 /// How a [`Visibility`] asks: `Ok(true)` for a public repository.
 pub(crate) type ReadVisibility = Box<dyn Fn() -> Result<bool, String> + Send + Sync>;
 
-/// Whether a repository is public, asked once; see the module docs.
+/// Where a [`Visibility`] writes its line: [`crate::log::line`] outside the unit tests.
+pub(crate) type VisibilityLog = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Whether a repository is public, asked once; see the module docs. A failure is logged when
+/// it starts and when its text changes, not at every question (#186).
 pub(crate) struct Visibility {
     read: ReadVisibility,
     known: OnceLock<bool>,
+    /// The text of the last failure logged.
+    failed: Mutex<Option<String>>,
+    log: VisibilityLog,
 }
 
 impl fmt::Debug for Visibility {
@@ -183,9 +190,21 @@ impl fmt::Debug for Visibility {
 
 impl Visibility {
     pub(crate) fn new(read: ReadVisibility) -> Self {
+        Self::with_sink(read, Box::new(crate::log::line))
+    }
+
+    /// A visibility whose line goes to `log`.
+    #[cfg(test)]
+    pub(crate) fn with_log(read: ReadVisibility, log: VisibilityLog) -> Self {
+        Self::with_sink(read, log)
+    }
+
+    fn with_sink(read: ReadVisibility, log: VisibilityLog) -> Self {
         Self {
             read,
             known: OnceLock::new(),
+            failed: Mutex::new(None),
+            log,
         }
     }
 
@@ -198,7 +217,8 @@ impl Visibility {
     }
 
     /// Whether the repository is public: the answer kept, else GitHub asked (blocking). A
-    /// question that fails counts as public and is asked again next time.
+    /// question that fails counts as public and is asked again next time; its line is written
+    /// only when its text differs from the last failure's.
     pub(crate) fn public(&self) -> bool {
         if let Some(public) = self.known.get() {
             return *public;
@@ -206,10 +226,17 @@ impl Visibility {
         match (self.read)() {
             Ok(public) => *self.known.get_or_init(|| public),
             Err(e) => {
-                crate::log::log!(
-                    "bosund: the repository's visibility cannot be read ({e}); verdict output \
-                     stays off its reports"
-                );
+                let mut failed = self.failed.lock().unwrap_or_else(PoisonError::into_inner);
+                // Mutant (`mutant_board_visibility_every_failure`): every failure is logged.
+                if failed.as_deref() != Some(e.as_str())
+                    || cfg!(mutant_board_visibility_every_failure)
+                {
+                    (self.log)(&format!(
+                        "bosund: the repository's visibility cannot be read ({e}); verdict \
+                         output stays off its reports"
+                    ));
+                    *failed = Some(e);
+                }
                 true
             }
         }
@@ -386,6 +413,38 @@ mod tests {
         assert!(!visibility.public());
         assert_eq!(asked.load(Ordering::SeqCst), 2);
         assert!(Visibility::fixed(true).public());
+    }
+
+    /// #186: a failure is logged when it starts and when its text changes; nothing after a
+    /// success.
+    #[test]
+    fn a_failing_visibility_is_logged_once_until_its_text_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = lines.clone();
+        let visibility = Visibility::with_log(
+            Box::new(move || match counter.fetch_add(1, Ordering::SeqCst) {
+                0..=2 | 5 => Err("offline".to_owned()),
+                3 | 4 => Err("not found".to_owned()),
+                _ => Ok(false),
+            }),
+            Box::new(move |line| sink.lock().unwrap().push(line.to_owned())),
+        );
+        let answers: Vec<bool> = (0..10).map(|_| visibility.public()).collect();
+        assert_eq!(answers, [[true; 6].as_slice(), &[false; 4]].concat());
+        let lines = lines.lock().unwrap().clone();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        for (line, text) in lines.iter().zip(["offline", "not found", "offline"]) {
+            assert!(line.contains(text), "{line:?} names {text:?}");
+            assert!(
+                line.contains("verdict output stays off its reports"),
+                "{line:?}"
+            );
+        }
+        assert_eq!(asked.load(Ordering::SeqCst), 7);
     }
 
     /// The reads of `pace` over `span` of a fake clock ticking every `tick`, each reporting

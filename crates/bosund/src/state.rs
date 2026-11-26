@@ -282,7 +282,7 @@ async fn register_named(
     identity: &str,
 ) -> Result<Vec<String>, bosun_store::Error> {
     let stored = store.reader().repos().await?;
-    let mut moves = Vec::new();
+    let mut lines = Vec::new();
     let mut batch = Vec::new();
     for (name, repo) in config.repos.iter().filter(|(_, r)| r.identity == identity) {
         let moved = stored
@@ -290,7 +290,7 @@ async fn register_named(
             .find(|row| row.name.as_deref() == Some(name.as_str()))
             .filter(|row| row.path != repo.key);
         if let Some(row) = moved {
-            moves.push(format!(
+            lines.push(format!(
                 "bosund: repository {name}: its path moved from {} to {}; its items and \
                  history follow it",
                 row.path, repo.key
@@ -305,7 +305,7 @@ async fn register_named(
         .writer()
         .write(vec![bosun_store::Write::Configured(batch)])
         .await?;
-    Ok(moves)
+    Ok(lines)
 }
 
 /// Opens each identity's store and starts its ingest. On failure, what was opened is returned
@@ -717,12 +717,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            register_named(&store, &first, "test")
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        let none: [String; 0] = [];
+        assert_eq!(register_named(&store, &first, "test").await.unwrap(), none);
 
         let moved = config(dir.path(), &[("demo", "moved"), ("beta", "beta")]);
         let lines = register_named(&store, &moved, "test").await.unwrap();
@@ -734,20 +730,15 @@ mod tests {
                  history follow it"
             )]
         );
-        assert!(
-            register_named(&store, &moved, "test")
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        let none: [String; 0] = [];
+        assert_eq!(register_named(&store, &moved, "test").await.unwrap(), none);
         assert_eq!(store.reader().repos().await.unwrap().len(), 2);
 
         let renamed = config(dir.path(), &[("demo2", "moved"), ("beta", "beta")]);
-        assert!(
-            register_named(&store, &renamed, "test")
-                .await
-                .unwrap()
-                .is_empty()
+        let none: [String; 0] = [];
+        assert_eq!(
+            register_named(&store, &renamed, "test").await.unwrap(),
+            none
         );
         let swapped = config(dir.path(), &[("demo2", "beta"), ("beta", "moved")]);
         assert_eq!(

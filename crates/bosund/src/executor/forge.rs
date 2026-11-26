@@ -169,11 +169,15 @@ pub(crate) fn list_args(head: &str) -> Vec<String> {
         "--state",
         "open",
         "--json",
-        "number,url,body",
+        LIST_FIELDS,
     ]
     .map(str::to_owned)
     .to_vec()
 }
+
+/// The fields `gh pr list` is asked for: whether each pull request comes from a fork is what
+/// [`parse_list`] keeps them apart by.
+const LIST_FIELDS: &str = "number,url,body,isCrossRepository,headRepositoryOwner";
 
 /// `gh pr create` for `new`, its body read from `body_file`.
 pub(crate) fn create_args(new: &NewPullRequest, body_file: &Path) -> Vec<String> {
@@ -246,18 +250,30 @@ fn parse_state(out: &str) -> Result<PullRequestState, String> {
     }
 }
 
-/// The first pull request of `gh pr list --json number,url,body` output.
+/// The first pull request of `gh pr list --json` [`LIST_FIELDS`] output whose head branch is
+/// in the repository itself. `--head` matches the branch name only, so on a public repository
+/// anyone may open a pull request from `bosun/<slug>` of a fork before the daemon does: one
+/// whose head is in another repository (or that does not say) is never taken for the item's.
 fn parse_list(out: &str) -> Result<Option<PullRequest>, String> {
     #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct Listed {
         number: u64,
         url: String,
         #[serde(default)]
         body: String,
+        /// `None` when `gh` did not say: taken for a fork's.
+        #[serde(default)]
+        is_cross_repository: Option<bool>,
     }
     let listed: Vec<Listed> = serde_json::from_str(out.trim())
         .map_err(|e| format!("`gh pr list` printed what is not a list of pull requests: {e}"))?;
-    Ok(listed.into_iter().next().map(|l| PullRequest {
+    // Mutant (`mutant_forge_adopts_fork_pull_request`): a fork's pull request of the same
+    // branch name is taken for the item's.
+    let own = |l: &Listed| {
+        cfg!(mutant_forge_adopts_fork_pull_request) || l.is_cross_repository == Some(false)
+    };
+    Ok(listed.into_iter().find(own).map(|l| PullRequest {
         number: l.number,
         url: l.url,
         body: l.body,
@@ -387,7 +403,7 @@ mod tests {
                 "--state",
                 "open",
                 "--json",
-                "number,url,body"
+                "number,url,body,isCrossRepository,headRepositoryOwner"
             ]
         );
 
@@ -459,14 +475,31 @@ mod tests {
 
     #[test]
     fn a_listed_pull_request_and_a_created_url_are_read() {
-        let listed = parse_list(r#"[{"number":7,"url":"https://x/o/r/pull/7","body":"b"}]"#)
-            .unwrap()
-            .unwrap();
+        let listed = parse_list(
+            r#"[{"number":7,"url":"https://x/o/r/pull/7","body":"b","isCrossRepository":false}]"#,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!((listed.number, listed.body.as_str()), (7, "b"));
         assert_eq!(parse_list("[]\n").unwrap(), None);
         assert!(parse_list("nope").is_err());
         assert_eq!(number_of("https://github.com/o/r/pull/42"), Some(42));
         assert_eq!(number_of("https://github.com/o/r"), None);
+    }
+
+    /// #2, #8: `gh pr list --head` matches the branch name in forks too. A pull request from
+    /// a fork listed first, and one that does not say where its head is, are passed over; the
+    /// repository's own is taken, and with none of its own there is none.
+    #[test]
+    fn a_pull_request_from_a_fork_is_never_adopted() {
+        let fork = r#"{"number":3,"url":"https://x/o/r/pull/3","body":"fork",
+            "isCrossRepository":true,"headRepositoryOwner":{"login":"someone"}}"#;
+        let silent = r#"{"number":4,"url":"https://x/o/r/pull/4","body":"silent"}"#;
+        let own = r#"{"number":5,"url":"https://x/o/r/pull/5","body":"own",
+            "isCrossRepository":false,"headRepositoryOwner":{"login":"o"}}"#;
+        let found = parse_list(&format!("[{fork},{silent},{own}]")).unwrap();
+        assert_eq!(found.map(|p| p.number), Some(5));
+        assert_eq!(parse_list(&format!("[{fork},{silent}]")).unwrap(), None);
     }
 
     #[test]

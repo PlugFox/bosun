@@ -2600,6 +2600,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_forge_adopts_fork_pull_request",
+        issue: PR_CARD,
+        breaks: "a fork's pull request of the item's branch name is taken for the item's",
+        package: "bosund",
+        check: Check::Test("executor::forge::tests::a_pull_request_from_a_fork_is_never_adopted"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_loop_pr_refusal_is_retried",
         issue: PR_CARD,
         breaks: "a refused push or pull request is retried as if the forge had not answered",

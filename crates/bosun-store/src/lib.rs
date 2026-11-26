@@ -56,7 +56,7 @@ pub use work::{
     RunCommitRow, RunCommits, RunEnd, RunRow, RunStart, Snapshot, StoredItem, TransitionRow,
     VerdictEnd, VerdictRow, VerdictStart, WorktreeKind, WorktreeRow, WorktreeState,
 };
-pub use writer::{PriceChange, Repo, SourceFile, Write, Writer};
+pub use writer::{Configured, PriceChange, Repo, SourceFile, Write, Writer};
 
 use std::path::Path;
 use std::time::Duration;

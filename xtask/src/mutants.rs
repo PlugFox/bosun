@@ -2797,6 +2797,34 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_store_repo_rename_refused",
+        issue: 132,
+        breaks: "a repository renamed at the same path is refused: the identity's store does not open",
+        package: "bosun-store",
+        check: Check::Test(
+            "writer::tests::a_renamed_repository_keeps_its_row_with_its_items_and_messages",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_repo_unnamed_items_kept",
+        issue: 132,
+        breaks: "a name's older items stay on an unnamed row, which the loop never sees",
+        package: "bosun-store",
+        check: Check::Test(
+            "writer::tests::an_unnamed_row_with_a_names_items_is_merged_into_the_named_row",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_repo_moves_unordered",
+        issue: 132,
+        breaks: "two repositories that swap paths in one edit are refused: the store does not open",
+        package: "bosun-store",
+        check: Check::Test("writer::tests::two_repositories_that_swap_paths_keep_their_rows"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_queue_lint_references_unwarned",
         issue: 139,
         breaks: "a card that leans on an issue the session cannot read passes lint silently",

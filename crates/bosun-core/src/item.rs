@@ -2304,10 +2304,12 @@ mod tests {
                     result: RunResult::Fail,
                 },
             ]),
+            State::Done(_) => events.extend([Event::PullRequestClosed, Event::PullRequestClosed]),
             _ => {}
         }
         // Rare: these end the item or need the user.
         events.extend([
+            Event::PullRequestClosed,
             Event::Question { attempt },
             Event::Refused {
                 attempt,

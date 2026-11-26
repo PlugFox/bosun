@@ -2672,6 +2672,16 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_loop_pr_closed_stored_after_event",
+        issue: PR_POLL_CARD,
+        breaks: "a closed pull request's row stays open when its event is not written",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_closed_pull_request_is_stored_before_its_event",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_loop_pr_closed_ignored",
         issue: PR_POLL_CARD,
         breaks: "a pull request closed unmerged is taken for an open one: the item stays Done",

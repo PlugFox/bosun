@@ -174,7 +174,7 @@ async fn repo_queue(served: &Served, (name, repo): &NamedRepo, items: &[StoredIt
     view.hash = Some(text_hash(changes.cursor.as_str()));
     let stored: BTreeMap<&str, &StoredItem> = items
         .iter()
-        .filter(|i| i.repo == repo.key)
+        .filter(|i| crate::executor::of_repo(i, name, repo))
         .map(|i| (i.item.id.0.as_str(), i))
         .collect();
     let on_board: BTreeSet<u64> = changes.cards.iter().map(|c| c.id.0).collect();

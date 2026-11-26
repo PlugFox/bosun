@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repo SET\n             remote = coalesce(?, remote),\n             default_branch = coalesce(?, default_branch)\n         WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "781f017589467cffd0fd53844bd6896f65dbf31fed0abc99c179f8d500322d87"
+}

@@ -51,7 +51,10 @@ async fn overview(state: &State, served: &Served) -> Result<Overview, ErrorObjec
     let waits = crate::leases::waits_of(state, served);
     let mut repos = Vec::new();
     for ((name, repo), held) in served.repos.iter().zip(&control.repos) {
-        let mine: Vec<&StoredItem> = items.iter().filter(|i| i.repo == repo.key).collect();
+        let mine: Vec<&StoredItem> = items
+            .iter()
+            .filter(|i| crate::executor::of_repo(i, name, repo))
+            .collect();
         let current = mine.iter().find(|i| i.item.state.is_active()).copied();
         // The item in flight, else the one that moved last.
         let latest = current.or_else(|| mine.iter().max_by_key(|i| i.updated_ms).copied());

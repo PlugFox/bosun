@@ -34,6 +34,13 @@ pub struct Bill {
     pub unpriced: BTreeMap<String, u64>,
 }
 
+/// A stored repository: its configuration name, if it has one, and its current path key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoRow {
+    pub name: Option<String>,
+    pub path: String,
+}
+
 impl Reader {
     pub(crate) fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -56,6 +63,25 @@ impl Reader {
     pub async fn message(&self, provider: &str, id: &str) -> Result<Option<Message>, Error> {
         let mut conn = self.pool.acquire().await?;
         load_message(&mut conn, provider, id).await
+    }
+
+    /// Every stored repository, by path.
+    ///
+    /// # Errors
+    ///
+    /// A database error.
+    pub async fn repos(&self) -> Result<Vec<RepoRow>, Error> {
+        Ok(
+            sqlx::query!("SELECT name, path FROM repo ORDER BY path, id")
+                .fetch_all(&self.pool)
+                .await?
+                .into_iter()
+                .map(|row| RepoRow {
+                    name: row.name,
+                    path: row.path,
+                })
+                .collect(),
+        )
     }
 
     /// Every transcript file of `provider` and how far it has been parsed, by file key.
@@ -450,6 +476,7 @@ mod tests {
             .writer()
             .write(vec![
                 Write::Repo(crate::Repo {
+                    name: None,
                     path: "/work/repo".to_owned(),
                     remote: None,
                     default_branch: None,

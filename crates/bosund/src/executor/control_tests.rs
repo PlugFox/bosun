@@ -72,6 +72,7 @@ impl Scene {
         self.store
             .writer()
             .write(vec![Write::Repo(StoreRepo {
+                name: None,
                 path: key,
                 remote: None,
                 default_branch: None,

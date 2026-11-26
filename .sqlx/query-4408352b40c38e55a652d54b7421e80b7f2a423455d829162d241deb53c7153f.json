@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!: i64\", path FROM repo",
+  "query": "SELECT id AS \"id!: i64\", name FROM repo WHERE path = ?",
   "describe": {
     "columns": [
       {
@@ -15,24 +15,24 @@
         }
       },
       {
-        "name": "path",
+        "name": "name",
         "ordinal": 1,
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "repo",
-            "name": "path"
+            "name": "name"
           }
         }
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       false,
-      false
+      true
     ]
   },
-  "hash": "e4efffde2acdefcd9da3011dc74f2134efac4c96c06ae3a8a26510fada315d95"
+  "hash": "4408352b40c38e55a652d54b7421e80b7f2a423455d829162d241deb53c7153f"
 }

@@ -183,6 +183,7 @@ impl Machine {
     fn new(id: ItemId) -> Self {
         let writes = vec![Write::Item(NewItem {
             item: id.clone(),
+            name: "demo".to_owned(),
             repo: ROOT.to_owned(),
             card_key: None,
             at_ms: T0,

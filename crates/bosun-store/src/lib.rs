@@ -48,7 +48,7 @@ mod writer;
 pub use activity::RecentSession;
 pub use error::Error;
 pub use link::{CommitLink, Link, LinkedSession};
-pub use read::{Bill, By, Group, Reader};
+pub use read::{Bill, By, Group, Reader, RepoRow};
 pub use report::{CheckRow, ToolRow, UsageRow, VersionHealth, WindowSums};
 pub use work::{
     AgentCall, AgentCallKind, AgentCallRow, AttemptRow, ItemHistory, LandingRow, LeaseWaitRow,

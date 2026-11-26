@@ -155,6 +155,7 @@ impl World {
             .write(vec![
                 Write::Item(NewItem {
                     item: id.clone(),
+                    name: served.repos[0].0.clone(),
                     repo: served.repos[0].1.key.clone(),
                     card_key: Some("3".to_owned()),
                     at_ms: T0,

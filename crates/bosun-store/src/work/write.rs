@@ -1,6 +1,6 @@
 //! The writer's handlers for the loop's tables. Each runs inside the batch's transaction.
 
-use bosun_core::{Attempt, Effect, EffectKind, Item, ItemId, Stepped, canonical_path, style_of};
+use bosun_core::{Attempt, Effect, EffectKind, Item, ItemId, Stepped};
 use sqlx::sqlite::SqliteConnection;
 
 use super::codec;
@@ -43,23 +43,21 @@ pub(crate) async fn attempt_id(
 }
 
 pub(crate) async fn upsert_item(conn: &mut SqliteConnection, new: &NewItem) -> Result<(), Error> {
-    upsert_repo(
+    let repo = upsert_repo(
         conn,
         &Repo {
+            name: Some(new.name.clone()),
             path: new.repo.clone(),
             remote: None,
             default_branch: None,
         },
     )
     .await?;
-    let key = canonical_path(&new.repo, style_of(&new.repo));
-    let repo = sqlx::query_scalar!(r#"SELECT id AS "id!: i64" FROM repo WHERE path = ?"#, key)
-        .fetch_one(&mut *conn)
-        .await?;
     sqlx::query!(
         "INSERT INTO item (item_key, repo_id, card_key, created_ms, updated_ms)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (item_key) DO UPDATE SET
+             repo_id = excluded.repo_id,
              card_key = coalesce(excluded.card_key, card_key)",
         new.item.0,
         repo,

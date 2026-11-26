@@ -1520,6 +1520,7 @@ mod tests {
                 .writer()
                 .write(vec![Write::Item(NewItem {
                     item: item.clone(),
+                    name: "demo".to_owned(),
                     repo: "demo".to_owned(),
                     card_key: Some("1".to_owned()),
                     at_ms: 1,

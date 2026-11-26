@@ -30,7 +30,7 @@ use bosun_core::{Effect, EffectKey, EffectKind, Event, ItemId, State, UserComman
 use bosun_queue::{Card, Changes, Column};
 use bosun_store::{OutboxOp, StoredItem, Write};
 
-use super::{Loop, Signal, blocking, claim, git, item_id, lookup, outbox};
+use super::{Loop, Signal, blocking, claim, git, item_id, lookup, of_repo, outbox};
 
 /// The label that restarts an item's session (#5).
 pub(crate) const RESTART_LABEL: &str = "restart";
@@ -215,7 +215,7 @@ impl Loop {
         };
         let stored: BTreeMap<ItemId, StoredItem> = stored
             .into_iter()
-            .filter(|s| s.repo == repo.key)
+            .filter(|s| of_repo(s, &repo_name, repo))
             .map(|s| (s.item.id.clone(), s))
             .collect();
 

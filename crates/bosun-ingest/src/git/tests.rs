@@ -202,6 +202,7 @@ fn key(dir: &Path) -> String {
 async fn store_scan(store: &Store, dir: &Path, scan: Scan) {
     let repo = key(dir);
     let mut batch = vec![Write::Repo(Repo {
+        name: None,
         path: repo.clone(),
         remote: scan.remote,
         default_branch: scan.default_branch,

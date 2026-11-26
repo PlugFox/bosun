@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\" FROM (\n               SELECT id, 0 AS rank FROM repo WHERE path = ?1\n               UNION ALL\n               SELECT repo_id AS id, 1 AS rank FROM repo_alias WHERE path = ?1)\n           ORDER BY rank LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "repo_alias",
+            "name": "repo_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d62b2b5eb7d0fec655d4e79c8a5c6e9e52cfb339a7c8d795843a5a8d0aea67ee"
+}

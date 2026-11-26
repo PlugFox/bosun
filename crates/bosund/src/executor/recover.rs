@@ -148,10 +148,12 @@ impl Loop {
         let Some((repo, _)) = lookup(&config, &repo_name) else {
             return false;
         };
-        let repo_key = repo.key.clone();
         let reader = self.shared.deps.reader.clone();
         let stored: Vec<StoredItem> = match reader.items(false).await {
-            Ok(items) => items.into_iter().filter(|s| s.repo == repo_key).collect(),
+            Ok(items) => items
+                .into_iter()
+                .filter(|s| super::of_repo(s, &repo_name, repo))
+                .collect(),
             Err(e) => {
                 self.shared
                     .trouble(format!("the store cannot be read: {e}"));

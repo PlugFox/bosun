@@ -13,8 +13,10 @@ use crate::read::Reader;
 pub struct StoredItem {
     /// The item, exactly as the last recorded transition left it.
     pub item: Item,
-    /// The repository's canonical path key.
+    /// The repository's canonical path key: its row's current path.
     pub repo: String,
+    /// The repository's configuration name, if its row has one.
+    pub repo_name: Option<String>,
     pub card_key: Option<String>,
     /// The hash of the current snapshot, if one was taken.
     pub snapshot_hash: Option<String>,
@@ -254,7 +256,7 @@ impl Reader {
     ) -> Result<Vec<StoredItem>, Error> {
         let key = only.map(|id| id.0.as_str());
         let rows = sqlx::query!(
-            r#"SELECT i.item_key, r.path AS repo, i.card_key, i.state, i.park_reason,
+            r#"SELECT i.item_key, r.path AS repo, r.name AS repo_name, i.card_key, i.state, i.park_reason,
                       i.park_until_ms, i.park_next, i.outcome, i.reason, i.seq, i.attempts,
                       i.spawns, i.runs, i.failed, i.uncounted, i.conflicts, i.boot, i.created_ms,
                       i.updated_ms, s.hash AS "snapshot_hash?: String",
@@ -315,6 +317,7 @@ impl Reader {
                     boot: number(row.boot, "boot")?,
                 },
                 repo: row.repo,
+                repo_name: row.repo_name,
                 card_key: row.card_key,
                 snapshot_hash: row.snapshot_hash,
                 created_ms: row.created_ms,

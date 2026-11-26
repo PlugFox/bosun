@@ -33,7 +33,11 @@ use bosun_core::{Exit, ItemId, RunResult, SpawnMode};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewItem {
     pub item: ItemId,
-    /// The repository's canonical path key; registered if it is not yet.
+    /// The repository's configuration name (`repo.<name>`): the item belongs to the row of that
+    /// name, wherever its path is.
+    pub name: String,
+    /// The repository's canonical path key, as configured; registered (or moved to) with the
+    /// name as [`crate::Write::Repo`] does.
     pub repo: String,
     /// The queue backend's id of the card, if it has one.
     pub card_key: Option<String>,

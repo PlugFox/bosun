@@ -422,6 +422,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # survives a standard error that is gone.
   "cfg(mutant_proc_children_inherit_console)",
   "cfg(mutant_log_panics_without_stderr)",
+  # #132: a repository's identity in the store is its configuration name; a move updates its
+  # row's path.
+  "cfg(mutant_store_repo_by_path)",
+  "cfg(mutant_store_repo_new_row_on_move)",
 ] }
 
 [workspace.lints.clippy]

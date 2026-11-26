@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO repo_alias (path, repo_id) VALUES (?, ?)\n         ON CONFLICT (path) DO UPDATE SET repo_id = excluded.repo_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "98a697630fe54230181edaccd48285337f886c3a4cc721c8d0305bd8d774f598"
+}

@@ -579,10 +579,11 @@ async fn teardown_runs_while_the_item_still_holds_its_leases() {
     watcher.abort();
 }
 
-/// A loop the store halts (it refuses the transition that runs the verdict) runs nothing more
-/// for its item, so it frees the item's leases: once the loop task has ended the item holds
-/// nothing, the journal is empty, and another holder is granted `rig` at once
-/// (`mutant_loop_halt_keeps_leases` keeps them while the daemon runs).
+/// A loop the store halts (it refuses the transition that runs the verdict; a refusal other
+/// than a stale transition halts the loop) runs nothing more for its item, so it frees the
+/// item's leases: once the loop task has ended the item holds nothing, the journal is empty,
+/// and another holder is granted `rig` at once (`mutant_loop_halt_keeps_leases` keeps them
+/// while the daemon runs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_loop_that_halts_frees_its_items_leases() {
     let mut scene = Scene::with_worktrees(None).await;
@@ -602,6 +603,7 @@ async fn a_loop_that_halts_frees_its_items_leases() {
         t.effects
             .iter()
             .any(|e| matches!(e.kind, EffectKind::RunVerdict { .. }))
+            .then_some(bosun_store::Error::Closed)
     });
     let (task, watcher) = scene.start(Some(failpoint));
     tokio::time::timeout(LIMIT, task)

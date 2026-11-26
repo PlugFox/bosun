@@ -153,6 +153,7 @@ pub(crate) fn reason(reason: Reason) -> &'static str {
         Reason::Setup => "setup",
         Reason::Handshake => "handshake",
         Reason::Identity => "identity",
+        Reason::Stale => "stale",
     }
 }
 
@@ -174,6 +175,7 @@ pub(crate) fn parse_reason(name: &str) -> Result<Reason, Error> {
         "setup" => Reason::Setup,
         "handshake" => Reason::Handshake,
         "identity" => Reason::Identity,
+        "stale" => Reason::Stale,
         other => return Err(corrupt("reason", other)),
     })
 }
@@ -377,6 +379,7 @@ mod tests {
             Reason::Setup,
             Reason::Handshake,
             Reason::Identity,
+            Reason::Stale,
         ]
         .map(State::NeedsYou);
         let states = [

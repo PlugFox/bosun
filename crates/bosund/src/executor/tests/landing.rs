@@ -1459,7 +1459,8 @@ async fn a_closed_pull_request_is_stored_before_its_event() {
     scene.write_board(&[card(1, "Closed later", "test -f a.txt", "Item one.")]);
     scene.script(1, &["commit a.txt a".to_owned()]);
     let failpoint: Failpoint = Arc::new(|t: &bosun_core::Transition| {
-        t.cause == bosun_core::Event::PullRequestClosed.name()
+        (t.cause == bosun_core::Event::PullRequestClosed.name())
+            .then_some(bosun_store::Error::Closed)
     });
     let (task, watcher) = scene.start(Some(failpoint));
     let state = ended(&scene, 1, LIMIT).await;

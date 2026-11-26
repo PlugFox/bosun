@@ -72,6 +72,9 @@ pub(crate) const NOTE_UNCOMMITTED: &str = "uncommitted";
 /// not be made or set up (#8): the `setup` command and how it ended, or the error. Its
 /// Needs-you comment (`setup`) quotes it.
 pub(crate) const NOTE_SETUP: &str = "setup";
+/// The kind of an item's note that holds the store's refusal of a transition the daemon
+/// computed from a stale view of the item (#132). Its Needs-you comment (`stale`) quotes it.
+pub(crate) const NOTE_STALE: &str = "stale";
 
 /// The longest note of kind [`NOTE_SETUP`], in characters.
 const SETUP_NOTE_CAP: usize = 500;
@@ -606,6 +609,13 @@ impl Drainer {
                 {
                     let _ = write!(body, ": {}", publish::sanitise_inline(&cause, 500));
                 }
+                // What the store refused (#132).
+                if other == Reason::Stale
+                    && let Some(refusal) = self.note(item, NOTE_STALE).await?
+                    && !refusal.trim().is_empty()
+                {
+                    let _ = write!(body, ": {}", publish::sanitise_inline(&refusal, 500));
+                }
                 if other == Reason::LandingRefused
                     && let Some(error) = self.landing_error(row).await?
                 {
@@ -647,6 +657,7 @@ fn reason_text(reason: Reason) -> &'static str {
         Reason::Setup => "The item's worktree could not be made or set up",
         Reason::Handshake => "The session's MCP server did not start, again after one retry",
         Reason::Identity => "The identity checks before a session refused it",
+        Reason::Stale => "The daemon's view of the item was older than its stored history",
     }
 }
 

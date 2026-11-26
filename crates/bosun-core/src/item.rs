@@ -196,6 +196,9 @@ pub enum Reason {
     /// The identity checks before a session refused (#2, rule 2; #99): the remote's owner,
     /// the token's login or the resolved author is not the identity's. Retrying cannot help.
     Identity,
+    /// The daemon's view of the item was older than its stored history; a transition computed
+    /// from it was refused (#132).
+    Stale,
 }
 
 /// The state of an item.
@@ -423,6 +426,9 @@ pub enum Event {
     BudgetExceeded,
     /// The configuration or the policy hash changed during the item.
     ConfigChanged,
+    /// The store refused a transition computed from the daemon's view of the item as stale: the
+    /// view was older than the item's stored history (#132). Stepped from the stored item.
+    Stale,
     /// The daemon restarted; the work in flight in the current state is gone (crash recovery).
     Restarted {
         /// The daemon's boot number, increasing across starts.
@@ -474,6 +480,7 @@ impl Event {
             Self::KillSwitch => "kill_switch",
             Self::BudgetExceeded => "budget_exceeded",
             Self::ConfigChanged => "config_changed",
+            Self::Stale => "stale",
             Self::Restarted { .. } => "restarted",
             Self::Reattached { .. } => "reattached",
             Self::PullRequestClosed => "pr_closed",
@@ -858,11 +865,28 @@ impl Draft {
                 self.kill_child();
                 self.needs_you(Reason::ConfigChanged);
             }
+            Event::Stale => self.stale()?,
             Event::Restarted { boot, tail } => self.restarted(*boot, *tail)?,
             Event::Reattached { boot } => self.reattached(*boot)?,
             Event::PullRequestClosed => self.pr_closed()?,
             Event::User(command) => self.user(*command)?,
         }
+        Some(())
+    }
+
+    /// The store refused a transition computed from a stale view of the item (#132): from any
+    /// state the daemon is not done with, the child is killed and the item needs the user.
+    fn stale(&mut self) -> Option<()> {
+        self.expect(&[
+            State::Ready,
+            State::Claimed,
+            State::Running,
+            State::Parked(PARKED),
+            State::Verifying,
+            State::Landing,
+        ])?;
+        self.kill_child();
+        self.needs_you(Reason::Stale);
         Some(())
     }
 
@@ -2171,6 +2195,56 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_event_moves_every_unfinished_item_to_needs_you() {
+        let ready = Item::new(ItemId::new("local:demo#1"));
+        let claimed = go(&ready, &Event::Claim, &ctx()).item;
+        let verifying = go(&running(), &exit(&running(), Exit::Ok), &ctx()).item;
+        assert_eq!(verifying.state, State::Verifying);
+        let parked = Item {
+            state: State::Parked(PARKED),
+            ..running()
+        };
+        let landing = landing();
+        assert_eq!(landing.state, State::Landing);
+        for item in [
+            ready.clone(),
+            claimed,
+            running(),
+            parked,
+            verifying,
+            landing,
+        ] {
+            let next = go(&item, &Event::Stale, &ctx());
+            assert_eq!(next.transition.cause, "stale");
+            assert_eq!(
+                next.item.state,
+                State::NeedsYou(Reason::Stale),
+                "from {:?}",
+                item.state
+            );
+            let effects = kinds(&next);
+            assert!(effects.contains(&EffectKind::Comment(Reason::Stale)));
+            assert!(effects.contains(&EffectKind::Project(Column::NeedsYou)));
+            if item.state == State::Running {
+                assert!(effects.contains(&EffectKind::Kill), "{effects:?}");
+            }
+        }
+        let done = Item {
+            state: State::Done(Outcome::Pass),
+            ..running()
+        };
+        let cancelled = Item {
+            state: State::Cancelled,
+            ..ready.clone()
+        };
+        let linted = go(&ready, &Event::LintFailed, &ctx()).item;
+        assert_eq!(linted.state, State::NeedsYou(Reason::Lint));
+        for item in [done, cancelled, linted] {
+            assert_eq!(step(&item, &Event::Stale, &ctx()), None, "{:?}", item.state);
+        }
+    }
+
+    #[test]
     fn a_setup_failure_needs_the_user_uncounted() {
         let claimed = go(
             &Item::new(ItemId::new("local:demo#3")),
@@ -2317,6 +2391,7 @@ mod tests {
             },
             Event::BudgetExceeded,
             Event::SetupFailed,
+            Event::Stale,
             Event::User(UserCommand::Requeue),
             Event::User(UserCommand::Restart),
             Event::User(UserCommand::ManualDone),

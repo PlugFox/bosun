@@ -444,6 +444,7 @@ pub(crate) fn reason_of(state: State) -> Option<String> {
             Reason::Setup => "setup",
             Reason::Handshake => "handshake",
             Reason::Identity => "identity",
+            Reason::Stale => "stale",
         },
         _ => return None,
     };

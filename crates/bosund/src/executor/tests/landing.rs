@@ -1290,6 +1290,35 @@ async fn a_pull_request_closed_unmerged_needs_the_user_with_one_comment() {
     assert!(row.landed_sha.is_some(), "the other columns kept: {row:?}");
 }
 
+/// After Done in `pr` mode (#8): pull request #1 is closed unmerged, and the store refuses the
+/// transition of [`Event::PullRequestClosed`] (the failpoint), so the loop halts there. The
+/// landing row says `closed` all the same: the row is stored before the event, and a row left
+/// `open` behind an item no longer Done would never be asked about again, holding its
+/// dependants for good (`mutant_loop_pr_closed_stored_after_event` leaves it `open`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_pull_request_is_stored_before_its_event() {
+    let (scene, fake, _remote) = pr_scene("").await;
+    scene.write_board(&[card(1, "Closed later", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let failpoint: Failpoint = Arc::new(|t: &bosun_core::Transition| {
+        t.cause == bosun_core::Event::PullRequestClosed.name()
+    });
+    let (task, watcher) = scene.start(Some(failpoint));
+    let state = ended(&scene, 1, LIMIT).await;
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    fake.set_state(1, forge::PullRequestState::Closed);
+    // The loop halts once the store refuses the transition.
+    let halted = tokio::time::timeout(LIMIT, task).await;
+    watcher.abort();
+    assert!(
+        halted.is_ok(),
+        "the loop did not stop at the refused transition"
+    );
+    let row = scene.store.reader().landing(&item(1)).await.unwrap();
+    let row = row.expect("the landing row");
+    assert_eq!(row.pr_state, Some(bosun_store::PrState::Closed), "{row:?}");
+}
+
 /// E6: card 2 is `blocked-by` card 1. Card 1 ends Done with its pull request open; while the
 /// forge says it is open card 2 is not claimed. Once the fake forge says it was merged, card 2
 /// is claimed and ends Done, and card 1's landing row says `merged`

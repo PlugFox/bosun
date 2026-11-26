@@ -7,9 +7,12 @@
 //!
 //! - merged: the row says `merged`. Final: it is not asked about again.
 //! - closed unmerged: the item's [`NOTE_PR_CLOSED`] note (its number, its URL, and the
-//!   transition it explains), then [`Event::PullRequestClosed`] applied as to any item not in
-//!   flight (Needs you with one comment, which names the pull request), then the row says
-//!   `closed`. A crash in between asks again; the event, applied twice, adds nothing.
+//!   transition it explains), then the row says `closed`, then [`Event::PullRequestClosed`]
+//!   applied as to any item not in flight (Needs you with one comment, which names the pull
+//!   request). The row comes first: once the item is Needs you it is no longer asked about,
+//!   so a row left `open` behind the event would hold the item's dependants for good. A
+//!   crash between the row and the event leaves the item Done, its pull request `closed` in
+//!   its report, and asks nothing again; the event itself, applied twice, adds nothing.
 //! - open, or no answer, or a refusal: nothing changes. A failure is reported once per item
 //!   until the forge answers again.
 //!
@@ -187,13 +190,13 @@ impl Loop {
                     if self.halted {
                         return;
                     }
-                    self.store_pr_state(&row, PrState::Closed).await;
                 }
             }
         }
     }
 
-    /// Pull request `number` of `item` was closed unmerged: its note, then the event.
+    /// Pull request `number` of `item` was closed unmerged: its note, its row `closed`, then
+    /// the event.
     async fn pr_closed(&mut self, item: &bosun_core::Item, row: &LandingRow, number: u64) {
         let at_ms = now_ms();
         let note = Write::ItemNote {
@@ -219,7 +222,15 @@ impl Loop {
             self.shared.options.repo,
             item.id
         );
+        // Mutant (`mutant_loop_pr_closed_stored_after_event`): the row is stored after the
+        // event, and stays `open` when the event's write fails.
+        if !cfg!(mutant_loop_pr_closed_stored_after_event) {
+            self.store_pr_state(row, PrState::Closed).await;
+        }
         self.bounce(item, &Event::PullRequestClosed).await;
+        if cfg!(mutant_loop_pr_closed_stored_after_event) && !self.halted {
+            self.store_pr_state(row, PrState::Closed).await;
+        }
     }
 
     /// The row of `row`'s own attempt says `state`; every other column keeps its value.

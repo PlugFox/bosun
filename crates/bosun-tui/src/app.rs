@@ -410,6 +410,7 @@ pub(crate) mod tests {
                     repo: "alpha".to_owned(),
                     path: "/work/alpha".to_owned(),
                     queue: "local_file".to_owned(),
+                    queue_source: None,
                     state: "working".to_owned(),
                     hold: None,
                     current: Some(CurrentItem {
@@ -432,6 +433,7 @@ pub(crate) mod tests {
                     repo: "beta".to_owned(),
                     path: "/work/beta".to_owned(),
                     queue: "local_file".to_owned(),
+                    queue_source: None,
                     state: "idle".to_owned(),
                     hold: Some("pause".to_owned()),
                     current: None,

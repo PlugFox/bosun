@@ -39,6 +39,7 @@ mod leases;
 mod moved;
 mod recovery;
 mod refusals;
+mod removal;
 mod shim;
 mod sticky;
 mod sweep;

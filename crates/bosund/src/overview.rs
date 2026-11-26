@@ -26,6 +26,16 @@ pub(crate) fn queue_kind(queue: Option<&Queue>) -> &'static str {
     }
 }
 
+/// Where a repository's queue is: the local file's path as configured, or `<owner>/<number>`
+/// of a Projects v2 board; `None` for no queue or another kind.
+pub(crate) fn queue_source(queue: Option<&Queue>) -> Option<String> {
+    match queue {
+        Some(Queue::LocalFile { file }) => Some(file.display().to_string()),
+        Some(Queue::Projects { owner, number }) => Some(format!("{owner}/{number}")),
+        Some(_) | None => None,
+    }
+}
+
 /// The `status.*` methods.
 pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObject> {
     match name {
@@ -66,6 +76,7 @@ async fn overview(state: &State, served: &Served) -> Result<Overview, ErrorObjec
             repo: name.clone(),
             path: repo.path.display().to_string(),
             queue: queue_kind(repo.queue.as_ref()).to_owned(),
+            queue_source: queue_source(repo.queue.as_ref()),
             state: if current.is_some() { "working" } else { "idle" }.to_owned(),
             hold: held.hold.clone(),
             current: current.map(|i| CurrentItem {

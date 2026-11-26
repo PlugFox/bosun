@@ -46,6 +46,11 @@ pub struct RepoOverview {
     pub path: String,
     /// Its queue's kind: `local_file`, `projects_v2`, or `none` when it has no queue.
     pub queue: String,
+    /// Where its queue is, as the daemon read it at start: the local file's path as
+    /// configured, or `<owner>/<number>` of a Projects v2 board; absent for no queue or
+    /// another kind. `bosun doctor` compares it with the configuration (#186).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_source: Option<String>,
     /// `working` while an item of the repository is in flight, else `idle`.
     pub state: String,
     /// The hold in force on the repository, strongest first: `kill`, `pause`, `daily_cap`;

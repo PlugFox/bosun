@@ -332,6 +332,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_cli_with_runs_on_refusal)",
   "cfg(mutant_cli_with_no_pathext)",
   "cfg(mutant_cli_with_no_signal_forward)",
+  # #186 (finding 4): `bosun with` across a daemon restart.
+  "cfg(mutant_cli_with_release_not_reconnected)",
+  "cfg(mutant_cli_with_wait_not_reconnected)",
+  "cfg(mutant_cli_with_runs_after_daemon_lost)",
   # #157: landing in worktree mode.
   "cfg(mutant_loop_accept_pre_rebase_verdict)",
   "cfg(mutant_loop_land_while_deferred)",

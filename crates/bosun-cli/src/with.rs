@@ -180,21 +180,7 @@ where
                 () = interrupts.recv() => None,
             };
             let Some(polled) = polled else {
-                let withdrawn = if cfg!(mutant_cli_with_withdraw_reconnects) {
-                    // Mutant (`mutant_cli_with_withdraw_reconnects`): the withdrawal goes over
-                    // the connection the Ctrl-C cut a call short on, reconnecting for as long as
-                    // a lost daemon is waited for.
-                    daemon
-                        .call::<method::LeaseRelease>(&release)
-                        .await
-                        .map(drop)
-                        .map_err(|e| e.message)
-                } else {
-                    tokio::select! {
-                        withdrawn = daemon.withdraw(&release) => withdrawn,
-                        () = interrupts.recv() => Err("interrupted again".to_owned()),
-                    }
-                };
+                let withdrawn = daemon.interrupted(&release, &mut interrupts).await;
                 eprintln!("bosun: {}", withdrawal_note(&names, &withdrawn));
                 return Ok(INTERRUPTED);
             };
@@ -315,6 +301,29 @@ where
                 // The daemon did not restart: the token is simply refused.
                 return Err(Failure::from(error));
             }
+        }
+    }
+
+    /// Withdraws a waiting request after Ctrl-C ([`Daemon::withdraw`]); a second Ctrl-C from
+    /// `interrupts` stops it.
+    async fn interrupted(
+        &mut self,
+        release: impl Fn(&str) -> ReleaseParams,
+        interrupts: &mut impl Interrupt,
+    ) -> Result<(), String> {
+        if cfg!(mutant_cli_with_withdraw_reconnects) {
+            // Mutant (`mutant_cli_with_withdraw_reconnects`): the withdrawal goes over the
+            // connection the Ctrl-C cut a call short on, reconnecting for as long as a lost
+            // daemon is waited for.
+            return self
+                .call::<method::LeaseRelease>(&release)
+                .await
+                .map(drop)
+                .map_err(|e| e.message);
+        }
+        tokio::select! {
+            withdrawn = self.withdraw(&release) => withdrawn,
+            () = interrupts.recv() => Err("interrupted again".to_owned()),
         }
     }
 
@@ -1041,7 +1050,7 @@ mod tests {
         .unwrap();
         assert_eq!(code, INTERRUPTED);
         assert!(started.elapsed() < Duration::from_secs(10));
-        assert!(accepted(&daemon.log(), 2, "lease.release").is_empty());
+        assert_eq!(accepted(&daemon.log(), 2, "lease.release"), []);
     }
 
     #[test]

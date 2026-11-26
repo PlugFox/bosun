@@ -132,6 +132,39 @@ fn processes_named_finds_a_copy_of_the_helper_by_its_name_only() {
     }
 }
 
+/// How early a listed start may lie before the wall clock just before the spawn: the
+/// platform's resolution of a start (a clock tick on Linux, the system clock's tick on
+/// Windows), with room to spare, and far below a second.
+const RESOLUTION_MS: i64 = 50;
+
+/// A process started now is not listed as started noticeably earlier: the sweep spares a
+/// process that looks older than the attempt, so a start put early (on Linux, the boot time of
+/// `/proc/stat` is whole seconds) spares a stray started just after the attempt began.
+#[test]
+fn a_listed_start_is_not_put_before_the_spawn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let name = unique_name();
+    let copy = copy_of_self(dir.path(), &name);
+    let mut worst = i64::MAX;
+    for _ in 0..3 {
+        let (mut child, before) = wait_helper(&copy);
+        let found = listed(&name, 1);
+        child.kill().ok();
+        child.wait().ok();
+        let named = found
+            .iter()
+            .find(|n| n.key.pid == child.id())
+            .copied()
+            .expect("the helper is listed");
+        worst = worst.min(named.started_unix_ms - before);
+    }
+    assert!(
+        worst >= -RESOLUTION_MS,
+        "a start was listed {} ms before the spawn",
+        -worst
+    );
+}
+
 /// The helper's entry point: a no-op unless the role variable selects a role.
 #[test]
 fn run_role() {

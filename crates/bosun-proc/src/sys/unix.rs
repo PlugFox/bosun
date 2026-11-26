@@ -227,31 +227,42 @@ pub(crate) fn processes_named(name: &str) -> io::Result<Vec<(u32, u64)>> {
 }
 
 /// Linux: a start time (clock ticks since boot) as Unix milliseconds, rounded down: the boot
-/// time `btime` of `/proc/stat` (whole seconds) plus the ticks over `sysconf(_SC_CLK_TCK)`.
-/// When either cannot be read, the process is taken to have started at the epoch: older than
-/// any attempt, so it is spared.
+/// time to the nanosecond ([`boot_unix_ns`]) plus the ticks over `sysconf(_SC_CLK_TCK)`. The
+/// ticks are whole, so the start may come out up to one tick (10 ms at the usual 100 Hz) early,
+/// never late. When a clock or the tick rate cannot be read, the process is taken to have
+/// started at the epoch: older than any attempt, so it is spared.
 #[cfg(target_os = "linux")]
 pub(crate) fn start_unix_ms(start: u64) -> i64 {
-    let boot = std::fs::read_to_string("/proc/stat")
-        .ok()
-        .and_then(|stat| parse_btime(&stat));
     // SAFETY: `sysconf` has no memory preconditions; any name is a valid argument.
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    match (boot, u64::try_from(hz).ok().filter(|&hz| hz > 0)) {
+    match (boot_unix_ns(), u64::try_from(hz).ok().filter(|&hz| hz > 0)) {
         (Some(boot), Some(hz)) => {
-            let ms = u128::from(boot) * 1000 + u128::from(start) * 1000 / u128::from(hz);
-            i64::try_from(ms).unwrap_or(i64::MAX)
+            let ns = boot + i128::from(start) * 1_000_000_000 / i128::from(hz);
+            i64::try_from(ns.div_euclid(1_000_000)).unwrap_or(i64::MAX)
         }
         _ => 0,
     }
 }
 
-/// The boot time, `btime`, of the text of `/proc/stat`, in seconds since the Unix epoch.
-#[cfg(any(target_os = "linux", test))]
-fn parse_btime(stat: &str) -> Option<u64> {
-    stat.lines()
-        .find_map(|line| line.strip_prefix("btime "))
-        .and_then(|rest| rest.trim().parse().ok())
+/// Linux: when the machine booted, in nanoseconds since the Unix epoch, as the wall clock now
+/// places it: `CLOCK_REALTIME` less `CLOCK_BOOTTIME`, the clock the start times of
+/// `/proc/<pid>/stat` count from (it includes time suspended). Not `btime` of `/proc/stat`,
+/// which is whole seconds and so puts a start up to a second early. `None` when a clock does
+/// not read.
+#[cfg(target_os = "linux")]
+fn boot_unix_ns() -> Option<i128> {
+    let read = |clock: libc::clockid_t| {
+        // SAFETY: `timespec` is plain C data; all zeros is a valid value.
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        // SAFETY: `ts` is a writable local and both clock ids exist on Linux.
+        if unsafe { libc::clock_gettime(clock, &raw mut ts) } != 0 {
+            return None;
+        }
+        Some(i128::from(ts.tv_sec) * 1_000_000_000 + i128::from(ts.tv_nsec))
+    };
+    let since_boot = read(libc::CLOCK_BOOTTIME)?;
+    let now = read(libc::CLOCK_REALTIME)?;
+    Some(now - since_boot)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -546,14 +557,7 @@ pub(crate) fn free_space(path: &std::path::Path) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_btime, parse_stat, parse_stat_group};
-
-    #[test]
-    fn the_boot_time_is_the_btime_line_of_proc_stat() {
-        let stat = "cpu  1 2 3\nintr 5\nbtime 1700000000\nprocesses 42\n";
-        assert_eq!(parse_btime(stat), Some(1_700_000_000));
-        assert_eq!(parse_btime("cpu 1\n"), None);
-    }
+    use super::{parse_stat, parse_stat_group};
 
     #[test]
     fn the_group_is_field_five_counted_from_the_last_parenthesis() {

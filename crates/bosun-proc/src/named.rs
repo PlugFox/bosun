@@ -14,8 +14,9 @@ pub struct Named {
     /// listing is never taken for this process.
     pub key: ProcessKey,
     /// When it started, in Unix milliseconds, rounded down: a doubt makes the process look
-    /// older, and an older process is spared. (Linux: the boot time `btime` of `/proc/stat` is
-    /// whole seconds, so this may be up to a second early.)
+    /// older, and an older process is spared. The doubt is the platform's resolution only:
+    /// Linux counts a start in clock ticks (10 ms at the usual 100 Hz) from a boot time read to
+    /// the nanosecond, Windows creation times follow the system clock's tick (about 16 ms).
     pub started_unix_ms: i64,
 }
 

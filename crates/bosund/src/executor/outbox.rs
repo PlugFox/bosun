@@ -45,6 +45,7 @@ use bosun_queue::{Owned, QueueError};
 use bosun_store::{AgentCallKind, OutboxOp, OutboxRow, Reader, Write};
 use tokio::sync::{Notify, watch};
 
+use super::landing::NOTE_LANDING;
 use super::pulls::NOTE_PR_CLOSED;
 use super::{Shared, blocking, lookup};
 
@@ -509,6 +510,27 @@ impl Drainer {
         Ok(Some(text))
     }
 
+    /// What a Needs-you row of [`Reason::LandingRefused`] says the forge answered: the error of
+    /// the item's [`NOTE_LANDING`] note, written by the refusal of the row's attempt,
+    /// scrubbed and capped. `None` for a refusal that left no such note.
+    async fn landing_error(&self, row: &OutboxRow) -> Result<Option<String>, String> {
+        #[derive(serde::Deserialize)]
+        struct Refused {
+            error: String,
+            #[serde(default)]
+            attempt: Option<u32>,
+        }
+        let attempt = key_parts(&row.effect_key).map(|(a, _, _)| a);
+        Ok(self
+            .note(&row.item, NOTE_LANDING)
+            .await?
+            .and_then(|text| serde_json::from_str::<Refused>(&text).ok())
+            .filter(|r| r.attempt.is_some() && r.attempt == attempt)
+            .map(|r| r.error)
+            .filter(|e| !e.trim().is_empty())
+            .map(|e| publish::sanitise_inline(&publish::scrub(&e), 500)))
+    }
+
     /// The new comment of a Needs-you row: its reason; a question's own text.
     async fn comment_body(&self, row: &OutboxRow, reason: Reason) -> Result<String, String> {
         let item = &row.item;
@@ -582,6 +604,11 @@ impl Drainer {
                     && !cause.trim().is_empty()
                 {
                     let _ = write!(body, ": {}", publish::sanitise_inline(&cause, 500));
+                }
+                if other == Reason::LandingRefused
+                    && let Some(error) = self.landing_error(row).await?
+                {
+                    let _ = write!(body, ": {error}");
                 }
                 body.push_str(
                     ". The item report above has the facts. Move the card to Ready to retry \

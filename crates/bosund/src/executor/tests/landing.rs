@@ -1136,6 +1136,10 @@ async fn a_refused_pull_request_needs_the_user_and_an_unreachable_forge_keeps_la
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    wait_for("the Needs-you comment", LIMIT, async || {
+        !needs_you_comments(&scene, 1).is_empty()
+    })
+    .await;
     task.abort();
     watcher.abort();
     assert_eq!(state, Some(State::NeedsYou(Reason::LandingRefused)));
@@ -1150,6 +1154,12 @@ async fn a_refused_pull_request_needs_the_user_and_an_unreachable_forge_keeps_la
         .expect("the landing note");
     assert!(note.contains("branch protection"), "{note}");
     assert!(fake.prs().is_empty());
+    // The Needs-you comment says what the forge answered.
+    let comments = needs_you_comments(&scene, 1);
+    assert!(
+        comments.len() == 1 && comments[0].contains("branch protection"),
+        "{comments:#?}"
+    );
 
     let (mut scene, fake, remote) = pr_scene(RIG).await;
     let leases = Arc::new(

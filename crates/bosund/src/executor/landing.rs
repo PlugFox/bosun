@@ -770,7 +770,10 @@ impl Task<'_> {
         let note = Write::ItemNote {
             item: item.clone(),
             kind: NOTE_LANDING.to_owned(),
-            body: serde_json::json!({ "error": why, "at_ms": at_ms }).to_string(),
+            body: serde_json::json!({
+                "error": why, "attempt": self.spec.attempt, "at_ms": at_ms,
+            })
+            .to_string(),
             at_ms,
         };
         if let Err(e) = self.shared.deps.writer.write(vec![note]).await {

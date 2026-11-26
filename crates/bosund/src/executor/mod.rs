@@ -144,6 +144,7 @@ mod outbox;
 mod park;
 mod pulls;
 mod recover;
+mod said;
 mod session;
 mod sweep;
 #[cfg(test)]
@@ -599,6 +600,9 @@ pub(crate) struct Loop {
     lints: BTreeMap<u64, Linted>,
     /// The last identity check before a claim and when it ran.
     checked: Option<(Instant, Result<(), String>)>,
+    /// The last claim refusal logged: a refusal is logged when it starts and when its text
+    /// changes, not at every poll (#186).
+    refused: said::Said,
     /// No claim before this (after a failed claim).
     backoff: Option<Instant>,
     /// More than one item of this repository was in flight at start; the user sorts it out.
@@ -674,6 +678,7 @@ impl Loop {
             cursor: None,
             lints: BTreeMap::new(),
             checked: None,
+            refused: said::Said::default(),
             backoff: None,
             waiting: false,
             recovered: false,
@@ -1935,9 +1940,15 @@ impl Loop {
         else {
             return;
         };
-        if let Err(e) = self.ready_to_claim(repo, identity).await {
-            self.shared.trouble(e);
-            return;
+        match self.ready_to_claim(repo, identity).await {
+            Err(e) => {
+                // Mutant (`mutant_loop_claim_refusal_every_poll`): every refusal is logged.
+                if self.refused.first(&e) || cfg!(mutant_loop_claim_refusal_every_poll) {
+                    self.shared.trouble(e);
+                }
+                return;
+            }
+            Ok(()) => self.refused.clear(),
         }
         if !self.register(repo, card, next).await {
             return;

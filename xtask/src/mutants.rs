@@ -2626,6 +2626,16 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_loop_pr_based_on_local_target",
+        issue: PR_CARD,
+        breaks: "a pull request branch is based on the user's local target, unpushed commits and all",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_pull_request_branch_never_holds_the_users_unpushed_commits",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_loop_pr_refusal_is_retried",
         issue: PR_CARD,
         breaks: "a refused push or pull request is retried as if the forge had not answered",

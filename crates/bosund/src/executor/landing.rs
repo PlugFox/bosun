@@ -41,8 +41,16 @@
 //!    `Landing` and the repository claims nothing. A target the user committed on meanwhile
 //!    starts again from step 2, at most [`RESTARTS`] times.
 //!
-//! In `pr` mode steps 1 to 4 are the same; nothing is merged and the user's target does not
-//! move ([`Task::pull_request`]):
+//! In `pr` mode steps 1 to 4 are the same but for the target (E28): the item is based on,
+//! rebased onto and compared with the target as it is on the forge, never the user's local
+//! branch, whose unpushed commits must not reach a pull request. The claim and step 2 fetch it
+//! from the repository `origin` names, at the URL the push goes to, under the repository
+//! identity's tool environment and credentials (#2), into the clone's
+//! [`forge_target_ref`] ([`fetch_forge_target`]); the clone's `refs/heads/<target>`, the claim's
+//! base and the capture of the user's checkout are left as they are. A target already holding
+//! the commit is not taken for a landing (that is the forge's merge, which the poll of
+//! [`super::pulls`] sees). A forge that does not answer is waited out as in step 6. Nothing is
+//! merged and the user's target and checkout never move ([`Task::pull_request`]):
 //!
 //! 5. The verified head `H` is offered and fetched into the user's repository as in step 6 (the
 //!    offer is dropped again on every path), and pushed from there by name,
@@ -264,18 +272,29 @@ impl Task<'_> {
         let attempt = self.spec.attempt;
         let target = wt.target.clone();
 
-        // 2. The target's head now.
-        let t = match self.sync(&wt.workspace, &target).await {
-            Ok(t) => t,
-            Err(e) => return self.refuse(e),
+        // 2. The target's head now: the forge's in `pr` mode (E28), the user's otherwise.
+        // Mutant (`mutant_loop_pr_based_on_local_target`): the user's local target is the
+        // base of a pull request too.
+        let t = match how {
+            Mode::Pr if !cfg!(mutant_loop_pr_based_on_local_target) => {
+                match self.forge_target(repo, wt, bundle, &target).await {
+                    Some(Ok(t)) => t,
+                    Some(Err(why)) => return Pass::Done(Some(self.pr_refused(&why).await)),
+                    None => return Pass::Done(None),
+                }
+            }
+            Mode::Pr | Mode::Merge(_) => match self.sync(&wt.workspace, &target).await {
+                Ok(t) => t,
+                Err(e) => return self.refuse(e),
+            },
         };
         let row = match self.shared.deps.reader.landing(item).await {
             Ok(row) => row.filter(|r| r.attempt == attempt),
             Err(e) => return self.refuse(format!("its landing row: {e}")),
         };
         // A crash after the fast-forward: the target holds what this attempt landed (the user
-        // may have committed on it since).
-        if let Some(row) = &row {
+        // may have committed on it since). Not in `pr` mode, which moves no target.
+        if let Some(row) = row.as_ref().filter(|_| matches!(how, Mode::Merge(_))) {
             let (clone, landed, at) = (
                 Git::new(wt.workspace.clone_path()),
                 row.landed_sha.clone(),
@@ -536,24 +555,9 @@ impl Task<'_> {
                     return Some(self.pr_refused(&why).await);
                 }
                 ForgeError::Refused(why) | ForgeError::Unreachable(why) => {
-                    if !waiting {
-                        waiting = true;
-                        // The forge may be away for hours: the item waits holding nothing
-                        // (E24); the push and the forge need no lease.
-                        self.shared
-                            .deps
-                            .leases
-                            .release(&crate::leases::Holder::Item(item.clone()))
-                            .await;
-                        self.shared.trouble(format!(
-                            "{item}: the pull request of `{branch}` waits: {why}; it is tried \
-                             again, and the repository claims nothing meanwhile"
-                        ));
-                    }
-                    let poll = self.shared.options.poll;
-                    tokio::select! {
-                        () = tokio::time::sleep(poll) => {}
-                        () = verdict::killed(&mut self.kill) => return None,
+                    let what = format!("the pull request of `{branch}`");
+                    if !self.wait_for_forge(&mut waiting, &what, &why).await {
+                        return None;
                     }
                 }
             }
@@ -565,6 +569,66 @@ impl Task<'_> {
             return Some(self.refused(e));
         }
         Some(Event::Landed)
+    }
+
+    /// Waits [`super::Options::poll`] for a forge that did not answer about `what` (`why`); the
+    /// first wait releases the item's leases (E24, E27: the push and the forge need none) and
+    /// says so. `false` when the task was killed meanwhile.
+    async fn wait_for_forge(&mut self, waiting: &mut bool, what: &str, why: &str) -> bool {
+        let item = self.spec.item.clone();
+        if !*waiting {
+            *waiting = true;
+            self.shared
+                .deps
+                .leases
+                .release(&crate::leases::Holder::Item(item.clone()))
+                .await;
+            self.shared.trouble(format!(
+                "{item}: {what} waits: {why}; it is tried again, and the repository claims \
+                 nothing meanwhile"
+            ));
+        }
+        let poll = self.shared.options.poll;
+        tokio::select! {
+            () = tokio::time::sleep(poll) => true,
+            () = verdict::killed(&mut self.kill) => false,
+        }
+    }
+
+    /// Step 2 of `pr` (E28): the forge's target fetched into the clone's [`forge_target_ref`];
+    /// its commit, or the refusal in words, or `None` when the task was killed while the forge
+    /// did not answer.
+    async fn forge_target(
+        &mut self,
+        repo: &Repo,
+        wt: &ItemWorktree,
+        bundle: &Bundle,
+        target: &str,
+    ) -> Option<Result<String, String>> {
+        let env = Env::tool(bundle, &inherited());
+        let mut waiting = false;
+        loop {
+            let (clone, user, env, branch) = (
+                wt.workspace.clone_path(),
+                repo.path.clone(),
+                env.clone(),
+                target.to_owned(),
+            );
+            match blocking(move || fetch_forge_target(&clone, &user, &env, &branch)).await {
+                Ok(t) => return Some(Ok(t)),
+                Err(ForgeError::Refused(why)) => {
+                    return Some(Err(format!(
+                        "the target {target} cannot be fetched from the forge: {why}"
+                    )));
+                }
+                Err(ForgeError::Unreachable(why)) => {
+                    let what = format!("the fetch of `{target}` from the forge");
+                    if !self.wait_for_forge(&mut waiting, &what, &why).await {
+                        return None;
+                    }
+                }
+            }
+        }
     }
 
     /// One try of steps 5 and 6 of `pr`: `h` fetched into the user's repository and pushed as
@@ -1036,6 +1100,58 @@ pub(crate) fn remote_command(git: &Git, env: &Env) -> std::process::Command {
     env.apply(&mut command);
     command.args(CREDENTIALS);
     command
+}
+
+/// The clone's ref of the forge's `target` in `pr` mode (E28): what the item is based on and
+/// rebased onto, never the clone's `refs/heads/<target>`, which follows the user's branch.
+pub(crate) fn forge_target_ref(target: &str) -> String {
+    format!("refs/bosun/forge/{target}")
+}
+
+/// E28: fetches `target` of the forge into the clone at `clone`, as [`forge_target_ref`], and
+/// returns its commit. The forge is the repository `origin` of the user's checkout at `user`
+/// names, at the URL the push goes to ([`push_url`]: the pull request branch is based on the
+/// repository it is pushed to), asked under `env`, the identity's tool environment, with its
+/// [`CREDENTIALS`] and within [`forge::TOOL_TIMEOUT`]. Forced: the ref is only a copy of the
+/// forge's. Nothing of the user's checkout is read or moved but its `origin`.
+///
+/// # Errors
+///
+/// [`ForgeError::Unreachable`] when the forge does not answer; [`ForgeError::Refused`] when it
+/// refuses or has no such branch.
+pub(crate) fn fetch_forge_target(
+    clone: &std::path::Path,
+    user: &std::path::Path,
+    env: &Env,
+    target: &str,
+) -> Result<String, ForgeError> {
+    let url = push_url(&Git::new(user), env)?;
+    let copy = forge_target_ref(target);
+    let refspec = format!("+refs/heads/{target}:{copy}");
+    let git = Git::new(clone);
+    let mut command = remote_command(&git, env);
+    command.args(["-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch"]);
+    command.args(["--quiet", "--no-tags", "--no-write-fetch-head", "--"]);
+    command.args([url.as_str(), refspec.as_str()]);
+    let out = forge::output_within(&mut command, forge::TOOL_TIMEOUT, "git fetch")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        return Err(forge::classify(format!(
+            "git fetch {REMOTE} {target}: {stderr}"
+        )));
+    }
+    git.run(
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{copy}^{{commit}}"),
+        ],
+        None,
+    )
+    .map(|t| t.trim().to_owned())
+    .map_err(|e| ForgeError::Refused(format!("the forge's {target}: {e}")))
 }
 
 /// The URL a push to [`REMOTE`] goes to, `pushInsteadOf` and `pushurl` applied under `env`:

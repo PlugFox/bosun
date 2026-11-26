@@ -242,7 +242,21 @@ async fn open_worktree(
         repo.path.clone(),
         repo.landing.target.clone(),
     );
-    let prepared = blocking(move || -> Result<(String, UserCheckout), String> {
+    // E28: in `pr` mode the item starts from the forge's target, fetched as the identity.
+    // Mutant (`mutant_loop_pr_based_on_local_target`): it starts from the user's local target.
+    let forge = if repo.landing.mode == bosun_config::LandingMode::Pr
+        && !cfg!(mutant_loop_pr_based_on_local_target)
+    {
+        let bundle = super::identity::bundle(&repo.identity, identity, &repo.path)
+            .map_err(ClaimOutcome::Failed)?;
+        Some(bosun_identity::Env::tool(
+            &bundle,
+            &bosun_identity::inherited(),
+        ))
+    } else {
+        None
+    };
+    let prepared = blocking(move || -> Result<(String, String, UserCheckout), String> {
         ws.ensure_clone()
             .map_err(|e| format!("the daemon's clone: {e}"))?;
         let target = if let Some(target) = target {
@@ -263,20 +277,27 @@ async fn open_worktree(
                 .unwrap_or(&branch)
                 .to_owned()
         };
-        ws.sync_target(&target).map_err(|e| {
-            format!("the target {target} cannot be fetched into the daemon's clone: {e}")
-        })?;
+        let at = if let Some(env) = &forge {
+            super::landing::fetch_forge_target(&ws.clone_path(), &user, env, &target).map_err(
+                |e| format!("the target {target} cannot be fetched from the forge: {e}"),
+            )?;
+            super::landing::forge_target_ref(&target)
+        } else {
+            ws.sync_target(&target).map_err(|e| {
+                format!("the target {target} cannot be fetched into the daemon's clone: {e}")
+            })?;
+            format!("refs/heads/{target}")
+        };
         // E4, E21: the user's checkout as it is now, compared before every verdict.
         let checkout = UserCheckout::capture(&user)
             .map_err(|e| format!("the user's checkout cannot be captured: {e}"))?;
-        Ok((target, checkout))
+        Ok((target, at, checkout))
     })
     .await;
-    let (target, user) = prepared.map_err(ClaimOutcome::Failed)?;
+    let (target, at, user) = prepared.map_err(ClaimOutcome::Failed)?;
     // What no item owns goes before the item gets its worktree: nothing else of the loop runs
     // now, and the item's own earlier worktree (a claim redone) is not its to keep.
     workspace.sweep(shared, identity, &[], false).await;
-    let at = format!("refs/heads/{target}");
     let opened = workspace
         .open_with_setup(
             shared,

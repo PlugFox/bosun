@@ -8,6 +8,7 @@
 
 mod attempt;
 mod commit;
+mod effort;
 mod event;
 mod item;
 mod lease;
@@ -20,6 +21,7 @@ mod schedule;
 
 pub use attempt::{Attempt, AttemptEvent, AttemptState, RunResult};
 pub use commit::Commit;
+pub use effort::{EFFORT_LEVELS, is_effort_level};
 pub use event::{
     ContextWindow, FileTouch, Gap, Message, ModelTotals, Origin, SessionCheck, Tokens, ToolCall,
     ToolResult, TouchKind, Usage, WindowKey, WindowKind, WindowMeta,

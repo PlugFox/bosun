@@ -221,6 +221,7 @@ impl Machine {
             session_key: session.to_owned(),
             started_ms: at(second),
             start_sha: None,
+            effort: None,
         }));
     }
 

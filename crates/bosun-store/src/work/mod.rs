@@ -87,6 +87,9 @@ pub struct RunStart {
     /// HEAD when the session started, the start of its commit range (#8); `None` when it could
     /// not be read.
     pub start_sha: Option<String>,
+    /// The effort level the session asked for (`--effort`); `None` when none was passed. Set on
+    /// the attempt: every session of an attempt asks for the same one.
+    pub effort: Option<String>,
 }
 
 /// A verdict run that started. Keyed by (attempt, run).

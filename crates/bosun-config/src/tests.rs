@@ -1219,6 +1219,39 @@ fn the_repository_hash_covers_the_sweep_only_when_it_is_set() {
 }
 
 #[test]
+fn an_unknown_repository_effort_level_is_refused() {
+    let found = problems(&with_repo("effort = 'ultra'\n"));
+    assert!(
+        found.iter().any(|p| p.contains("repo.bosun.effort")
+            && p.contains("ultra")
+            && bosun_core::EFFORT_LEVELS.iter().all(|l| p.contains(l))),
+        "{found:?}"
+    );
+    for rest in ["effort = ''\n", "effort = 'High'\n", "effort = 3\n"] {
+        let found = problems(&with_repo(rest));
+        assert!(
+            found.iter().any(|p| p.contains("repo.bosun.effort")),
+            "{rest}: {found:?}"
+        );
+    }
+    let config = parse(&with_repo("effort = 'max'\n"), &Local).unwrap();
+    assert_eq!(config.repos["bosun"].effort.as_deref(), Some("max"));
+    let bare = parse(&with_repo(""), &Local).unwrap();
+    assert_eq!(bare.repos["bosun"].effort, None);
+
+    let hash = |text: &str| parse(text, &Local).unwrap().repo_hash("bosun").unwrap();
+    let plain = hash(&with_repo(""));
+    let high = hash(&with_repo("effort = 'high'\n"));
+    assert_ne!(high, plain);
+    assert_ne!(hash(&with_repo("effort = 'low'\n")), high);
+    let sweep = "sweep = { processes = ['devserver'] }\n";
+    assert_ne!(
+        hash(&with_repo(&format!("{sweep}effort = 'high'\n"))),
+        hash(&with_repo(sweep))
+    );
+}
+
+#[test]
 fn the_fast_death_keys_change_the_hash_only_when_not_default() {
     let hash = |text: &str| parse(text, &Local).unwrap().repo_hash("bosun").unwrap();
     let with = |daemon: &str| format!("[daemon]\npark_cap = 4\n{daemon}{}", with_repo(""));

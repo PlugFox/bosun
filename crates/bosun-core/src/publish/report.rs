@@ -93,6 +93,8 @@ pub struct AttemptFacts {
     pub state: AttemptState,
     /// The model its sessions ran.
     pub model: Option<String>,
+    /// The effort level its sessions asked for (`--effort`); `None` when none was passed.
+    pub effort: Option<String>,
     /// Its session ids.
     pub sessions: Vec<String>,
     /// Crash retries used.
@@ -398,6 +400,9 @@ fn attempts(body: &mut String, attempts: &[AttemptFacts], refusals: bool) {
         }
         if let Some(model) = &attempt.model {
             let _ = write!(body, "; model {}", name(model, ID_CAP));
+        }
+        if let Some(effort) = &attempt.effort {
+            let _ = write!(body, "; effort {}", name(effort, ID_CAP));
         }
         if !attempt.sessions.is_empty() {
             let shown = &attempt.sessions[..attempt.sessions.len().min(SESSIONS_MAX)];

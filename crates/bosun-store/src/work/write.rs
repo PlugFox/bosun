@@ -458,6 +458,18 @@ pub(crate) async fn insert_run(conn: &mut SqliteConnection, run: &RunStart) -> R
     )
     .execute(&mut *conn)
     .await?;
+    // Every session of an attempt asks for the same effort (from the snapshot and the hashed
+    // configuration), so the attempt's column is the session's.
+    // Mutant (`mutant_store_attempt_effort_dropped`): the attempt's effort is never set.
+    if !cfg!(mutant_store_attempt_effort_dropped) {
+        sqlx::query!(
+            "UPDATE attempt SET effort = ? WHERE id = ?",
+            run.effort,
+            attempt,
+        )
+        .execute(&mut *conn)
+        .await?;
+    }
     // A transcript ingested before this row is a run session too.
     if !cfg!(mutant_store_run_kind_order) {
         mark_run_session(conn, &run.provider, &run.session_key).await?;

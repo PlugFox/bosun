@@ -55,6 +55,7 @@
 //! build_dirs = ["target"]       # new ignored files are expected here only
 //! queue = { kind = "projects", owner = "me", number = 7 }  # or kind = "local_file", file = '...'
 //! model = "opus"                # the sessions' default model; required with a queue (#133)
+//! effort = "high"               # the sessions' default effort level; default: none passed
 //! verdict = { timeout = "30m" } # and `shell`, default `sh` (from Git on Windows)
 //! landing = { mode = "merge", target = "main", merge = { method = "squash", push = false } }
 //! worktree = { root = 'C:\wt\bosun', setup = "cargo fetch", disk_floor = "20GB", shared_build = { dir = 'C:\wt\bosun-target', resource = "target", env = "CARGO_TARGET_DIR" } }
@@ -91,6 +92,11 @@
 //! - An unknown key of a `policy` is refused, so that a misspelt `protected` cannot leave paths
 //!   unprotected; so is an unknown key of a `resource`, a `worktree`, a
 //!   `worktree.shared_build`, a `landing.merge`, a `landing.pr` or a `sweep`.
+//! - `repo.<name>.model` (#133): the model a session asks for (`--model`) when its card names
+//!   none; required when the repository has a `queue`.
+//! - `repo.<name>.effort` (#7, #9): the effort level a session asks for (`--effort`) when its
+//!   card names none; one of `low`, `medium`, `high`, `xhigh`, `max`
+//!   ([`bosun_core::EFFORT_LEVELS`]), anything else is refused. Default: no `--effort` is passed.
 //! - `repo.<name>.landing` (#8): how an item's commits land. `mode` is `local` (the default),
 //!   `merge` or `pr`. `local` is not "stage 1 only": it is the dogfood mode, `merge` with the
 //!   method `ff` and no push onto the branch the item was claimed from (E6, E20); without a
@@ -269,6 +275,10 @@ pub struct Repo {
     /// none (#5, #133): a name or an alias the runner accepts, e.g. `opus`. Required when
     /// `queue` is set, so no session runs on whatever the agent CLI defaults to.
     pub model: Option<String>,
+    /// `effort`: the effort level a session of the repository asks for (`--effort`) when its
+    /// card names none (#7, #9): one of [`bosun_core::EFFORT_LEVELS`]. Default `None`: no
+    /// `--effort` is passed, and the agent CLI uses its own.
+    pub effort: Option<String>,
     /// `verdict`: the defaults of the item contract's verdict.
     pub verdict: Verdict,
     /// `policy`: the permission policy, effective.
@@ -637,6 +647,7 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
                     identity: r.identity?.0,
                     queue: r.queue,
                     model: r.model,
+                    effort: r.effort,
                     verdict: r.verdict,
                     policy: r.policy,
                     build_dirs: r.build_dirs,

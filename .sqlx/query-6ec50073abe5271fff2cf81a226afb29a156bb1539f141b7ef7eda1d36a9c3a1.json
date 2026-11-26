@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT a.number, a.spawn, a.run, a.state, a.first_run, a.crash_retries,\n                      a.head_sha, a.started_ms, a.ended_ms, a.refusal,\n                      s.hash AS \"snapshot_hash?: String\"\n               FROM attempt a\n               JOIN item i ON i.id = a.item_id\n               LEFT JOIN snapshot s ON s.id = a.snapshot_id\n               WHERE i.item_key = ? ORDER BY a.number",
+  "query": "SELECT a.number, a.spawn, a.run, a.state, a.first_run, a.crash_retries,\n                      a.head_sha, a.started_ms, a.ended_ms, a.refusal, a.effort,\n                      s.hash AS \"snapshot_hash?: String\"\n               FROM attempt a\n               JOIN item i ON i.id = a.item_id\n               LEFT JOIN snapshot s ON s.id = a.snapshot_id\n               WHERE i.item_key = ? ORDER BY a.number",
   "describe": {
     "columns": [
       {
@@ -114,8 +114,19 @@
         }
       },
       {
-        "name": "snapshot_hash?: String",
+        "name": "effort",
         "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "effort"
+          }
+        }
+      },
+      {
+        "name": "snapshot_hash?: String",
+        "ordinal": 11,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -139,8 +150,9 @@
       false,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "ffcfee244ff5e796e31b7a4ff1e8157922fba9ea10f6f6701c0af0e39aa1f000"
+  "hash": "6ec50073abe5271fff2cf81a226afb29a156bb1539f141b7ef7eda1d36a9c3a1"
 }

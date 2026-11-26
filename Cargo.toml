@@ -474,6 +474,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_outbox_comment_without_dependants)",
   "cfg(mutant_api_waiting_across_identities)",
   "cfg(mutant_tui_queue_hides_waits)",
+  # #200: the effort level per repository and per card, passed as `--effort` and recorded.
+  "cfg(mutant_runner_card_effort_ignored)",
+  "cfg(mutant_runner_effort_default_medium)",
+  "cfg(mutant_store_attempt_effort_dropped)",
+  "cfg(mutant_queue_effort_unchecked)",
+  "cfg(mutant_config_effort_unchecked)",
 ] }
 
 [workspace.lints.clippy]

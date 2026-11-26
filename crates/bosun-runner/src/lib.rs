@@ -195,6 +195,9 @@ pub struct SessionContext {
     pub policy: ToolPolicy,
     /// The model, when the repository names one; otherwise the CLI's default.
     pub model: Option<String>,
+    /// The effort level (`--effort`), when the card or the repository names one (one of
+    /// `bosun_core::EFFORT_LEVELS`); otherwise the CLI's default.
+    pub effort: Option<String>,
 }
 
 /// How the child process ended, as the spawner saw it.

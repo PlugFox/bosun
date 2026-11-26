@@ -37,6 +37,7 @@ fn ctx() -> SessionContext {
         repo_mcp_servers: vec!["docs".to_owned()],
         policy: ToolPolicy::default(),
         model: None,
+        effort: None,
     }
 }
 
@@ -316,6 +317,33 @@ fn the_tool_lists_come_from_the_policy_and_push_is_denied() {
     let argv = args(&ClaudeRunner::new("claude").command(&ctx));
     assert!(!argv.iter().any(|a| a == "--disallowedTools"));
     assert_eq!(values(&argv, "--model"), ["opus"]);
+}
+
+#[test]
+fn the_command_passes_the_effort_only_when_given() {
+    let runner = ClaudeRunner::new("claude");
+    let mut ctx = ctx();
+    ctx.effort = Some("xhigh".to_owned());
+    for spawn in [
+        runner.command(&ctx),
+        runner.resume_command(&ctx.session_id, &ctx),
+    ] {
+        let argv = args(&spawn);
+        assert_eq!(
+            argv.iter().filter(|a| *a == "--effort").count(),
+            1,
+            "one effort flag: {argv:?}"
+        );
+        assert_eq!(values(&argv, "--effort"), ["xhigh"]);
+    }
+    ctx.effort = None;
+    for spawn in [
+        runner.command(&ctx),
+        runner.resume_command(&ctx.session_id, &ctx),
+    ] {
+        let argv = args(&spawn);
+        assert!(!argv.iter().any(|a| a == "--effort"), "{argv:?}");
+    }
 }
 
 #[test]

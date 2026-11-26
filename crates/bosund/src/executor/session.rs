@@ -618,6 +618,25 @@ pub(crate) fn session_model(contract: &bosun_queue::Contract, repo: &Repo) -> Op
     contract.model.clone().or_else(|| repo.model.clone())
 }
 
+/// The effort level a session of `repo` asks for (`--effort`, #7, #9): the card's `effort`,
+/// else the repository's `repo.<name>.effort`, else `None`, and then no `--effort` is passed.
+/// There is no default level: the runner presets (#9) will bring one.
+pub(crate) fn session_effort(contract: &bosun_queue::Contract, repo: &Repo) -> Option<String> {
+    if cfg!(mutant_runner_card_effort_ignored) {
+        // Mutant (`mutant_runner_card_effort_ignored`): the card's key is ignored.
+        return repo.effort.clone();
+    }
+    if cfg!(mutant_runner_effort_default_medium) {
+        // Mutant (`mutant_runner_effort_default_medium`): `medium` when neither names one.
+        return contract
+            .effort
+            .clone()
+            .or_else(|| repo.effort.clone())
+            .or_else(|| Some("medium".to_owned()));
+    }
+    contract.effort.clone().or_else(|| repo.effort.clone())
+}
+
 /// Where the session's MCP configuration goes: its directory, outside the working tree.
 fn mcp_path(dir: &Path, repo: &Repo) -> PathBuf {
     if cfg!(mutant_mcp_config_in_tree) {
@@ -819,6 +838,7 @@ pub(crate) async fn session(
             ..ToolPolicy::default()
         },
         model: session_model(&claimed.snapshot.contract, repo),
+        effort: session_effort(&claimed.snapshot.contract, repo),
     };
     let command = match run.mode {
         SpawnMode::Resume => runner.resume_command(&session_id, &ctx),
@@ -877,6 +897,7 @@ pub(crate) async fn session(
         session_key: session_id.to_string(),
         started_ms: now_ms(),
         start_sha: start_head.clone(),
+        effort: ctx.effort.clone(),
     });
     if let Err(e) = shared.deps.writer.write(vec![start]).await {
         shared.trouble(format!("{}: the run cannot be recorded: {e}", run.item));

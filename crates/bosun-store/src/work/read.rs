@@ -54,6 +54,8 @@ pub struct AttemptRow {
     /// Why the daemon refused it before its verdict ([`crate::Write::AttemptRefusal`]), in the
     /// daemon's words; empty when nothing refused it.
     pub refusal: Vec<String>,
+    /// The effort level its sessions asked for (`--effort`); `None` when none was passed.
+    pub effort: Option<String>,
 }
 
 /// One session bosun spawned.
@@ -401,7 +403,7 @@ impl Reader {
     pub async fn attempts(&self, item: &ItemId) -> Result<Vec<AttemptRow>, Error> {
         let rows = sqlx::query!(
             r#"SELECT a.number, a.spawn, a.run, a.state, a.first_run, a.crash_retries,
-                      a.head_sha, a.started_ms, a.ended_ms, a.refusal,
+                      a.head_sha, a.started_ms, a.ended_ms, a.refusal, a.effort,
                       s.hash AS "snapshot_hash?: String"
                FROM attempt a
                JOIN item i ON i.id = a.item_id
@@ -435,6 +437,7 @@ impl Reader {
                             .map_err(|_| Error::Corrupt(format!("attempt refusal {json:?}")))?,
                         None => Vec::new(),
                     },
+                    effort: row.effort,
                 })
             })
             .collect()

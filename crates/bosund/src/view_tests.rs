@@ -188,6 +188,7 @@ impl World {
                     session_key: "session-3".to_owned(),
                     started_ms: T0 + 10,
                     start_sha: None,
+                    effort: None,
                 }),
             ])
             .await

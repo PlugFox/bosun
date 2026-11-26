@@ -10,6 +10,7 @@ fn attempt(number: u32, state: AttemptState, tail: &str) -> AttemptFacts {
         number,
         state,
         model: Some("model-a".into()),
+        effort: None,
         sessions: vec![format!("session-{number}")],
         crash_retries: 0,
         verdict: Some(VerdictFacts {
@@ -123,6 +124,22 @@ fn the_body_starts_with_the_hidden_key() {
     assert!(body.contains("verdict fail, then fail in 12.3 s"), "{body}");
     assert!(
         code_blocks(&body).iter().any(|b| b.contains("error: two")),
+        "{body}"
+    );
+}
+
+#[test]
+fn the_attempt_line_names_its_effort_only_when_one_was_passed() {
+    let mut facts = facts();
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(!body.contains("effort"), "{body}");
+    facts.attempts = vec![AttemptFacts {
+        effort: Some("high".into()),
+        ..attempt(1, AttemptState::Fail, "")
+    }];
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(
+        body.contains("; model `model-a`; effort `high`; sessions `session-1`"),
         "{body}"
     );
 }
@@ -276,6 +293,7 @@ fn maximal_facts_stay_under_the_cap() {
                 number: i,
                 state: AttemptState::Fail,
                 model: Some(big.clone()),
+                effort: Some(big.clone()),
                 sessions: many(&big),
                 crash_retries: 3,
                 verdict: Some(VerdictFacts {

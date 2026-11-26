@@ -12,6 +12,7 @@
 //! budget = { eqv = "2M", wall = "2h" } # eqv tokens (a number, or "500k" / "2M"), wall-clock
 //! runner = "claude"                  # override of the repository's default
 //! model = "opus"
+//! effort = "high"                   # low, medium, high, xhigh or max
 //! allow-protected = ["tests/harness.rs"] # protected paths this item may change
 //! ```
 //! ````
@@ -49,6 +50,9 @@ pub struct Contract {
     pub runner: Option<String>,
     /// The model, overriding the repository's default.
     pub model: Option<String>,
+    /// The effort level, overriding the repository's default: one of
+    /// [`bosun_core::EFFORT_LEVELS`]. `None` with no repository default: no `--effort` is passed.
+    pub effort: Option<String>,
     /// Protected paths (#7) this item may change.
     pub allow_protected: Vec<String>,
 }
@@ -108,7 +112,7 @@ impl fmt::Display for ContractError {
             Self::UnknownKey(key) => write!(
                 f,
                 "unknown key `{key}`; the fields are verdict, verdict-timeout, needs, \
-                 blocked-by, budget, runner, model and allow-protected"
+                 blocked-by, budget, runner, model, effort and allow-protected"
             ),
             Self::Field { key, problem } => write!(f, "`{key}`: {problem}"),
         }
@@ -216,6 +220,7 @@ impl Contract {
             budget: Budget::default(),
             runner: None,
             model: None,
+            effort: None,
             allow_protected: Vec::new(),
         };
         for (key, item) in document.as_table() {
@@ -227,6 +232,7 @@ impl Contract {
                 "budget" => budget(item, &mut errors).map(|b| contract.budget = b),
                 "runner" => text(item).map(|v| contract.runner = Some(v)),
                 "model" => text(item).map(|v| contract.model = Some(v)),
+                "effort" => effort(item).map(|v| contract.effort = Some(v)),
                 "allow-protected" => strings(item).map(|v| contract.allow_protected = v),
                 unknown => {
                     errors.push(ContractError::UnknownKey(unknown.to_owned()));
@@ -265,6 +271,19 @@ fn text(item: &Item) -> Result<String, String> {
         return Err("is empty".to_owned());
     }
     Ok(value.to_owned())
+}
+
+/// An effort level of the runner ([`bosun_core::EFFORT_LEVELS`]).
+fn effort(item: &Item) -> Result<String, String> {
+    let value = text(item)?;
+    // Mutant (`mutant_queue_effort_unchecked`): any non-blank string is taken as a level.
+    if cfg!(mutant_queue_effort_unchecked) || bosun_core::is_effort_level(&value) {
+        return Ok(value);
+    }
+    Err(format!(
+        "{value:?} is not an effort level; the levels are {}",
+        bosun_core::EFFORT_LEVELS.join(", ")
+    ))
 }
 
 /// An array of non-blank strings.
@@ -413,7 +432,8 @@ mod tests {
         let contract = Contract::parse(&body(
             "verdict = \"cargo test\"\nverdict-timeout = \"1h30m\"\nneeds = [\"phone\"]\n\
              blocked-by = [\"#12\", 14]\nbudget = { eqv = \"2M\", wall = 7200 }\n\
-             runner = \"claude\"\nmodel = \"opus\"\nallow-protected = [\"tests/h.rs\"]\n",
+             runner = \"claude\"\nmodel = \"opus\"\neffort = \"xhigh\"\n\
+             allow-protected = [\"tests/h.rs\"]\n",
         ))
         .unwrap();
         assert_eq!(
@@ -429,6 +449,7 @@ mod tests {
                 },
                 runner: Some("claude".into()),
                 model: Some("opus".into()),
+                effort: Some("xhigh".into()),
                 allow_protected: vec!["tests/h.rs".into()],
             }
         );

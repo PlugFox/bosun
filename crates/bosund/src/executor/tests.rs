@@ -35,6 +35,7 @@ use crate::config_watch;
 use crate::events::{Events, Options as EventOptions};
 
 mod blocked;
+mod effort;
 mod fast_death;
 mod landing;
 mod leases;

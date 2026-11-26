@@ -12,7 +12,7 @@
 //!        --append-system-prompt-file <file>
 //!        --permission-mode dontAsk
 //!        --allowedTools <rule>... --disallowedTools <rule>...
-//!        [--model <model>]
+//!        [--model <model>] [--effort <level>]
 //! ```
 //!
 //! with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` ([`AUTO_MEMORY_OFF`]) added to the environment.
@@ -28,6 +28,9 @@
 //!   prompt of every later session, unreviewed. What an agent learns goes into its summary.
 //! - The tools of `bosun` and of the repository's servers are pre-allowed; the policy's
 //!   rules follow. Push is denied unless the policy allows it ([`PUSH_RULES`]).
+//! - `--effort <level>` is passed only when the card or the repository names a level (one of
+//!   `bosun_core::EFFORT_LEVELS`, checked by the configuration and by lint); without one the
+//!   CLI uses its own default.
 //! - Each rule is one argument: a rule with a space (`Bash(git push:*)`) stays one rule.
 //! - `--append-system-prompt-file` is accepted by the CLI although `--help` (2.1.329) lists
 //!   only `--append-system-prompt`.
@@ -163,6 +166,10 @@ impl ClaudeRunner {
         if let Some(model) = &ctx.model {
             args.push("--model".into());
             args.push(model.into());
+        }
+        if let Some(effort) = &ctx.effort {
+            args.push("--effort".into());
+            args.push(effort.into());
         }
         // Mutant `mutant_runner_auto_memory_on` (#135): the switch is not passed.
         let env: Vec<(OsString, OsString)> = if cfg!(mutant_runner_auto_memory_on) {

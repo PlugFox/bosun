@@ -797,6 +797,7 @@ pub(crate) async fn report_facts(
                 number,
                 state: row.attempt.state,
                 model: models_of(number),
+                effort: row.effort.clone(),
                 sessions,
                 crash_retries: row.attempt.crash_retries,
                 verdict,

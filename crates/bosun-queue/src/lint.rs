@@ -657,6 +657,37 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_effort_level_is_refused() {
+        let lint = run(&card(1, Some("cargo test"), "effort = \"ultra\"\n"));
+        assert!(!lint.claimable());
+        let [finding] = &lint.findings[..] else {
+            panic!("{:?}", lint.findings);
+        };
+        assert!(matches!(
+            &finding.code,
+            Code::Contract(ContractError::Field { key, .. }) if key == "effort"
+        ));
+        let shown = finding.to_string();
+        assert!(
+            shown.contains("effort") && shown.contains("ultra"),
+            "{shown}"
+        );
+        for level in bosun_core::EFFORT_LEVELS {
+            assert!(shown.contains(level), "{shown}");
+        }
+        for level in bosun_core::EFFORT_LEVELS {
+            let lint = run(&card(
+                1,
+                Some("cargo test"),
+                &format!("effort = {level:?}\n"),
+            ));
+            assert_eq!(lint.findings, [], "{level}");
+            assert!(lint.claimable(), "{level}");
+            assert_eq!(lint.contract.unwrap().effort.as_deref(), Some(level));
+        }
+    }
+
+    #[test]
     fn a_clean_card_is_claimable() {
         let lint = run(&card(
             2,

@@ -180,7 +180,7 @@ fn landing(canon: &mut Canon, landing: &Landing) {
     });
 }
 
-/// The keys added after the version-1 encoding (#149, and `sweep` after it), appended after `[daemon]`, one tagged
+/// The keys added after the version-1 encoding (#149, then `sweep` and `effort`), appended after `[daemon]`, one tagged
 /// section per group and only when the group is not at its defaults: a repository without
 /// `worktree` whose landing keys are at their defaults keeps its version-1 hash, so installing
 /// a new daemon sends no item in flight to Needs you (E19). Each tag holds a `/`, which no
@@ -213,6 +213,11 @@ fn extensions(canon: &mut Canon, repo: &Repo) {
                 .bool(true)
                 .strs(sweep.processes.iter().map(String::as_str)),
         };
+    }
+    // The sessions' effort level (#7, #9), only when set: a repository without `effort` keeps
+    // the hash it had before the key existed.
+    if always || repo.effort.is_some() {
+        canon.str("effort/2").opt_str(repo.effort.as_deref());
     }
 }
 

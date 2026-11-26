@@ -3164,7 +3164,58 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("view::tests::the_queue_says_what_a_waiting_card_waits_on"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_runner_card_effort_ignored",
+        issue: EFFORT_CARD,
+        breaks: "a session asks for the repository's effort only: the card's `effort` is ignored",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::effort::the_card_effort_overrides_the_repository_effort_and_is_recorded",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_effort_default_medium",
+        issue: EFFORT_CARD,
+        breaks: "a session with no effort on its card or its repository is passed `--effort medium`",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::effort::without_an_effort_no_flag_is_passed_and_none_is_recorded",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_attempt_effort_dropped",
+        issue: EFFORT_CARD,
+        breaks: "the run-start write does not record the session's effort on its attempt",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::effort::the_card_effort_overrides_the_repository_effort_and_is_recorded",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_effort_unchecked",
+        issue: EFFORT_CARD,
+        breaks: "the contract takes any non-blank `effort`, so lint claims a card with an unknown level",
+        package: "bosun-queue",
+        check: Check::Test("lint::tests::an_unknown_effort_level_is_refused"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_effort_unchecked",
+        issue: EFFORT_CARD,
+        breaks: "the configuration takes any word as `repo.<name>.effort`",
+        package: "bosun-config",
+        check: Check::Test("tests::an_unknown_repository_effort_level_is_refused"),
+        platform: None,
+    },
 ];
+
+/// #200, the card of #7 that passes the agent CLI's effort level (`--effort`) from the card's
+/// `effort`, else from `repo.<name>.effort`, and records it on the attempt: the plumbing of the
+/// runner presets decided on #9.
+const EFFORT_CARD: u32 = 200;
 
 /// #199, the card of #5 that shows the Ready cards waiting on an open blocker and names them
 /// in the blocker's Needs-you comment.

@@ -404,6 +404,7 @@ fn run_start(attempt: u32, spawn: u32, session_key: &str) -> Write {
         session_key: session_key.to_owned(),
         started_ms: T0,
         start_sha: None,
+        effort: None,
     })
 }
 

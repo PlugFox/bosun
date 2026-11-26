@@ -77,6 +77,7 @@ pub(crate) struct DraftRepo {
     pub(crate) identity: Option<(String, Option<Location>)>,
     pub(crate) queue: Option<Queue>,
     pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
     pub(crate) verdict: Verdict,
     pub(crate) policy: Policy,
     pub(crate) build_dirs: BTreeSet<String>,
@@ -396,6 +397,7 @@ impl Reader<'_> {
             identity: None,
             queue: None,
             model: None,
+            effort: None,
             verdict: Verdict::default(),
             policy: Policy::default(),
             build_dirs: BTreeSet::new(),
@@ -419,6 +421,7 @@ impl Reader<'_> {
                 }
                 "queue" => repo.queue = self.queue(item, &what, key_at),
                 "model" => repo.model = self.word(item, &what),
+                "effort" => repo.effort = self.effort(item, &what),
                 "verdict" => {
                     if let Some(table) = self.table(item, &what, key_at) {
                         self.verdict(table, &what, &mut repo.verdict);
@@ -968,6 +971,28 @@ impl Reader<'_> {
             self.problem(
                 at,
                 format!("`{what}` is {text:?}; it must be non-empty, with no surrounding spaces"),
+            );
+            return None;
+        }
+        Some(text.to_owned())
+    }
+
+    /// An effort level of the runner ([`bosun_core::EFFORT_LEVELS`]).
+    fn effort(&mut self, item: &Item, what: &str) -> Option<String> {
+        let (text, at) = self.string(item, what)?;
+        // Mutant (`mutant_config_effort_unchecked`): any word is taken as a level.
+        let known = if cfg!(mutant_config_effort_unchecked) {
+            !text.is_empty() && text.trim() == text
+        } else {
+            bosun_core::is_effort_level(text)
+        };
+        if !known {
+            self.problem(
+                at,
+                format!(
+                    "`{what}` is {text:?}; it is one of {}",
+                    bosun_core::EFFORT_LEVELS.join(", ")
+                ),
             );
             return None;
         }

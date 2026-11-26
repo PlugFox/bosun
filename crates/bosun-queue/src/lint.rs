@@ -8,9 +8,17 @@
 //! - Every `blocked-by` target exists, and no card blocks itself.
 //! - Every resource in `needs` is known.
 //!
-//! Two warnings, which leave the card claimable (#44 B): the verdict's last pipeline step sends
-//! stdout to `/dev/null`, or the last pipeline ends in `tail -1` and no step before it is a test
-//! runner. Either way the verdict passes with nothing on stdout worth quoting.
+//! Three warnings, which leave the card claimable (#44 B):
+//!
+//! - the verdict's last pipeline step sends stdout to `/dev/null`, or
+//! - the last pipeline ends in `tail -1` and no step before it is a test runner: either way the
+//!   verdict passes with nothing on stdout worth quoting;
+//! - the card leans on an issue by number (#139): a `#N` in its acceptance section (from a
+//!   heading starting with `Acceptance` to the next heading of its level or higher), in its
+//!   verdict, or right after `see`, `per` or `as in` anywhere in the body. The session cannot
+//!   read GitHub, so a card says what it needs itself. Provenance lines (`Parent:`,
+//!   `Part of`), code spans and fenced blocks, and references such as `owner/repo#3` or `&#39;`
+//!   are not counted. One warning per number, in order of first appearance.
 //!
 //! "The verdict already passes on the base commit" is not here: it runs the verdict, and in
 //! stage 1 runs at claim only (D7 of #7).
@@ -54,6 +62,8 @@ pub enum Code {
     StdoutDiscarded,
     /// The verdict ends in `tail -1` of something that is not a test runner (warning).
     TailOfNonRunner,
+    /// The card leans on an issue by number, which the session cannot read (warning).
+    UnquotedReference(u64),
 }
 
 /// One problem found by [`lint`].
@@ -87,6 +97,11 @@ impl fmt::Display for Finding {
             Code::TailOfNonRunner => f.write_str(
                 "the verdict ends in `tail -1` of a command that is not a test runner: its last \
                  line may not be the verdict's",
+            ),
+            Code::UnquotedReference(n) => write!(
+                f,
+                "the card leans on #{n}, which the session cannot read: quote what it needs \
+                 from #{n} in the card"
             ),
         }
     }
@@ -218,6 +233,12 @@ pub fn lint(card: &Card, context: &LintContext<'_>) -> Lint {
             lint.error(Code::UnknownResource(resource.clone()));
         }
     }
+    // Mutant (`mutant_queue_lint_references_unwarned`): no reference is ever warned about.
+    if !cfg!(mutant_queue_lint_references_unwarned) {
+        for n in leaned_on_references(&card.body, &contract.verdict) {
+            lint.warning(Code::UnquotedReference(n));
+        }
+    }
     lint.contract = Some(contract);
     lint
 }
@@ -273,6 +294,175 @@ fn tail_of_non_runner(steps: &[Step]) -> bool {
         ["-1" | "-n1" | "--lines=1" | "-n+1"] | ["-n" | "--lines", "1"]
     );
     one_line && !before.iter().any(is_test_runner)
+}
+
+/// The issue numbers the card leans on, distinct, in order of first appearance: each `#N` of
+/// the acceptance section, of the verdict, or right after `see`, `per` or `as in` in the body.
+/// Provenance lines, code spans and fenced blocks are skipped; the verdict is read from
+/// `verdict` only (in the body it sits in a fenced block).
+fn leaned_on_references(body: &str, verdict: &str) -> Vec<u64> {
+    let mut found = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut push = |n: u64| {
+        if seen.insert(n) {
+            found.push(n);
+        }
+    };
+    // The open fence: its character and length.
+    let mut fence: Option<(char, usize)> = None;
+    // The level of the acceptance heading, while inside its section.
+    let mut acceptance: Option<usize> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if let Some((c, len)) = fence {
+            let run = trimmed.chars().take_while(|&x| x == c).count();
+            if run >= len && trimmed[run * c.len_utf8()..].trim().is_empty() {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(c) = trimmed.chars().next().filter(|&c| c == '`' || c == '~') {
+            let run = trimmed.chars().take_while(|&x| x == c).count();
+            if run >= 3 {
+                fence = Some((c, run));
+                continue;
+            }
+        }
+        if let Some((level, text)) = heading(trimmed) {
+            if acceptance.is_some_and(|open| level <= open) {
+                acceptance = None;
+            }
+            if text
+                .get(..10)
+                .is_some_and(|start| start.eq_ignore_ascii_case("acceptance"))
+            {
+                acceptance = Some(level);
+            }
+        }
+        // Mutant (`mutant_queue_lint_provenance_warns`): provenance lines are scanned too.
+        if is_provenance(trimmed) && !cfg!(mutant_queue_lint_provenance_warns) {
+            continue;
+        }
+        let text = without_code_spans(line);
+        for (at, n) in references(&text) {
+            if acceptance.is_some() || points_to(&text[..at]) {
+                push(n);
+            }
+        }
+    }
+    for (_, n) in references(verdict) {
+        push(n);
+    }
+    found
+}
+
+/// A Markdown ATX heading: its level and its text.
+fn heading(line: &str) -> Option<(usize, &str)> {
+    let level = line.chars().take_while(|&c| c == '#').count();
+    let rest = &line[level..];
+    ((1..=6).contains(&level) && (rest.is_empty() || rest.starts_with([' ', '\t'])))
+        .then(|| (level, rest.trim()))
+}
+
+/// Whether a line records where the card came from: `Parent:` or `Part of`, after an optional
+/// list marker and optional `**`.
+fn is_provenance(line: &str) -> bool {
+    let line = line
+        .strip_prefix(['-', '*', '+'])
+        .map_or(line, str::trim_start);
+    let line = line.strip_prefix("**").unwrap_or(line);
+    let starts = |prefix: &str| {
+        line.get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    };
+    if starts("part of") {
+        return true;
+    }
+    starts("parent") && {
+        let rest = &line["parent".len()..];
+        rest.strip_prefix("**").unwrap_or(rest).starts_with(':')
+    }
+}
+
+/// `line` with each inline code span replaced by a space. A run of backticks with no closing
+/// run of the same length is text.
+fn without_code_spans(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find('`') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let run = after.len() - after.trim_start_matches('`').len();
+        let body = &after[run..];
+        let mut close = None;
+        let mut at = 0;
+        while let Some(found) = body[at..].find('`') {
+            let from = at + found;
+            let len = body[from..].len() - body[from..].trim_start_matches('`').len();
+            if len == run {
+                close = Some(from + len);
+                break;
+            }
+            at = from + len;
+        }
+        if let Some(end) = close {
+            out.push(' ');
+            rest = &body[end..];
+        } else {
+            out.push_str(&after[..run]);
+            rest = body;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every `#N` of `text` that names an issue: its byte offset and number. Not one preceded by a
+/// letter, digit, `_`, `/`, `&` or `#` (`owner/repo#3`, `&#39;`, `##`), nor digits followed by
+/// a letter.
+fn references(text: &str) -> Vec<(usize, u64)> {
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices('#') {
+        let before = text[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '/' | '&' | '#')) {
+            continue;
+        }
+        let digits = &text[at + 1..];
+        let len = digits.len()
+            - digits
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .len();
+        if len == 0 || digits[len..].starts_with(char::is_alphabetic) {
+            continue;
+        }
+        if let Ok(n) = digits[..len].parse() {
+            out.push((at, n));
+        }
+    }
+    out
+}
+
+/// Whether `before` (the text in front of a `#N`) ends in `see`, `per` or `as in`, then white
+/// space and an optional `:`.
+fn points_to(before: &str) -> bool {
+    let t = before.trim_end();
+    let t = t.strip_suffix(':').map_or(t, str::trim_end);
+    ends_with_word(t, "see").is_some()
+        || ends_with_word(t, "per").is_some()
+        || ends_with_word(t, "in").is_some_and(|rest| {
+            rest.ends_with(char::is_whitespace) && ends_with_word(rest.trim_end(), "as").is_some()
+        })
+}
+
+/// `text` without `word` at its end (any case, a whole word), or `None`.
+fn ends_with_word<'t>(text: &'t str, word: &str) -> Option<&'t str> {
+    let cut = text.len().checked_sub(word.len())?;
+    let rest = text.get(..cut)?;
+    let whole = !rest
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+    (whole && text[cut..].eq_ignore_ascii_case(word)).then_some(rest)
 }
 
 /// The real [`Resolve`]: asks the verdict shell itself, `sh -c 'command -v -- "$1"'`, in the
@@ -400,6 +590,14 @@ mod tests {
             closed: false,
             comments: Vec::new(),
             blocked_by: Vec::new(),
+        }
+    }
+
+    /// A card whose body is `prose`, then the block with `verdict`.
+    fn card_with_body(prose: &str, verdict: &str) -> Card {
+        Card {
+            body: format!("{prose}\n\n```bosun\nverdict = {verdict:?}\n```\n"),
+            ..card(1, Some(verdict), "")
         }
     }
 
@@ -550,6 +748,62 @@ mod tests {
         ] {
             assert_eq!(run(&card(1, Some(verdict), "")).findings, [], "{verdict}");
         }
+    }
+
+    #[test]
+    fn a_bare_issue_reference_in_the_acceptance_or_the_verdict_warns() {
+        for (prose, verdict, n) in [
+            (
+                "Intro.\n\n## Acceptance\n\n- [ ] Behaves as decided in #8.\n",
+                "cargo test",
+                8,
+            ),
+            ("Prose.", "cargo test -p demo # #12", 12),
+            ("Keep the old format, see #9.", "cargo test", 9),
+            ("Name it per #10.", "cargo test", 10),
+            ("As in #11, the flag is hidden.", "cargo test", 11),
+            (
+                "## Acceptance\n\n- [ ] Behaves as #8 says.\n- [ ] And keeps #8.\n",
+                "cargo test",
+                8,
+            ),
+        ] {
+            let lint = run(&card_with_body(prose, verdict));
+            assert_eq!(codes(&lint), [&Code::UnquotedReference(n)], "{prose}");
+            assert_eq!(lint.findings[0].severity, Severity::Warning);
+            assert!(lint.findings[0].to_string().contains(&format!("#{n}")));
+            assert!(lint.claimable(), "{prose}");
+        }
+        // Distinct numbers, in order of first appearance.
+        let lint = run(&card_with_body(
+            "See: #3.\n\n### Acceptance criteria\n\n- [ ] #2, #3 and #1.\n",
+            "cargo test",
+        ));
+        assert_eq!(
+            codes(&lint),
+            [
+                &Code::UnquotedReference(3),
+                &Code::UnquotedReference(2),
+                &Code::UnquotedReference(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn provenance_lines_and_references_outside_the_acceptance_do_not_warn() {
+        let prose = "Parent: #8 (the decisions quoted below)\n\n\
+                     The bug, which #5 first saw, is quoted here.\n\n\
+                     ## Acceptance\n\n\
+                     Part of #7 (found in a run).\n\
+                     - **Part of** #7\n\
+                     - [ ] The fix keeps `see #4` working.\n\
+                     - [ ] owner/repo#3 is untouched; so is &#39; and #4a.\n\n\
+                     ```text\n#2 inside a fence\n```\n\n\
+                     ### Mutants\n\n- [ ] `mutant_demo`\n\n\
+                     ## Notes\n\n\
+                     #6 was looked at too.\n";
+        let lint = run(&card_with_body(prose, "cargo test"));
+        assert_eq!(lint.findings, [], "{prose}");
     }
 
     #[test]

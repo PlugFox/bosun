@@ -56,6 +56,23 @@
 //!   error is `is_error` true, `terminal_reason` `api_error`, exit code 1. A failure before the
 //!   first turn (resuming an unknown session) is `subtype` `error_during_execution` with
 //!   `errors`, exit code 1.
+//! - A refused tool call (see the spike below): `{"type":"system","subtype":"permission_denied",
+//!   "tool_name":...,"tool_use_id":...,"decision_reason_type":"rule","message":...}` when it
+//!   happens, and one entry `{"tool_name":...,"tool_use_id":...,"tool_input":{...}}` of the
+//!   result's `permission_denials` for each refusal of the session.
+//!
+//! # Denials
+//!
+//! [`Runner::denials`] reads the refused calls from the tail: the `result` line's
+//! `permission_denials` when the tail has a result line (of several, each denial once, by its
+//! `tool_use_id`), otherwise (a session killed or crashed before its result) the
+//! `permission_denied` events still in the tail. A denial's target is
+//! the call's subject from `tool_input`: `command` for the shell tools,
+//! `file_path` for the file tools, `path` or `pattern` for the search tools, `url` for fetches,
+//! else the compact JSON of the input; capped at [`Denial::TARGET_CAP`] characters. Its reason
+//! is the matching `permission_denied` event's `decision_reason_type` (by `tool_use_id`) when
+//! the tail still has the event. A refusal by a repository's `PreToolUse` hook is not read: it
+//! shows only as an error `tool_result`, which the bounded tail does not keep.
 //!
 //! **Inferred, not observed** (a limit cannot be produced on demand): a usage limit is a
 //! `rate_limit_event` whose `status` is `rejected`, with the reset in `resetsAt`, and an API
@@ -90,7 +107,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Map, Value};
 
 use crate::{
-    Exit, LiveEntry, McpServer, ProcessExit, Runner, SessionContext, SessionId, Spawn, Tail,
+    Denial, Exit, LiveEntry, McpServer, ProcessExit, Runner, SessionContext, SessionId, Spawn, Tail,
 };
 
 /// The name of the daemon's MCP server in the per-session configuration.
@@ -325,8 +342,104 @@ impl Runner for ClaudeRunner {
         classify(exit, &Seen::read(tail))
     }
 
+    fn denials(&self, tail: &Tail) -> Vec<Denial> {
+        // Mutant `mutant_runner_drop_denials`: the runner reads no denials.
+        if cfg!(mutant_runner_drop_denials) {
+            return Vec::new();
+        }
+        read_denials(tail)
+    }
+
     fn resume_command(&self, id: &SessionId, ctx: &SessionContext) -> Spawn {
         self.spawn(["--resume", id.as_str()], ctx, RESUME_PROMPT.to_owned())
+    }
+}
+
+/// The denials of a tail (see the module doc's "Denials").
+fn read_denials(tail: &Tail) -> Vec<Denial> {
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
+    let mut events: Vec<Value> = Vec::new();
+    let mut listed: Option<Vec<Value>> = None;
+    for line in tail.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match (
+            text(&event, "type").as_deref(),
+            text(&event, "subtype").as_deref(),
+        ) {
+            (Some("system"), Some("permission_denied")) => events.push(event),
+            (Some("result"), _) => {
+                // A session has one result line; should a tail hold more, a denial listed by
+                // several is read once.
+                let listed = listed.get_or_insert_with(Vec::new);
+                for entry in event
+                    .get("permission_denials")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let id = entry.get("tool_use_id").and_then(Value::as_str);
+                    let repeated = id.is_some()
+                        && listed
+                            .iter()
+                            .any(|e| e.get("tool_use_id").and_then(Value::as_str) == id);
+                    if !repeated {
+                        listed.push(entry.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let reason_of = |id: Option<&str>| {
+        let id = id?;
+        events
+            .iter()
+            .find(|e| e.get("tool_use_id").and_then(Value::as_str) == Some(id))
+            .and_then(|e| text(e, "decision_reason_type"))
+    };
+    match listed {
+        Some(listed) => listed
+            .iter()
+            .map(|entry| Denial {
+                tool: text(entry, "tool_name").unwrap_or_default(),
+                target: entry.get("tool_input").and_then(target_of),
+                reason: reason_of(entry.get("tool_use_id").and_then(Value::as_str)),
+            })
+            .collect(),
+        None => events
+            .iter()
+            .map(|event| Denial {
+                tool: text(event, "tool_name").unwrap_or_default(),
+                target: None,
+                reason: text(event, "decision_reason_type"),
+            })
+            .collect(),
+    }
+}
+
+/// The subject of a tool call from its `tool_input`: `command` (the shells), `file_path` (the
+/// file tools), `path` or `pattern` (the search tools), `url` (fetches), else the compact JSON
+/// of the input; capped at [`Denial::TARGET_CAP`] characters. `None` for a missing or empty
+/// input.
+fn target_of(input: &Value) -> Option<String> {
+    let named = ["command", "file_path", "path", "pattern", "url"]
+        .iter()
+        .find_map(|key| input.get(*key).and_then(Value::as_str));
+    let target = match named {
+        Some(text) => text.to_owned(),
+        None if input.is_null() || input.as_object().is_some_and(Map::is_empty) => return None,
+        None => input.to_string(),
+    };
+    Some(cap_chars(&target, Denial::TARGET_CAP))
+}
+
+/// `text` cut to at most `cap` characters, on a character boundary.
+fn cap_chars(text: &str, cap: usize) -> String {
+    match text.char_indices().nth(cap) {
+        Some((at, _)) => text[..at].to_owned(),
+        None => text.to_owned(),
     }
 }
 

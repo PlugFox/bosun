@@ -99,9 +99,9 @@ pub use item::{
     SessionInfo, SessionParams, SessionTail, SnapshotView, TailParams, TransitionView, VerdictView,
 };
 pub use items::{
-    AttemptReport, Evidence, FlakyVerdict, InferredItem, InferredItems, InferredSession, ItemRow,
-    Items, LeaseWaits, ParkedTime, RefusedEdit, RetriedItem, RunCommit, RunSession, TrailerMissing,
-    Trailers, WorktreeUse,
+    AttemptReport, DeniedCall, Evidence, FlakyVerdict, InferredItem, InferredItems,
+    InferredSession, ItemRow, Items, LeaseWaits, ParkedTime, RefusedEdit, RetriedItem, RunCommit,
+    RunSession, TrailerMissing, Trailers, WorktreeUse,
 };
 pub use lease::{
     AcquireParams, AcquireResult, BUSY, ReleaseParams, ReleaseResult, ResourceView, Resources,

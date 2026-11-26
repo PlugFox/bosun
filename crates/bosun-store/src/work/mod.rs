@@ -21,7 +21,7 @@ mod tests;
 pub(crate) mod write;
 
 pub use read::{
-    AgentCallRow, AttemptRow, LandingRow, LeaseWaitRow, OutboxOp, OutboxRow, ProcessRow,
+    AgentCallRow, AttemptRow, DenialRow, LandingRow, LeaseWaitRow, OutboxOp, OutboxRow, ProcessRow,
     RecordedChild, RunRow, StoredItem, TransitionRow, VerdictRow, WorktreeRow,
 };
 pub use report::{ItemHistory, RunCommitRow};
@@ -182,6 +182,46 @@ pub struct RunCommits {
     pub head_sha: String,
     /// The shas of `base..head`, in any order.
     pub commits: Vec<String>,
+}
+
+/// Who refused a tool call of a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenialSource {
+    /// The agent CLI, under the permission lists.
+    Permission,
+    /// A repository's `PreToolUse` hook (reserved: not read yet).
+    Hook,
+}
+
+impl DenialSource {
+    /// Its name as stored: `permission`, `hook`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        codec::denial_source(self)
+    }
+}
+
+/// One tool call a session's agent CLI refused (#7: refusals per attempt).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeniedCall {
+    pub source: DenialSource,
+    /// The tool's name.
+    pub tool: String,
+    /// The call's subject (a command line, a path); `None` when the stream did not say.
+    pub target: Option<String>,
+    /// Why it was refused, in the CLI's words (`rule`); `None` when the stream did not say.
+    pub reason: Option<String>,
+}
+
+/// The refused tool calls of a session that ended, in the order its stream listed them. Keyed
+/// by (attempt, spawn, position): writing it again adds nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunDenials {
+    pub item: ItemId,
+    pub attempt: u32,
+    /// The session's number, as in its [`RunStart`].
+    pub spawn: u32,
+    pub denials: Vec<DeniedCall>,
 }
 
 /// What a worktree is for (#8).

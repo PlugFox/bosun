@@ -4,7 +4,7 @@
 use bosun_core::{Attempt, Column, Exit, Item, ItemId, Reason, RunResult, SpawnMode};
 
 use super::codec;
-use super::{AgentCallKind, PrState, Snapshot, WorktreeKind, WorktreeState};
+use super::{AgentCallKind, DenialSource, PrState, Snapshot, WorktreeKind, WorktreeState};
 use crate::error::{Error, from_db};
 use crate::read::Reader;
 
@@ -56,6 +56,20 @@ pub struct AttemptRow {
     pub refusal: Vec<String>,
     /// The effort level its sessions asked for (`--effort`); `None` when none was passed.
     pub effort: Option<String>,
+}
+
+/// One tool call refused during an attempt ([`crate::Write::RunDenials`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenialRow {
+    pub attempt: u32,
+    /// The session's number.
+    pub spawn: u32,
+    /// Its position among the session's refusals, from 0.
+    pub seq: u32,
+    pub source: DenialSource,
+    pub tool: String,
+    pub target: Option<String>,
+    pub reason: Option<String>,
 }
 
 /// One session bosun spawned.
@@ -761,6 +775,36 @@ impl Reader {
         .await?;
         rows.into_iter()
             .map(|row| Ok((number(row.number, "attempt number")?, row.test_name)))
+            .collect()
+    }
+
+    /// The tool calls refused during the attempts of `item`, by attempt, session and position.
+    ///
+    /// # Errors
+    ///
+    /// A database error, or a stored value that does not read back.
+    pub async fn denials(&self, item: &ItemId) -> Result<Vec<DenialRow>, Error> {
+        let rows = sqlx::query!(
+            "SELECT a.number, d.spawn, d.seq, d.source, d.tool, d.target, d.reason
+             FROM attempt_denial d JOIN attempt a ON a.id = d.attempt_id
+             JOIN item i ON i.id = a.item_id
+             WHERE i.item_key = ? ORDER BY a.number, d.spawn, d.seq",
+            item.0,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(DenialRow {
+                    attempt: number(row.number, "attempt number")?,
+                    spawn: number(row.spawn, "spawn number")?,
+                    seq: number(row.seq, "denial position")?,
+                    source: codec::parse_denial_source(&row.source)?,
+                    tool: row.tool,
+                    target: row.target,
+                    reason: row.reason,
+                })
+            })
             .collect()
     }
 

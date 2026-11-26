@@ -68,9 +68,13 @@ use bosun_proc::ChildSpec;
 use bosun_proc::shim::{Record, ShimSpawner, session_record};
 use bosun_runner::claude::{ClaudeRunner, mcp_config};
 use bosun_runner::{
-    LiveEntry, McpServer, ProcessExit, Runner, SessionContext, SessionId, Tail, ToolPolicy, prompt,
+    Denial, LiveEntry, McpServer, ProcessExit, Runner, SessionContext, SessionId, Tail, ToolPolicy,
+    prompt,
 };
-use bosun_store::{NewProcess, ProcessRow, RunCommits, RunEnd, RunRow, RunStart, Write};
+use bosun_store::{
+    DenialSource, DeniedCall, NewProcess, ProcessRow, RunCommits, RunDenials, RunEnd, RunRow,
+    RunStart, Write,
+};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::watch;
@@ -925,7 +929,15 @@ pub(crate) async fn session(
         let write = Write::Process(new_process(run, &session_id, &credential, dir, None));
         if let Err(e) = shared.deps.writer.write(vec![write]).await {
             shared.trouble(format!("{}: the session's shim: {e}", run.item));
-            end(shared, run, Exit::Crash, start_head.as_deref(), &git_repo).await;
+            end(
+                shared,
+                run,
+                Exit::Crash,
+                start_head.as_deref(),
+                &git_repo,
+                &[],
+            )
+            .await;
             return crash;
         }
     }
@@ -944,7 +956,15 @@ pub(crate) async fn session(
             if let Some(dir) = &shim_dir {
                 process_gone(shared, run, &session_record(dir)).await;
             }
-            end(shared, run, Exit::Crash, start_head.as_deref(), &git_repo).await;
+            end(
+                shared,
+                run,
+                Exit::Crash,
+                start_head.as_deref(),
+                &git_repo,
+                &[],
+            )
+            .await;
             return crash;
         }
     };
@@ -1263,7 +1283,16 @@ async fn follow(
             shared.options.mcp.display(),
             shared.options.handshake.as_secs()
         ));
-        end(shared, run, Exit::Crash, start_head.as_deref(), &git_repo).await;
+        let denials = runner.denials(&tail);
+        end(
+            shared,
+            run,
+            Exit::Crash,
+            start_head.as_deref(),
+            &git_repo,
+            &denials,
+        )
+        .await;
         shared.publish(EventBody::SessionEnded {
             item: run.item.to_string(),
             attempt: run.attempt,
@@ -1285,7 +1314,16 @@ async fn follow(
         // Killed by the daemon: recorded as a crash; the machine has moved on already.
         None => (Exit::Crash, None),
     };
-    end(shared, run, exit, start_head.as_deref(), &git_repo).await;
+    let denials = runner.denials(&tail);
+    end(
+        shared,
+        run,
+        exit,
+        start_head.as_deref(),
+        &git_repo,
+        &denials,
+    )
+    .await;
     shared.publish(EventBody::SessionEnded {
         item: run.item.to_string(),
         attempt: run.attempt,
@@ -1691,8 +1729,16 @@ fn mode_name(mode: SpawnMode) -> &'static str {
     }
 }
 
-/// Records the end of a session: the run row's exit and HEAD, and its commit range (#72).
-async fn end(shared: &Shared, run: &Run, exit: Exit, start_head: Option<&str>, git_repo: &Git) {
+/// Records the end of a session: the run row's exit and HEAD, its commit range (#72) and the
+/// tool calls its CLI denied (#7), read from its tail by the caller.
+async fn end(
+    shared: &Shared,
+    run: &Run,
+    exit: Exit,
+    start_head: Option<&str>,
+    git_repo: &Git,
+    denials: &[Denial],
+) {
     let (head, commits) = {
         let git_repo = git_repo.clone();
         let start = start_head.map(str::to_owned);
@@ -1722,6 +1768,23 @@ async fn end(shared: &Shared, run: &Run, exit: Exit, start_head: Option<&str>, g
             base_sha: base.to_owned(),
             head_sha: head,
             commits,
+        }));
+    }
+    // Mutant (`mutant_loop_denials_not_written`): the session's denials are not stored.
+    if !denials.is_empty() && !cfg!(mutant_loop_denials_not_written) {
+        writes.push(Write::RunDenials(RunDenials {
+            item: run.item.clone(),
+            attempt: run.attempt,
+            spawn: run.spawn,
+            denials: denials
+                .iter()
+                .map(|d| DeniedCall {
+                    source: DenialSource::Permission,
+                    tool: d.tool.clone(),
+                    target: d.target.clone(),
+                    reason: d.reason.clone(),
+                })
+                .collect(),
         }));
     }
     if let Err(e) = shared.deps.writer.write(writes).await {

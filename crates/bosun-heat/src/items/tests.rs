@@ -15,7 +15,8 @@ use bosun_core::{
 };
 use bosun_ingest::{Ingest, Options as IngestOptions, claude};
 use bosun_store::{
-    AgentCall, AgentCallKind, NewItem, Options, RunCommits, RunEnd, RunStart, Store, Write,
+    AgentCall, AgentCallKind, DenialSource, DeniedCall, NewItem, Options, RunCommits, RunDenials,
+    RunEnd, RunStart, Store, Write,
 };
 use tempfile::TempDir;
 
@@ -310,7 +311,8 @@ fn trailers<'a>(item: &'a str, session: &'a str) -> [(&'a str, &'a str); 3] {
 /// its verdict twice; attempt 2 runs S2 and its verdict is flaky; landed. Commits 1 and 2 are
 /// attempt 1's (one per span of S1), 3 is attempt 2's. Item B runs S3, whose commit 4 has no
 /// `Run:` or `Session:` trailer, and is refused for touching a protected path. Commit 5 is
-/// made in the interactive session I1, inside S2's time span, and names item A.
+/// made in the interactive session I1, inside S2's time span, and names item A. S2's CLI refused
+/// one tool call, a push.
 fn seed() -> Vec<Write> {
     let mut a = Machine::new(item_a());
     a.go(0, &Event::Claim);
@@ -344,6 +346,17 @@ fn seed() -> Vec<Write> {
         head_sha: None,
         refused: true,
         at_ms: at(2005),
+    }));
+    a.writes.push(Write::RunDenials(RunDenials {
+        item: item_a(),
+        attempt: 2,
+        spawn: a.attempt().1,
+        denials: vec![DeniedCall {
+            source: DenialSource::Permission,
+            tool: "Bash".to_owned(),
+            target: Some("git push origin HEAD".to_owned()),
+            reason: Some("rule".to_owned()),
+        }],
     }));
     a.exit(2100, Exit::Ok, (2, 3), &[3]);
     a.preconditions(2101);

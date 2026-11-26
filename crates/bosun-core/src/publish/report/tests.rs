@@ -21,6 +21,7 @@ fn attempt(number: u32, state: AttemptState, tail: &str) -> AttemptFacts {
             tail: tail.into(),
         }),
         refusal: Vec::new(),
+        denials: Vec::new(),
     }
 }
 
@@ -142,6 +143,67 @@ fn the_attempt_line_names_its_effort_only_when_one_was_passed() {
         body.contains("; model `model-a`; effort `high`; sessions `session-1`"),
         "{body}"
     );
+}
+
+#[test]
+fn denied_calls_name_their_targets_only_off_a_public_repository() {
+    // Joined at run time, so the source holds no token-shaped literal.
+    let token = format!("{}{}", "ghp", "_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij");
+    let denied = |tool: &str, target: &str| DeniedCall {
+        tool: tool.into(),
+        target: Some(target.into()),
+    };
+    let mut facts = facts();
+    facts.attempts = vec![AttemptFacts {
+        denials: vec![
+            denied("Bash", "git push origin HEAD"),
+            denied("Edit", "/fixture/repo-a/.github/workflows/ci.yml"),
+            denied(
+                "Bash",
+                &format!("curl -H 'Authorization: token {token}' example.invalid"),
+            ),
+        ],
+        ..attempt(1, AttemptState::Fail, "")
+    }];
+
+    // A public repository gets the count per tool, never a target.
+    let body = render_report(&facts, ReportOptions::for_repository(true));
+    assert!(
+        body.contains("; 3 tool calls denied (Bash 2, Edit 1); model `model-a`"),
+        "{body}"
+    );
+    for target in ["git push", "ci.yml", "curl", &token] {
+        assert!(!body.contains(target), "{target}: {body}");
+    }
+
+    // A private one names each call and its target as code spans, the secret redacted.
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(
+        body.contains(
+            "; 3 tool calls denied: `Bash` `git push origin HEAD`, \
+             `Edit` `/fixture/repo-a/.github/workflows/ci.yml`, `Bash` `curl"
+        ),
+        "{body}"
+    );
+    assert!(!body.contains(&token), "{body}");
+    assert!(body.contains("[redacted]"), "{body}");
+
+    // One call is a call, and an attempt without any says nothing.
+    facts.attempts[0].denials.truncate(1);
+    let body = render_report(&facts, ReportOptions::for_repository(true));
+    assert!(body.contains("; 1 tool call denied (Bash 1)"), "{body}");
+    facts.attempts[0].denials.clear();
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(!body.contains("denied"), "{body}");
+
+    // Past the budget the rest are counted.
+    facts.attempts[0].denials = vec![denied("Bash", &"y".repeat(200)); 30];
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(
+        body.contains("; 30 tool calls denied: `Bash` `yyy"),
+        "{body}"
+    );
+    assert!(body.contains(" more; model `model-a`"), "{body}");
 }
 
 #[test]
@@ -304,6 +366,13 @@ fn maximal_facts_stay_under_the_cap() {
                     tail: lines.clone(),
                 }),
                 refusal: many(&lines),
+                denials: many(&big)
+                    .into_iter()
+                    .map(|target| DeniedCall {
+                        tool: big.clone(),
+                        target: Some(target),
+                    })
+                    .collect(),
             })
             .collect(),
         flaky_tests: many(&big),
@@ -396,6 +465,13 @@ fn the_agents_summary_is_quoted_marked_and_inert() {
             tail: CORPUS.join("\n"),
         }),
         refusal: corpus.clone(),
+        denials: corpus
+            .iter()
+            .map(|target| DeniedCall {
+                tool: target.clone(),
+                target: Some(target.clone()),
+            })
+            .collect(),
         ..attempt(1, AttemptState::Fail, "")
     }];
     facts.summary = Some(AgentSummary {

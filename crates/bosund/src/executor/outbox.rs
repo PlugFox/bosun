@@ -37,8 +37,8 @@ use std::time::Duration;
 
 use bosun_config::Config;
 use bosun_core::publish::{
-    self, AgentSummary, AttemptFacts, DiffStat, Landing, LandingMode, ParkedFacts, ReportFacts,
-    ReportOptions, VerdictFacts,
+    self, AgentSummary, AttemptFacts, DeniedCall, DiffStat, Landing, LandingMode, ParkedFacts,
+    ReportFacts, ReportOptions, VerdictFacts,
 };
 use bosun_core::{Column, ItemId, Outcome, ParkReason, Reason, State};
 use bosun_queue::{Owned, QueueError};
@@ -737,6 +737,7 @@ pub(crate) async fn report_facts(
     let calls = reader.agent_calls(item).await.map_err(e)?;
     let transitions = reader.transitions(item).await.map_err(e)?;
     let flaky = reader.flaky_tests(item).await.map_err(e)?;
+    let denials = reader.denials(item).await.map_err(e)?;
     // The item's runs, exact, as `bosun report` bills them (#72).
     let row = bosun_heat::item_row(
         reader,
@@ -802,6 +803,14 @@ pub(crate) async fn report_facts(
                 crash_retries: row.attempt.crash_retries,
                 verdict,
                 refusal: row.refusal.clone(),
+                denials: denials
+                    .iter()
+                    .filter(|d| d.attempt == number)
+                    .map(|d| DeniedCall {
+                        tool: d.tool.clone(),
+                        target: d.target.clone(),
+                    })
+                    .collect(),
             }
         })
         .collect();

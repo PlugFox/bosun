@@ -22,8 +22,8 @@ use crate::error::{Error, from_db, to_db};
 use crate::read;
 use crate::work::write as work;
 use crate::work::{
-    AgentCall, LandingRow, NewItem, NewProcess, NewWorktree, RunCommits, RunEnd, RunStart,
-    Snapshot, VerdictEnd, VerdictStart, WorktreeState,
+    AgentCall, LandingRow, NewItem, NewProcess, NewWorktree, RunCommits, RunDenials, RunEnd,
+    RunStart, Snapshot, VerdictEnd, VerdictStart, WorktreeState,
 };
 
 /// How many batches may wait for the writer before senders wait too.
@@ -132,6 +132,9 @@ pub enum Write {
     /// The commit range of a session that ended: each commit of it is linked to the session
     /// exactly (#72). Keyed by (attempt, spawn).
     RunCommits(RunCommits),
+    /// The tool calls a session's agent CLI refused (#7), stored on its attempt. Keyed by
+    /// (attempt, spawn, position in the session): writing it again adds nothing.
+    RunDenials(RunDenials),
     /// A verdict run started, with its child process. Keyed by (attempt, run).
     VerdictStarted(VerdictStart),
     /// A verdict run finished; clears its child process.
@@ -484,6 +487,7 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
         } => work::attempt_refusal(conn, &item, attempt, &reasons).await,
         Write::RunEnded(end) => work::end_run(conn, &end).await,
         Write::RunCommits(range) => work::run_commits(conn, &range).await,
+        Write::RunDenials(denials) => work::run_denials(conn, &denials).await,
         Write::VerdictStarted(start) => work::start_verdict(conn, &start).await,
         Write::VerdictEnded(end) => work::end_verdict(conn, &end).await,
         Write::AgentCall(call) => work::insert_agent_call(conn, &call).await,

@@ -29,6 +29,9 @@ const COMMAND_CAP: usize = 500;
 const LINE_CAP: usize = 300;
 /// The reasons an attempt was refused with, together; each is at most [`LINE_CAP`].
 const REFUSAL_CAP: usize = 1_000;
+/// The tool calls an attempt's CLI denied, together: the entries shown (each a tool and its
+/// target, or a tool and its count), the rest counted.
+const DENIAL_CAP: usize = 500;
 /// A name shown as a code span: a test, a path, a branch.
 const NAME_CAP: usize = 200;
 /// A model name or a session id.
@@ -105,6 +108,18 @@ pub struct AttemptFacts {
     /// refusals, in the daemon's words; empty when nothing refused it. A reason may quote the
     /// repository (a path, a commit message), so the renderer cleans it.
     pub refusal: Vec<String>,
+    /// The tool calls the agent CLI refused during its sessions (#7), in order.
+    pub denials: Vec<DeniedCall>,
+}
+
+/// A tool call the agent CLI refused under the permission lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeniedCall {
+    /// The tool's name.
+    pub tool: String,
+    /// The call's subject (a command line, a path). Agent-influenced: it names files and
+    /// quotes commands, so a public repository's report only counts the calls.
+    pub target: Option<String>,
 }
 
 /// A verdict of one attempt.
@@ -212,7 +227,8 @@ pub struct ReportOptions {
     /// Publish the verdict output tails.
     pub tails: bool,
     /// Publish the reasons an attempt was refused with before its verdict (#137): they name
-    /// files of the working tree and quote commit messages.
+    /// files of the working tree and quote commit messages. Also the targets of the tool calls
+    /// the agent CLI denied (#7): a command line, a path.
     pub refusals: bool,
 }
 
@@ -398,6 +414,7 @@ fn attempts(body: &mut String, attempts: &[AttemptFacts], refusals: bool) {
                 let _ = write!(body, " and {more} more");
             }
         }
+        denials(body, &attempt.denials, refusals);
         if let Some(model) = &attempt.model {
             let _ = write!(body, "; model {}", name(model, ID_CAP));
         }
@@ -618,6 +635,70 @@ fn first_chars_from_end(s: &str, n: usize) -> &str {
         _ if n == 0 => "",
         _ => s,
     }
+}
+
+/// The tool calls an attempt's CLI denied: with `targets`, each tool and its target as code
+/// spans; else only the count per tool, most frequent first. As many entries as fit
+/// [`DENIAL_CAP`], the rest counted.
+fn denials(body: &mut String, denials: &[DeniedCall], targets: bool) {
+    if denials.is_empty() {
+        return;
+    }
+    let n = denials.len();
+    let calls = if n == 1 { "tool call" } else { "tool calls" };
+    // Mutant (`mutant_report_denial_targets_on_public`): the targets are listed on a public
+    // repository too.
+    if !targets && !cfg!(mutant_report_denial_targets_on_public) {
+        let mut by_tool: Vec<(&str, usize)> = Vec::new();
+        for denial in denials {
+            match by_tool.iter_mut().find(|(tool, _)| *tool == denial.tool) {
+                Some((_, count)) => *count += 1,
+                None => by_tool.push((&denial.tool, 1)),
+            }
+        }
+        // A stable sort: a tie keeps the order of the first call.
+        by_tool.sort_by_key(|a| std::cmp::Reverse(a.1));
+        let counts = by_tool.iter().filter_map(|(tool, count)| {
+            let tool = sanitise_inline(&redact_head(tool, ID_CAP), ID_CAP);
+            (!tool.is_empty()).then(|| format!("{tool} {count}"))
+        });
+        let _ = write!(
+            body,
+            "; {n} {calls} denied ({})",
+            fit_entries(counts, by_tool.len())
+        );
+        return;
+    }
+    let entries = denials.iter().filter_map(|denial| {
+        let tool = name(&denial.tool, ID_CAP);
+        if tool.is_empty() {
+            return None;
+        }
+        Some(match denial.target.as_deref().map(|t| name(t, NAME_CAP)) {
+            Some(target) if !target.is_empty() => format!("{tool} {target}"),
+            _ => tool,
+        })
+    });
+    let _ = write!(body, "; {n} {calls} denied: {}", fit_entries(entries, n));
+}
+
+/// `entries` (of `total`; one that renders empty is left out) joined, as many as fit
+/// [`DENIAL_CAP`] (the first always), the rest of `total` counted.
+fn fit_entries(entries: impl Iterator<Item = String>, total: usize) -> String {
+    let mut shown: Vec<String> = Vec::new();
+    let mut used = 0;
+    for text in entries {
+        if !shown.is_empty() && used + chars(&text) > DENIAL_CAP {
+            break;
+        }
+        used += chars(&text);
+        shown.push(text);
+    }
+    let mut out = shown.join(", ");
+    if total > shown.len() {
+        let _ = write!(out, " and {} more", total - shown.len());
+    }
+    out
 }
 
 /// The cleaned and redacted head of `text` ([`scrub`]), long enough for anything that renders

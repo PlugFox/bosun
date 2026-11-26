@@ -929,6 +929,41 @@
       ],
       "type": "object"
     },
+    "DeniedCall": {
+      "description": "The refused calls of one tool on one target.",
+      "properties": {
+        "count": {
+          "description": "Refused calls.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "description": "The items whose attempts made them, sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "target": {
+          "description": "The call's subject (a command line, a path), with secrets redacted\n(`bosun_core::publish::redact`); `null` when the stream did not say.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "description": "The tool's name (`Bash`, `Edit`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "count",
+        "items"
+      ],
+      "type": "object"
+    },
     "Estimates": {
       "description": "Result of `report.estimates`. Its params are those of `report.exact`\n([`crate::ReportParams`]).",
       "properties": {
@@ -2280,6 +2315,14 @@
           },
           "type": "array"
         },
+        "denied_calls": {
+          "default": [],
+          "description": "The tool calls the agent CLI refused under the permission lists during the attempts of\nthe rows' items, per tool and target, most frequent first (then by tool and target):\nwhat the work wanted and could not have.",
+          "items": {
+            "$ref": "#/$defs/DeniedCall"
+          },
+          "type": "array"
+        },
         "flaky": {
           "description": "The flaky verdicts (fail, then pass on the re-run) with their failing tests (#44 D), by\nitem, then attempt.",
           "items": {
@@ -3501,6 +3544,7 @@
           "$ref": "#/$defs/Items",
           "default": {
             "commits": [],
+            "denied_calls": [],
             "flaky": [],
             "lease_waits": [],
             "outside_runs": 0,

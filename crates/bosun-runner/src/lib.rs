@@ -311,6 +311,24 @@ pub enum LiveEntry {
     },
 }
 
+/// A tool call the agent CLI refused under the permission lists (#7: refusals per attempt).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Denial {
+    /// The tool's name (`Bash`, `Edit`, `mcp__docs__search`).
+    pub tool: String,
+    /// The call's subject (a command line, a path, a URL), capped at [`Denial::TARGET_CAP`]
+    /// characters; `None` when the stream did not say.
+    pub target: Option<String>,
+    /// Why the CLI refused it (for Claude Code, the event's `decision_reason_type`, such as
+    /// `rule`), when the stream still says.
+    pub reason: Option<String>,
+}
+
+impl Denial {
+    /// The longest target kept, in characters.
+    pub const TARGET_CAP: usize = 500;
+}
+
 /// A coding-agent CLI driven unattended (#7).
 pub trait Runner {
     /// The command of a new session under the pre-assigned [`SessionContext::session_id`].
@@ -326,6 +344,10 @@ pub trait Runner {
 
     /// The class of the session's end. Never [`Exit::Question`].
     fn classify_exit(&self, exit: ProcessExit, tail: &Tail) -> Exit;
+
+    /// The tool calls the CLI refused during the session, in the order the stream lists them,
+    /// read from the session's tail; none when the tail says nothing about refusals.
+    fn denials(&self, tail: &Tail) -> Vec<Denial>;
 
     /// The command that resumes session `id` (after a limit, a sleep, a crash).
     fn resume_command(&self, id: &SessionId, ctx: &SessionContext) -> Spawn;

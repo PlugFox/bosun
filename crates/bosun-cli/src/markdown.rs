@@ -169,6 +169,7 @@ pub(crate) fn report(report: &Report, out: &mut String) {
     items::items(&report.items, out);
     items::lease_waits(&report.items, out);
     items::worktrees(&report.items, out);
+    items::denied_calls(&report.items, out);
 }
 
 fn total(report: &Report, out: &mut String) {
@@ -856,6 +857,50 @@ mod tests {
         }
         assert!(
             text.find("## Lease waits") > text.find("### Commits of the runs"),
+            "after the existing sections"
+        );
+    }
+
+    /// #7: the refused tool calls of the range, one row per tool and target with its count and
+    /// items, after the existing sections; a report with none prints no heading.
+    /// `mutant_report_drop_denied_calls` drops the section.
+    #[test]
+    fn the_report_lists_denied_tool_calls() {
+        let read = std::fs::read_to_string(golden("../bosun-heat/tests/golden/report.json"));
+        let mut report: Report = serde_json::from_str(&read.unwrap()).unwrap();
+        report.items.denied_calls.clear();
+        let mut text = String::new();
+        super::report(&report, &mut text);
+        assert!(!text.contains("## Denied tool calls"), "{text}");
+
+        report.items.denied_calls = vec![
+            bosun_api::DeniedCall {
+                tool: "Bash".to_owned(),
+                target: Some("git push origin HEAD".to_owned()),
+                count: 3,
+                items: vec!["alpha#2".to_owned(), "alpha#3".to_owned()],
+            },
+            bosun_api::DeniedCall {
+                tool: "WebFetch".to_owned(),
+                target: Some("https://example.invalid/docs".to_owned()),
+                count: 1,
+                items: vec!["alpha#3".to_owned()],
+            },
+        ];
+        let mut text = String::new();
+        super::report(&report, &mut text);
+        let section = text
+            .split("## Denied tool calls\n\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no denied tool calls:\n{text}"));
+        let push = section.find("| Bash | git push origin HEAD | 3 | alpha#2, alpha#3 |");
+        let fetch = section.find("| WebFetch | https://example.invalid/docs | 1 | alpha#3 |");
+        assert!(
+            push.is_some() && fetch.is_some() && push < fetch,
+            "both rows, most frequent first:\n{section}"
+        );
+        assert!(
+            text.find("## Denied tool calls") > text.find("### Commits of the runs"),
             "after the existing sections"
         );
     }

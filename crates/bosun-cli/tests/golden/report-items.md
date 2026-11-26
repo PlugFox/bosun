@@ -146,6 +146,14 @@ The worktrees on disk now, whatever the range, with their sizes when last measur
 | local:demo#2 | item | quarantined (blocked by target/lock) | 512 B | /synthetic/worktrees/demo-2 |
 | total of 2 |  |  | 3.0 MiB |  |
 
+## Denied tool calls
+
+The tool calls the agent CLI refused under the permission lists during the attempts of the items above, per tool and target (secrets redacted), most frequent first.
+
+| tool | target | count | items |
+| --- | --- | ---: | --- |
+| Bash | git push origin HEAD | 1 | local:demo#1 |
+
 ---
 
 ## Estimates

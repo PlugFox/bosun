@@ -10,7 +10,7 @@ use bosun_core::{
     RunResult, SpawnMode, State,
 };
 
-use super::{PrState, WorktreeKind, WorktreeState};
+use super::{DenialSource, PrState, WorktreeKind, WorktreeState};
 use crate::error::Error;
 
 fn corrupt(what: &str, value: &str) -> Error {
@@ -285,6 +285,21 @@ pub(crate) fn effect_kind(kind: EffectKind) -> &'static str {
         EffectKind::Comment(_) => "comment",
         EffectKind::Report => "report",
     }
+}
+
+pub(crate) fn denial_source(source: DenialSource) -> &'static str {
+    match source {
+        DenialSource::Permission => "permission",
+        DenialSource::Hook => "hook",
+    }
+}
+
+pub(crate) fn parse_denial_source(name: &str) -> Result<DenialSource, Error> {
+    Ok(match name {
+        "permission" => DenialSource::Permission,
+        "hook" => DenialSource::Hook,
+        other => return Err(corrupt("denial source", other)),
+    })
 }
 
 pub(crate) fn worktree_kind(kind: WorktreeKind) -> &'static str {

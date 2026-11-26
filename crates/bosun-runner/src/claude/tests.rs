@@ -387,3 +387,61 @@ fn a_reset_in_milliseconds_is_read_as_milliseconds() {
     );
     assert_eq!(legacy_reset("usage limit reached"), None);
 }
+
+#[test]
+fn the_result_lists_the_denied_calls_with_their_targets() {
+    let runner = ClaudeRunner::new("claude");
+    let denials = |text: &str| runner.denials(&Tail::from_text(text));
+    let push = Denial {
+        tool: "Bash".to_owned(),
+        target: Some("git push origin HEAD".to_owned()),
+        reason: Some("rule".to_owned()),
+    };
+
+    let stream = fixture("permission-denied");
+    assert_eq!(denials(&stream), std::slice::from_ref(&push));
+
+    // Killed before its result: the event still in the tail names the tool and the reason.
+    let cut = stream
+        .lines()
+        .filter(|line| !line.starts_with(r#"{"type":"result""#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_ne!(cut, stream);
+    assert_eq!(
+        denials(&cut),
+        [Denial {
+            target: None,
+            ..push
+        }]
+    );
+
+    assert_eq!(denials(&fixture("normal-end")), []);
+
+    let result = r#"{"type":"result","subtype":"success","is_error":false,"result":"done","permission_denials":[{"tool_name":"Edit","tool_use_id":"toolu_e1","tool_input":{"file_path":"src/a.rs","old_string":"a","new_string":"b"}},{"tool_name":"mcp__docs__lookup","tool_use_id":"toolu_m1","tool_input":{"depth":2,"topic":"x"}}]}"#;
+    assert_eq!(
+        denials(result),
+        [
+            Denial {
+                tool: "Edit".to_owned(),
+                target: Some("src/a.rs".to_owned()),
+                reason: None,
+            },
+            Denial {
+                tool: "mcp__docs__lookup".to_owned(),
+                target: Some(r#"{"depth":2,"topic":"x"}"#.to_owned()),
+                reason: None,
+            },
+        ]
+    );
+
+    let long = format!(
+        r#"{{"type":"result","is_error":false,"permission_denials":[{{"tool_name":"Bash","tool_input":{{"command":"{}"}}}}]}}"#,
+        "é".repeat(600)
+    );
+    let capped = denials(&long);
+    assert_eq!(
+        capped[0].target.as_deref().map(|t| t.chars().count()),
+        Some(Denial::TARGET_CAP)
+    );
+}

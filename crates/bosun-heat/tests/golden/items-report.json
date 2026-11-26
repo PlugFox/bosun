@@ -684,6 +684,16 @@
         "bytes": 512,
         "blocking": "target/lock"
       }
+    ],
+    "denied_calls": [
+      {
+        "tool": "Bash",
+        "target": "git push origin HEAD",
+        "count": 1,
+        "items": [
+          "local:demo#1"
+        ]
+      }
     ]
   }
 }

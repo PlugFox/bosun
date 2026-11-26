@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.number, d.spawn, d.seq, d.source, d.tool, d.target, d.reason\n             FROM attempt_denial d JOIN attempt a ON a.id = d.attempt_id\n             JOIN item i ON i.id = a.item_id\n             WHERE i.item_key = ? ORDER BY a.number, d.spawn, d.seq",
+  "describe": {
+    "columns": [
+      {
+        "name": "number",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "name": "spawn",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt_denial",
+            "name": "spawn"
+          }
+        }
+      },
+      {
+        "name": "seq",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempt_denial",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "name": "source",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt_denial",
+            "name": "source"
+          }
+        }
+      },
+      {
+        "name": "tool",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt_denial",
+            "name": "tool"
+          }
+        }
+      },
+      {
+        "name": "target",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt_denial",
+            "name": "target"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt_denial",
+            "name": "reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "e0aa9404984a46b9ed8b52adc3548f0d8d28e824f28cf1a6da5dad6507dcbc3a"
+}

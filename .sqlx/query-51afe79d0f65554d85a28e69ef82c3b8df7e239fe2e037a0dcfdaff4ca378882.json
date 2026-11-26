@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO attempt_denial (attempt_id, spawn, seq, source, tool, target, reason)\n             VALUES (?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT (attempt_id, spawn, seq) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "51afe79d0f65554d85a28e69ef82c3b8df7e239fe2e037a0dcfdaff4ca378882"
+}

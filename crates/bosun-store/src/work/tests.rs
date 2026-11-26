@@ -197,6 +197,47 @@ async fn an_item_reads_back_as_the_machine_left_it() {
         store.reader().attempts(&id()).await.unwrap()[0].refusal,
         ["no commit was made since the base", "a \"quoted\" one"]
     );
+    // The tool calls a session's CLI refused (#7): stored in order; a replay adds nothing.
+    assert_eq!(store.reader().denials(&id()).await.unwrap(), []);
+    let denied = |tool: &str, target: Option<&str>| DeniedCall {
+        source: DenialSource::Permission,
+        tool: tool.to_owned(),
+        target: target.map(str::to_owned),
+        reason: Some("rule".to_owned()),
+    };
+    let denials = Write::RunDenials(RunDenials {
+        item: id(),
+        attempt: 1,
+        spawn: 1,
+        denials: vec![
+            denied("Bash", Some("git push origin HEAD")),
+            denied("Edit", None),
+        ],
+    });
+    store
+        .writer()
+        .write(vec![denials.clone(), denials])
+        .await
+        .unwrap();
+    let stored = store.reader().denials(&id()).await.unwrap();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|d| (
+                d.attempt,
+                d.spawn,
+                d.seq,
+                d.tool.as_str(),
+                d.target.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (1, 1, 0, "Bash", Some("git push origin HEAD")),
+            (1, 1, 1, "Edit", None)
+        ]
+    );
+    assert_eq!(stored[0].reason.as_deref(), Some("rule"));
+    assert_eq!(stored[0].source, DenialSource::Permission);
     assert_eq!(
         store.reader().item_counts().await.unwrap(),
         [("done".to_owned(), 1)]

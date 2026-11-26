@@ -5,8 +5,8 @@ use sqlx::sqlite::SqliteConnection;
 
 use super::codec;
 use super::{
-    AgentCall, AgentCallKind, LandingRow, NewItem, NewProcess, NewWorktree, RunCommits, RunEnd,
-    RunStart, Snapshot, VerdictEnd, VerdictStart, WorktreeState,
+    AgentCall, AgentCallKind, LandingRow, NewItem, NewProcess, NewWorktree, RunCommits, RunDenials,
+    RunEnd, RunStart, Snapshot, VerdictEnd, VerdictStart, WorktreeState,
 };
 use crate::error::{Error, to_db};
 use crate::writer::{Repo, upsert_repo};
@@ -599,6 +599,34 @@ pub(crate) async fn run_commits(
              ON CONFLICT (repo_id, sha) DO NOTHING",
             sha,
             run,
+        )
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Stores a session's refused tool calls on its attempt, numbered in order; a call already stored
+/// at its position stays as it is.
+pub(crate) async fn run_denials(
+    conn: &mut SqliteConnection,
+    denials: &RunDenials,
+) -> Result<(), Error> {
+    let attempt = attempt_id(conn, &denials.item, denials.attempt).await?;
+    for (seq, denial) in denials.denials.iter().enumerate() {
+        let seq = i64::try_from(seq).map_err(|_| Error::OutOfRange("denial position"))?;
+        let source = denial.source.as_str();
+        sqlx::query!(
+            "INSERT INTO attempt_denial (attempt_id, spawn, seq, source, tool, target, reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (attempt_id, spawn, seq) DO NOTHING",
+            attempt,
+            denials.spawn,
+            seq,
+            source,
+            denial.tool,
+            denial.target,
+            denial.reason,
         )
         .execute(&mut *conn)
         .await?;

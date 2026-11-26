@@ -3210,12 +3210,55 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("tests::an_unknown_repository_effort_level_is_refused"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_runner_drop_denials",
+        issue: DENIALS_CARD,
+        breaks: "the Claude runner reads no permission denials from a session's tail",
+        package: "bosun-runner",
+        check: Check::Test("claude::tests::the_result_lists_the_denied_calls_with_their_targets"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_denials_not_written",
+        issue: DENIALS_CARD,
+        breaks: "the session's end stores none of its permission denials on the attempt",
+        package: "bosund",
+        check: Check::Test(DENIALS_SCENE),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_report_denial_targets_on_public",
+        issue: DENIALS_CARD,
+        breaks: "the item report names the targets of denied tool calls on a public repository",
+        package: "bosun-core",
+        check: Check::Test(
+            "publish::report::tests::denied_calls_name_their_targets_only_off_a_public_repository",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_report_drop_denied_calls",
+        issue: DENIALS_CARD,
+        breaks: "`bosun report` omits its section of denied tool calls",
+        package: "bosun-cli",
+        check: Check::Test("markdown::tests::the_report_lists_denied_tool_calls"),
+        platform: None,
+    },
 ];
 
 /// #200, the card of #7 that passes the agent CLI's effort level (`--effort`) from the card's
 /// `effort`, else from `repo.<name>.effort`, and records it on the attempt: the plumbing of the
 /// runner presets decided on #9.
 const EFFORT_CARD: u32 = 200;
+
+/// The card of #7 that stores the agent CLI's permission denials per attempt and shows them in
+/// the item report and in `bosun report` (its own number was not known when it was written; its
+/// parent's stands in).
+const DENIALS_CARD: u32 = 7;
+
+/// The scene of that card.
+const DENIALS_SCENE: &str =
+    "executor::tests::denials::a_denied_tool_call_is_stored_on_its_attempt_and_shown_in_its_report";
 
 /// #199, the card of #5 that shows the Ready cards waiting on an open blocker and names them
 /// in the blocker's Needs-you comment.

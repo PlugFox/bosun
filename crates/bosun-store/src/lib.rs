@@ -51,10 +51,11 @@ pub use link::{CommitLink, Link, LinkedSession};
 pub use read::{Bill, By, Group, Reader, RepoRow};
 pub use report::{CheckRow, ToolRow, UsageRow, VersionHealth, WindowSums};
 pub use work::{
-    AgentCall, AgentCallKind, AgentCallRow, AttemptRow, ItemHistory, LandingRow, LeaseWaitRow,
-    NewItem, NewProcess, NewWorktree, OutboxOp, OutboxRow, PrState, ProcessRow, RecordedChild,
-    RunCommitRow, RunCommits, RunEnd, RunRow, RunStart, Snapshot, StoredItem, TransitionRow,
-    VerdictEnd, VerdictRow, VerdictStart, WorktreeKind, WorktreeRow, WorktreeState,
+    AgentCall, AgentCallKind, AgentCallRow, AttemptRow, DenialRow, DenialSource, DeniedCall,
+    ItemHistory, LandingRow, LeaseWaitRow, NewItem, NewProcess, NewWorktree, OutboxOp, OutboxRow,
+    PrState, ProcessRow, RecordedChild, RunCommitRow, RunCommits, RunDenials, RunEnd, RunRow,
+    RunStart, Snapshot, StoredItem, TransitionRow, VerdictEnd, VerdictRow, VerdictStart,
+    WorktreeKind, WorktreeRow, WorktreeState,
 };
 pub use writer::{Configured, PriceChange, Repo, SourceFile, Write, Writer};
 

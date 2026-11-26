@@ -1,5 +1,6 @@
 //! The loop's sections of the report (#7, #72): items, attempts, retries, flaky verdicts,
-//! refused protected-path edits, time parked, and the commits of the runs.
+//! refused protected-path edits, time parked, the commits of the runs, and the tool calls the
+//! agent CLI refused.
 //!
 //! An item's cost is two numbers that are never summed (#3, "The bill"):
 //!
@@ -54,6 +55,25 @@ pub struct Items {
     /// repository when it names one), in the order they were made.
     #[serde(default)]
     pub worktrees: Vec<WorktreeUse>,
+    /// The tool calls the agent CLI refused under the permission lists during the attempts of
+    /// the rows' items, per tool and target, most frequent first (then by tool and target):
+    /// what the work wanted and could not have.
+    #[serde(default)]
+    pub denied_calls: Vec<DeniedCall>,
+}
+
+/// The refused calls of one tool on one target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeniedCall {
+    /// The tool's name (`Bash`, `Edit`).
+    pub tool: String,
+    /// The call's subject (a command line, a path), with secrets redacted
+    /// (`bosun_core::publish::redact`); `null` when the stream did not say.
+    pub target: Option<String>,
+    /// Refused calls.
+    pub count: u64,
+    /// The items whose attempts made them, sorted.
+    pub items: Vec<String>,
 }
 
 /// The granted waits for one resource instance.

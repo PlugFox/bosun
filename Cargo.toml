@@ -480,6 +480,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_store_attempt_effort_dropped)",
   "cfg(mutant_queue_effort_unchecked)",
   "cfg(mutant_config_effort_unchecked)",
+  # #7: the agent CLI's permission denials are stored per attempt and shown in the item report
+  # (counted on a public repository) and in `bosun report`.
+  "cfg(mutant_runner_drop_denials)",
+  "cfg(mutant_loop_denials_not_written)",
+  "cfg(mutant_report_denial_targets_on_public)",
+  "cfg(mutant_report_drop_denied_calls)",
 ] }
 
 [workspace.lints.clippy]

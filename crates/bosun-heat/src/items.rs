@@ -4,9 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bosun_api::{
-    AttemptReport, Evidence, FlakyVerdict, InferredItem, InferredItems, InferredSession, ItemRow,
-    Items, LeaseWaits, ModelRow, ParkedTime, RefusedEdit, RepoRef, RetriedItem, RunCommit,
-    RunSession, TrailerMissing, Trailers, WorktreeUse,
+    AttemptReport, DeniedCall, Evidence, FlakyVerdict, InferredItem, InferredItems,
+    InferredSession, ItemRow, Items, LeaseWaits, ModelRow, ParkedTime, RefusedEdit, RepoRef,
+    RetriedItem, RunCommit, RunSession, TrailerMissing, Trailers, WorktreeUse,
 };
 use bosun_core::{Exit, PriceTable, SpawnMode};
 use bosun_store::{ItemHistory, LeaseWaitRow, Reader, RunCommitRow, UsageRow};
@@ -203,6 +203,7 @@ pub(crate) async fn items(
     out.refused_edits
         .sort_by(|a, b| (a.ts_ms, &a.item).cmp(&(b.ts_ms, &b.item)));
     out.parked = parked_total.into_values().collect();
+    out.denied_calls = denied_calls(&histories);
 
     let commits = run_commits(reader, scope, &histories).await?;
     add_commits(&mut out, &commits, repo_ref);
@@ -220,6 +221,32 @@ pub(crate) async fn items(
     out.outside_runs = in_range.saturating_sub(linked.len() as u64);
     leases_and_worktrees(reader, scope, &mut out).await?;
     Ok(out)
+}
+
+/// The refused tool calls of `histories`, per tool and redacted target, most frequent first,
+/// then by tool and target.
+fn denied_calls(histories: &[ItemHistory]) -> Vec<DeniedCall> {
+    let mut by: BTreeMap<(String, Option<String>), (u64, BTreeSet<String>)> = BTreeMap::new();
+    for history in histories {
+        for denial in &history.denials {
+            let target = denial.target.as_deref().map(bosun_core::publish::redact);
+            let entry = by.entry((denial.tool.clone(), target)).or_default();
+            entry.0 += 1;
+            entry.1.insert(history.item.item.id.0.clone());
+        }
+    }
+    let mut out: Vec<DeniedCall> = by
+        .into_iter()
+        .map(|((tool, target), (count, items))| DeniedCall {
+            tool,
+            target,
+            count,
+            items: items.into_iter().collect(),
+        })
+        .collect();
+    // A stable sort: equal counts keep the (tool, target) order of the map.
+    out.sort_by_key(|a| std::cmp::Reverse(a.count));
+    out
 }
 
 /// The lease waits of the range and the worktrees on disk or quarantined now, in `scope`'s
@@ -315,6 +342,7 @@ pub async fn item_row(
         transitions: reader.transitions(id).await?,
         flaky_tests: reader.flaky_tests(id).await?,
         agent_calls: reader.agent_calls(id).await?,
+        denials: reader.denials(id).await?,
     };
     let sessions: BTreeSet<SessionKey> = history
         .runs

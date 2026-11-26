@@ -364,6 +364,41 @@ pub(crate) fn worktrees(items: &Items, out: &mut String) {
     more(count, out);
 }
 
+/// The tool calls the agent CLI refused under the permission lists (#7): what the work wanted
+/// and could not have. Omitted when there is none.
+pub(crate) fn denied_calls(items: &Items, out: &mut String) {
+    if items.denied_calls.is_empty() || cfg!(mutant_report_drop_denied_calls) {
+        // Mutant (`mutant_report_drop_denied_calls`): the section is never printed.
+        return;
+    }
+    out.push_str("## Denied tool calls\n\n");
+    out.push_str(
+        "The tool calls the agent CLI refused under the permission lists during the attempts \
+         of the items above, per tool and target (secrets redacted), most frequent first.\n\n",
+    );
+    let mut table = Table::new(&[
+        ("tool", false),
+        ("target", false),
+        ("count", true),
+        ("items", false),
+    ]);
+    for row in items.denied_calls.iter().take(super::LIMIT) {
+        // A multi-line command stays on its row.
+        let target = row.target.as_deref().map_or_else(
+            || "unknown".to_owned(),
+            |t| t.split_whitespace().collect::<Vec<_>>().join(" "),
+        );
+        table.row(vec![
+            row.tool.clone(),
+            target,
+            row.count.to_string(),
+            row.items.join(", "),
+        ]);
+    }
+    table.render(out);
+    more(items.denied_calls.len(), out);
+}
+
 /// The inferred sessions of items, among the estimates.
 pub(crate) fn inferred(items: &InferredItems, out: &mut String) {
     out.push_str("### Items: inferred sessions (estimate)\n\n");

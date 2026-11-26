@@ -26,8 +26,8 @@ mod text;
 
 pub use redact::redact;
 pub use report::{
-    AgentSummary, AttemptFacts, BODY_CAP, Bill, DiffStat, Landing, LandingMode, ParkedFacts,
-    ReportFacts, ReportOptions, VerdictFacts, render_report, report_key,
+    AgentSummary, AttemptFacts, BODY_CAP, Bill, DeniedCall, DiffStat, Landing, LandingMode,
+    ParkedFacts, ReportFacts, ReportOptions, VerdictFacts, render_report, report_key,
 };
 pub use sanitise::{sanitise, sanitise_inline};
 

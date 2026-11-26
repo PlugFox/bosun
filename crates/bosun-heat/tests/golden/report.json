@@ -450,6 +450,7 @@
     "trailer_missing": [],
     "outside_runs": 4,
     "lease_waits": [],
-    "worktrees": []
+    "worktrees": [],
+    "denied_calls": []
   }
 }

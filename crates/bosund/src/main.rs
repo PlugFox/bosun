@@ -54,6 +54,7 @@ mod config_watch;
 #[cfg(all(test, windows))]
 mod console_tests;
 mod control;
+mod doctor;
 mod events;
 mod executor;
 mod item;

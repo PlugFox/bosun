@@ -2895,6 +2895,24 @@ const MUTANTS: &[Mutant] = &[
             "with::tests::a_daemon_that_does_not_come_back_ends_the_wait_without_running_the_command",
         ),
         platform: None,
+    }, // `bosun doctor` asks the daemon to start its `gh` (#131, part 2).
+    Mutant {
+        name: "mutant_api_probe_always_ok",
+        issue: 192,
+        breaks: "doctor.probe reports the daemon's gh as started whatever happened",
+        package: "bosund",
+        check: Check::Test("view_tests::the_doctor_probe_fails_when_the_daemon_cannot_start_gh"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_doctor_daemon_gh_ignored",
+        issue: 192,
+        breaks: "bosun doctor's daemon_gh check is ok whatever the daemon answered",
+        package: "bosun-cli",
+        check: Check::Test(
+            "doctor::tests::the_daemon_gh_check_fails_when_the_daemon_cannot_start_gh",
+        ),
+        platform: None,
     },
 ];
 

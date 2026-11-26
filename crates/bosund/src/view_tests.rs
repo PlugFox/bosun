@@ -97,6 +97,7 @@ impl World {
                 credentials: crate::agent::Credentials::default(),
                 control: crate::control::Control::with_token(TOKEN, None),
                 leases: std::sync::Arc::new(leases),
+                gh: std::path::PathBuf::from("gh"),
             },
             dir,
         };
@@ -872,5 +873,88 @@ async fn a_waiting_item_names_the_resource_and_its_holder() {
             .await;
         assert_eq!(released, json!({"released": true}));
     }
+    world.close().await;
+}
+
+/// Writes a stand-in for `gh` into `dir` that prints `line` (to standard error when `fail`,
+/// then exits 3; else to standard output, then exits 0); its path.
+fn stand_in_gh(dir: &Path, name: &str, line: &str, fail: bool) -> PathBuf {
+    let dir = dir.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    if cfg!(windows) {
+        let path = dir.join("gh.cmd");
+        let (redirect, exit) = if fail { (" 1>&2", 3) } else { ("", 0) };
+        std::fs::write(
+            &path,
+            format!("@echo off\r\necho {line}{redirect}\r\nexit /b {exit}\r\n"),
+        )
+        .unwrap();
+        path
+    } else {
+        let path = dir.join("gh");
+        let (redirect, exit) = if fail { (" 1>&2", 3) } else { ("", 0) };
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho '{line}'{redirect}\nexit {exit}\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+}
+
+/// #131: `doctor.probe` starts the daemon's `gh` and says whether it ran, with why not when it
+/// did not; only an identity the daemon does not serve is an error
+/// (`mutant_api_probe_always_ok` reports the failing stand-in as ok).
+#[tokio::test]
+async fn the_doctor_probe_fails_when_the_daemon_cannot_start_gh() {
+    async fn probe(world: &World) -> Value {
+        world.ok("doctor.probe", json!({"identity": "a"})).await
+    }
+    let mut world = World::new().await;
+
+    world.state.gh = stand_in_gh(
+        world.dir.path(),
+        "failing",
+        "the stand-in cannot start",
+        true,
+    );
+    let failed = probe(&world).await;
+    assert_eq!(failed["identity"], "a");
+    assert_eq!(failed["ok"], false, "{failed}");
+    let detail = failed["detail"].as_str().unwrap();
+    assert!(detail.contains("exit code 3"), "{detail}");
+    assert!(detail.contains("the stand-in cannot start"), "{detail}");
+    assert_eq!(failed["program"], world.state.gh.display().to_string());
+
+    world.state.gh = stand_in_gh(
+        world.dir.path(),
+        "working",
+        "gh version 0.0.0 (demo)",
+        false,
+    );
+    let ran = probe(&world).await;
+    assert_eq!(ran["ok"], true, "{ran}");
+    assert_eq!(ran["detail"], "gh version 0.0.0 (demo)");
+
+    world.state.gh = world
+        .dir
+        .path()
+        .join("nowhere")
+        .join("gh-that-is-not-there");
+    let missing = probe(&world).await;
+    assert_eq!(missing["ok"], false, "{missing}");
+    assert!(!missing["detail"].as_str().unwrap().is_empty(), "{missing}");
+
+    assert_eq!(
+        world
+            .refused("doctor.probe", json!({"identity": "nobody"}))
+            .await,
+        i64::from(code::UNKNOWN_IDENTITY)
+    );
     world.close().await;
 }

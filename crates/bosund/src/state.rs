@@ -104,6 +104,9 @@ pub(crate) struct State {
     pub(crate) control: Control,
     /// The lease manager every loop shares (#8), which `lease.*` reaches too.
     pub(crate) leases: Arc<Leases>,
+    /// The program the daemon runs as `gh` for `doctor.probe`: `gh`, found on its `PATH`; a
+    /// stand-in in tests.
+    pub(crate) gh: PathBuf,
 }
 
 impl State {
@@ -115,6 +118,7 @@ impl State {
             credentials: Credentials::default(),
             control: Control::default(),
             leases: Arc::new(Leases::none()),
+            gh: PathBuf::from("gh"),
         }
     }
 
@@ -224,6 +228,7 @@ pub(crate) async fn run(
         credentials: Credentials::default(),
         control: operator,
         leases: leases.clone(),
+        gh: PathBuf::from("gh"),
     });
 
     let progress = tokio::spawn(watch_ingest(state.clone()));

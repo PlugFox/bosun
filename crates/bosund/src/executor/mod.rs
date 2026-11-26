@@ -173,7 +173,7 @@ use tokio::task::JoinHandle;
 
 use crate::events::{self, Events};
 
-pub(crate) use forge::GhForge;
+pub(crate) use forge::{ForgeError, GhForge, output_within};
 pub(crate) use identity::{GhLogins, Logins};
 pub(crate) use park::{Alive, Clock, SystemClock};
 pub(crate) use recover::next_boot;

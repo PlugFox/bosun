@@ -2966,6 +2966,33 @@
       "pattern": "^(0|[1-9][0-9]*)$",
       "type": "string"
     },
+    "ProbeResult": {
+      "description": "Result of `doctor.probe`. An outcome of the child, whatever it is, is a result, not an API\nerror: the only error is an identity the daemon does not serve.",
+      "properties": {
+        "detail": {
+          "description": "When `ok`, the first line of its standard output; else why not: the OS error when it\ncould not be started, the exit code and the end of its standard error when it exited\nnon-zero, or that it did not answer within the limit.",
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "ok": {
+          "description": "Whether the program started, exited zero and answered within the limit.",
+          "type": "boolean"
+        },
+        "program": {
+          "description": "The program the daemon ran, as it was given to the OS.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "program",
+        "ok",
+        "detail"
+      ],
+      "type": "object"
+    },
     "QueueParams": {
       "description": "Params of `queue.get`.",
       "properties": {
@@ -5044,6 +5071,15 @@
       },
       "result": {
         "$ref": "#/$defs/ControlStatus"
+      }
+    },
+    "doctor.probe": {
+      "description": "Starts the daemon's `gh` once (`gh --version`) and says whether it ran: a daemon that      cannot start children fails here (#131). Reads nothing of the identity's; needs no      operator token.",
+      "params": {
+        "$ref": "#/$defs/IdentityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProbeResult"
       }
     },
     "events.subscribe": {

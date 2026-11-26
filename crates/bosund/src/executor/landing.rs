@@ -37,7 +37,10 @@
 //! #2), read from its git configuration file, never the daemon process's global git identity;
 //! an identity whose author cannot be read refuses the landing.
 //! 6. The clone offers it under [`git::landing_ref`]; the user's repository fetches it (objects
-//!    only, E14) and [`bosun_git::land::fast_forward`] moves the target there (E2): by ref when
+//!    only, E14), the Git LFS objects of the pointers of `<target>..<landed>` are carried from
+//!    the clone's store into the user's (a git fetch never carries them, and the fast-forward's
+//!    smudge would ask a remote for them; a carry that fails refuses the landing, [`carry_lfs`]),
+//!    and [`bosun_git::land::fast_forward`] moves the target there (E2): by ref when
 //!    no checkout has it, by `merge --ff-only` in a clean checkout. A dirty or busy checkout
 //!    defers it: reported once, retried every [`super::Options::poll`] while the item stays in
 //!    `Landing` and the repository claims nothing. A target the user committed on meanwhile
@@ -55,7 +58,8 @@
 //! merged and the user's target and checkout never move ([`Task::pull_request`]):
 //!
 //! 5. The verified head `H` is offered and fetched into the user's repository as in step 6 (the
-//!    offer is dropped again on every path), and pushed from there by name,
+//!    offer is dropped again on every path; the Git LFS objects of `<forge target>..<H>` are
+//!    carried there too, and none is pushed to the forge), and pushed from there by name,
 //!    `git push origin <H>:refs/heads/bosun/<slug>` ([`git::pr_branch`]), under the repository
 //!    identity's tool environment (#2) with the repository's hooks disabled: a replay is a
 //!    no-op. The `bosun/` branches are the daemon's: a head rebased since an earlier push (a
@@ -407,7 +411,7 @@ impl Task<'_> {
         }
 
         // 6. Delivered to the user's repository (E14), moved by E2.
-        if let Err(e) = self.offer(wt, &repo.path, &landed).await {
+        if let Err(e) = self.offer(wt, &repo.path, &t, &landed).await {
             self.drop_offer(wt).await;
             return self.refuse(format!(
                 "the landed commit cannot be fetched into the user's repository: {e}"
@@ -477,34 +481,33 @@ impl Task<'_> {
     }
 
     /// The clone offers `commit` under [`git::landing_ref`] and the user's repository at
-    /// `user` fetches it, objects only (E14). The offer stays: the caller drops it.
+    /// `user` fetches it, objects only (E14); then the Git LFS objects of the pointers of
+    /// `base..commit` (`base` a commit or ref of the clone the user's repository has the
+    /// objects of) are carried from the clone's store into the user's ([`carry_lfs`]), so the
+    /// fast-forward's smudge needs no remote. The offer stays: the caller drops it.
     async fn offer(
         &self,
         wt: &ItemWorktree,
         user: &std::path::Path,
+        base: &str,
         commit: &str,
-    ) -> Result<(), bosun_git::Error> {
+    ) -> Result<(), String> {
         let (clone, user, offered, commit) = (
             wt.workspace.clone_path(),
             user.to_owned(),
             git::landing_ref(&self.spec.item),
             commit.to_owned(),
         );
-        blocking(move || -> Result<(), bosun_git::Error> {
-            Git::new(&clone).run(&["update-ref", &offered, &commit], None)?;
-            let from = clone.to_string_lossy();
-            // Objects only (E14): no `FETCH_HEAD`, no maintenance or gc in the user's `.git`;
-            // the configuration as well as the flags, for a git that ignores the flag.
-            let mut args = vec!["-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch"];
-            args.extend(["--quiet", "--no-tags"]);
-            args.extend(["--no-write-fetch-head", "--no-auto-maintenance"]);
-            if cfg!(mutant_loop_landing_fetch_writes_fetch_head) {
-                // Mutant (`mutant_loop_landing_fetch_writes_fetch_head`): the fetch writes the
-                // user's `FETCH_HEAD` and may start maintenance there.
-                args = vec!["fetch", "--quiet", "--no-tags"];
+        let base = base.to_owned();
+        blocking(move || -> Result<(), String> {
+            fetch_offer(&clone, &user, &offered, &commit).map_err(|e| e.to_string())?;
+            // Mutant (`mutant_loop_lfs_not_carried_to_user`): the user's repository gets the
+            // commit without its Git LFS objects.
+            if !cfg!(mutant_loop_lfs_not_carried_to_user) {
+                carry_lfs(&clone, &user, &base, &commit).map_err(|e| {
+                    format!("its Git LFS objects cannot be carried into the user's repository: {e}")
+                })?;
             }
-            args.extend(["--", &from, &offered]);
-            Git::new(&user).run(&args, None)?;
             Ok(())
         })
         .await
@@ -654,7 +657,9 @@ impl Task<'_> {
         summary: &str,
         facts: &[(String, String)],
     ) -> Result<PullRequest, ForgeError> {
-        let offered = self.offer(wt, &repo.path, h).await;
+        let offered = self
+            .offer(wt, &repo.path, &forge_target_ref(&new.base), h)
+            .await;
         self.drop_offer(wt).await;
         offered.map_err(|e| {
             ForgeError::Refused(format!(
@@ -1304,6 +1309,54 @@ fn fast_forward(
         });
     }
     land::fast_forward(&git, branch, to)
+}
+
+/// The Git LFS objects of the pointers of `base..commit` in the clone at `clone`, carried from
+/// its store into the store of the user's repository at `user`. Nothing is carried when the
+/// clone has no Git LFS store.
+fn carry_lfs(
+    clone: &std::path::Path,
+    user: &std::path::Path,
+    base: &str,
+    commit: &str,
+) -> Result<(), bosun_git::lfs::Error> {
+    let clone = Git::new(clone);
+    let from = bosun_git::lfs::storage(&clone)?;
+    if !from.is_dir() {
+        return Ok(());
+    }
+    let pointers = bosun_git::lfs::pointers_between(&clone, base, commit)?;
+    if pointers.is_empty() {
+        return Ok(());
+    }
+    let to = bosun_git::lfs::storage(&Git::new(user))?;
+    bosun_git::lfs::carry(&from, &to, pointers.iter().map(|p| p.oid.as_str()))?;
+    Ok(())
+}
+
+/// Step 6's offer: `commit` under `offered` in the clone at `clone`, fetched into the user's
+/// repository at `user`, objects only (E14).
+fn fetch_offer(
+    clone: &std::path::Path,
+    user: &std::path::Path,
+    offered: &str,
+    commit: &str,
+) -> Result<(), bosun_git::Error> {
+    Git::new(clone).run(&["update-ref", offered, commit], None)?;
+    let from = clone.to_string_lossy();
+    // Objects only (E14): no `FETCH_HEAD`, no maintenance or gc in the user's `.git`;
+    // the configuration as well as the flags, for a git that ignores the flag.
+    let mut args = vec!["-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch"];
+    args.extend(["--quiet", "--no-tags"]);
+    args.extend(["--no-write-fetch-head", "--no-auto-maintenance"]);
+    if cfg!(mutant_loop_landing_fetch_writes_fetch_head) {
+        // Mutant (`mutant_loop_landing_fetch_writes_fetch_head`): the fetch writes the
+        // user's `FETCH_HEAD` and may start maintenance there.
+        args = vec!["fetch", "--quiet", "--no-tags"];
+    }
+    args.extend(["--", &from, offered]);
+    Git::new(user).run(&args, None)?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -3244,7 +3244,43 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("markdown::tests::the_report_lists_denied_tool_calls"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_git_lfs_carry_unchecked",
+        issue: LFS_CARD,
+        breaks: "a Git LFS object is carried whatever its content hashes to",
+        package: "bosun-git",
+        check: Check::Test("lfs::tests::a_pointer_is_read_and_anything_else_is_not"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_lfs_not_carried_to_user",
+        issue: LFS_CARD,
+        breaks: "a landed commit reaches the user's repository without its Git LFS objects, so \
+                 the fast-forward's smudge fails (on a machine without git-lfs the scene is \
+                 skipped and the mutant survives)",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::lfs::an_lfs_object_committed_in_a_worktree_reaches_the_users_checkout",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_clone_without_lfs_filter",
+        issue: LFS_CARD,
+        breaks: "the daemon's clone pins no Git LFS filter, so worktrees hold pointers (on a \
+                 machine without git-lfs the scene is skipped and the mutant survives)",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::lfs::a_worktree_and_its_verdict_checkout_have_the_lfs_content_of_the_base",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #8 that carries Git LFS objects into the daemon's clone before a checkout and
+/// into the user's repository at landing, and pins Git LFS's filter in the clone (its own
+/// number was not known when it was written; its parent's stands in).
+const LFS_CARD: u32 = 8;
 
 /// #200, the card of #7 that passes the agent CLI's effort level (`--effort`) from the card's
 /// `effort`, else from `repo.<name>.effort`, and records it on the attempt: the plumbing of the

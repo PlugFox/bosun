@@ -81,6 +81,17 @@ impl Git {
         }
     }
 
+    /// [`Git::run`] with bytes in and out: for output that need not be text (`cat-file
+    /// --batch`).
+    pub(crate) fn run_bytes(&self, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>, Error> {
+        let out = Self::exec_bytes(self.command(), args, stdin)?;
+        if out.status.success() {
+            Ok(out.stdout)
+        } else {
+            Err(self.failed(args, &out.stderr))
+        }
+    }
+
     /// Runs a query that exits 1 with no output when there is nothing to report (`config
     /// --get`, `symbolic-ref --quiet`, `rev-parse --verify --quiet`): its trimmed output, or
     /// `None` on exit 1 or empty output.
@@ -136,9 +147,17 @@ impl Git {
     }
 
     fn exec_in(
-        mut command: Command,
+        command: Command,
         args: &[&str],
         stdin: Option<&str>,
+    ) -> Result<std::process::Output, Error> {
+        Self::exec_bytes(command, args, stdin.map(str::as_bytes))
+    }
+
+    fn exec_bytes(
+        mut command: Command,
+        args: &[&str],
+        stdin: Option<&[u8]>,
     ) -> Result<std::process::Output, Error> {
         command.args(args);
         if stdin.is_some() {
@@ -150,7 +169,7 @@ impl Git {
         let writer = match (stdin, child.stdin.take()) {
             (Some(text), Some(mut pipe)) => {
                 let text = text.to_owned();
-                Some(std::thread::spawn(move || pipe.write_all(text.as_bytes())))
+                Some(std::thread::spawn(move || pipe.write_all(&text)))
             }
             _ => None,
         };

@@ -40,6 +40,7 @@ mod effort;
 mod fast_death;
 mod landing;
 mod leases;
+mod lfs;
 mod moved;
 mod recovery;
 mod refusals;

@@ -63,6 +63,11 @@
 //! [`merge::merge_commit`] builds the commit an item lands as (`ff`, `squash` or `no-ff`) with
 //! plumbing, refusing a tree other than the verified one; a new commit gets the trailers.
 //!
+//! # Git LFS (#8)
+//!
+//! [`lfs`] finds the Git LFS pointers of a commit or a range and carries their objects from
+//! one repository's store to another's, each checked against its name; it never runs git-lfs.
+//!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
 #![cfg_attr(
     test,
@@ -73,6 +78,7 @@ mod base;
 mod child;
 mod invoke;
 pub mod land;
+pub mod lfs;
 pub mod merge;
 mod message;
 mod precondition;

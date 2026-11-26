@@ -25,6 +25,19 @@
 //!   system `core.autocrlf=true`, the daemon checked out CRLF files that the agent's git saw
 //!   as modified, and every rebase and commit in the session failed. The clone's config is
 //!   the one scope both read; the repository's own `.gitattributes` still decides.
+//! - The one other exception: when `git lfs version` succeeds, the clone's own config pins Git
+//!   LFS's filter as `git lfs install` writes it ([`LFS_PIN`]: `filter.lfs.clean`, `smudge`,
+//!   `process` and `required`, and the `lfs.repositoryformatversion` git-lfs itself writes on
+//!   first use, which would otherwise change the guarded configuration during a session), set
+//!   the way the line-ending policy is, on an existing clone too. These are fixed values the daemon writes, never the user's configuration, so the
+//!   daemon's git, the agent's and the verdict's clean and smudge the files the repository's
+//!   `.gitattributes` routes through Git LFS whatever their global configuration says. Without
+//!   git-lfs nothing is pinned, and a checkout of such a file holds its pointer.
+//! - Before a worktree or a verdict checkout is made, the Git LFS objects of its commit's
+//!   pointers that the user's repository has are carried from the user's store into the
+//!   clone's ([`lfs::carry`]), so the smudge needs no remote. One the user's repository lacks
+//!   too is asked of a remote by git-lfs, and a checkout that cannot have it fails as git
+//!   says. Landing carries the landed commit's objects the other way ([`super::landing`]).
 //! - The target is fetched from the user's checkout at claim ([`Workspace::sync_target`]),
 //!   fast-forward only: a target the user rewrote is an error, not an overwrite. It is never
 //!   checked out in the clone.
@@ -68,8 +81,8 @@ use std::time::Duration;
 
 use bosun_config::{Identity, Repo};
 use bosun_core::{ItemId, PathStyle, canonical_path};
-use bosun_git::Git;
 use bosun_git::worktree::{self, Floor, FreeSpace, Quarantine, Removal, Worktree};
+use bosun_git::{Git, lfs};
 use bosun_proc::ProcessKey;
 use bosun_queue::lint::verdict_shell;
 use bosun_runner::verdict::{Limits, Outcome, VerdictSpec};
@@ -151,7 +164,41 @@ fn pin_eol(git: &Git) -> Result<(), Error> {
     if cfg!(mutant_loop_clone_without_eol_pin) {
         return Ok(());
     }
-    for (key, value) in EOL_PIN {
+    pin(git, &EOL_PIN)
+}
+
+/// Git LFS's filter as `git lfs install` writes it, pinned in the clone's own config when
+/// git-lfs is installed ([`pin_lfs`]): fixed values, never the user's. With it the key git-lfs
+/// itself writes into a repository's config the first time it runs there
+/// (`lfs.repositoryformatversion`): written by the agent's first clean, it would change the
+/// guarded configuration during the session (#59) and refuse the attempt.
+const LFS_PIN: [(&str, &str); 5] = [
+    ("filter.lfs.clean", "git-lfs clean -- %f"),
+    ("filter.lfs.smudge", "git-lfs smudge -- %f"),
+    ("filter.lfs.process", "git-lfs filter-process"),
+    ("filter.lfs.required", "true"),
+    ("lfs.repositoryformatversion", "0"),
+];
+
+/// Whether `git lfs version` succeeds on this machine; asked once.
+fn git_lfs_installed(git: &Git) -> bool {
+    static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *INSTALLED.get_or_init(|| git.run(&["lfs", "version"], None).is_ok())
+}
+
+/// Sets [`LFS_PIN`] in the clone's own config the way [`pin_eol`] sets its keys, when git-lfs
+/// is installed; without it nothing is pinned.
+fn pin_lfs(git: &Git) -> Result<(), Error> {
+    // Mutant (`mutant_loop_clone_without_lfs_filter`): the clone pins no LFS filter.
+    if cfg!(mutant_loop_clone_without_lfs_filter) || !git_lfs_installed(git) {
+        return Ok(());
+    }
+    pin(git, &LFS_PIN)
+}
+
+/// Sets each of `keys` in `git`'s own config where it holds another value or none.
+fn pin(git: &Git, keys: &[(&str, &str)]) -> Result<(), Error> {
+    for &(key, value) in keys {
         let local = git.optional(&["config", "--local", "--get", key])?;
         if local.as_deref().map(str::trim) != Some(value) {
             git.run(&["config", key, value], None)?;
@@ -195,6 +242,8 @@ pub(crate) enum Error {
     },
     /// A git command failed.
     Git(bosun_git::Error),
+    /// The Git LFS objects of the commit to check out cannot be carried into the clone.
+    Lfs(lfs::Error),
     /// The worktree was not made (below the disk floor among others), or not removed.
     Worktree(worktree::Error),
     /// The worktree's row cannot be written; the worktree was removed again.
@@ -211,6 +260,10 @@ impl fmt::Display for Error {
             ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::Git(e) => e.fmt(f),
+            Self::Lfs(e) => write!(
+                f,
+                "the Git LFS objects cannot be carried into the daemon's clone: {e}"
+            ),
             Self::Worktree(e) => e.fmt(f),
             Self::Store(e) => write!(f, "the worktree cannot be recorded: {e}"),
         }
@@ -223,6 +276,7 @@ impl std::error::Error for Error {
             Self::NotTheClone { .. } => None,
             Self::Io { source, .. } => Some(source),
             Self::Git(e) => Some(e),
+            Self::Lfs(e) => Some(e),
             Self::Worktree(e) => Some(e),
             Self::Store(e) => Some(e),
         }
@@ -232,6 +286,12 @@ impl std::error::Error for Error {
 impl From<bosun_git::Error> for Error {
     fn from(e: bosun_git::Error) -> Self {
         Self::Git(e)
+    }
+}
+
+impl From<lfs::Error> for Error {
+    fn from(e: lfs::Error) -> Self {
+        Self::Lfs(e)
     }
 }
 
@@ -413,6 +473,7 @@ impl Workspace {
                     git.run(&["config", "core.longpaths", "true"], None)?;
                 }
                 pin_eol(&git)?;
+                pin_lfs(&git)?;
                 Ok(git)
             }
             Err(source) => Err(Error::Io { path, source }),
@@ -474,6 +535,7 @@ impl Workspace {
         }
         // A clone made before the pin was: it gets it now, once.
         pin_eol(&git)?;
+        pin_lfs(&git)?;
         Ok(git)
     }
 
@@ -514,6 +576,7 @@ impl Workspace {
         let source = if cfg!(mutant_loop_worktree_in_user_repo) {
             Git::new(&self.user)
         } else {
+            self.carry_lfs_in(at)?;
             self.clone_git()
         };
         let made = match self.config.disk_floor {
@@ -532,6 +595,24 @@ impl Workspace {
             ),
         };
         Ok(made?)
+    }
+
+    /// Carries the Git LFS objects of the pointers of `at` (a commit or a ref of the clone)
+    /// that the user's repository has from its store into the clone's, so the checkout's
+    /// smudge needs no remote. A user's repository without a Git LFS store costs nothing more.
+    fn carry_lfs_in(&self, at: &str) -> Result<(), Error> {
+        let from = lfs::storage(&Git::new(&self.user))?;
+        if !from.is_dir() {
+            return Ok(());
+        }
+        let clone = self.clone_git();
+        let pointers = lfs::pointers(&clone, at)?;
+        if pointers.is_empty() {
+            return Ok(());
+        }
+        let to = lfs::storage(&clone)?;
+        lfs::carry(&from, &to, pointers.iter().map(|p| p.oid.as_str()))?;
+        Ok(())
     }
 
     /// Makes `item`'s worktree, named `name`, at `at` (a commit or a ref of the clone), and

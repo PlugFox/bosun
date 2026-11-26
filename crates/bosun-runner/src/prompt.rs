@@ -9,8 +9,10 @@
 //!   attempt before its verdict, when it did (#137);
 //! - [`Prompt::system`], appended to the CLI's system prompt (Claude:
 //!   `--append-system-prompt-file`): the repository's standing instructions for unattended work
-//!   and the exit protocol. It is the same for every attempt of an item, so a resumed session
-//!   keeps it.
+//!   and the exit protocol, whose last bullet says that the session cannot read GitHub: a
+//!   `#N` in the task is provenance, not a reference to look up, and what the task lacks is a
+//!   question (`ask_question`), not a guess (#139). It is the same for every attempt of an
+//!   item, so a resumed session keeps it.
 //!
 //! A runner without a system-prompt file puts [`Prompt::system`] before [`Prompt::user`].
 //!
@@ -135,6 +137,14 @@ and `blocking: true`, then end the session.
 daemon runs the verdict command, and only its result decides.
 - Commit your work. Leave the working tree clean. Do not push, do not rewrite history below \
 the item's base, and do not edit the verdict's tests or the repository's gate scripts.
+";
+
+/// The last bullet of the exit protocol (#139): the session cannot read GitHub, so a `#N` in
+/// the task is provenance, and what is missing is a question.
+pub const PROVENANCE_RULE: &str = "\
+- This session cannot read GitHub: `gh` and the API refuse it. A `#N` in the task only \
+records where the card came from; it is not something to look up, and everything the task \
+needs is in it. If something you need is missing, call `ask_question` instead of guessing.
 ";
 
 /// Whether a comment is prompt input: not one of the daemon's, by node id or by hidden key.
@@ -354,6 +364,10 @@ pub fn build(input: &PromptInput) -> Prompt {
         system.push_str("\n\n");
     }
     system.push_str(EXIT_PROTOCOL);
+    // Mutant (`mutant_runner_prompt_without_provenance_rule`): the bullet is left out.
+    if !cfg!(mutant_runner_prompt_without_provenance_rule) {
+        system.push_str(PROVENANCE_RULE);
+    }
 
     Prompt { user, system }
 }
@@ -491,6 +505,25 @@ mod tests {
         assert!(prompt.system.contains("submit_summary"));
         assert!(prompt.system.contains("ask_question"));
         assert!(!prompt.user.contains("Exit protocol"));
+    }
+
+    #[test]
+    fn the_system_prompt_says_issue_references_are_provenance_only() {
+        let prompt = build(&input());
+        let line = prompt
+            .system
+            .lines()
+            .find(|l| l.contains("cannot read GitHub"))
+            .unwrap_or_else(|| panic!("no provenance rule in {}", prompt.system));
+        assert!(line.starts_with("- "), "a bullet of its own: {line}");
+        for part in ["`#N`", "ask_question", "instead of guessing"] {
+            assert!(line.contains(part), "the rule lacks {part:?}: {line}");
+        }
+        assert!(
+            !prompt.user.contains("cannot read GitHub"),
+            "{}",
+            prompt.user
+        );
     }
 
     #[test]

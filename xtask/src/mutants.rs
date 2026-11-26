@@ -2776,6 +2776,36 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_queue_lint_references_unwarned",
+        issue: 139,
+        breaks: "a card that leans on an issue the session cannot read passes lint silently",
+        package: "bosun-queue",
+        check: Check::Test(
+            "lint::tests::a_bare_issue_reference_in_the_acceptance_or_the_verdict_warns",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_lint_provenance_warns",
+        issue: 139,
+        breaks: "a provenance line (`Parent:`, `Part of`) warns like a reference the card leans on",
+        package: "bosun-queue",
+        check: Check::Test(
+            "lint::tests::provenance_lines_and_references_outside_the_acceptance_do_not_warn",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_prompt_without_provenance_rule",
+        issue: 139,
+        breaks: "the session is not told that it cannot read GitHub and that a `#N` is provenance only",
+        package: "bosun-runner",
+        check: Check::Test(
+            "prompt::tests::the_system_prompt_says_issue_references_are_provenance_only",
+        ),
+        platform: None,
+    },
 ];
 
 /// #164, the card of #8 that polls the pull request of an item Done in `pr` mode (merged

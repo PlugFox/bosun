@@ -21,6 +21,13 @@
 //! `UNAUTHORIZED`, which it does not. A live credential naming another item is `UNAUTHORIZED`
 //! whatever the guards.
 //!
+//! Limitation: the guard is not bounded in time. A loop whose recovery never ends (its board
+//! stays unreachable, so `recover` keeps failing) holds its guard until the daemon stops, and
+//! meanwhile every unknown credential daemon-wide, of any repository, is `RECOVERING`: a
+//! `bosun-mcp` holding a credential that is gone for good (its session's item was settled
+//! before the restart) retries each call for its full 60 s before it fails, instead of failing
+//! at once. Nothing is admitted that should not be; only that failure is slow.
+//!
 //! A request carrying a credential may call `agent.*` only, and `agent.*` admits nothing but a
 //! live credential naming its own item ([`crate::api`] refuses the rest).
 //!

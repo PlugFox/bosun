@@ -2636,6 +2636,26 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_loop_pr_message_range_local_target",
+        issue: PR_CARD,
+        breaks: "in `pr` mode the commits the forge's target has over the user's local one are judged as the item's",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_forge_target_ahead_of_the_users_is_not_the_items_own_work",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_pr_forge_target_unfollowed",
+        issue: PR_CARD,
+        breaks: "the forge's target fetched at landing is taken for a moved ref by the next preconditions",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_conflict_with_the_forge_target_lands_in_one_attempt",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_loop_pr_refusal_is_retried",
         issue: PR_CARD,
         breaks: "a refused push or pull request is retried as if the forge had not answered",

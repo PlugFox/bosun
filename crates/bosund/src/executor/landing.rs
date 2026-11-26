@@ -12,7 +12,9 @@
 //! 2. The target is fetched from the user's checkout into the daemon's clone, fast-forward only
 //!    ([`super::workspace::Workspace::sync_target`]); a refused fetch (the user rewrote the
 //!    target) is [`Event::LandingRefused`]. The base the item's preconditions compare refs with,
-//!    and the capture of the user's checkout, follow the target ([`Done::Followed`]). A target
+//!    and the capture of the user's checkout, follow the target ([`Done::Followed`]). In `pr`
+//!    mode the target is the forge's instead (E28, [`fetch_forge_target`]), and the base the
+//!    preconditions compare refs with follows its copy in the clone the same way. A target
 //!    that holds the commit the attempt's row says it landed, at it or past it (the user
 //!    committed on it after a fast-forward the daemon crashed behind), is already landed
 //!    ([`already_landed`]): it is not rebased onto again. The row is the attempt's own and its
@@ -278,7 +280,14 @@ impl Task<'_> {
         let t = match how {
             Mode::Pr if !cfg!(mutant_loop_pr_based_on_local_target) => {
                 match self.forge_target(repo, wt, bundle, &target).await {
-                    Some(Ok(t)) => t,
+                    Some(Ok(t)) => {
+                        // Mutant (`mutant_loop_pr_forge_target_unfollowed`): the claim keeps the
+                        // forge's target as it was at claim.
+                        if !cfg!(mutant_loop_pr_forge_target_unfollowed) {
+                            self.follow_forge(&target, &t).await;
+                        }
+                        t
+                    }
                     Some(Err(why)) => return Pass::Done(Some(self.pr_refused(&why).await)),
                     None => return Pass::Done(None),
                 }
@@ -833,6 +842,29 @@ impl Task<'_> {
         if let Err(e) = self.shared.deps.writer.write(writes).await {
             self.shared
                 .trouble(format!("{item}: the moved target cannot be recorded: {e}"));
+        }
+    }
+
+    /// `pr` mode (E28): the daemon fetched the forge's `target` into its clone's
+    /// [`forge_target_ref`] at `t`: the base the preconditions compare refs with takes it in, in
+    /// memory and in the store, as [`Self::follow`] does for the user's target. The user's
+    /// checkout has no such ref, and its capture stays as it is.
+    async fn follow_forge(&mut self, target: &str, t: &str) {
+        let name = forge_target_ref(target);
+        if self.claimed.base.refs.get(&name).map(String::as_str) == Some(t) {
+            return;
+        }
+        self.claimed.base.refs.insert(name, t.to_owned());
+        self.followed = true;
+        let item = self.spec.item.clone();
+        let write = Write::SnapshotRefs {
+            item: item.clone(),
+            refs_json: serde_json::json!(self.claimed.base.refs).to_string(),
+        };
+        if let Err(e) = self.shared.deps.writer.write(vec![write]).await {
+            self.shared.trouble(format!(
+                "{item}: the moved forge target cannot be recorded: {e}"
+            ));
         }
     }
 

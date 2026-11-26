@@ -819,6 +819,7 @@ impl Loop {
             branch: row.branch,
             base: row.base_sha,
         };
+        let base_ref = super::base_ref(repo, &target);
         Ok((
             path,
             Some(super::ItemWorktree {
@@ -826,6 +827,7 @@ impl Loop {
                 worktree,
                 user,
                 target,
+                base_ref,
             }),
         ))
     }

@@ -321,6 +321,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_pr_push_without_lease)",
   "cfg(mutant_forge_tool_without_timeout)",
   "cfg(mutant_loop_pr_based_on_local_target)",
+  "cfg(mutant_loop_pr_message_range_local_target)",
+  "cfg(mutant_loop_pr_forge_target_unfollowed)",
   "cfg(mutant_loop_done_ignored_while_pending)",
   "cfg(mutant_loop_pr_closed_stored_after_event)",
   "cfg(mutant_api_lease_acquire_always_grants)",

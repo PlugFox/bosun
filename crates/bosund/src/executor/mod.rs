@@ -2072,6 +2072,9 @@ impl Loop {
                 }
                 return;
             }
+            // Mutant (`mutant_loop_refusal_kept_after_a_pass`): the last refusal is kept across
+            // a claim that passed, so the same refusal later is not said.
+            Ok(()) if cfg!(mutant_loop_refusal_kept_after_a_pass) => {}
             Ok(()) => self.refused.clear(),
         }
         if !self.register(repo, card, next).await {

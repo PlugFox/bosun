@@ -451,10 +451,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #139: a card is self-contained: lint warns on a `#N` it leans on, and the session's prompt
   # says a `#N` is provenance only.
   "cfg(mutant_queue_lint_references_unwarned)",
+  "cfg(mutant_queue_lint_parent_scanned)",
   "cfg(mutant_queue_lint_provenance_warns)",
   "cfg(mutant_runner_prompt_without_provenance_rule)",
   # #189: a claim refusal and a visibility failure logged once per text.
   "cfg(mutant_loop_claim_refusal_every_poll)",
+  "cfg(mutant_loop_refusal_kept_after_a_pass)",
   "cfg(mutant_board_visibility_every_failure)",
   # #190: a reload names what waits for the next daemon start; a removed repository.
   "cfg(mutant_reload_misses_queue_change)",

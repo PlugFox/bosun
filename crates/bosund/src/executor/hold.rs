@@ -350,7 +350,7 @@ impl Loop {
             at_ms: now,
         };
         if let Err(e) = self.shared.deps.writer.write(vec![note]).await {
-            self.halt(&e.to_string());
+            self.halt("the item's budget note", &e.to_string());
             return;
         }
         self.apply(Event::BudgetExceeded).await;

@@ -46,10 +46,39 @@ pub(crate) enum Read {
     Revert,
 }
 
+/// Whether a column write of an item is still in the outbox, as [`read`] takes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pending {
+    /// None is.
+    No,
+    /// One is.
+    Write,
+    /// One is, and it is the Needs-you write of a pull request closed unmerged (#8): the card
+    /// is still in Done, where the item was until then.
+    PrClosed,
+}
+
+impl From<bool> for Pending {
+    fn from(pending: bool) -> Self {
+        if pending { Self::Write } else { Self::No }
+    }
+}
+
 /// What the card (`None`: gone from the board) says about an item in `state`. `pending`: a
-/// column write of the item is still in the outbox; `restarted`: the `restart` label on the
-/// card was already acted on.
-pub(crate) fn read(state: State, card: Option<&Card>, pending: bool, restarted: bool) -> Read {
+/// column write of the item is still in the outbox ([`Pending`]); `restarted`: the `restart`
+/// label on the card was already acted on.
+pub(crate) fn read(
+    state: State,
+    card: Option<&Card>,
+    pending: impl Into<Pending>,
+    restarted: bool,
+) -> Read {
+    let pending = pending.into();
+    // Mutant (`mutant_loop_done_ignored_while_pending`): any pending write hides a Done the
+    // user moved the card to.
+    let pr_closing = pending == Pending::PrClosed
+        || (pending == Pending::Write && cfg!(mutant_loop_done_ignored_while_pending));
+    let pending = pending != Pending::No;
     let in_flight = state.is_active();
     let owned = in_flight || matches!(state, State::NeedsYou(_));
     if state == State::Claimed {
@@ -78,8 +107,11 @@ pub(crate) fn read(state: State, card: Option<&Card>, pending: bool, restarted: 
         }
         Column::Ready if matches!(state, State::Done(_)) && !pending => Read::Revert,
         // A Done item whose pull request was closed unmerged (#8) is Needs you while its card
-        // is still in Done: the column write is the daemon's own, still in the outbox.
-        Column::Done if in_flight || (owned && !pending) => Read::Command(UserCommand::ManualDone),
+        // is still in Done: the column write is the daemon's own, still in the outbox. Any
+        // other Done is the user's, whatever else is pending.
+        Column::Done if in_flight || (owned && !pr_closing) => {
+            Read::Command(UserCommand::ManualDone)
+        }
         Column::InProgress | Column::Verify | Column::NeedsYou => {
             if in_flight && !restarted && card.labels.iter().any(|l| l == RESTART_LABEL) {
                 return Read::Command(UserCommand::Restart);
@@ -101,6 +133,30 @@ pub(crate) struct Synced {
 }
 
 impl Loop {
+    /// Whether a column write pending for `item`, of the transitions `seqs`, is the Needs-you
+    /// write of its pull request closed unmerged: the item's [`NOTE_PR_CLOSED`] note names one
+    /// of them.
+    ///
+    /// [`NOTE_PR_CLOSED`]: super::pulls::NOTE_PR_CLOSED
+    async fn pr_closing(&self, item: &bosun_core::Item, seqs: &BTreeSet<u32>) -> bool {
+        #[derive(serde::Deserialize)]
+        struct Closed {
+            seq: u32,
+        }
+        if item.state != State::NeedsYou(bosun_core::Reason::LandingRefused) {
+            return false;
+        }
+        self.shared
+            .deps
+            .reader
+            .item_note(&item.id, super::pulls::NOTE_PR_CLOSED)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|text| serde_json::from_str::<Closed>(&text).ok())
+            .is_some_and(|c| seqs.contains(&c.seq))
+    }
+
     /// Polls the board and applies the user's commands. `None` when the board or the store
     /// cannot be read, or when a command changed an item (the next tick schedules).
     #[allow(clippy::too_many_lines)]
@@ -109,13 +165,17 @@ impl Loop {
         let config = self.config();
         let (repo, _) = lookup(&config, &repo_name)?;
         // Read before the poll: a write acknowledged after it is on the board the poll sees.
-        let pending: BTreeSet<ItemId> =
+        // Each item with a column write pending, and the transitions those writes belong to.
+        let pending: BTreeMap<ItemId, BTreeSet<u32>> =
             match outbox::pending(&self.shared.deps.reader, &repo_name).await {
                 Ok(rows) => rows
                     .into_iter()
                     .filter(|r| matches!(r.op, OutboxOp::Project(_)))
-                    .map(|r| r.item)
-                    .collect(),
+                    .fold(BTreeMap::new(), |mut map, r| {
+                        let seqs: &mut BTreeSet<u32> = map.entry(r.item).or_default();
+                        seqs.extend(outbox::key_parts(&r.effect_key).map(|(_, seq, _)| seq));
+                        map
+                    }),
                 Err(e) => {
                     self.shared
                         .trouble(format!("the outbox cannot be read: {e}"));
@@ -176,7 +236,12 @@ impl Loop {
                 None => entry.item.clone(),
             };
             let restarted = self.restarts.contains(id);
-            let mut read = read(item.state, card, pending.contains(id), restarted);
+            let pending = match pending.get(id) {
+                None => Pending::No,
+                Some(seqs) if self.pr_closing(&item, seqs).await => Pending::PrClosed,
+                Some(_) => Pending::Write,
+            };
+            let mut read = read(item.state, card, pending, restarted);
             // Worktree mode (#8, E19): a claim may spend long in the worktree's `setup`; the
             // card moved to Backlog meanwhile (only the user moves it there: the claim found it
             // in Ready) cancels it, and the kill ends the setup at once. Without worktree mode
@@ -460,13 +525,28 @@ mod tests {
         // Done until the column write goes out.
         let closed = State::NeedsYou(Reason::LandingRefused);
         assert_eq!(
-            read(closed, Some(&card(Column::Done, &[])), true, false),
+            read(
+                closed,
+                Some(&card(Column::Done, &[])),
+                Pending::PrClosed,
+                false
+            ),
             Read::Nothing
         );
         assert_eq!(
             read(closed, Some(&card(Column::Done, &[])), false, false),
             Read::Command(UserCommand::ManualDone)
         );
+        // Any other pending write, in any landing mode, leaves the user's Done the user's: an
+        // item that needs the user, its Needs-you comment or column write still queued, is
+        // dragged to Done.
+        for state in [needs, closed] {
+            assert_eq!(
+                read(state, Some(&card(Column::Done, &[])), true, false),
+                Read::Command(UserCommand::ManualDone),
+                "{state:?}"
+            );
+        }
         // A user's column, though, is always the user's.
         assert_eq!(
             read(State::Running, Some(&card(Column::Done, &[])), true, false),

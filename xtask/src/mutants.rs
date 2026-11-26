@@ -2664,6 +2664,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_loop_done_ignored_while_pending",
+        issue: PR_POLL_CARD,
+        breaks: "a user's drag to Done is lost while any column write of the item is pending",
+        package: "bosund",
+        check: Check::Test("executor::commands::tests::a_board_behind_the_outbox_is_not_a_change"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_loop_pr_closed_ignored",
         issue: PR_POLL_CARD,
         breaks: "a pull request closed unmerged is taken for an open one: the item stays Done",

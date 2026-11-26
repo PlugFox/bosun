@@ -2608,6 +2608,16 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_loop_pr_push_without_lease",
+        issue: PR_CARD,
+        breaks: "a head rebased since its branch was pushed cannot be pushed: Needs you",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::landing::a_rebased_head_is_pushed_over_the_branch_pushed_before",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_loop_pr_refusal_is_retried",
         issue: PR_CARD,
         breaks: "a refused push or pull request is retried as if the forge had not answered",

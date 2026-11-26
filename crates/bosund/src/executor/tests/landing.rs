@@ -1006,6 +1006,57 @@ async fn a_landing_redone_after_the_pull_request_opened_opens_no_second_one() {
     );
 }
 
+/// The bare remote already has `bosun/demo-1` at a commit of an earlier push, which the head
+/// the item lands now does not descend from (a head rebased since: a crash with a moved target,
+/// or a card reworked after its pull request closed). The landing pushes over it, with a lease
+/// on what the remote has, and ends Done with the branch at the verified head and one pull
+/// request (`mutant_loop_pr_push_without_lease` pushes plainly: rejected, Needs you).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rebased_head_is_pushed_over_the_branch_pushed_before() {
+    let (scene, fake, remote) = pr_scene("").await;
+    // The earlier push: a commit object of the user's repository on no branch, pushed to the
+    // remote's `bosun/demo-1` directly, never anywhere else.
+    let start = scene.git(&["rev-parse", "HEAD"]);
+    let earlier = scene.git(&[
+        "commit-tree",
+        "HEAD^{tree}",
+        "-p",
+        "HEAD",
+        "-m",
+        "An earlier head",
+    ]);
+    let url = remote.to_string_lossy().into_owned();
+    scene.git(&[
+        "push",
+        "-q",
+        &url,
+        &format!("{earlier}:refs/heads/bosun/demo-1"),
+    ]);
+    assert_eq!(scene.git(&["rev-parse", "HEAD"]), start);
+    assert_eq!(
+        pushed(&scene, &remote),
+        [format!("refs/heads/bosun/demo-1 {earlier}")]
+    );
+
+    scene.write_board(&[card(1, "Rebased", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let row = scene.store.reader().landing(&item(1)).await.unwrap();
+    let head = row.and_then(|r| r.head_sha).expect("the verified head");
+    assert_ne!(head, earlier);
+    assert_eq!(
+        pushed(&scene, &remote),
+        [format!("refs/heads/bosun/demo-1 {head}")]
+    );
+    assert_eq!(fake.prs().len(), 1);
+}
+
 /// A lease a card may need in these scenes.
 const RIG: &str = "[resource.rig]\nkind = \"device\"\ncapacity = 1\nscope = \"machine\"\n";
 

@@ -447,9 +447,11 @@ fn gh(at: &At, args: &[String]) -> Result<String, ForgeError> {
 }
 
 /// A failed push or `gh` call, by what it printed: no answer from the service is
-/// [`ForgeError::Unreachable`]; anything else, the service's no included, is
-/// [`ForgeError::Refused`] (a wait without end is worse than asking the user).
+/// [`ForgeError::Unreachable`], and so is a rate limit, primary or secondary (an HTTP 403 or
+/// 429 that says so): it lifts by itself, so it is waited out. Anything else, the service's no
+/// included, is [`ForgeError::Refused`] (a wait without end is worse than asking the user).
 pub(crate) fn classify(error: String) -> ForgeError {
+    const RATE_LIMITED: &[&str] = &["rate limit", "http 429", "too many requests"];
     const REFUSED: &[&str] = &[
         "[rejected]",
         "[remote rejected]",
@@ -487,6 +489,9 @@ pub(crate) fn classify(error: String) -> ForgeError {
         "http 504",
     ];
     let lower = error.to_lowercase();
+    if RATE_LIMITED.iter().any(|m| lower.contains(m)) {
+        return ForgeError::Unreachable(error);
+    }
     if REFUSED.iter().any(|m| lower.contains(m)) {
         return ForgeError::Refused(error);
     }
@@ -707,6 +712,10 @@ mod tests {
             "error connecting to api.github.com",
             "fatal: unable to access 'https://x/': The requested URL returned error: 502",
             "dial tcp: lookup api.github.com: no such host",
+            "HTTP 403: API rate limit exceeded for user ID 1.",
+            "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes.",
+            "HTTP 429: Too Many Requests",
+            "GraphQL: API rate limit exceeded for user ID 1.",
         ];
         for text in unreachable {
             assert!(

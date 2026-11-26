@@ -432,7 +432,8 @@ impl Loop {
                 process,
                 run,
                 record,
-                spawned,
+                // Guarded from the other loops' process sweeps while it is followed.
+                spawned: self.shared.deps.live.track(spawned),
             }),
             Err(e) => {
                 crate::log::log!(

@@ -546,6 +546,8 @@ fn start_loops(
     let mcp = executor::find_mcp();
     let shim = executor::find_shim();
     let daemon_id = daemon_id();
+    // The trees of every loop, which no loop's process sweep kills (#2).
+    let live = Arc::new(executor::Live::default());
     let mut loops = Vec::new();
     for (name, repo) in &config.repos {
         let Some(served) = state.identities.get(&repo.identity) else {
@@ -607,6 +609,7 @@ fn start_loops(
             alive: Arc::new(bosun_proc::is_running),
             control: state.control.clone(),
             leases: leases.clone(),
+            live: live.clone(),
             free_space: Arc::new(executor::Disk),
             forge: Arc::new(executor::GhForge),
         };

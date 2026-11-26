@@ -679,6 +679,24 @@ impl Leases {
         self.save(&inner);
     }
 
+    /// The processes the leases name, of every identity: each `bosun with` command that holds
+    /// or waits for a lease, and each session shim a lease lives by. The process sweep spares
+    /// them and what descends from them.
+    pub(crate) fn processes(&self) -> Vec<ProcessKey> {
+        let inner = self.lock();
+        let commands = |holder: &Holder| match holder {
+            Holder::Command(key) => Some(*key),
+            Holder::Item(_) => None,
+        };
+        inner
+            .granted
+            .iter()
+            .flat_map(|e| [commands(&e.holder), e.shim])
+            .chain(inner.waiting.iter().map(|w| commands(&w.holder)))
+            .flatten()
+            .collect()
+    }
+
     /// Releases every lease whose holder is gone (E16), and withdraws the request of a
     /// command whose process is gone; returns those holders.
     pub(crate) fn release_stale(&self) -> Vec<Holder> {

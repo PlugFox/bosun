@@ -132,6 +132,33 @@ impl Container {
     pub(crate) fn members(&self) -> io::Result<Vec<u32>> {
         job_members(self.job.as_raw_handle())
     }
+
+    /// The job as another thread lists it while this container lives: this process holds it,
+    /// under this handle value.
+    pub(crate) fn id(&self) -> io::Result<ContainerId> {
+        let pid = std::process::id();
+        let start =
+            start_time(pid)?.ok_or_else(|| io::Error::other("this process has no start"))?;
+        Ok(ContainerId {
+            holder: pid,
+            start,
+            job: self.job.as_raw_handle() as usize as u64,
+        })
+    }
+}
+
+/// Where a job can be listed from: the process that holds a handle to it (pid and start time)
+/// and the handle's value in that process, as [`job_members_of`] takes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ContainerId {
+    pub(crate) holder: u32,
+    pub(crate) start: u64,
+    pub(crate) job: u64,
+}
+
+/// The members of the job `id` names; none once its holder is gone, since the job died with it.
+pub(crate) fn container_members(id: ContainerId) -> io::Result<Vec<u32>> {
+    Ok(job_members_of(id.holder, id.start, id.job)?.unwrap_or_default())
 }
 
 /// How many times a job's id list is read before [`Container::members`] gives up. Each retry
@@ -464,6 +491,36 @@ pub(crate) fn processes_named(name: &str) -> io::Result<Vec<(u32, u64)>> {
         more = unsafe { Process32NextW(snapshot.as_raw_handle(), &raw mut entry) } != 0;
     }
     Ok(found)
+}
+
+/// The parent pid of `pid` in a Toolhelp process snapshot; `None` when the snapshot does not
+/// list it. The parent may have exited since, and its pid may name another process now: the
+/// caller compares start times.
+pub(crate) fn parent_of(pid: u32) -> io::Result<Option<u32>> {
+    // SAFETY: a process snapshot of the whole system; the flags are valid and the process id
+    // is ignored for `TH32CS_SNAPPROCESS`.
+    let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    let snapshot = owned(raw).ok_or_else(io::Error::last_os_error)?;
+    // SAFETY: `PROCESSENTRY32W` is plain C data; all zeros is a valid value.
+    let mut entry: PROCESSENTRY32W = unsafe { mem::zeroed() };
+    entry.dwSize = size_of_u32::<PROCESSENTRY32W>();
+    // SAFETY: the snapshot handle is live; `entry` is writable and its `dwSize` is set, as the
+    // call requires.
+    let mut more = unsafe { Process32FirstW(snapshot.as_raw_handle(), &raw mut entry) } != 0;
+    while more {
+        if entry.th32ProcessID == pid {
+            return Ok(Some(entry.th32ParentProcessID));
+        }
+        // SAFETY: as for `Process32FirstW`.
+        more = unsafe { Process32NextW(snapshot.as_raw_handle(), &raw mut entry) } != 0;
+    }
+    Ok(None)
+}
+
+/// Terminates the one process `pid` if it started at `start`: on Windows a process is killed
+/// alone, so this is [`reap`].
+pub(crate) fn kill_one(pid: u32, start: u64) -> io::Result<bool> {
+    reap(pid, start)
 }
 
 pub(crate) fn reap(pid: u32, start: u64) -> io::Result<bool> {

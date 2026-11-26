@@ -148,3 +148,87 @@ async fn a_named_stray_started_during_the_attempt_is_killed_and_an_older_one_is_
     let note: Vec<Swept> = serde_json::from_str(&note.expect("a sweep note")).unwrap();
     assert_eq!(note, [Swept { name, pid: newer }]);
 }
+
+/// Another live session of the daemon (another repository's, as the loops share the daemon's
+/// [`crate::executor::Live`]) runs a process of the listed name, started during the attempt:
+/// a copy of the stray started in a container of its own and guarded as that session's tree.
+/// A second copy, started at the same time by nobody the daemon runs, is the attempt's stray.
+/// After the item ends Done the attempt's stray is gone, the other session's copy still runs,
+/// and the `sweep` note names the attempt's stray only
+/// (`mutant_loop_sweep_kills_other_sessions` kills the other session's copy too).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stray_of_another_live_session_is_spared_by_the_sweep() {
+    let mut scene = Scene::new().await;
+    let name = unique_name();
+    let strays_dir = scene.path("strays");
+    std::fs::create_dir_all(&strays_dir).unwrap();
+    let stray = strays_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    copy_executable(fake_agent(), &stray);
+    std::fs::write(strays_dir.join(format!("{name}.script")), "sleep 600000\n").unwrap();
+    scene.config_more = format!("[repo.demo.sweep]\nprocesses = ['{name}']\n");
+    std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();
+
+    let (started, release) = (scene.path("started"), scene.path("release"));
+    scene.write_board(&[card(1, "Swept", "test -f done.txt", "Leave a stray.")]);
+    scene.script(
+        1,
+        &[
+            format!("write {} x", started.display()),
+            format!("wait {}", release.display()),
+            "commit done.txt done".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    wait_for("the session to start", LIMIT, async || {
+        started.exists() || terminal(scene.state(1).await)
+    })
+    .await;
+    // The other session: the stray in a container of its own, guarded while the test holds it.
+    let spec = bosun_proc::ChildSpec {
+        program: stray.clone(),
+        args: Vec::new(),
+        env: std::env::vars_os()
+            .filter(|(k, _)| {
+                let k = k.to_string_lossy().to_ascii_uppercase();
+                k == "PATH" || k == "SYSTEMROOT"
+            })
+            .collect(),
+        cwd: strays_dir.clone(),
+        stdin: None,
+    };
+    let other = scene.live.track(
+        bosun_proc::NativeSpawner
+            .spawn(&spec)
+            .expect("start the other session"),
+    );
+    let other_key = other.tree.key();
+    let mut strays = Strays::default();
+    strays.0.push(start_stray(&stray));
+    let own = strays.0[0].id();
+    std::fs::write(&release, "x").unwrap();
+
+    let state = ended(&scene, 1, LIMIT).await;
+    task.abort();
+    watcher.abort();
+    let own_gone = exits_within(&mut strays.0[0], Duration::from_secs(5));
+    let other_alive = bosun_proc::is_running(other_key);
+    let note = scene
+        .store
+        .reader()
+        .item_note(&ItemId::new("demo#1"), NOTE_SWEEP)
+        .await
+        .unwrap();
+    // The other session's tree is killed with its container when it is dropped.
+    drop(other);
+    drop(strays);
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    assert!(own_gone, "the attempt's stray (pid {own}) still runs");
+    assert!(
+        other_alive,
+        "the other session's process (pid {}) was killed",
+        other_key.pid
+    );
+    let note: Vec<Swept> = serde_json::from_str(&note.expect("a sweep note")).unwrap();
+    assert_eq!(note, [Swept { name, pid: own }]);
+}

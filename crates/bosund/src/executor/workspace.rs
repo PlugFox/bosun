@@ -1566,6 +1566,7 @@ mod tests {
                     )
                     .unwrap(),
                 ),
+                live: Arc::default(),
                 free_space: Arc::new(Disk),
             };
             Self {

@@ -175,6 +175,7 @@ pub(crate) use forge::GhForge;
 pub(crate) use identity::{GhLogins, Logins};
 pub(crate) use park::{Alive, Clock, SystemClock};
 pub(crate) use recover::next_boot;
+pub(crate) use sweep::Live;
 
 /// How long a session that asked a blocking question may go on before it is killed: time to
 /// write down what it has (#7).
@@ -338,6 +339,10 @@ pub(crate) struct Deps {
     pub(crate) control: crate::control::Control,
     /// The daemon's lease manager, shared by every repository's loop (#8).
     pub(crate) leases: Arc<crate::leases::Leases>,
+    /// The trees every repository's loop runs, shared as the lease manager is: the process
+    /// sweep spares them (#2). [`Loop::new`] makes [`Deps::spawner`] and [`Deps::sessions`]
+    /// guard theirs in it.
+    pub(crate) live: Arc<sweep::Live>,
     /// The free space of the disk floor of worktree mode (#8): the system's
     /// ([`workspace::Disk`]) in the daemon.
     pub(crate) free_space: Arc<dyn bosun_git::worktree::FreeSpace + Send + Sync>,
@@ -610,6 +615,18 @@ impl Loop {
         let gaps = park::Gaps::new(options.poll);
         let control = deps.control.subscribe();
         let pace = board::Pace::new(options.idle_backoff, options.poll);
+        // Every tree the loop starts is guarded from the other loops' process sweeps.
+        let deps = Deps {
+            spawner: Arc::new(sweep::Tracking {
+                inner: deps.spawner.clone(),
+                live: deps.live.clone(),
+            }),
+            sessions: Arc::new(sweep::TrackingShim {
+                inner: deps.sessions.clone(),
+                live: deps.live.clone(),
+            }),
+            ..deps
+        };
         Self {
             shared: Arc::new(Shared {
                 options,

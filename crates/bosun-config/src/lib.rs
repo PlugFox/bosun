@@ -123,9 +123,14 @@
 //!   process of the user with one of these executable file names that started at or after the
 //!   attempt began is killed, logged and noted on the item. A name is a file name without a
 //!   directory: ASCII letters, digits, `.`, `-` and `_`, not empty and not only dots; on
-//!   Windows it matches with or without `.exe`, case-insensitively. Default: no sweep. The key
-//!   is its own opt-in, independent of `worktree`. (Not the worktree sweep, which closes item
-//!   worktrees nobody owns.)
+//!   Windows it matches with or without `.exe`, case-insensitively. Each match is killed alone,
+//!   by its pid, never its process group. A process inside or descended from another live
+//!   session, verdict or setup run of the daemon (any repository, any identity) or from a live
+//!   `bosun with` command is spared. Anything else of the user with a listed name that started
+//!   during the attempt is killed, so list only names nothing else of yours runs under: the
+//!   sweep may kill a process of your own with that name that you started while the attempt
+//!   ran. Default: no sweep. The key is its own opt-in, independent of `worktree`. (Not the
+//!   worktree sweep, which closes item worktrees nobody owns.)
 //! - `[resource.<name>]` (#8): a resource items may name in `needs`. `kind` is required. They
 //!   are read at daemon start (an edit takes effect at the next start) and leased in worktree
 //!   mode: a card of a repository with `repo.<name>.worktree` may need them, and holds them from
@@ -284,7 +289,9 @@ pub struct Repo {
 #[non_exhaustive]
 pub struct Sweep {
     /// `processes`: executable file names of known strays, without a directory: ASCII letters,
-    /// digits, `.`, `-` and `_`. Order and duplicates do not matter. Default empty.
+    /// digits, `.`, `-` and `_`. Order and duplicates do not matter. Default empty. The sweep
+    /// may kill a process of the user's own with one of these names that the user started
+    /// while an attempt ran (see the module documentation).
     pub processes: BTreeSet<String>,
 }
 

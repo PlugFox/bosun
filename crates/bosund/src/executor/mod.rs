@@ -133,6 +133,7 @@
 
 pub(crate) mod board;
 mod breaker;
+mod census;
 mod checkout;
 mod claim;
 mod commands;
@@ -586,6 +587,8 @@ struct Current {
     /// How many times in a row the landing reported one head rebased in one attempt (#8):
     /// shared with the landing task, which refuses at [`landing::REBASED_LIMIT`].
     rebased: Arc<std::sync::Mutex<Option<landing::Streak>>>,
+    /// Whether the census's unknown `allow-census` names were logged for this item (#7).
+    census_logged: bool,
 }
 
 /// A lint result, cached per card body.
@@ -1339,6 +1342,25 @@ impl Loop {
         let config = self.config();
         let item = cur.item.id.clone();
         let done = self.done_tx.clone();
+        // The census (#7) follows a pass of the item's own commits, never a landing's
+        // re-verdict of a rebased head.
+        let census = (cur.item.state == State::Verifying)
+            .then(|| lookup(&config, &self.shared.options.repo))
+            .flatten()
+            .and_then(|(repo, _)| repo.policy.census.clone())
+            // Mutant (`mutant_loop_skip_census`): the census never runs.
+            .filter(|_| !cfg!(mutant_loop_skip_census));
+        if let Some(census) = &census
+            && let Some(cur) = self.current.as_mut()
+            && !std::mem::replace(&mut cur.census_logged, true)
+        {
+            census::log_unknown_allowances(
+                &self.shared.options.repo,
+                &item,
+                census,
+                &claimed.snapshot.contract.allow_census,
+            );
+        }
         let handle = tokio::spawn(async move {
             let spec = verdict::Run {
                 item: item.clone(),
@@ -1346,8 +1368,18 @@ impl Loop {
                 number: run,
                 first_failing,
             };
-            let (event, failing) =
+            let (mut event, failing) =
                 verdict::verdict(&shared, &config, &claimed, &spec, kill_rx).await;
+            if let Some(census) = &census
+                && let Event::Verdict {
+                    result: bosun_core::RunResult::Pass,
+                    ..
+                } = event
+                && let Some(dropped) =
+                    census::after_pass(&shared, &claimed, census, &item, attempt, run).await
+            {
+                event = dropped;
+            }
             let _ = done.send(Done::Event {
                 item,
                 event,
@@ -2140,6 +2172,7 @@ impl Loop {
             child: park::ChildSlot::default(),
             ignored: None,
             rebased: Arc::default(),
+            census_logged: false,
         });
         self.apply(Event::Claim).await;
     }

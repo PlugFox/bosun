@@ -10,7 +10,7 @@ use bosun_core::{PathStyle, Scope, canonical_path};
 use toml_edit::{Document, Item, TableLike};
 
 use crate::error::{Location, Notice, Problem};
-use crate::policy::{Policy, relative_entry};
+use crate::policy::{Census, Policy, relative_entry};
 use crate::{
     Budget, Daemon, Landing, LandingMode, McpServer, PullRequest, Queue, Resource, Sweep, Verdict,
 };
@@ -561,19 +561,130 @@ impl Reader<'_> {
     fn policy(&mut self, table: &dyn TableLike, what: &str) -> Policy {
         let mut protected = BTreeSet::new();
         let mut push = false;
+        let mut census = None;
         for (key, item) in table.iter() {
             let key_at = self.key_at(table, key, item);
             let path = format!("{what}.{key}");
             match key {
                 "protected" => protected = self.entries(item, &path).unwrap_or_default(),
                 "push" => set(&mut push, self.bool(item, &path)),
+                "census" => {
+                    if let Some(table) = self.table(item, &path, key_at) {
+                        census = self.census(table, &path, key_at);
+                    }
+                }
                 other => self.problem(
                     key_at,
-                    format!("unknown key `{what}.{other}`; a policy has `protected` and `push`"),
+                    format!(
+                        "unknown key `{what}.{other}`; a policy has `protected`, `push` and \
+                         `census`"
+                    ),
                 ),
             }
         }
-        Policy::new(protected, push)
+        Policy::new(protected, push, census)
+    }
+
+    /// Reads `policy.census` (#7): `glob` and the `keep` and `cap` tables of named regexes.
+    fn census(
+        &mut self,
+        table: &dyn TableLike,
+        what: &str,
+        at: Option<Location>,
+    ) -> Option<Census> {
+        let mut glob = None;
+        let mut keep = BTreeMap::new();
+        let mut cap = BTreeMap::new();
+        let mut read = true;
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let path = format!("{what}.{key}");
+            match key {
+                "glob" => {
+                    let Some((text, text_at)) = self.string(item, &path) else {
+                        read = false;
+                        continue;
+                    };
+                    if text.is_empty() || text.starts_with('/') || text.contains('\\') {
+                        read = false;
+                        self.problem(
+                            text_at,
+                            format!(
+                                "`{path}` is {text:?}; it is a non-empty, repository-relative \
+                                 glob with `/` as the separator"
+                            ),
+                        );
+                    } else {
+                        glob = Some(text.to_owned());
+                    }
+                }
+                "keep" | "cap" => {
+                    let Some(counters) = self.table(item, &path, key_at) else {
+                        read = false;
+                        continue;
+                    };
+                    let into = if key == "keep" { &mut keep } else { &mut cap };
+                    for (name, item) in counters.iter() {
+                        let name_at = self.key_at(counters, name, item);
+                        let counter = format!("{path}.{name}");
+                        if !valid_name(name) {
+                            read = false;
+                            self.problem(
+                                name_at,
+                                format!(
+                                    "`{counter}`: a counter's name is ASCII letters, digits, \
+                                     `-` and `_`"
+                                ),
+                            );
+                            continue;
+                        }
+                        match self.string(item, &counter) {
+                            Some((regex, _)) if !regex.is_empty() => {
+                                into.insert(name.to_owned(), regex.to_owned());
+                            }
+                            Some((_, regex_at)) => {
+                                read = false;
+                                self.problem(
+                                    regex_at,
+                                    format!("`{counter}` is empty; it is a git extended regex"),
+                                );
+                            }
+                            None => read = false,
+                        }
+                    }
+                }
+                other => {
+                    read = false;
+                    self.problem(
+                        key_at,
+                        format!(
+                            "unknown key `{what}.{other}`; a census has `glob`, `keep` and `cap`"
+                        ),
+                    );
+                }
+            }
+        }
+        if let Some(name) = keep.keys().find(|name| cap.contains_key(*name)) {
+            self.problem(
+                at,
+                format!("`{what}`: the counter {name:?} is in both `keep` and `cap`"),
+            );
+            return None;
+        }
+        if read && keep.is_empty() && cap.is_empty() {
+            self.problem(
+                at,
+                format!("`{what}` has no counter; name at least one in `keep` or `cap`"),
+            );
+            return None;
+        }
+        let Some(glob) = glob else {
+            if read {
+                self.problem(at, format!("`{what}` has no `glob`"));
+            }
+            return None;
+        };
+        read.then(|| Census::new(glob, keep, cap))
     }
 
     /// Reads `landing` (#8). The checks against the worktree and the modes of this version are

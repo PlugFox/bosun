@@ -64,6 +64,11 @@
 //! protected = ["tests/harness", "xtask/src/lint.rs"]  # `.gitignore` is always added
 //! push = false                  # default
 //!
+//! [repo.bosun.policy.census]    # optional (#7): counted at an item's base and judged commit
+//! glob = "tests/**"             # a git `:(glob)` pathspec, repository-relative
+//! keep = { tests = "fn test_", assertions = "assert" }  # matching lines must not drop
+//! cap = { ignored = '#\[ignore' }                      # matching lines must not rise
+//!
 //! [repo.bosun.mcp_servers.docs] # merged into the per-session MCP configuration
 //! command = "docs-server"
 //! args = ["--stdio"]
@@ -89,6 +94,12 @@
 //!   without wildcards ([`Policy::protected`]).
 //! - Durations are a positive whole number and one of `s`, `m`, `h`, `d`, `w`.
 //! - Identity, repository and MCP server names are ASCII letters, digits, `-` and `_`.
+//! - `repo.<name>.policy.census` (#7): after a passing verdict, the lines matching each counter
+//!   (git's extended regex, `git grep -E`) in the files of `glob` are counted in the tree of the
+//!   item's base and of the judged commit; a `keep` counter that dropped or a `cap` counter that
+//!   rose sends the item to Needs you, unless the card's `allow-census` names it. An unknown key,
+//!   an empty or absolute `glob`, a census without counters and a name in both tables are
+//!   refused. The policy hash covers the census only when it is set.
 //! - An unknown key of a `policy` is refused, so that a misspelt `protected` cannot leave paths
 //!   unprotected; so is an unknown key of a `resource`, a `worktree`, a
 //!   `worktree.shared_build`, a `landing.merge`, a `landing.pr` or a `sweep`.
@@ -201,7 +212,7 @@ use std::time::Duration;
 pub use bosun_core::Scope;
 pub use disk::{Disk, DiskProbe, SystemProbe};
 pub use error::{Error, Location, Notice, Problem};
-pub use policy::{ALWAYS_PROTECTED, Policy};
+pub use policy::{ALWAYS_PROTECTED, Census, Policy};
 
 /// The default of `identity.<name>.github_host`.
 pub const DEFAULT_GITHUB_HOST: &str = "github.com";

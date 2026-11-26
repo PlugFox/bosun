@@ -535,6 +535,7 @@ fn contract_json(contract: &bosun_queue::Contract, session_model: Option<&str>) 
         "model": contract.model,
         "session_model": session_model,
         "allow_protected": contract.allow_protected,
+        "allow_census": contract.allow_census,
     })
     .to_string()
 }

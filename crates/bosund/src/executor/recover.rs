@@ -557,6 +557,7 @@ impl Loop {
             child: park::ChildSlot::default(),
             ignored,
             rebased: Arc::default(),
+            census_logged: false,
         });
         if item.state != State::Claimed && item.state.is_active() {
             self.hold_power();

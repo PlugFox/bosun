@@ -936,6 +936,73 @@ mod tests {
         store.close().await.unwrap();
     }
 
+    /// #7: migration 21 rebuilds `item` to allow the reason `census_drop`. An item of a database
+    /// of version 19 reads back the same; the new reason is accepted and read back, an unknown
+    /// one refused.
+    #[tokio::test]
+    async fn migration_21_accepts_the_census_drop_reason_and_keeps_every_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = open(&path, &Options::default(), &up_to(19)).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO repo (id, path, name) VALUES (1, '/fixture/demo', 'demo');
+             INSERT INTO item (id, item_key, repo_id, card_key, state, reason, attempt_number,
+                               seq, attempts, spawns, runs, failed, uncounted, boot, created_ms,
+                               updated_ms, conflicts)
+             VALUES (3, 'demo#1', 1, 'card-1', 'needs_you', 'stale', 1, 4, 1, 2, 1, 0, 1, 2, 10,
+                     20, 1);
+             INSERT INTO attempt (id, item_id, number, state, spawn, started_ms)
+             VALUES (1, 3, 1, 'exited', 1, 10);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        let item_columns = "SELECT id, item_key, repo_id, card_key, state, park_reason,
+                                   park_until_ms, park_next, outcome, reason, attempt_number,
+                                   snapshot_id, seq, attempts, spawns, runs, failed, uncounted,
+                                   boot, created_ms, updated_ms, conflicts
+                            FROM item ORDER BY id";
+        let before = items(&mut conn, item_columns).await;
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        {
+            let mut conn = store.reader().pool.acquire().await.unwrap();
+            assert_eq!(items(&mut conn, item_columns).await, before);
+        }
+        store.close().await.unwrap();
+
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE item SET reason = 'census_drop' WHERE id = 3")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        let refused = sqlx::query("UPDATE item SET reason = 'unknown' WHERE id = 3")
+            .execute(&mut conn)
+            .await;
+        assert!(refused.is_err());
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let id = bosun_core::ItemId::new("demo#1");
+        let stored = store.reader().item(&id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.item.state,
+            bosun_core::State::NeedsYou(bosun_core::Reason::CensusDrop)
+        );
+        store.close().await.unwrap();
+    }
+
     /// Every row of `query` as text, column by column, to compare a table before and after.
     async fn items(conn: &mut SqliteConnection, query: &'static str) -> Vec<Vec<Option<String>>> {
         use sqlx::Row;

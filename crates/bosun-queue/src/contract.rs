@@ -14,6 +14,7 @@
 //! model = "opus"
 //! effort = "high"                   # low, medium, high, xhigh or max
 //! allow-protected = ["tests/harness.rs"] # protected paths this item may change
+//! allow-census = ["assertions"]      # census counters (#7) this item may move the wrong way
 //! ```
 //! ````
 //!
@@ -55,6 +56,10 @@ pub struct Contract {
     pub effort: Option<String>,
     /// Protected paths (#7) this item may change.
     pub allow_protected: Vec<String>,
+    /// Census counters (#7) of the repository's policy this item may move the wrong way: a
+    /// `keep` counter may drop, a `cap` counter may rise. A name the census does not have is
+    /// ignored (the daemon logs it).
+    pub allow_census: Vec<String>,
 }
 
 /// The caps of one item; `None`: the repository's default.
@@ -112,7 +117,7 @@ impl fmt::Display for ContractError {
             Self::UnknownKey(key) => write!(
                 f,
                 "unknown key `{key}`; the fields are verdict, verdict-timeout, needs, \
-                 blocked-by, budget, runner, model, effort and allow-protected"
+                 blocked-by, budget, runner, model, effort, allow-protected and allow-census"
             ),
             Self::Field { key, problem } => write!(f, "`{key}`: {problem}"),
         }
@@ -222,6 +227,7 @@ impl Contract {
             model: None,
             effort: None,
             allow_protected: Vec::new(),
+            allow_census: Vec::new(),
         };
         for (key, item) in document.as_table() {
             let result = match key {
@@ -234,6 +240,7 @@ impl Contract {
                 "model" => text(item).map(|v| contract.model = Some(v)),
                 "effort" => effort(item).map(|v| contract.effort = Some(v)),
                 "allow-protected" => strings(item).map(|v| contract.allow_protected = v),
+                "allow-census" => strings(item).map(|v| contract.allow_census = v),
                 unknown => {
                     errors.push(ContractError::UnknownKey(unknown.to_owned()));
                     continue;
@@ -433,7 +440,7 @@ mod tests {
             "verdict = \"cargo test\"\nverdict-timeout = \"1h30m\"\nneeds = [\"phone\"]\n\
              blocked-by = [\"#12\", 14]\nbudget = { eqv = \"2M\", wall = 7200 }\n\
              runner = \"claude\"\nmodel = \"opus\"\neffort = \"xhigh\"\n\
-             allow-protected = [\"tests/h.rs\"]\n",
+             allow-protected = [\"tests/h.rs\"]\nallow-census = [\"assertions\"]\n",
         ))
         .unwrap();
         assert_eq!(
@@ -451,6 +458,7 @@ mod tests {
                 model: Some("opus".into()),
                 effort: Some("xhigh".into()),
                 allow_protected: vec!["tests/h.rs".into()],
+                allow_census: vec!["assertions".into()],
             }
         );
     }

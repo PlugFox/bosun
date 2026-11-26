@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1276,4 +1276,59 @@ fn the_fast_death_keys_change_the_hash_only_when_not_default() {
     assert_ne!(sessions, bare);
     assert_ne!(within, bare);
     assert_ne!(sessions, within);
+}
+
+#[test]
+fn a_census_policy_reads_its_glob_and_counters() {
+    let policy = "[repo.bosun.policy]\nprotected = ['tests/harness']\n";
+    let census = "[repo.bosun.policy.census]\n\
+                  glob = 'tests/**'\n\
+                  keep = { tests = 'fn test_', assertions = 'assert' }\n\
+                  cap = { ignored = '#\\[ignore' }\n";
+    let with = parse(&with_repo(&format!("{policy}{census}")), &Local).unwrap();
+    let read = with.repos["bosun"].policy.census.clone().expect("a census");
+    let map = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|&(k, v)| (k.to_owned(), v.to_owned()))
+            .collect()
+    };
+    assert_eq!(
+        read,
+        Census::new(
+            "tests/**".to_owned(),
+            map(&[("tests", "fn test_"), ("assertions", "assert")]),
+            map(&[("ignored", r"#\[ignore")]),
+        )
+    );
+
+    for (bad, what) in [
+        (
+            "glob = 'tests/**'\nkeep = { a = 'x' }\nskip = 1\n",
+            "unknown key",
+        ),
+        ("glob = ''\nkeep = { a = 'x' }\n", "glob"),
+        (
+            "glob = 'tests/**'\nkeep = { a = 'x' }\ncap = { a = 'y' }\n",
+            "both",
+        ),
+        ("glob = 'tests/**'\n", "no counter"),
+    ] {
+        let found = problems(&with_repo(&format!(
+            "{policy}[repo.bosun.policy.census]\n{bad}"
+        )));
+        assert_eq!(found.len(), 1, "{bad:?}: {found:?}");
+        assert!(found[0].contains("census"), "{bad:?}: {found:?}");
+        assert!(found[0].contains(what), "{bad:?}: {found:?}");
+    }
+
+    // A policy without a census keeps the hash it had before the census existed (pinned), and
+    // a census changes it.
+    let without = parse(&with_repo(policy), &Local).unwrap();
+    let without = without.repos["bosun"].policy.hash();
+    assert_eq!(
+        without,
+        "6b58c1cfd201e82a3efcb3e28d636bb72f3e388a6d40fbfa7aedb08473d9260d"
+    );
+    assert_ne!(with.repos["bosun"].policy.hash(), without);
 }

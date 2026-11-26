@@ -8,7 +8,7 @@
 //!             |          |           |            +-> running     (re-verdict failed, or
 //!             |          |           |            |                first conflict: one session)
 //!             |          |           +-> running        (verdict failed, attempts left)
-//!             |          |           +-> needs_you      (attempts exhausted, guard)
+//!             |          |           +-> needs_you      (attempts exhausted, guard, census)
 //!             |          +-> parked -> running          (limit, pause, kill, daily cap)
 //!             |          +-> needs_you                  (question, auth, budget,
 //!             |                                          uncounted-park cap, config changed)
@@ -199,6 +199,9 @@ pub enum Reason {
     /// The daemon's view of the item was older than its stored history; a transition computed
     /// from it was refused (#132).
     Stale,
+    /// The verdict passed, but the census of the repository's tests (#7) found a kept counter
+    /// that dropped or a capped one that rose between the item's base and the judged commit.
+    CensusDrop,
 }
 
 /// The state of an item.
@@ -409,6 +412,16 @@ pub enum Event {
         /// Its result.
         result: RunResult,
     },
+    /// A verdict run passed, but the census of the repository's tests (#7) found a kept counter
+    /// that dropped or a capped one that rose between the item's base and the judged commit
+    /// (or could not count): sent in place of that run's [`Event::Verdict`]. Needs you; no
+    /// attempt is counted failed.
+    CensusDropped {
+        /// The attempt.
+        attempt: u32,
+        /// The verdict run that passed.
+        run: u32,
+    },
     /// The landing step finished.
     Landed,
     /// The landing step was refused.
@@ -483,6 +496,7 @@ impl Event {
             Self::Preconditions { .. } => "preconditions",
             Self::Refused { .. } => "refused",
             Self::Verdict { .. } => "verdict",
+            Self::CensusDropped { .. } => "census_dropped",
             Self::Landed => "landed",
             Self::LandingRefused => "landing_refused",
             Self::Rebased { .. } => "rebased",
@@ -784,6 +798,7 @@ struct Draft {
 }
 
 impl Draft {
+    #[allow(clippy::too_many_lines, reason = "one arm per event")]
     fn apply(&mut self, event: &Event) -> Option<()> {
         match event {
             Event::Claim => {
@@ -844,7 +859,10 @@ impl Draft {
             }
             // Recorded as the attempt's agent calls (#57), never a transition.
             Event::Summary { .. } | Event::Note { .. } => return None,
-            Event::Preconditions { .. } | Event::Refused { .. } | Event::Verdict { .. } => {
+            Event::Preconditions { .. }
+            | Event::Refused { .. }
+            | Event::Verdict { .. }
+            | Event::CensusDropped { .. } => {
                 self.verification(event)?;
             }
             Event::Landed
@@ -946,6 +964,17 @@ impl Draft {
                 } else {
                     self.verdict_finished();
                 }
+            }
+            Event::CensusDropped { attempt, run } => {
+                // Only after the verdict of the item's own commits, never a landing's re-verdict.
+                self.expect(&[State::Verifying])?;
+                self.current(*attempt)?;
+                if self.item.attempt.as_ref()?.run != *run {
+                    return None;
+                }
+                // The verdict did pass: the attempt records it, and nothing is counted failed.
+                self.attempt_step(AttemptEvent::VerdictFinished(RunResult::Pass))?;
+                self.needs_you(Reason::CensusDrop);
             }
             _ => return None,
         }
@@ -1564,6 +1593,50 @@ mod tests {
             item = go(&item, &verdict(&item, r), &ctx()).item;
         }
         item
+    }
+
+    #[test]
+    fn a_census_drop_after_a_passing_verdict_needs_you_and_counts_nothing() {
+        let item = attempt(running(), &[]);
+        assert_eq!(item.state, State::Verifying);
+        let (attempt, _, run) = cur(&item);
+        // Another run's census, or another attempt's, is not this one's.
+        assert_eq!(
+            step(
+                &item,
+                &Event::CensusDropped {
+                    attempt,
+                    run: run + 1
+                },
+                &ctx()
+            ),
+            None
+        );
+        assert_eq!(
+            step(
+                &item,
+                &Event::CensusDropped {
+                    attempt: attempt + 1,
+                    run
+                },
+                &ctx()
+            ),
+            None
+        );
+        let next = go(&item, &Event::CensusDropped { attempt, run }, &ctx());
+        assert_eq!(next.item.state, State::NeedsYou(Reason::CensusDrop));
+        assert_eq!(next.item.failed, 0);
+        assert_eq!(next.transition.cause, "census_dropped");
+        let effects: Vec<_> = next.transition.effects.iter().map(|e| &e.kind).collect();
+        assert!(effects.contains(&&EffectKind::Comment(Reason::CensusDrop)));
+        assert!(!effects.iter().any(|k| matches!(k, EffectKind::Land { .. })));
+        // Not from a landing's re-verdict.
+        let landing = self::attempt(running(), &[RunResult::Pass]);
+        let (attempt, _, run) = cur(&landing);
+        assert_eq!(
+            step(&landing, &Event::CensusDropped { attempt, run }, &ctx()),
+            None
+        );
     }
 
     #[test]
@@ -2443,6 +2516,7 @@ mod tests {
                     run,
                     result: RunResult::Timeout,
                 },
+                Event::CensusDropped { attempt, run },
             ]),
             State::Landing => events.extend([
                 Event::Landed,

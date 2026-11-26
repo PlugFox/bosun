@@ -621,6 +621,12 @@ impl Drainer {
                 {
                     let _ = write!(body, ": {error}");
                 }
+                // The figures of the census (#7), and how the card accepts them.
+                if other == Reason::CensusDrop
+                    && let Some(note) = self.note(item, super::census::NOTE_CENSUS).await?
+                {
+                    body.push_str(&super::census::comment_figures(&note));
+                }
                 body.push_str(
                     ". The item report above has the facts. Move the card to Ready to retry \
                      with a fresh attempt counter, or to Backlog to cancel.",
@@ -681,6 +687,10 @@ fn reason_text(reason: Reason) -> &'static str {
         Reason::Handshake => "The session's MCP server did not start, again after one retry",
         Reason::Identity => "The identity checks before a session refused it",
         Reason::Stale => "The daemon's view of the item was older than its stored history",
+        Reason::CensusDrop => {
+            "The verdict passed, but the census of the repository's tests moved the wrong way \
+             between the item's base and the judged commit"
+        }
     }
 }
 

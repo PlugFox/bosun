@@ -1,7 +1,7 @@
-//! A repository's permission policy (#2, #7): the paths an unattended session may not edit and
-//! whether it may push.
+//! A repository's permission policy (#2, #7): the paths an unattended session may not edit,
+//! whether it may push, and the census of its tests.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The file that is protected whatever the policy says: a line added to it can hide the file
 /// that makes a verdict pass (#7).
@@ -19,21 +19,53 @@ pub struct Policy {
     pub protected: BTreeSet<String>,
     /// `push`: whether a session may push. Default false (#2).
     pub push: bool,
+    /// `census`: the counters of the repository's tests, compared between an item's base and
+    /// the commit its verdict judged (#7); `None` when the policy has none.
+    pub census: Option<Census>,
+}
+
+/// `[repo.<name>.policy.census]` (#7): named regexes whose matching lines are counted over the
+/// files a glob names, in a commit's tree (as `git grep --count -E` counts them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Census {
+    /// `glob`: a git `:(glob)` pathspec, repository-relative, `/`-separated.
+    pub glob: String,
+    /// `keep`: counter name -> git extended regex (POSIX ERE). These must not drop.
+    pub keep: BTreeMap<String, String>,
+    /// `cap`: counter name -> git extended regex (POSIX ERE). These must not rise.
+    pub cap: BTreeMap<String, String>,
+}
+
+impl Census {
+    /// A census of `glob` and the counters, as written (the reader validates them).
+    #[must_use]
+    pub fn new(
+        glob: String,
+        keep: BTreeMap<String, String>,
+        cap: BTreeMap<String, String>,
+    ) -> Self {
+        Self { glob, keep, cap }
+    }
 }
 
 impl Default for Policy {
     fn default() -> Self {
-        Self::new(BTreeSet::new(), false)
+        Self::new(BTreeSet::new(), false, None)
     }
 }
 
 impl Policy {
     /// The effective policy for the listed entries: [`ALWAYS_PROTECTED`] is added.
-    pub(crate) fn new(mut protected: BTreeSet<String>, push: bool) -> Self {
+    pub(crate) fn new(mut protected: BTreeSet<String>, push: bool, census: Option<Census>) -> Self {
         if !cfg!(mutant_config_gitignore_unprotected) {
             protected.insert(ALWAYS_PROTECTED.to_owned());
         }
-        Self { protected, push }
+        Self {
+            protected,
+            push,
+            census,
+        }
     }
 
     /// Whether `path` (repository-relative, `/`-separated, as git prints it) is protected.
@@ -93,7 +125,7 @@ mod tests {
     use super::*;
 
     fn policy(entries: &[&str]) -> Policy {
-        Policy::new(entries.iter().map(|&e| e.to_owned()).collect(), false)
+        Policy::new(entries.iter().map(|&e| e.to_owned()).collect(), false, None)
     }
 
     #[test]

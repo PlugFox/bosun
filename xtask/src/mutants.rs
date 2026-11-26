@@ -3305,7 +3305,53 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_skip_census",
+        issue: CENSUS_CARD,
+        breaks: "the census never runs: an item that deletes an assertion reaches Done",
+        package: "bosund",
+        check: Check::Test(CENSUS_SCENE),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_census_ignores_allowance",
+        issue: CENSUS_CARD,
+        breaks: "the card's `allow-census` is not passed: an allowed drop goes to Needs you",
+        package: "bosund",
+        check: Check::Test("executor::tests::census::a_card_that_allows_the_drop_lands"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_census_reads_working_tree",
+        issue: CENSUS_CARD,
+        breaks: "the census greps the working tree instead of the commit's tree",
+        package: "bosun-git",
+        check: Check::Test(
+            "census::tests::counts_lines_of_the_glob_at_a_commit_not_in_the_working_tree",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_census_cap_unchecked",
+        issue: CENSUS_CARD,
+        breaks: "a capped census counter (switched-off tests) may rise",
+        package: "bosun-git",
+        check: Check::Test(
+            "census::tests::a_drop_of_a_kept_counter_or_a_rise_of_a_capped_one_is_a_finding_unless_allowed",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #7 that counts a repository's tests, assertions and switched-off tests at an
+/// item's base and at the commit its verdict judged (`repo.<name>.policy.census`) and sends a
+/// wrong-way move to Needs you (its own number was not known when it was written; its parent's
+/// stands in).
+const CENSUS_CARD: u32 = 7;
+
+/// The first scene of that card.
+const CENSUS_SCENE: &str =
+    "executor::tests::census::an_item_that_deletes_an_assertion_goes_to_needs_you_with_the_counts";
 
 /// The card of #7 that denies a session edits of its protected paths with `Edit(...)` rules
 /// and names the item, its verdict and those paths in the system prompt (its own number was

@@ -144,6 +144,14 @@ fn policy(canon: &mut Canon, policy: &Policy) {
         canon.strs(policy.protected.iter().map(String::as_str));
     }
     canon.bool(policy.push);
+    // Only when set, so that a policy without a census keeps the hash it had before (#7).
+    if let Some(census) = &policy.census {
+        canon
+            .str("census")
+            .str(&census.glob)
+            .map(&census.keep)
+            .map(&census.cap);
+    }
 }
 
 fn repo(canon: &mut Canon, repo: &Repo) {

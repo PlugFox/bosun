@@ -68,6 +68,12 @@
 //! [`lfs`] finds the Git LFS pointers of a commit or a range and carries their objects from
 //! one repository's store to another's, each checked against its name; it never runs git-lfs.
 //!
+//! # The census (#7)
+//!
+//! [`census::count`] counts the lines matching named regexes in the files a glob names, in a
+//! commit's tree; [`census::compare`] lists the kept counters that dropped and the capped ones
+//! that rose between the item's base and the judged commit.
+//!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
 #![cfg_attr(
     test,
@@ -75,6 +81,7 @@
 )]
 
 mod base;
+pub mod census;
 mod child;
 mod invoke;
 pub mod land;

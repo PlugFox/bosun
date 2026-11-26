@@ -1027,7 +1027,12 @@ impl Loop {
         let config = self.config();
         match claim::hashes(&config, &self.shared.options.repo) {
             Some((repo, policy)) => repo != claimed.repo_hash || policy != claimed.policy_hash,
-            None => true,
+            // The repository was removed from the configuration (#186): its item in flight
+            // goes to Needs you (`config_changed`), and its loop claims nothing new
+            // (`schedule`).
+            // Mutant (`mutant_loop_removed_repo_keeps_item`): a removed repository counts as
+            // unchanged.
+            None => !cfg!(mutant_loop_removed_repo_keeps_item),
         }
     }
 
@@ -1835,6 +1840,9 @@ impl Loop {
     async fn schedule(&mut self) {
         let config = self.config();
         let repo_name = self.shared.options.repo.clone();
+        // A repository removed from the configuration claims nothing new (#186): its loop runs
+        // on until the next daemon start, and its item in flight went to Needs you
+        // (`hashes_changed`).
         let Some((repo, identity)) = lookup(&config, &repo_name) else {
             return;
         };

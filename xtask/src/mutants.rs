@@ -2827,6 +2827,44 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_reload_misses_queue_change",
+        issue: 190,
+        breaks: "a reload does not name a changed queue as waiting for the next start",
+        package: "bosund",
+        check: Check::Test(
+            "config_watch::tests::a_reload_names_each_change_that_waits_for_the_next_daemon_start",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_reload_relogs_pending",
+        issue: 190,
+        breaks: "a change waiting for the next start is logged again at every reload",
+        package: "bosund",
+        check: Check::Test(
+            "config_watch::tests::a_change_that_waits_for_the_next_start_is_logged_once",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_removed_repo_keeps_item",
+        issue: 190,
+        breaks: "the item in flight of a removed repository runs on",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::removal::a_removed_repository_claims_nothing_new_and_its_item_in_flight_needs_you",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_doctor_ignores_served_config",
+        issue: 190,
+        breaks: "bosun doctor does not compare the configuration with what the daemon serves",
+        package: "bosun-cli",
+        check: Check::Test("doctor::tests::the_doctor_names_what_waits_for_the_next_daemon_start"),
+        platform: None,
+    },
 ];
 
 /// #164, the card of #8 that polls the pull request of an item Done in `pr` mode (merged

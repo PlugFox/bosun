@@ -3231,6 +3231,13 @@
           "description": "Its queue's kind: `local_file`, `projects_v2`, or `none` when it has no queue.",
           "type": "string"
         },
+        "queue_source": {
+          "description": "Where its queue is, as the daemon read it at start: the local file's path as\nconfigured, or `<owner>/<number>` of a Projects v2 board; absent for no queue or\nanother kind. `bosun doctor` compares it with the configuration (#186).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "repo": {
           "description": "Its name in the configuration.",
           "type": "string"

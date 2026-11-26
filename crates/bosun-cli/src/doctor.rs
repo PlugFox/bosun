@@ -1,8 +1,9 @@
 //! `bosun doctor` (#4, #28): checks what the daemon needs, with the daemon up or down.
 //!
-//! It reads the configuration through `bosun-config` and asks the OS; the daemon is only
-//! asked `hello`. Each check is `ok`, `warn`, `fail` or `skip` (it could not run because an
-//! earlier check failed), and each warning and failure carries a fix.
+//! It reads the configuration through `bosun-config` and asks the OS; the daemon is asked
+//! `hello`, then `status.overview` of each identity for `served_config`. Each check is `ok`,
+//! `warn`, `fail` or `skip` (it could not run because an earlier check failed), and each
+//! warning and failure carries a fix.
 //!
 //! | Check | Fails or warns when |
 //! | --- | --- |
@@ -22,6 +23,7 @@
 //! | `endpoint` | nothing listens at the endpoint (fail) |
 //! | `endpoint_acl` | Unix: the socket's mode is not 0600 (fail). Windows: skipped, see below |
 //! | `daemon` | the daemon does not answer `hello`, or speaks another API version (fail) |
+//! | `served_config` | the configuration differs from what the daemon serves (`status.overview` of each identity) in a way that waits for the next daemon start: a repository added, removed, moved to another identity, or with another `path` or queue (its kind or `queue_source`); an identity the daemon does not serve (warn, #186); skipped when the daemon did not answer |
 //! | `log` | never fails: names the daemon's log file (`bosun_client::log`, #137), ok when it exists, skipped when the daemon has not written it yet |
 //!
 //! The per-identity checks carry the identity's name. The `PATH` the daemon gets is the one
@@ -58,8 +60,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use std::collections::BTreeMap;
+
+use bosun_api::rpc::code;
+use bosun_api::{IdentityParams, RepoOverview, method};
 use bosun_client::{Client, Endpoint, Error};
-use bosun_config::{Config, Disk, DiskProbe, SystemProbe, tools};
+use bosun_config::{Config, Disk, DiskProbe, Queue, SystemProbe, tools};
 use serde::Serialize;
 
 use crate::install::{self, Platform};
@@ -197,7 +203,13 @@ pub(crate) async fn run(inputs: &Inputs) -> Vec<Check> {
         (Ok(platform), Some(Ok(found))) => registration_check(platform, &inputs.name, found),
         (Ok(_), None) => Check::skip("registration", "not queried"),
     });
-    daemon(&inputs.endpoint, &mut checks).await;
+    let client = daemon(&inputs.endpoint, &mut checks).await;
+    if let Some(config) = &config {
+        checks.extend(match client {
+            Some(mut client) => served_config(config, &served(inputs, config, &mut client).await),
+            None => vec![Check::skip("served_config", "the daemon did not answer")],
+        });
+    }
     checks.push(log(inputs));
     checks
 }
@@ -926,7 +938,8 @@ fn endpoint_acl(_: &Endpoint) -> Check {
     Check::skip("endpoint_acl", "not checked on this platform")
 }
 
-async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) {
+/// `endpoint`, `endpoint_acl` and `daemon`: the client that answered `hello`, if one did.
+async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) -> Option<Client> {
     let start = "start it: log in again, or run bosun install, which starts it now; run \
                  bosund in a terminal to see why it stops";
     let endpoint = match endpoint {
@@ -938,7 +951,7 @@ async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) {
                 "pass --endpoint or set BOSUN_ENDPOINT",
             ));
             checks.push(Check::skip("daemon", "the endpoint has no name"));
-            return;
+            return None;
         }
     };
     let opened = tokio::time::timeout(bosun_client::CONNECT_TIMEOUT, bosun_client::open(endpoint))
@@ -949,7 +962,7 @@ async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) {
         Err(e) => {
             checks.push(Check::fail("endpoint", e.to_string(), start));
             checks.push(Check::skip("daemon", "the endpoint is not reachable"));
-            return;
+            return None;
         }
     };
     checks.push(Check::ok("endpoint", format!("{endpoint} is reachable")));
@@ -957,16 +970,19 @@ async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) {
     let hello = tokio::time::timeout(bosun_client::CONNECT_TIMEOUT, Client::over(stream))
         .await
         .unwrap_or(Err(Error::Timeout));
+    let mut answered = None;
     checks.push(match hello {
         Ok(client) => {
             let hello = client.daemon();
-            Check::ok(
+            let check = Check::ok(
                 "daemon",
                 format!(
                     "bosund {} (pid {}, API version {}) answers",
                     hello.daemon_version, hello.pid, hello.api_version
                 ),
-            )
+            );
+            answered = Some(client);
+            check
         }
         Err(e @ Error::UnsupportedVersion { .. }) => Check::fail(
             "daemon",
@@ -979,6 +995,160 @@ async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) {
             "stop whatever listens there and start bosund again",
         ),
     });
+    answered
+}
+
+/// What [`served_config`] takes for an identity the daemon answers it does not serve.
+pub(crate) const NOT_SERVED: &str = "the daemon serves no such identity";
+
+/// The end of every difference [`served_config`] names, as the daemon's reload line says it.
+const NEXT_START: &str = "takes effect at the next daemon start";
+
+/// The fix of every difference [`served_config`] names.
+const RESTART: &str = "restart the daemon (log in again, or run bosun install)";
+
+/// `status.overview` of each configured identity (of `--identity` only, when given), asked on
+/// the client that answered `hello`: the repositories the daemon serves, [`NOT_SERVED`], or
+/// another error's text.
+async fn served(
+    inputs: &Inputs,
+    config: &Config,
+    client: &mut Client,
+) -> BTreeMap<String, Result<Vec<RepoOverview>, String>> {
+    let mut served = BTreeMap::new();
+    for name in config.identities.keys() {
+        if inputs.identity.as_ref().is_some_and(|only| only != name) {
+            continue;
+        }
+        let asked = tokio::time::timeout(
+            bosun_client::CONNECT_TIMEOUT,
+            client.call::<method::StatusOverview>(&IdentityParams {
+                identity: name.clone(),
+            }),
+        )
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        let answer = match asked {
+            Ok(overview) => Ok(overview.repos),
+            Err(Error::Rpc(e)) if e.code == code::UNKNOWN_IDENTITY => Err(NOT_SERVED.to_owned()),
+            Err(e) => Err(e.to_string()),
+        };
+        served.insert(name.clone(), answer);
+    }
+    served
+}
+
+/// The kind of a configured queue, as `status.overview` names it.
+fn queue_kind(queue: Option<&Queue>) -> &'static str {
+    match queue {
+        Some(Queue::LocalFile { .. }) => "local_file",
+        Some(Queue::Projects { .. }) => "projects_v2",
+        Some(_) => "other",
+        None => "none",
+    }
+}
+
+/// Where a configured queue is, as `status.overview` names it (`queue_source`).
+fn queue_source(queue: Option<&Queue>) -> Option<String> {
+    match queue {
+        Some(Queue::LocalFile { file }) => Some(file.display().to_string()),
+        Some(Queue::Projects { owner, number }) => Some(format!("{owner}/{number}")),
+        Some(_) | None => None,
+    }
+}
+
+/// `served_config` (#186): the configuration against what the daemon serves, per identity of
+/// `served` (what [`served`] asked). Each difference that only a daemon start applies is a
+/// warning naming the repository or identity; none is one `ok`.
+pub(crate) fn served_config(
+    config: &Config,
+    served: &BTreeMap<String, Result<Vec<RepoOverview>, String>>,
+) -> Vec<Check> {
+    // Mutant (`mutant_doctor_ignores_served_config`): nothing is compared.
+    if cfg!(mutant_doctor_ignores_served_config) {
+        return vec![Check::ok(
+            "served_config",
+            "the daemon serves the configuration as written",
+        )];
+    }
+    let warn =
+        |identity: &str, detail: String| Check::warn("served_config", detail, RESTART).of(identity);
+    let served_under = |repo: &str| {
+        served.iter().find_map(|(identity, repos)| {
+            let repos = repos.as_ref().ok()?;
+            repos
+                .iter()
+                .any(|r| r.repo == repo)
+                .then_some(identity.as_str())
+        })
+    };
+    let mut checks = Vec::new();
+    for (identity, answer) in served {
+        let repos = match answer {
+            Ok(repos) => repos,
+            Err(e) if e == NOT_SERVED => {
+                checks.push(warn(
+                    identity,
+                    format!(
+                        "identity {identity} is added: its store, ingest and loops take effect \
+                         at the next daemon start"
+                    ),
+                ));
+                continue;
+            }
+            Err(e) => {
+                checks.push(
+                    Check::warn(
+                        "served_config",
+                        format!("identity {identity}: the daemon's overview cannot be read: {e}"),
+                        "run bosun doctor again; the daemon's log says why",
+                    )
+                    .of(identity),
+                );
+                continue;
+            }
+        };
+        for (name, repo) in config.repos.iter().filter(|(_, r)| r.identity == *identity) {
+            let Some(found) = repos.iter().find(|r| r.repo == *name) else {
+                let detail = if served_under(name).is_some() {
+                    format!("repository {name}: its identity changed: {NEXT_START}")
+                } else {
+                    format!("repository {name} is added: its loop {NEXT_START}")
+                };
+                checks.push(warn(identity, detail));
+                continue;
+            };
+            let queue = repo.queue.as_ref();
+            for (field, changed) in [
+                ("queue", found.queue != queue_kind(queue)),
+                ("queue", found.queue_source != queue_source(queue)),
+                ("path", found.path != repo.path.display().to_string()),
+            ] {
+                let detail = format!("repository {name}: its {field} changed: {NEXT_START}");
+                if changed && !checks.iter().any(|c| c.detail == detail) {
+                    checks.push(warn(identity, detail));
+                }
+            }
+        }
+        // One configured under another identity is named there, above.
+        for found in repos.iter().filter(|r| !config.repos.contains_key(&r.repo)) {
+            checks.push(warn(
+                identity,
+                format!(
+                    "repository {} is removed: its loop claims nothing new and its item in \
+                     flight goes to Needs you; the rest {NEXT_START}",
+                    found.repo
+                ),
+            ));
+        }
+    }
+    if checks.is_empty() {
+        checks.push(Check::ok(
+            "served_config",
+            "the daemon serves the configuration as written",
+        ));
+    }
+    checks
 }
 
 /// The worst status of `checks`: `fail`, else `warn`, else `ok`.
@@ -1164,6 +1334,81 @@ mod tests {
             }
         }
         assert_eq!(stop_hook("app", &root.join("absent")).status, Status::Skip);
+    }
+
+    /// #186: what the daemon serves against the file, through `served_config` alone (no
+    /// endpoint is opened).
+    #[test]
+    fn the_doctor_names_what_waits_for_the_next_daemon_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for sub in ["claude", "claude-other", "demo", "beta"] {
+            std::fs::create_dir_all(d.join(sub)).unwrap();
+        }
+        let board = d.join("board.toml");
+        let text = format!(
+            "[identity.test]\nclaude_config_dir = '{}'\ndatabase = '{}'\n\n\
+             [identity.other]\nclaude_config_dir = '{}'\ndatabase = '{}'\n\n\
+             [repo.demo]\npath = '{}'\nidentity = 'test'\n\
+             queue = {{ kind = 'local_file', file = '{}' }}\nmodel = 'opus'\n\n\
+             [repo.beta]\npath = '{}'\nidentity = 'test'\n",
+            d.join("claude").display(),
+            d.join("test.db").display(),
+            d.join("claude-other").display(),
+            d.join("other.db").display(),
+            d.join("demo").display(),
+            board.display(),
+            d.join("beta").display(),
+        );
+        let config = bosun_config::parse(&text, &NoProbe).unwrap();
+        let overview = |repo: &str, source: Option<String>| RepoOverview {
+            repo: repo.to_owned(),
+            path: config.repos[repo].path.display().to_string(),
+            queue: queue_kind(config.repos[repo].queue.as_ref()).to_owned(),
+            queue_source: source,
+            state: "idle".to_owned(),
+            hold: None,
+            current: None,
+            last_verdict: None,
+        };
+        let moved = d.join("moved.toml").display().to_string();
+        let served = BTreeMap::from([
+            ("other".to_owned(), Err(NOT_SERVED.to_owned())),
+            ("test".to_owned(), Ok(vec![overview("demo", Some(moved))])),
+        ]);
+        let checks = served_config(&config, &served);
+        assert!(
+            checks.iter().all(|c| c.status == Status::Warn
+                && c.detail.contains("next daemon start")
+                && c.fix.is_some()),
+            "{checks:#?}"
+        );
+        let details: Vec<&str> = checks.iter().map(|c| c.detail.as_str()).collect();
+        assert_eq!(checks.len(), 3, "{details:#?}");
+        for named in [
+            "repository beta is added",
+            "repository demo: its queue changed",
+            "identity other is added",
+        ] {
+            assert!(
+                details.iter().any(|d| d.starts_with(named)),
+                "{named}: {details:#?}"
+            );
+        }
+
+        let matching = BTreeMap::from([
+            ("other".to_owned(), Ok(Vec::new())),
+            (
+                "test".to_owned(),
+                Ok(vec![
+                    overview("beta", None),
+                    overview("demo", Some(board.display().to_string())),
+                ]),
+            ),
+        ]);
+        let checks = served_config(&config, &matching);
+        assert_eq!(checks.len(), 1, "{checks:#?}");
+        assert_eq!(checks[0].status, Status::Ok, "{checks:#?}");
     }
 
     #[test]

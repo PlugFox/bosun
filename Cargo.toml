@@ -434,6 +434,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #189: a claim refusal and a visibility failure logged once per text.
   "cfg(mutant_loop_claim_refusal_every_poll)",
   "cfg(mutant_board_visibility_every_failure)",
+  # #190: a reload names what waits for the next daemon start; a removed repository.
+  "cfg(mutant_reload_misses_queue_change)",
+  "cfg(mutant_reload_relogs_pending)",
+  "cfg(mutant_loop_removed_repo_keeps_item)",
+  "cfg(mutant_doctor_ignores_served_config)",
 ] }
 
 [workspace.lints.clippy]

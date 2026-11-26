@@ -996,8 +996,7 @@ fn push(
     }
     let expected = recorded.map(str::to_owned).or(now).unwrap_or_default();
     let spec = format!("{head}:{remote_ref}");
-    let mut command = git.command();
-    env.apply(&mut command);
+    let mut command = remote_command(&git, env);
     command.args(["push", "--quiet", "--no-verify"]);
     // Mutant (`mutant_loop_pr_push_without_lease`): a plain push, which a head rebased since
     // the branch was pushed cannot make.
@@ -1015,6 +1014,29 @@ fn push(
     Err(forge::classify(format!(
         "git push {REMOTE} {spec}: {stderr}"
     )))
+}
+
+/// The credential helpers of a git that talks to the forge for the identity: the list the
+/// identity's git configuration may have filled is emptied, then `gh auth git-credential`, which
+/// answers from the identity's `gh` configuration (`GH_CONFIG_DIR` of [`Env::tool`]). `Env::tool`
+/// sets `GIT_CONFIG_NOSYSTEM=1`, so without it an HTTPS remote has no credential at all. No
+/// token is ever on a command line, in a URL or in a log: `gh` hands it to git on a pipe. On
+/// Windows git runs the helper through its own `sh`, which finds `gh` on the identity's `PATH`
+/// as the daemon's own `gh` calls do.
+pub(crate) const CREDENTIALS: [&str; 4] = [
+    "-c",
+    "credential.helper=",
+    "-c",
+    "credential.helper=!gh auth git-credential",
+];
+
+/// A [`Git::command`] for a git that talks to the forge: `env`, the identity's tool environment,
+/// and the [`CREDENTIALS`].
+pub(crate) fn remote_command(git: &Git, env: &Env) -> std::process::Command {
+    let mut command = git.command();
+    env.apply(&mut command);
+    command.args(CREDENTIALS);
+    command
 }
 
 /// The URL a push to [`REMOTE`] goes to, `pushInsteadOf` and `pushurl` applied under `env`:
@@ -1043,8 +1065,7 @@ fn remote_head(
     url: &str,
     remote_ref: &str,
 ) -> Result<Option<String>, ForgeError> {
-    let mut command = git.command();
-    env.apply(&mut command);
+    let mut command = remote_command(git, env);
     command.args(["ls-remote", "--quiet", "--", url, remote_ref]);
     let out = command
         .output()
@@ -1167,6 +1188,31 @@ mod tests {
         git(dir, &["add", file]);
         git(dir, &["commit", "-q", "-m", file]);
         git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// #2, #8: a git that talks to the forge empties the identity's credential helpers and asks
+    /// the identity's `gh` instead; nothing that looks like a token is on its command line.
+    #[test]
+    fn a_remote_git_takes_its_credentials_from_the_identitys_gh() {
+        let command = remote_command(&Git::new("."), &Env::default());
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .windows(4)
+            .position(|w| w == CREDENTIALS)
+            .unwrap_or_else(|| panic!("{args:?}"));
+        assert!(
+            args[..at].iter().all(|a| !a.starts_with("credential.")),
+            "{args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains("token") || a.contains("password")),
+            "{args:?}"
+        );
     }
 
     /// #8: a passing verdict that cannot record its head would report the same head rebased

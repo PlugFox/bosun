@@ -320,7 +320,7 @@ impl Loop {
             .await
         {
             Ok(()) => self.board.wake(),
-            Err(e) => self.halt(&e.to_string()),
+            Err(e) => self.halt("an effect", &e.to_string()),
         }
     }
 

@@ -615,7 +615,8 @@ pub(crate) struct Loop {
     /// refused as retryable (#8, E10). A re-attached session takes it and drops it once its
     /// credential is admitted again.
     recovering: Option<crate::agent::Recovering>,
-    /// The store refused a transition: the loop stops.
+    /// The store failed a write or read the loop cannot go on without (any refusal of a
+    /// transition but a stale one, #132): the loop stops.
     halted: bool,
     /// The sleep detector.
     gaps: park::Gaps,
@@ -842,8 +843,9 @@ impl Loop {
     /// again, and [`Event::Stale`] is stepped from the stored item and recorded, so it goes to
     /// Needs you with the refusal in its comment. A stored item that cannot move (already Needs
     /// you, Done or Cancelled), or whose arrow is refused as stale again, is skipped: nothing
-    /// more is written for it, and the stale arrow is never retried. Any other refusal, of the
-    /// transition or of what this writes and reads, halts the loop ([`Loop::halt`]).
+    /// more is written for it, and the stale arrow is never retried. A stored item with no row
+    /// is skipped before anything is written for it. Any other refusal, of the transition or
+    /// of what this writes and reads, halts the loop ([`Loop::halt`]).
     ///
     /// Returns `None` when the loop halts; else the stored item (`None` when it has no row)
     /// and the arrow [`Event::Stale`] took from it, recorded, whose effects the caller performs.
@@ -860,10 +862,23 @@ impl Loop {
             matches!(error, bosun_store::Error::Stale(_)) && !cfg!(mutant_loop_halt_on_stale)
         };
         if !stale {
-            self.halt(&error.to_string());
+            self.halt("a transition", &error.to_string());
             return None;
         }
         let error = error.to_string();
+        // Read first: a note needs the item's row, and an item with none is skipped.
+        let stored = match self.shared.deps.reader.item(id).await {
+            Ok(Some(stored)) => stored.item,
+            Ok(None) => {
+                self.shared
+                    .trouble(format!("{id}: {error}; the item has no row and is skipped"));
+                return Some((None, None));
+            }
+            Err(e) => {
+                self.halt("a read of the item", &e.to_string());
+                return None;
+            }
+        };
         self.shared
             .trouble(format!("{id}: {error}; the item goes to Needs you"));
         let note = Write::ItemNote {
@@ -873,17 +888,9 @@ impl Loop {
             at_ms: now_ms(),
         };
         if let Err(e) = self.shared.deps.writer.write(vec![note]).await {
-            self.halt(&e.to_string());
+            self.halt("the item's stale note", &e.to_string());
             return None;
         }
-        let stored = match self.shared.deps.reader.item(id).await {
-            Ok(Some(stored)) => stored.item,
-            Ok(None) => return Some((None, None)),
-            Err(e) => {
-                self.halt(&e.to_string());
-                return None;
-            }
-        };
         let Some(stepped) = step(&stored, &Event::Stale, &self.ctx()) else {
             return Some((Some(stored), None));
         };
@@ -896,17 +903,17 @@ impl Loop {
                 Some((Some(stored), None))
             }
             Err(e) => {
-                self.halt(&e.to_string());
+                self.halt("a transition", &e.to_string());
                 None
             }
         }
     }
 
-    /// The store refused a write the loop cannot go on without: the loop stops.
-    fn halt(&mut self, error: &str) {
-        self.shared.trouble(format!(
-            "the store refused a transition, the loop stops: {error}"
-        ));
+    /// The store failed `what`, a write or read the loop cannot go on without (a transition
+    /// refused other than as stale, a note, an effect, a registration): the loop stops.
+    fn halt(&mut self, what: &str, error: &str) {
+        self.shared
+            .trouble(format!("the store refused {what}, the loop stops: {error}"));
         self.halted = true;
     }
 
@@ -952,7 +959,7 @@ impl Loop {
                 // Mutant: the effects are performed first and the row written after.
                 let follow = self.perform(&stepped.transition.effects).await;
                 if let Err(e) = self.record(&stepped).await {
-                    self.halt(&e.to_string());
+                    self.halt("a transition", &e.to_string());
                     return;
                 }
                 if let Some(cur) = self.current.as_mut() {
@@ -2013,7 +2020,7 @@ impl Loop {
             // Stored before the bounce queues its comment: a comment still pending when the
             // daemon restarts is posted with them (#111).
             if let Err(e) = outbox::note_findings(&self.shared.deps.writer, &id, &findings).await {
-                self.halt(&e);
+                self.halt("the lint findings", &e);
                 return;
             }
             self.shared.publish(EventBody::LintFindings {
@@ -2107,7 +2114,7 @@ impl Loop {
             at_ms: now_ms(),
         });
         if let Err(e) = self.shared.deps.writer.write(vec![write]).await {
-            self.halt(&e.to_string());
+            self.halt("the item's row", &e.to_string());
             return false;
         }
         true

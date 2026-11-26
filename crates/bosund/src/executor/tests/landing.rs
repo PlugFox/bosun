@@ -846,6 +846,13 @@ async fn pr_scene(more: &str) -> (Scene, Arc<FakeForge>, PathBuf) {
     let mut config = std::fs::read_to_string(&scene.gitconfig).unwrap();
     let _ = write!(config, "[url \"{url}\"]\n\tpushInsteadOf = {ORIGIN}\n");
     std::fs::write(&scene.gitconfig, config).unwrap();
+    // The forge's target, which `pr` mode starts from (E28): the user's `main` as it is now.
+    scene.git(&[
+        "push",
+        "-q",
+        &remote.to_string_lossy(),
+        "main:refs/heads/main",
+    ]);
     let fake = Arc::new(FakeForge::default());
     scene.forge = Some(fake.clone());
     (scene, fake, remote)
@@ -1054,6 +1061,53 @@ async fn a_rebased_head_is_pushed_over_the_branch_pushed_before() {
         pushed(&scene, &remote),
         [format!("refs/heads/bosun/demo-1 {head}")]
     );
+    assert_eq!(fake.prs().len(), 1);
+}
+
+/// E28: the user's `main` has a commit the forge does not (`local.txt`, never pushed). In `pr`
+/// mode the item starts from and is rebased onto the forge's `main`: the pull request branch
+/// does not contain the local commit, its parent is the forge's `main`, and the user's `main`
+/// and checkout stay at the local commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_request_branch_never_holds_the_users_unpushed_commits() {
+    let (scene, fake, remote) = pr_scene("").await;
+    let forge_main = git_in(&scene, &remote, &["rev-parse", "refs/heads/main"]);
+    std::fs::write(scene.repo.join("local.txt"), "local").unwrap();
+    scene.git(&["add", "local.txt"]);
+    scene.git(&[
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "-q",
+        "-m",
+        "Unpushed",
+    ]);
+    let local = scene.git(&["rev-parse", "HEAD"]);
+    assert_ne!(local, forge_main);
+
+    scene.write_board(&[card(1, "Forge based", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let row = scene.store.reader().landing(&item(1)).await.unwrap();
+    let head = row.and_then(|r| r.head_sha).expect("the verified head");
+    assert_eq!(
+        pushed(&scene, &remote),
+        [format!("refs/heads/bosun/demo-1 {head}")]
+    );
+    assert_eq!(
+        git_in(&scene, &remote, &["rev-parse", &format!("{head}^")]),
+        forge_main
+    );
+    let files = git_in(&scene, &remote, &["ls-tree", "--name-only", "-r", &head]);
+    assert!(!files.lines().any(|f| f == "local.txt"), "{files}");
+    assert_eq!(scene.git(&["rev-parse", "refs/heads/main"]), local);
+    assert_eq!(scene.git(&["rev-parse", "HEAD"]), local);
     assert_eq!(fake.prs().len(), 1);
 }
 

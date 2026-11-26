@@ -19,7 +19,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use super::sanitise::{sanitise, sanitise_inline};
-use super::text::{chars, clean, first_chars};
+use super::text::{chars, clean, code_span, first_chars};
 use super::{BODY_CAP, marker, scrub};
 
 /// The key of the marker that opens the daemon's region of the body.
@@ -33,6 +33,10 @@ const SUMMARY_CAP: usize = 40_000;
 const FACT_LABEL_CAP: usize = 100;
 /// One fact's value, in characters after sanitising.
 const FACT_CAP: usize = 500;
+/// The labels of the facts whose value is one of the daemon's own identifiers (the item's id,
+/// a commit): shown whole as a code span, inert and read as one token, not as text whose
+/// references the sanitiser wraps piece by piece (`` owner/repo`#7` ``).
+const CODE_FACTS: &[&str] = &["Item", "Commit"];
 /// Facts listed; the rest are counted.
 const FACTS_MAX: usize = 40;
 /// One fact's line at most: `- label: value` and its newline.
@@ -136,8 +140,14 @@ fn region(facts: &[(&str, &str)]) -> String {
     let mut out = marker(REGION_START_KEY);
     out.push_str("\n\n");
     for (label, value) in facts.iter().take(FACTS_MAX) {
+        let value = if CODE_FACTS.contains(label) {
+            // `n` characters, fenced by at most `n + 1` backticks on each side and padded by
+            // two spaces: at most `3n + 4`.
+            code_span(&scrub(first_chars(value, (FACT_CAP - 4) / 3)))
+        } else {
+            sanitise_inline(&scrub(first_chars(value, FACT_CAP * 4)), FACT_CAP)
+        };
         let label = sanitise_inline(label, FACT_LABEL_CAP);
-        let value = sanitise_inline(&scrub(first_chars(value, FACT_CAP * 4)), FACT_CAP);
         let _ = writeln!(out, "- {label}: {value}");
     }
     if facts.len() > FACTS_MAX {
@@ -383,8 +393,11 @@ mod tests {
             // The only markers are the daemon's two; `split` saw the only live closing keyword.
             assert_eq!(out.matches("bosun:key").count(), 2, "{out}");
         }
-        // Hostile fact values are inert too.
-        let hostile: Vec<(&str, &str)> = CORPUS.iter().map(|c| ("Fact", *c)).collect();
+        // Hostile fact values are inert too, those shown as code among them.
+        let hostile: Vec<(&str, &str)> = CORPUS
+            .iter()
+            .flat_map(|c| [("Fact", *c), ("Item", *c), ("Commit", *c)])
+            .collect();
         let out = body("", &hostile, 42);
         let (agent, region_text) = split(&out, 42);
         assert_eq!(agent, format!("{NO_DESCRIPTION}\n\n"));
@@ -394,6 +407,20 @@ mod tests {
             .expect("the region's bounds");
         assert_eq!(inert(inner), None, "{inner}");
         assert_eq!(out.matches("bosun:key").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn the_item_and_the_commit_are_each_one_code_span() {
+        let facts: &[(&str, &str)] = &[
+            ("Item", "demo-repo#5"),
+            ("Commit", "0123abc"),
+            ("Verdict", "ok #5"),
+        ];
+        let out = region(facts);
+        assert!(out.contains("\n- Item: `demo-repo#5`\n"), "{out}");
+        assert!(out.contains("\n- Commit: `0123abc`\n"), "{out}");
+        // Any other fact is text, its references wrapped.
+        assert!(out.contains("\n- Verdict: ok `#5`\n"), "{out}");
     }
 
     #[test]

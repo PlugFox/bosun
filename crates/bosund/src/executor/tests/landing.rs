@@ -1111,6 +1111,164 @@ async fn a_pull_request_branch_never_holds_the_users_unpushed_commits() {
     assert_eq!(fake.prs().len(), 1);
 }
 
+/// A squash merge of another item's pull request, as the forge makes it: a commit of the
+/// user's repository on top of `parent`, on no branch, whose message carries that item's
+/// trailers.
+fn squash_of_another_item(scene: &Scene, parent: &str, card: u64) -> String {
+    let message = format!(
+        "Land the item of #{card} (#{card})\n\nItem: demo#{card}\nRun: a1s1\n\
+         Session: 00000000-0000-4000-8000-00000000000{card}"
+    );
+    scene.git(&[
+        "commit-tree",
+        &format!("{parent}^{{tree}}"),
+        "-p",
+        parent,
+        "-m",
+        &message,
+    ])
+}
+
+/// E28, the reverse of the scene above: the forge's `main` is ahead of the user's, by a squash
+/// merge of another item's pull request (its message carries that item's trailers), and moves
+/// once more, by another such merge, before the first verdict. The item is based on, rebased
+/// onto and compared with the forge's `main`: it ends Done in one attempt with two passing
+/// verdict runs, its pull request branch is its one commit on top of the forge's newest
+/// `main`, and the user's `main` never moved
+/// (`mutant_loop_pr_message_range_local_target` counts the item's commits from the user's
+/// `main`: the merges' trailers are taken for forged ones, and every attempt fails its
+/// preconditions).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forge_target_ahead_of_the_users_is_not_the_items_own_work() {
+    let (mut scene, fake, remote) = pr_scene("").await;
+    let local = scene.git(&["rev-parse", "HEAD"]);
+    let url = remote.to_string_lossy().into_owned();
+    let first = squash_of_another_item(&scene, &local, 6);
+    scene.git(&["push", "-q", &url, &format!("{first}:refs/heads/main")]);
+    let second = squash_of_another_item(&scene, &first, 7);
+    let then = format!(
+        "git -C '{}' push -q '{}' {second}:refs/heads/main",
+        sh_path(&scene.repo),
+        sh_path(&remote)
+    );
+    setup_once(&mut scene, &then);
+    assert_eq!(scene.git(&["rev-parse", "HEAD"]), local);
+
+    scene.write_board(&[card(1, "Forge ahead", "test -f a.txt", "Item one.")]);
+    scene.script(1, &["commit a.txt a".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let attempt = scene.item(1).await.unwrap().attempt.unwrap();
+    assert_eq!(attempt.number, 1);
+    assert_eq!(passed(&scene, 1).await, 2);
+    assert_eq!(
+        git_in(&scene, &remote, &["rev-parse", "refs/heads/main"]),
+        second
+    );
+    let row = scene.store.reader().landing(&item(1)).await.unwrap();
+    let head = row.and_then(|r| r.head_sha).expect("the verified head");
+    assert_eq!(
+        pushed(&scene, &remote),
+        [format!("refs/heads/bosun/demo-1 {head}")]
+    );
+    assert_eq!(
+        git_in(&scene, &remote, &["rev-parse", &format!("{head}^")]),
+        second
+    );
+    assert_eq!(trailer_in(&scene, &remote, &head, "Item"), ["demo#1"]);
+    assert_eq!(scene.git(&["rev-parse", "refs/heads/main"]), local);
+    assert_eq!(scene.git(&["rev-parse", "HEAD"]), local);
+    assert_eq!(fake.prs().len(), 1);
+}
+
+/// E28 with a conflict: the setup script pushes, once before the first verdict, a squash merge
+/// of another item to the forge's `main` that writes `a.txt` too. The rebase at landing onto
+/// the forge's `main` conflicts; the conflict's session resets its branch onto the clone's copy
+/// of the forge's `main` and commits `a.txt` merged. Its preconditions take the moved copy for
+/// the landing's own fetch (the claim follows it, as it follows the user's target in the other
+/// modes), not for tampering, and the merge's trailers for the forge's, not the item's: the item
+/// ends Done in one attempt with one conflict and two sessions, its pull request branch one
+/// commit on top of the forge's `main`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_conflict_with_the_forge_target_lands_in_one_attempt() {
+    let (mut scene, fake, remote) = pr_scene("").await;
+    let local = scene.git(&["rev-parse", "HEAD"]);
+    scene.git(&["checkout", "-q", "-b", "elsewhere"]);
+    std::fs::write(scene.repo.join("a.txt"), "theirs").unwrap();
+    scene.git(&["add", "a.txt"]);
+    scene.git(&[
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "-q",
+        "-m",
+        "Land the item of #7 (#7)\n\nItem: demo#7\nRun: a1s1\n\
+         Session: 00000000-0000-4000-8000-000000000007",
+    ]);
+    let theirs = scene.git(&["rev-parse", "HEAD"]);
+    scene.git(&["checkout", "-q", "main"]);
+    scene.git(&["branch", "-q", "-D", "elsewhere"]);
+    let then = format!(
+        "git -C '{}' push -q '{}' {theirs}:refs/heads/main",
+        sh_path(&scene.repo),
+        sh_path(&remote)
+    );
+    setup_once(&mut scene, &then);
+    assert_eq!(scene.git(&["rev-parse", "HEAD"]), local);
+
+    scene.write_board(&[card(1, "Forge conflict", "test -f a.txt", "Item one.")]);
+    let p = |name: &str| sh_path(&scene.path(name));
+    scene.script(
+        1,
+        &[
+            format!("once {} commit a.txt a", p("m1")),
+            format!(
+                "once {} replay {}",
+                p("m2"),
+                Scene::stream("normal-end.jsonl")
+            ),
+            format!("once {} exit 0", p("m3")),
+            format!(
+                "git reset -q --hard {}",
+                crate::executor::landing::forge_target_ref("main")
+            ),
+            "commit a.txt merged".to_owned(),
+        ],
+    );
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    assert!(matches!(state, State::Done(_)), "{state:?}");
+    let it = scene.item(1).await.unwrap();
+    assert_eq!(it.conflicts, 1, "{it:?}");
+    assert_eq!(it.attempt.as_ref().unwrap().number, 1);
+    assert_eq!(scene.runs(1).await.len(), 2);
+    let row = scene.store.reader().landing(&item(1)).await.unwrap();
+    let head = row.and_then(|r| r.head_sha).expect("the verified head");
+    assert_eq!(
+        pushed(&scene, &remote),
+        [format!("refs/heads/bosun/demo-1 {head}")]
+    );
+    assert_eq!(
+        git_in(&scene, &remote, &["rev-parse", &format!("{head}^")]),
+        theirs
+    );
+    assert_eq!(
+        git_in(&scene, &remote, &["show", &format!("{head}:a.txt")]),
+        "merged"
+    );
+    assert_eq!(scene.git(&["rev-parse", "refs/heads/main"]), local);
+    assert_eq!(fake.prs().len(), 1);
+}
+
 /// A lease a card may need in these scenes.
 const RIG: &str = "[resource.rig]\nkind = \"device\"\ncapacity = 1\nscope = \"machine\"\n";
 

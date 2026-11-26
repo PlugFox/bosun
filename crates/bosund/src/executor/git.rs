@@ -66,13 +66,14 @@ pub(crate) fn merge_base(git: &Git, head: &str, target: &str) -> Result<String, 
 }
 
 /// Worktree mode (#8): `base` with the start of the item's own commits as its head: the merge
-/// base of the worktree's HEAD and the clone's `refs/heads/<target>` now. Landing rebases the
+/// base of the worktree's HEAD and `target` now, the clone's ref the item is based on
+/// ([`super::base_ref`]: the forge's target in `pr` mode, E28). Landing rebases the
 /// item onto the target, so the commits that came in from the target (a person's, with
 /// whatever messages they have) are never judged as the agent's. The refs and the stash are
 /// `base`'s own, as captured.
 pub(crate) fn item_base(git: &Git, base: &Base, target: &str) -> Result<Base, Error> {
     let head = head(git)?;
-    let start = merge_base(git, &head, &format!("refs/heads/{target}"))?;
+    let start = merge_base(git, &head, target)?;
     Ok(Base {
         head: start,
         ..base.clone()

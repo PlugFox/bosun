@@ -52,7 +52,8 @@
 //! (its clean checkout with it), so a Done item's work is on the target. The target the daemon
 //! moves in its clone, and in the user's repository, is taken into the claim's base and the
 //! capture of the user's checkout, and the item's own commits start at the merge base of its
-//! head and the target ([`git::item_base`]), so neither the next attempt nor a restarted daemon
+//! head and the target ([`git::item_base`]; in `pr` mode the forge's target, E28, [`base_ref`]),
+//! so neither the next attempt nor a restarted daemon
 //! takes landing for tampering, nor a person's commits for the agent's. Every item ends with
 //! its worktree closed; one that is not Done keeps its work in the clone under
 //! `refs/bosun/items/<item>`.
@@ -443,6 +444,24 @@ pub(crate) struct ItemWorktree {
     /// The branch the item started from and lands on (a bare name): `landing.target`, else
     /// the branch the user's checkout was on at claim.
     pub(crate) target: String,
+    /// The clone's ref of [`Self::target`] the item started from, is rebased onto and has its
+    /// own commits counted from ([`base_ref`]).
+    pub(crate) base_ref: String,
+}
+
+/// The ref of the daemon's clone that an item of `repo` landing on `target` is based on, rebased
+/// onto and compared with: the forge's target in `pr` mode (E28,
+/// [`landing::forge_target_ref`]), else `refs/heads/<target>`, which follows the user's branch
+/// (E2, E14).
+pub(crate) fn base_ref(repo: &Repo, target: &str) -> String {
+    // Mutant (`mutant_loop_pr_based_on_local_target`): the user's local target in `pr` mode too.
+    if repo.landing.mode == bosun_config::LandingMode::Pr
+        && !cfg!(mutant_loop_pr_based_on_local_target)
+    {
+        landing::forge_target_ref(target)
+    } else {
+        format!("refs/heads/{target}")
+    }
 }
 
 /// The branch `repo`'s items land on: `landing.target`, else the branch of the user's
@@ -1338,8 +1357,16 @@ impl Loop {
         let checked = {
             let item = item.clone();
             blocking(move || {
-                let target = claimed.worktree.as_ref().map(|wt| wt.target.as_str());
-                git::preconditions(&path, &claimed.base, &item, &runs, target)
+                // Mutant (`mutant_loop_pr_message_range_local_target`): the item's own commits
+                // are counted from the user's local target in `pr` mode too.
+                let from = claimed.worktree.as_ref().map(|wt| {
+                    if cfg!(mutant_loop_pr_message_range_local_target) {
+                        format!("refs/heads/{}", wt.target)
+                    } else {
+                        wt.base_ref.clone()
+                    }
+                });
+                git::preconditions(&path, &claimed.base, &item, &runs, from.as_deref())
             })
             .await
         };
@@ -2088,7 +2115,7 @@ fn guards(
     let git = bosun_git::Git::new(&claimed.workdir);
     // Worktree mode: the item's own commits, not those that came in from the target (#8).
     let base = match &claimed.worktree {
-        Some(wt) => git::item_base(&git, &claimed.base, &wt.target)?,
+        Some(wt) => git::item_base(&git, &claimed.base, &wt.base_ref)?,
         None => claimed.base.clone(),
     };
     let mut refusals = bosun_git::protected(

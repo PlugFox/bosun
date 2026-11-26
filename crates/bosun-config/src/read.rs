@@ -303,6 +303,12 @@ impl Reader<'_> {
                 "hello_timeout" => set(&mut daemon.hello_timeout, self.duration(item, &what)),
                 "park_cap" => set(&mut daemon.park_cap, self.count(item, &what)),
                 "mcp_call_cap" => set(&mut daemon.mcp_call_cap, self.count(item, &what)),
+                "fast_death_sessions" => {
+                    set(&mut daemon.fast_death_sessions, self.count(item, &what));
+                }
+                "fast_death_within" => {
+                    set(&mut daemon.fast_death_within, self.duration(item, &what));
+                }
                 _ => self.ignored(key_at, &what),
             }
         }

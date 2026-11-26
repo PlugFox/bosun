@@ -1,4 +1,9 @@
-//! Control (#7, #67): pauses, the kill switch, the daily cap's hold and the operator token.
+//! Control (#7, #67): pauses, the kill switch, the daily cap's hold, the fast-death breaker's
+//! trips and the operator token.
+//!
+//! All of it is in memory: a pause by hand and a trip of the breaker (a repository paused
+//! because its sessions keep dying at once, `executor::breaker`) do not survive a daemon
+//! restart, which lifts them.
 //!
 //! [`Control`] is daemon-wide and shared by the API and every repository's loop. The API
 //! changes it (`control.*`, under the operator token); each loop reads its hold at every step
@@ -63,6 +68,20 @@ struct Flags {
     resumed: BTreeMap<String, i64>,
     /// Identities whose daily cap holds their queue, until when.
     daily: BTreeMap<String, i64>,
+    /// Repositories paused by the fast-death breaker, until `bosun resume`.
+    tripped: BTreeMap<String, Trip>,
+}
+
+/// A repository paused by the fast-death breaker (#7).
+#[derive(Debug, Clone)]
+struct Trip {
+    /// The identity the repository belongs to: resuming the identity lifts it.
+    identity: String,
+    /// Why, for `status`.
+    reason: String,
+    /// When it tripped, ms since the Unix epoch.
+    #[allow(dead_code)] // kept for the record; nothing reads it yet
+    at_ms: i64,
 }
 
 #[derive(Debug)]
@@ -191,17 +210,30 @@ impl Control {
     pub(crate) fn resume(&self, identity: &str, repo: Option<&str>, now_ms: i64) {
         {
             let mut flags = self.flags();
-            match repo {
-                Some(repo) => {
-                    flags.paused_repos.remove(repo);
-                    flags.auto.remove(repo);
-                    flags.resumed.insert(repo.to_owned(), now_ms);
-                }
-                None => {
-                    flags.paused.remove(identity);
-                }
+            if let Some(repo) = repo {
+                flags.paused_repos.remove(repo);
+                flags.auto.remove(repo);
+                flags.tripped.remove(repo);
+                flags.resumed.insert(repo.to_owned(), now_ms);
+            } else {
+                flags.paused.remove(identity);
+                flags.tripped.retain(|_, trip| trip.identity != identity);
             }
         }
+        self.bump();
+    }
+
+    /// Pauses `repo` of `identity` for the fast-death breaker (#7), with `reason`, until a
+    /// resume of the repository or of the identity.
+    pub(crate) fn trip(&self, identity: &str, repo: &str, reason: String, at_ms: i64) {
+        self.flags().tripped.insert(
+            repo.to_owned(),
+            Trip {
+                identity: identity.to_owned(),
+                reason,
+                at_ms,
+            },
+        );
         self.bump();
     }
 
@@ -248,7 +280,7 @@ impl Control {
         let flags = self.flags();
         let auto = flags.auto.get(repo).is_some_and(|&until| now_ms < until);
         let mut paused_repos = BTreeSet::new();
-        if flags.paused_repos.contains(repo) || auto {
+        if flags.paused_repos.contains(repo) || auto || flags.tripped.contains_key(repo) {
             paused_repos.insert(repo.to_owned());
         }
         Gates {
@@ -277,6 +309,7 @@ impl Control {
                     paused: flags.paused_repos.contains(repo),
                     auto_paused_until_ms: flags.auto.get(repo).copied().filter(|&t| now_ms < t),
                     hold: hold.map(|h| hold_name(h).to_owned()),
+                    tripped: flags.tripped.get(repo).map(|trip| trip.reason.clone()),
                 }
             })
             .collect();

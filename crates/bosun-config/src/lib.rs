@@ -34,6 +34,8 @@
 //! hello_timeout = "30s"         # bosun-mcp must say hello within this after spawn
 //! park_cap = 5                  # uncounted parks and resumes per item, then Needs you
 //! mcp_call_cap = 20             # calls of each agent tool per attempt
+//! fast_death_sessions = 3       # this many sessions in a row of one repository that crash
+//! fast_death_within = "60s"     # ... this soon after their spawn pause it until `bosun resume`
 //!
 //! [identity.personal]           # the identity bundle (#2)
 //! claude_config_dir = 'C:\Users\me\.claude'               # CLAUDE_CONFIG_DIR of the identity
@@ -548,6 +550,13 @@ pub struct Daemon {
     pub park_cap: u32,
     /// `mcp_call_cap`: calls of each agent tool per attempt. Default 20.
     pub mcp_call_cap: u32,
+    /// `fast_death_sessions`: the fast-death breaker (#7) pauses a repository after this many
+    /// sessions in a row, across its items, crashed by themselves within
+    /// [`Daemon::fast_death_within`] of their spawn. Default 3. Daemon-wide.
+    pub fast_death_sessions: u32,
+    /// `fast_death_within`: how soon after its spawn a crash counts toward the breaker.
+    /// Default 60 s. Daemon-wide.
+    pub fast_death_within: Duration,
 }
 
 impl Default for Daemon {
@@ -560,6 +569,8 @@ impl Default for Daemon {
             hello_timeout: Duration::from_secs(30),
             park_cap: 5,
             mcp_call_cap: 20,
+            fast_death_sessions: 3,
+            fast_death_within: Duration::from_mins(1),
         }
     }
 }

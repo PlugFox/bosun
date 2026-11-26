@@ -122,6 +122,8 @@ fn the_stage_1_keys_are_read() {
          hello_timeout = '20s'\n\
          park_cap = 3\n\
          mcp_call_cap = 10\n\
+         fast_death_sessions = 4\n\
+         fast_death_within = '90s'\n\
          [identity.personal]\n\
          claude_config_dir = '{}'\n\
          database = '{}'\n\
@@ -181,6 +183,8 @@ fn the_stage_1_keys_are_read() {
             hello_timeout: Duration::from_secs(20),
             park_cap: 3,
             mcp_call_cap: 10,
+            fast_death_sessions: 4,
+            fast_death_within: Duration::from_secs(90),
         }
     );
 
@@ -1212,4 +1216,31 @@ fn the_repository_hash_covers_the_sweep_only_when_it_is_set() {
     let worktree = format!("worktree = {{ root = '{}' }}\n", abs("wt/bosun"));
     let both = format!("{worktree}sweep = {{ processes = ['devserver'] }}\n");
     assert_ne!(hash(&with_repo(&both)), hash(&with_repo(&worktree)));
+}
+
+#[test]
+fn the_fast_death_keys_change_the_hash_only_when_not_default() {
+    let hash = |text: &str| parse(text, &Local).unwrap().repo_hash("bosun").unwrap();
+    let with = |daemon: &str| format!("[daemon]\npark_cap = 4\n{daemon}{}", with_repo(""));
+    let bare = hash(&with(""));
+    // Computed with the encoding before the fast-death keys existed; `abs` makes the paths,
+    // and so the hash, platform-specific.
+    #[cfg(windows)]
+    assert_eq!(
+        bare,
+        "3d65afa11d6cf33ee8b6f6dfb843c2a55f836f9b4fe9e0d0e4fc342883f68500"
+    );
+    assert_eq!(
+        hash(&with(
+            "fast_death_sessions = 3\nfast_death_within = '60s'\n"
+        )),
+        bare,
+        "the defaults written out"
+    );
+    assert_eq!(hash(&with("fast_death_within = '1m'\n")), bare);
+    let sessions = hash(&with("fast_death_sessions = 4\n"));
+    let within = hash(&with("fast_death_within = '90s'\n"));
+    assert_ne!(sessions, bare);
+    assert_ne!(within, bare);
+    assert_ne!(sessions, within);
 }

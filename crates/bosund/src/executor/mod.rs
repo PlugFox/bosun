@@ -132,6 +132,7 @@
 //! machine (resumed, verified again or landed again, uncounted).
 
 pub(crate) mod board;
+mod breaker;
 mod checkout;
 mod claim;
 mod commands;
@@ -521,6 +522,9 @@ pub(crate) enum Done {
         event: Event,
         /// The failing test names of a verdict run that did not pass.
         failing: Vec<String>,
+        /// How the session ended, for the fast-death breaker ([`breaker`]): from the session
+        /// task, for a session it spawned or attached; `None` from every other task.
+        session: Option<breaker::SessionEnd>,
     },
     /// Landing moved the target (#8): what the item's preconditions and the checkout guard
     /// compare with from now on. Sent before the landing's event.
@@ -634,6 +638,8 @@ pub(crate) struct Loop {
     pace: board::Pace,
     /// The poll of the open pull requests of Done items (#8).
     pulls: pulls::Watch,
+    /// The fast-death breaker's streak, across items ([`breaker`]).
+    streak: breaker::Streak,
 }
 
 /// Aborts its task when dropped: the drainer ends with its loop.
@@ -709,6 +715,7 @@ impl Loop {
             absent: BTreeSet::new(),
             pace,
             pulls: pulls::Watch::default(),
+            streak: breaker::Streak::default(),
         }
     }
 
@@ -1204,6 +1211,7 @@ impl Loop {
                     item: item.clone(),
                     event: Event::Question { attempt },
                     failing: Vec::new(),
+                    session: None,
                 });
             })
         };
@@ -1246,7 +1254,7 @@ impl Loop {
                     session::session(&shared, &config, &claimed, &run, kill_rx, on_blocking).await
                 }
             };
-            let Some(event) = event else {
+            let Some((event, session)) = event else {
                 return;
             };
             // The session has ended: the process sweep runs before the item's next step (E12).
@@ -1255,6 +1263,7 @@ impl Loop {
                 item,
                 event,
                 failing: Vec::new(),
+                session,
             });
         });
         self.set_task(kill, handle).await;
@@ -1341,6 +1350,7 @@ impl Loop {
                 item,
                 event,
                 failing,
+                session: None,
             });
         });
         self.set_task(kill, handle).await;
@@ -1411,6 +1421,7 @@ impl Loop {
                     item,
                     event,
                     failing: Vec::new(),
+                    session: None,
                 });
             }
         });
@@ -1742,6 +1753,8 @@ impl Loop {
     }
 
     async fn on_done(&mut self, done: Done) {
+        // Before anything else: the breaker observes the session of its item, current or not.
+        let done = self.observe_session(done);
         let item = match &done {
             Done::Claim { item, .. } | Done::Event { item, .. } | Done::Followed { item, .. } => {
                 item.clone()

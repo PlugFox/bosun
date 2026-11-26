@@ -3076,12 +3076,66 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // The fast-death breaker: sessions that keep dying at once pause the repository (#7).
+    Mutant {
+        name: "mutant_loop_no_fast_death_breaker",
+        issue: FAST_DEATH_CARD,
+        breaks: "the loop observes no session end: instant deaths drain the queue to Needs you",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::fast_death::three_sessions_dying_at_once_pause_the_repository_until_resume",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_fast_death_streak_never_resets",
+        issue: FAST_DEATH_CARD,
+        breaks: "an end that should reset the fast-death streak leaves it",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::fast_death::a_quick_passing_session_between_crashes_resets_the_streak",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_fast_death_counts_kills",
+        issue: FAST_DEATH_CARD,
+        breaks: "a session the daemon killed counts toward the fast-death streak",
+        package: "bosund",
+        check: Check::Test(
+            "executor::breaker::tests::only_a_crash_that_ended_by_itself_within_the_window_counts",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_fast_death_charges_a_crash",
+        issue: FAST_DEATH_CARD,
+        breaks: "the session that trips the fast-death breaker is charged as a crash",
+        package: "bosun-core",
+        check: Check::Test(
+            "item::tests::a_fast_death_parks_the_item_paused_and_charges_it_nothing",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_fast_death_always_hashed",
+        issue: FAST_DEATH_CARD,
+        breaks: "the fast-death keys enter the configuration hash at their defaults too",
+        package: "bosun-config",
+        check: Check::Test("tests::the_fast_death_keys_change_the_hash_only_when_not_default"),
+        platform: None,
+    },
 ];
 
 /// #193, the card of #8 that keeps `bosun-mcp` working while the daemon restarts: retried
 /// calls, a retryable refusal while loops recover, caps and blocking questions across the
 /// restart.
 const BUFFERED_CALLS_CARD: u32 = 193;
+
+/// The card of #7 that pauses a repository whose sessions keep dying at once (the fast-death
+/// breaker). The session that wrote it was not told the card's own number, so it records the
+/// parent's.
+const FAST_DEATH_CARD: u32 = 7;
 
 /// #191, the card of #186 (its finding 4) that lets `bosun with` survive a daemon restart.
 const WITH_RECONNECT_CARD: u32 = 191;

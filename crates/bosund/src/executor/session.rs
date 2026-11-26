@@ -75,6 +75,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::watch;
 
+use super::breaker::SessionEnd;
 use super::park::ChildSlot;
 use super::verdict::killed;
 use super::{Claimed, Shared, Signal, blocking, git, identity, lookup, now_ms, workspace};
@@ -206,6 +207,11 @@ impl ShimRun {
         self.written_at = Instant::now();
     }
 }
+
+/// What a session task ends with: its event, and how its session ended for the fast-death
+/// breaker (`None` when no session was spawned or attached). `None` when the session was
+/// detached at a graceful stop (E22): there is no event.
+pub(crate) type Ended = Option<(Event, Option<SessionEnd>)>;
 
 /// Which session this is.
 #[derive(Debug, Clone)]
@@ -644,8 +650,8 @@ pub(crate) async fn session(
     run: &Run,
     mut kill: watch::Receiver<Signal>,
     on_blocking: Box<dyn Fn() + Send + Sync>,
-) -> Option<Event> {
-    let crash = Some(run.exited(Exit::Crash));
+) -> Ended {
+    let crash = Some((run.exited(Exit::Crash), None));
     let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
         return crash;
     };
@@ -664,7 +670,7 @@ pub(crate) async fn session(
             // A refusal is the configuration's change since the daemon started (E24).
             Err(Some(e)) => {
                 shared.trouble(format!("{}: its leases: {e}", run.item));
-                return Some(Event::ConfigChanged);
+                return Some((Event::ConfigChanged, None));
             }
         }
     }
@@ -684,10 +690,11 @@ pub(crate) async fn session(
         Ok(bundle) => bundle,
         Err(e) => {
             shared.trouble(format!("{}: {e}", run.item));
-            return Some(Event::IdentityRefused {
+            let refused = Event::IdentityRefused {
                 attempt: run.attempt,
                 spawn: run.spawn,
-            });
+            };
+            return Some((refused, None));
         }
     };
 
@@ -734,7 +741,7 @@ pub(crate) async fn session(
                     ));
                     super::outbox::note_setup(shared, &run.item, &failed.cause(), &failed.tail)
                         .await;
-                    return Some(Event::SetupFailed);
+                    return Some((Event::SetupFailed, None));
                 }
                 Err(super::workspace::Unopened::Error(e)) => {
                     shared.trouble(format!(
@@ -742,7 +749,7 @@ pub(crate) async fn session(
                         run.item
                     ));
                     super::outbox::note_setup(shared, &run.item, &e.to_string(), "").await;
-                    return Some(Event::SetupFailed);
+                    return Some((Event::SetupFailed, None));
                 }
             }
         }
@@ -920,6 +927,8 @@ pub(crate) async fn session(
             return crash;
         }
     };
+    // The fast-death breaker measures a session from here (#7).
+    let spawned_at = Instant::now();
     let key = spawned.tree.key();
     set_child(&run.child, Some(key));
     let shim_run = match &shim_dir {
@@ -948,6 +957,7 @@ pub(crate) async fn session(
         git_repo,
         await_hello: true,
         consumed: (0, 0),
+        spawned_at: Some(spawned_at),
     };
     follow(shared, run, following, spawned, kill).await
 }
@@ -989,6 +999,9 @@ struct Following {
     await_hello: bool,
     /// The bytes of each stream consumed so far, in whole lines (E18).
     consumed: (u64, u64),
+    /// Right after the spawn returned, for the fast-death breaker (#7); `None` for a session a
+    /// previous daemon started ([`attach`]), which never counts toward it.
+    spawned_at: Option<Instant>,
 }
 
 /// Follows a running session to its end: reads both streams (the live entries, the tail, the
@@ -1000,7 +1013,7 @@ async fn follow(
     following: Following,
     spawned: bosun_proc::Spawned,
     mut kill: watch::Receiver<Signal>,
-) -> Option<Event> {
+) -> Ended {
     let Following {
         runner,
         session_id,
@@ -1015,6 +1028,7 @@ async fn follow(
         git_repo,
         await_hello,
         mut consumed,
+        spawned_at,
     } = following;
     let said_hello = |credential: &Option<crate::agent::Issued>| {
         credential
@@ -1132,6 +1146,7 @@ async fn follow(
     };
     // The child has exited or is being killed: no wake check may take it for dead now.
     set_child(&run.child, None);
+    let lived = spawned_at.map_or(Duration::ZERO, |at| at.elapsed());
     // A graceful stop (E22): a session under its shim is left running for the next daemon,
     // which re-attaches it as it would after a crash. Its tree is not killed and nothing of its
     // end is written: not the run's end, not the row's `gone`, not the lease journal's shim
@@ -1213,6 +1228,12 @@ async fn follow(
     };
     drop(session_dir);
     let ended = status.is_some();
+    // How it ended, for the fast-death breaker (#7): a re-attached session outlived a daemon.
+    let end_of = |exit: Exit| SessionEnd {
+        crashed: exit == Exit::Crash && spawned_at.is_some(),
+        by_itself: ended && !missed && !capped,
+        lived,
+    };
     if missed {
         shared.trouble(format!(
             "{}: bosun-mcp ({}) did not say hello within {} s of the spawn; the session was \
@@ -1228,10 +1249,11 @@ async fn follow(
             spawn: run.spawn,
             exit: events::exit_name(Some(Exit::Crash)).to_owned(),
         });
-        return Some(Event::NoHandshake {
+        let event = Event::NoHandshake {
             attempt: run.attempt,
             spawn: run.spawn,
-        });
+        };
+        return Some((event, Some(end_of(Exit::Crash))));
     }
     let (exit, published) = match status {
         Some(status) => {
@@ -1255,7 +1277,7 @@ async fn follow(
             run.item,
             run.shim_cap.as_secs()
         ));
-        return Some(Event::BudgetExceeded);
+        return Some((Event::BudgetExceeded, Some(end_of(exit))));
     }
     if run.mode == SpawnMode::Resume && exit == Exit::Crash && ended && !up.load(Ordering::Relaxed)
     {
@@ -1263,12 +1285,13 @@ async fn follow(
             "bosund: {}: the resume of session {session_id} failed; a fresh session follows",
             run.item
         );
-        return Some(Event::ResumeFailed {
+        let event = Event::ResumeFailed {
             attempt: run.attempt,
             spawn: run.spawn,
-        });
+        };
+        return Some((event, Some(end_of(exit))));
     }
-    Some(run.exited(exit))
+    Some((run.exited(exit), Some(end_of(exit))))
 }
 
 /// A session a previous daemon left under its shim (#8, E3), as crash recovery found it: its
@@ -1304,8 +1327,8 @@ pub(crate) async fn attach(
     mut kill: watch::Receiver<Signal>,
     on_blocking: Box<dyn Fn() + Send + Sync>,
     recovering: Option<Recovering>,
-) -> Option<Event> {
-    let crash = Some(run.exited(Exit::Crash));
+) -> Ended {
+    let crash = Some((run.exited(Exit::Crash), None));
     let Some((repo, _)) = lookup(config, &shared.options.repo) else {
         return crash;
     };
@@ -1330,7 +1353,7 @@ pub(crate) async fn attach(
             // A refusal is the configuration's change since the daemon started (E24).
             Err(Some(e)) => {
                 shared.trouble(format!("{}: its leases: {e}", run.item));
-                return Some(Event::ConfigChanged);
+                return Some((Event::ConfigChanged, None));
             }
         }
     }
@@ -1428,6 +1451,7 @@ pub(crate) async fn attach(
         git_repo,
         await_hello: false,
         consumed: (process.stdout_offset, process.stderr_offset),
+        spawned_at: None,
     };
     follow(shared, run, following, spawned, kill).await
 }

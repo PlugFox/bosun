@@ -282,4 +282,19 @@ fn daemon(canon: &mut Canon, daemon: &Daemon) {
         .duration(daemon.hello_timeout)
         .u64(u64::from(daemon.park_cap))
         .u64(u64::from(daemon.mcp_call_cap));
+    // The fast-death breaker's keys (#7) are encoded only when not at their defaults, behind a
+    // tag no other value can read as: a configuration without them keeps the hash it had
+    // before they existed, so an upgrade sends no item in flight to Needs you.
+    let defaults = Daemon::default();
+    // Mutant (`mutant_config_fast_death_always_hashed`): they are encoded even at their
+    // defaults, so every existing hash changes.
+    if cfg!(mutant_config_fast_death_always_hashed)
+        || daemon.fast_death_sessions != defaults.fast_death_sessions
+        || daemon.fast_death_within != defaults.fast_death_within
+    {
+        canon
+            .str("fast_death/2")
+            .u64(u64::from(daemon.fast_death_sessions))
+            .duration(daemon.fast_death_within);
+    }
 }

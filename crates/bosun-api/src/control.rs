@@ -88,4 +88,8 @@ pub struct RepoControl {
     /// The hold in force now, strongest first: `kill`, `pause`, `daily_cap`; absent when none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<String>,
+    /// Paused by the fast-death breaker (#7): why, until `bosun resume`. Absent when not
+    /// tripped; a daemon restart lifts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tripped: Option<String>,
 }

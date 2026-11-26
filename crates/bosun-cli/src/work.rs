@@ -145,7 +145,12 @@ fn render_status(o: &Overview, out: &mut String) {
             .hold
             .as_deref()
             .map_or_else(String::new, |h| format!(", hold {h}"));
-        let _ = writeln!(out, "repo {}: {}{hold}", repo.repo, repo.state);
+        // Why the fast-death breaker paused it (#7).
+        let tripped = repo
+            .tripped
+            .as_deref()
+            .map_or_else(String::new, |why| format!(": {why}"));
+        let _ = writeln!(out, "repo {}: {}{hold}{tripped}", repo.repo, repo.state);
         if let Some(item) = &repo.current {
             let detail = remark(item.detail.as_deref(), &item.waiting);
             let _ = writeln!(
@@ -586,6 +591,51 @@ mod tests {
                 "demo#4 in demo: claimed (waiting for rig: held by busy; cache/demo: held by \
                  bosun with 42), attempt 0, 0 failed\n"
             ),
+            "{out}"
+        );
+    }
+
+    /// #7: a repository the fast-death breaker paused says why on its line.
+    #[test]
+    fn a_tripped_repository_says_why_it_is_paused() {
+        let why = "3 sessions in a row ended within 60 s of their spawn (the last: demo#1); \
+                   bosun resume lifts it";
+        let overview: Overview = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "daemon_version": "0.0.0",
+            "started_ms": 0,
+            "now_ms": 0,
+            "killed": false,
+            "paused": false,
+            "events": {"epoch": "1-1", "head": 0, "subscribers": 0},
+            "repos": [{
+                "repo": "demo",
+                "path": "/repos/demo",
+                "queue": "local_file",
+                "state": "idle",
+                "hold": "pause",
+                "tripped": why,
+            }],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render_status(&overview, &mut out);
+        assert!(
+            out.contains(&format!("repo demo: idle, hold pause: {why}\n")),
+            "{out}"
+        );
+
+        let status: bosun_api::ControlStatus = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "killed": false,
+            "paused": false,
+            "repos": [{"repo": "demo", "paused": false, "hold": "pause", "tripped": why}],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        crate::control::render(&status, &mut out);
+        assert!(
+            out.contains(&format!("repo demo: hold pause: {why}\n")),
             "{out}"
         );
     }

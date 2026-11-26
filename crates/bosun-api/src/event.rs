@@ -235,6 +235,19 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo: Option<String>,
     },
+    /// The fast-death breaker tripped (#7): `sessions` sessions in a row of the repository, the
+    /// last one of `item`, crashed by themselves within `within_ms` of their spawn. The
+    /// repository is paused until `bosun resume` (or a daemon restart).
+    FastDeaths {
+        /// The repository paused.
+        repo: String,
+        /// The item whose session tripped the breaker.
+        item: String,
+        /// How many sessions in a row.
+        sessions: u32,
+        /// The window after a spawn within which a crash counts, in ms.
+        within_ms: u64,
+    },
     /// A budget cap was reached (#7, #67): an item's eqv or wall-clock cap (the item is killed
     /// and goes to Needs you), or the identity's daily eqv cap (the queue parks until
     /// `until_ms`, local midnight).
@@ -280,6 +293,7 @@ impl EventBody {
         "lint_findings",
         "board_sync_error",
         "control_changed",
+        "fast_deaths",
         "budget_exceeded",
         "ingest_progress",
         "ingest_pass",
@@ -303,6 +317,7 @@ impl EventBody {
             Self::LintFindings { .. } => "lint_findings",
             Self::BoardSyncError { .. } => "board_sync_error",
             Self::ControlChanged { .. } => "control_changed",
+            Self::FastDeaths { .. } => "fast_deaths",
             Self::BudgetExceeded { .. } => "budget_exceeded",
             Self::IngestProgress { .. } => "ingest_progress",
             Self::IngestPass { .. } => "ingest_pass",

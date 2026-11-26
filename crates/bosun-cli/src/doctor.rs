@@ -1508,6 +1508,7 @@ mod tests {
             queue_source: source,
             state: "idle".to_owned(),
             hold: None,
+            tripped: None,
             current: None,
             last_verdict: None,
         };

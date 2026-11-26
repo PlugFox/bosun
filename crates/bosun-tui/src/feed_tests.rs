@@ -331,6 +331,7 @@ fn answer(request: &Request, state: &Mutex<State>) -> Result<Value, String> {
                             paused,
                             auto_paused_until_ms: None,
                             hold: paused.then(|| "pause".to_owned()),
+                            tripped: None,
                         }],
                     })
                 }

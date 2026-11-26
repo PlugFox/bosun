@@ -1472,6 +1472,43 @@
           "type": "object"
         },
         {
+          "description": "The fast-death breaker tripped (#7): `sessions` sessions in a row of the repository, the\nlast one of `item`, crashed by themselves within `within_ms` of their spawn. The\nrepository is paused until `bosun resume` (or a daemon restart).",
+          "properties": {
+            "item": {
+              "description": "The item whose session tripped the breaker.",
+              "type": "string"
+            },
+            "repo": {
+              "description": "The repository paused.",
+              "type": "string"
+            },
+            "sessions": {
+              "description": "How many sessions in a row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "fast_deaths",
+              "type": "string"
+            },
+            "within_ms": {
+              "description": "The window after a spawn within which a crash counts, in ms.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "repo",
+            "item",
+            "sessions",
+            "within_ms"
+          ],
+          "type": "object"
+        },
+        {
           "description": "A budget cap was reached (#7, #67): an item's eqv or wall-clock cap (the item is killed\nand goes to Needs you), or the identity's daily eqv cap (the queue parks until\n`until_ms`, local midnight).",
           "properties": {
             "cap": {
@@ -3210,6 +3247,13 @@
         "repo": {
           "description": "The repository's name in the configuration.",
           "type": "string"
+        },
+        "tripped": {
+          "description": "Paused by the fast-death breaker (#7): why, until `bosun resume`. Absent when not\ntripped; a daemon restart lifts it.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3272,6 +3316,13 @@
         "state": {
           "description": "`working` while an item of the repository is in flight, else `idle`.",
           "type": "string"
+        },
+        "tripped": {
+          "description": "Paused by the fast-death breaker (#7): why, until `bosun resume`. Absent when not\ntripped; a daemon restart lifts it.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

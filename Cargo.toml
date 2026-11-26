@@ -464,6 +464,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_removed_repo_keeps_item)",
   "cfg(mutant_doctor_ignores_served_config)",
   "cfg(mutant_doctor_misses_identity_move)",
+  "cfg(mutant_loop_no_fast_death_breaker)",
+  "cfg(mutant_loop_fast_death_streak_never_resets)",
+  "cfg(mutant_loop_fast_death_counts_kills)",
+  "cfg(mutant_core_fast_death_charges_a_crash)",
+  "cfg(mutant_config_fast_death_always_hashed)",
 ] }
 
 [workspace.lints.clippy]

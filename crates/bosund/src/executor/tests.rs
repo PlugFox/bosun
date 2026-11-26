@@ -34,6 +34,7 @@ use super::*;
 use crate::config_watch;
 use crate::events::{Events, Options as EventOptions};
 
+mod fast_death;
 mod landing;
 mod leases;
 mod moved;

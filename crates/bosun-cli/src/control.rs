@@ -169,6 +169,9 @@ pub(crate) fn render(status: &ControlStatus, out: &mut String) {
                 "an interactive session works there (until {until})"
             ));
         }
+        if let Some(tripped) = &repo.tripped {
+            why.push(tripped.clone());
+        }
         let why = if why.is_empty() {
             String::new()
         } else {

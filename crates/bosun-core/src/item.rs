@@ -343,6 +343,17 @@ pub enum Event {
         /// The session that failed to resume.
         spawn: u32,
     },
+    /// The repository's fast-death breaker tripped on this session (#7): it was the last of
+    /// several sessions in a row that died by themselves soon after their spawn, across items.
+    /// The repository is paused; the item parks paused and charges nothing for this session
+    /// (no crash retry, no uncounted resume, no failed attempt). After the pause it starts a
+    /// fresh session of the same attempt from its last commit.
+    FastDeath {
+        /// The attempt it belonged to.
+        attempt: u32,
+        /// The session's number.
+        spawn: u32,
+    },
     /// The session's MCP server did not say hello within the handshake timeout after spawn
     /// (#64); the daemon has killed the session. Retried once, uncounted toward the attempts;
     /// a second miss is Needs you.
@@ -463,6 +474,7 @@ impl Event {
             Self::Cycle => "cycle",
             Self::Exited { .. } => "exited",
             Self::ResumeFailed { .. } => "resume_failed",
+            Self::FastDeath { .. } => "fast_death",
             Self::NoHandshake { .. } => "no_handshake",
             Self::IdentityRefused { .. } => "identity_refused",
             Self::Question { .. } => "question",
@@ -812,6 +824,7 @@ impl Draft {
                     self.start(Next::Reset);
                 }
             }
+            Event::FastDeath { attempt, spawn } => self.fast_death(*attempt, *spawn)?,
             Event::NoHandshake { attempt, spawn } => {
                 self.expect(&[State::Running])?;
                 self.session(*attempt, *spawn)?;
@@ -1101,6 +1114,27 @@ impl Draft {
                 }
             }
         }
+    }
+
+    /// The session that tripped the repository's fast-death breaker (#7): parked paused
+    /// whatever the hold (the breaker has just paused the repository, and the session is gone
+    /// already), charged nothing, to start a fresh session of the same attempt after the pause.
+    fn fast_death(&mut self, attempt: u32, spawn: u32) -> Option<()> {
+        self.expect(&[State::Running])?;
+        self.session(attempt, spawn)?;
+        if cfg!(mutant_core_fast_death_charges_a_crash) {
+            // Mutant (`mutant_core_fast_death_charges_a_crash`): the tripping session is charged
+            // as any crash.
+            self.exited(Exit::Crash, "");
+            return Some(());
+        }
+        self.attempt_mut().state = AttemptState::Exited;
+        self.item.state = State::Parked(Park {
+            reason: ParkReason::Paused,
+            until_ms: None,
+            next: Next::Reset,
+        });
+        Some(())
     }
 
     /// A session whose MCP server never said hello (#64). It shares the attempt's crash retry:
@@ -1663,6 +1697,53 @@ mod tests {
         assert_eq!(cur(&retried).0, 1);
         let failed = go(&retried, &exit(&retried, Exit::Crash), &ctx()).item;
         assert_eq!((failed.failed, cur(&failed).0), (1, 2));
+    }
+
+    #[test]
+    fn a_fast_death_parks_the_item_paused_and_charges_it_nothing() {
+        let item = running();
+        let item = go(&item, &exit(&item, Exit::Crash), &ctx()).item;
+        assert_eq!(item.state, State::Running, "the crash retry was taken");
+        let before = item.attempt.clone().unwrap();
+        assert_eq!(before.crash_retries, 1);
+        let (attempt, spawn, _) = cur(&item);
+        let stale = Event::FastDeath {
+            attempt,
+            spawn: spawn - 1,
+        };
+        assert_eq!(step(&item, &stale, &ctx()), None, "an older session");
+        let tripped = go(&item, &Event::FastDeath { attempt, spawn }, &ctx());
+        assert_eq!(tripped.transition.cause, "fast_death");
+        let parked = tripped.item;
+        assert_eq!(
+            parked.state,
+            State::Parked(Park {
+                reason: ParkReason::Paused,
+                until_ms: None,
+                next: Next::Reset,
+            })
+        );
+        let after = parked.attempt.as_ref().unwrap();
+        assert_eq!(after.crash_retries, before.crash_retries);
+        assert_eq!(after.number, before.number);
+        assert_eq!(
+            (parked.failed, parked.uncounted, parked.attempts),
+            (item.failed, item.uncounted, item.attempts)
+        );
+        let woken = go(&parked, &Event::Tick, &ctx());
+        assert_eq!(woken.item.state, State::Running);
+        assert_eq!(cur(&woken.item).0, attempt, "the same attempt");
+        assert_eq!(cur(&woken.item).1, spawn + 1, "a new session");
+        assert!(
+            woken.transition.effects.iter().any(|e| e.kind
+                == EffectKind::Spawn {
+                    attempt,
+                    spawn: spawn + 1,
+                    mode: SpawnMode::Reset,
+                }),
+            "{:?}",
+            woken.transition.effects
+        );
     }
 
     #[test]
@@ -2295,6 +2376,7 @@ mod tests {
     /// so sequences make progress), whether it is addressed to a stale number, the hold.
     type Pick = (u8, bool, u8);
 
+    #[allow(clippy::too_many_lines)] // one list of every event, by state
     fn events_for(item: &Item, stale: bool) -> Vec<Event> {
         let (attempt, spawn, run) = item
             .attempt
@@ -2338,6 +2420,7 @@ mod tests {
                 exited(Exit::Limit { reset_ms: None }, ""),
                 exited(Exit::Crash, "done"),
                 Event::ResumeFailed { attempt, spawn },
+                Event::FastDeath { attempt, spawn },
                 Event::IdentityRefused { attempt, spawn },
                 Event::KillSwitch,
             ]),

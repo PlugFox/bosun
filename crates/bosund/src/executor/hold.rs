@@ -84,7 +84,7 @@ fn ms_u64(ms: i64) -> u64 {
 
 impl Loop {
     /// The identity that owns this loop's repository.
-    fn identity_name(&self) -> Option<String> {
+    pub(super) fn identity_name(&self) -> Option<String> {
         self.config()
             .repos
             .get(&self.shared.options.repo)

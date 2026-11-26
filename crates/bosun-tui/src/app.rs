@@ -413,6 +413,7 @@ pub(crate) mod tests {
                     queue_source: None,
                     state: "working".to_owned(),
                     hold: None,
+                    tripped: None,
                     current: Some(CurrentItem {
                         item: "alpha#3".to_owned(),
                         state: "running".to_owned(),
@@ -436,6 +437,7 @@ pub(crate) mod tests {
                     queue_source: None,
                     state: "idle".to_owned(),
                     hold: Some("pause".to_owned()),
+                    tripped: None,
                     current: None,
                     last_verdict: Some(LastVerdict {
                         item: "beta#7".to_owned(),

@@ -79,6 +79,7 @@ async fn overview(state: &State, served: &Served) -> Result<Overview, ErrorObjec
             queue_source: queue_source(repo.queue.as_ref()),
             state: if current.is_some() { "working" } else { "idle" }.to_owned(),
             hold: held.hold.clone(),
+            tripped: held.tripped.clone(),
             current: current.map(|i| CurrentItem {
                 item: i.item.id.to_string(),
                 state: i.item.state.as_str().to_owned(),

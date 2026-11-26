@@ -1,5 +1,6 @@
 //! `fake-agent` runs its script: the stream fixture on stdout, the git actions in its cwd, the
 //! exit code.
+#![allow(clippy::disallowed_methods, reason = "a test's own children")]
 
 use std::io::Write as _;
 use std::path::Path;

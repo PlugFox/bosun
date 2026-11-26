@@ -54,6 +54,10 @@
 //! `// SAFETY:` comment. `cargo xtask check-deps` fails when any other crate lifts the
 //! workspace's `unsafe_code = "deny"`.
 #![allow(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "a test's own children")
+)]
 
 pub mod disk;
 mod key;

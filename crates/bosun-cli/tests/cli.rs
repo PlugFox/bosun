@@ -5,6 +5,7 @@
 //!
 //! `bosund` and `recount` are binaries of other packages, so the tests build them once with
 //! `cargo build` into the target directory this test runs from; neither is linked.
+#![allow(clippy::disallowed_methods, reason = "a test's own children")]
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

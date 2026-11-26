@@ -211,6 +211,10 @@ fn spawn_command(
         let _ = (path, pathext);
         None
     };
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "`bosun with` runs the user's command in the user's console"
+    )]
     let spawned = match &resolved {
         Some(full) => std::process::Command::new(full).args(rest).spawn(),
         None => std::process::Command::new(program).args(rest).spawn(),
@@ -308,6 +312,10 @@ impl Stops {
 /// Sends `signal` (`-TERM`, `-HUP`) to the command's pid alone, never to a process group.
 #[cfg(unix)]
 fn forward(pid: u32, signal: &str) {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the CLI forwards a signal from the user's console"
+    )]
     let sent = std::process::Command::new("kill")
         .arg(signal)
         .arg(pid.to_string())

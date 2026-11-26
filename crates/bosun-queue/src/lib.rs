@@ -24,6 +24,7 @@
 //! This crate never reaches `bosun-store` or the other side-effect crates (#12).
 
 mod card;
+mod child;
 pub mod claim;
 pub mod contract;
 pub mod lint;

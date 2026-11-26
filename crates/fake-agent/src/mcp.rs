@@ -32,6 +32,10 @@ impl Server {
         let command = config["command"]
             .as_str()
             .ok_or_else(|| format!("server {name}: no command"))?;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "a test stand-in for an agent, never the daemon's own child"
+        )]
         let mut cmd = Command::new(command);
         for arg in config["args"].as_array().into_iter().flatten() {
             cmd.arg(arg.as_str().unwrap_or_default());

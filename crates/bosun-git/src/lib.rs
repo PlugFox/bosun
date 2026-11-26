@@ -64,8 +64,13 @@
 //! plumbing, refusing a tree other than the verified one; a new commit gets the trailers.
 //!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "a test's own children")
+)]
 
 mod base;
+mod child;
 mod invoke;
 pub mod land;
 pub mod merge;

@@ -92,6 +92,10 @@ pub(crate) struct Registration {
 }
 
 /// Runs a command; its output, or why it could not run.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the CLI's children share the user's console on purpose"
+)]
 fn run(program: &str, args: &[&OsStr]) -> Result<Output, String> {
     Command::new(program)
         .args(args)

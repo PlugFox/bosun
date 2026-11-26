@@ -31,6 +31,10 @@
 //! the daemon keeps its data) that ACL grants full control to the user, `SYSTEM` and the
 //! `Administrators` group and nothing to other users. A database placed in a directory with a
 //! wider ACL gets that ACL.
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "a test's own children")
+)]
 
 mod activity;
 mod error;

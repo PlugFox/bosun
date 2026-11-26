@@ -418,6 +418,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # starts at a fixed local time without the automatic pause.
   "cfg(mutant_test_slowdown_ignored)",
   "cfg(mutant_test_daily_cap_auto_pause)",
+  # #131: an orphaned daemon's console children start with a console of their own; its log
+  # survives a standard error that is gone.
+  "cfg(mutant_proc_children_inherit_console)",
+  "cfg(mutant_log_panics_without_stderr)",
 ] }
 
 [workspace.lints.clippy]

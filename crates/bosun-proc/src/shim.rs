@@ -585,6 +585,10 @@ pub fn run(spec_path: &Path) -> io::Result<i32> {
         Some(path) => Stdio::from(File::open(path)?),
         None => Stdio::null(),
     };
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the shim starts its child contained, with CREATE_NO_WINDOW on Windows"
+    )]
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -784,6 +788,10 @@ impl ShimSpawner {
             stdin,
         }
         .write(&spec_path)?;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the session shim starts with CREATE_NO_WINDOW on Windows"
+        )]
         let mut command = Command::new(&self.shim);
         command
             .arg(&spec_path)

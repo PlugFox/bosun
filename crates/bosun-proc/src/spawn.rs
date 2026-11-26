@@ -138,6 +138,10 @@ pub struct NativeSpawner;
 
 impl Spawner for NativeSpawner {
     fn spawn(&self, spec: &ChildSpec) -> io::Result<Spawned> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "a contained spawn: the platform layer sets CREATE_NO_WINDOW"
+        )]
         let mut command = tokio::process::Command::new(&spec.program);
         command
             .args(&spec.args)

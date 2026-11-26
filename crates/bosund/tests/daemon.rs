@@ -1,6 +1,7 @@
 //! The daemon binary against its endpoint (#24): a second instance, identity isolation, the
 //! socket's mode, a clean stop, and the event stream of a reingest (#69). Each test runs its own daemon on its own endpoint, over
 //! copies of the synthetic fixtures (#16) in a temporary directory.
+#![allow(clippy::disallowed_methods, reason = "a test's own children")]
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

@@ -13,6 +13,10 @@
 //!   that implements [`LineParser`] and [`Provider`] and emits only the provider-neutral types
 //!   of [`Record`], so a second provider adds a module, not a field.
 //! - [`plans`] maps the configuration to one ingest per identity (#2, rule 4).
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "a test's own children")
+)]
 
 mod assemble;
 pub mod claude;

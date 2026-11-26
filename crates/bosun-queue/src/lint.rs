@@ -18,7 +18,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::card::{Card, ItemId};
 use crate::contract::{Contract, ContractError};
@@ -301,7 +301,7 @@ impl ShellResolver {
     }
 
     fn run(&self, script: &str, arg: &str) -> bool {
-        Command::new(&self.shell)
+        crate::child::command(&self.shell)
             .arg("-c")
             .arg(script)
             .arg("sh")

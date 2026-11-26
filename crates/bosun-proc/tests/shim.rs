@@ -2,6 +2,7 @@
 //! test executable re-invoked with one test selected ([`run_role`]) and the role in an
 //! environment variable, as the crate's own helper does. A helper reports on stdout, which the
 //! shim sends to a file, as `bosun-shim-helper <key> <value>` lines.
+#![allow(clippy::disallowed_methods, reason = "a test's own children")]
 
 use std::collections::HashMap;
 use std::ffi::OsString;

@@ -435,7 +435,7 @@ pub(crate) fn output_within(
 
 /// Runs `gh args` in `at`; its standard output, or the failure classified.
 fn gh(at: &At, args: &[String]) -> Result<String, ForgeError> {
-    let mut command = Command::new("gh");
+    let mut command = crate::child::command("gh");
     at.env.apply(&mut command);
     command.args(args).current_dir(&at.dir);
     let out = output_within(&mut command, TOOL_TIMEOUT, "gh")?;

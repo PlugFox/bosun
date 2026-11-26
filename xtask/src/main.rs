@@ -1,4 +1,8 @@
 //! Repository tasks for bosun (#12). Run as `cargo xtask <task>`.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a developer tool, never a child of the daemon"
+)]
 
 mod api;
 mod deps;

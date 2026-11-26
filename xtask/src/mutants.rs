@@ -2739,6 +2739,23 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_proc_children_inherit_console",
+        issue: 131,
+        breaks: "the daemon's console children share its console: once its host is gone, they fail at load",
+        package: "bosund",
+        check: Check::Test("console_tests::children_start_after_the_hosting_console_has_ended"),
+        // Only a Windows console can be gone from under its process.
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_log_panics_without_stderr",
+        issue: 131,
+        breaks: "a log line panics when standard error is a console that is gone",
+        package: "bosund",
+        check: Check::Test("console_tests::children_start_after_the_hosting_console_has_ended"),
+        platform: Some(Platform::Windows),
+    },
 ];
 
 /// #164, the card of #8 that polls the pull request of an item Done in `pr` mode (merged

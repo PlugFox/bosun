@@ -18,6 +18,10 @@
 //! nothing the agent writes in its messages ("I am done", "QUESTION: ...") changes the class
 //! (invariant 2 of #1). Usage is never read from the stream either: the transcript ingested by
 //! stage 0 is the single source of the bill.
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, reason = "a test's own children")
+)]
 
 #[cfg(feature = "claude")]
 pub mod claude;

@@ -5,6 +5,8 @@
 //! [`bosun_client::log::KEEP`] of them are kept.
 //!
 //! A file that cannot be opened or written leaves standard error only; the daemon runs on.
+//! Standard error may be a console that is gone (the logon task's `conhost` ended, #131): a
+//! line that cannot be written there is dropped, and still reaches the file.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
@@ -44,7 +46,12 @@ pub(crate) fn init(path: &Path) -> Result<(), String> {
 
 /// Writes one line to standard error and to the log file.
 pub(crate) fn line(text: &str) {
-    eprintln!("{text}");
+    // Mutant (`mutant_log_panics_without_stderr`): writing standard error panics when it is gone.
+    if cfg!(mutant_log_panics_without_stderr) {
+        eprintln!("{text}");
+    } else {
+        let _ = writeln!(std::io::stderr().lock(), "{text}");
+    }
     if let Some(log) = FILE.get() {
         log.lock()
             .unwrap_or_else(PoisonError::into_inner)

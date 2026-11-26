@@ -1,0 +1,7 @@
+# A child of the daemon must not share its console (#131): every daemon site starts it through
+# its crate's `child::command`; every other `Command::new` is allowed where it stands, with a
+# reason.
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "a child of the daemon starts through its crate's `child::command` (#131)" },
+  { path = "tokio::process::Command::new", reason = "a child of the daemon starts through its crate's `child::command` (#131)" },
+]

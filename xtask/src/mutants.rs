@@ -2685,23 +2685,21 @@ const MUTANTS: &[Mutant] = &[
     },
 ];
 
-/// The card of #8 that polls the pull request of an item Done in `pr` mode (merged releases
-/// dependants, closed unmerged is Needs you; its own number was not known when it was written;
-/// its parent's stands in).
-const PR_POLL_CARD: u32 = 8;
+/// #164, the card of #8 that polls the pull request of an item Done in `pr` mode (merged
+/// releases dependants, closed unmerged is Needs you).
+const PR_POLL_CARD: u32 = 164;
 
-/// The card of #8 that lands an item as a pull request (`landing.mode = "pr"`; its own number was
-/// not known when it was written; its parent's stands in).
-const PR_CARD: u32 = 8;
+/// #163, the card of #8 that lands an item as a pull request (`landing.mode = "pr"`), and the
+/// mutants of its review.
+const PR_CARD: u32 = 163;
 
 /// The redo scene of the pull request card, which hosts two mutants.
 const PR_REDO_SCENE: &str =
     "executor::tests::landing::a_landing_redone_after_the_pull_request_opened_opens_no_second_one";
 
-/// The card of #8 that shows the leases (`lease.list`, the TUI's Resources tab, what a waiting
-/// item waits for) and puts lease waits and worktree disk use in the report (its own number
-/// was not known when it was written; its parent's stands in).
-const RESOURCES_CARD: u32 = 8;
+/// #161, the card of #8 that shows the leases (`lease.list`, the TUI's Resources tab, what a
+/// waiting item waits for) and puts lease waits and worktree disk use in the report.
+const RESOURCES_CARD: u32 = 161;
 
 /// The card of #8 that lets an item go of its leases while it is Parked or its landing is
 /// deferred, and takes a lease refusal for a configuration change (E24; its own number was not

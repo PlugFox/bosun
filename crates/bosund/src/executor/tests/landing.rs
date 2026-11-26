@@ -1273,6 +1273,11 @@ async fn a_pull_request_closed_unmerged_needs_the_user_with_one_comment() {
         "{}",
         comments[0]
     );
+    assert!(
+        comments[0].contains("Move the card to Ready to retry with a fresh attempt counter"),
+        "{}",
+        comments[0]
+    );
     let card = scene.cards().into_iter().find(|c| c.id.0 == 1).unwrap();
     assert_eq!(card.column, Column::NeedsYou);
     let row = scene.store.reader().landing(&item(1)).await.unwrap();

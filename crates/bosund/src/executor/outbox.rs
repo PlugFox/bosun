@@ -588,7 +588,8 @@ impl Drainer {
             Reason::LandingRefused if let Some(closed) = self.closed_pull_request(row).await? => {
                 body.push_str(&closed);
                 body.push_str(
-                    ". The item report above has the facts. Move the card to Ready to retry                      with a fresh attempt counter, or to Backlog to cancel.",
+                    ". The item report above has the facts. Move the card to Ready to retry \
+                     with a fresh attempt counter, or to Backlog to cancel.",
                 );
             }
             other => {

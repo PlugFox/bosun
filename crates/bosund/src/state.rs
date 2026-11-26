@@ -272,15 +272,17 @@ fn operator_token(config: &Config, file: PathBuf) -> Result<Control, String> {
     Ok(Control::with_token(&token, Some(file)))
 }
 
-/// Registers every configured repository of `identity` by its name (#132): a repository whose
-/// configured path differs from its stored one has moved, and its row (with its items and
-/// history) follows it. Says so once: afterwards the stored path is the configured one.
+/// Registers every configured repository of `identity` by its name, as one set (#132): a
+/// repository whose configured path differs from its stored one has moved, and its row (with
+/// its items and history) follows it. Returns a line for each move, to be said once the write
+/// succeeded: afterwards the stored path is the configured one.
 async fn register_named(
     store: &Store,
     config: &Config,
     identity: &str,
-) -> Result<(), bosun_store::Error> {
+) -> Result<Vec<String>, bosun_store::Error> {
     let stored = store.reader().repos().await?;
+    let mut moves = Vec::new();
     let mut batch = Vec::new();
     for (name, repo) in config.repos.iter().filter(|(_, r)| r.identity == identity) {
         let moved = stored
@@ -288,21 +290,22 @@ async fn register_named(
             .find(|row| row.name.as_deref() == Some(name.as_str()))
             .filter(|row| row.path != repo.key);
         if let Some(row) = moved {
-            crate::log::log!(
+            moves.push(format!(
                 "bosund: repository {name}: its path moved from {} to {}; its items and \
                  history follow it",
-                row.path,
-                repo.key
-            );
+                row.path, repo.key
+            ));
         }
-        batch.push(bosun_store::Write::Repo(bosun_store::Repo {
-            name: Some(name.clone()),
+        batch.push(bosun_store::Configured {
+            name: name.clone(),
             path: repo.key.clone(),
-            remote: None,
-            default_branch: None,
-        }));
+        });
     }
-    store.writer().write(batch).await
+    store
+        .writer()
+        .write(vec![bosun_store::Write::Configured(batch)])
+        .await?;
+    Ok(moves)
 }
 
 /// Opens each identity's store and starts its ingest. On failure, what was opened is returned
@@ -331,9 +334,16 @@ pub(crate) async fn open(
             &store,
             IngestOptions::default(),
         );
-        if let Err(e) = register_named(&store, config, &plan.identity).await {
-            let _ = store.close().await;
-            return Err((identities, format!("identity {}: {e}", plan.identity)));
+        match register_named(&store, config, &plan.identity).await {
+            Ok(moves) => {
+                for line in moves {
+                    crate::log::log!("{line}");
+                }
+            }
+            Err(e) => {
+                let _ = store.close().await;
+                return Err((identities, format!("identity {}: {e}", plan.identity)));
+            }
         }
         if let Err(e) = ingest.register_repos(&plan.repo_roots).await {
             let _ = store.close().await;
@@ -661,4 +671,93 @@ fn start_loops(
         ));
     }
     loops
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configuration of identity `test` whose repositories are `repos` (name, directory
+    /// under `dir`).
+    fn config(dir: &std::path::Path, repos: &[(&str, &str)]) -> Config {
+        use std::fmt::Write as _;
+        for sub in ["claude", "db"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let mut text = format!(
+            "[identity.test]\n\
+             claude_config_dir = '{claude}'\n\
+             database = '{db}'\n\
+             github_login = 'synthetic-login'\n\n",
+            claude = dir.join("claude").display(),
+            db = dir.join("db").join("bosun.db").display(),
+        );
+        for (name, sub) in repos {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+            writeln!(
+                text,
+                "[repo.{name}]\npath = '{}'\nidentity = 'test'\n",
+                dir.join(sub).display()
+            )
+            .unwrap();
+        }
+        bosun_config::parse(&text, &SystemProbe::new()).unwrap()
+    }
+
+    /// #132: registering the configured repositories says a move once, in the line it returns
+    /// for the caller to log after the write; registering again says nothing, and a rename at
+    /// the same path or a swap of two paths opens the store as well.
+    #[tokio::test]
+    async fn registering_the_configured_repositories_says_a_move_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = config(dir.path(), &[("demo", "repo"), ("beta", "beta")]);
+        let store = Store::open(
+            dir.path().join("db").join("bosun.db"),
+            StoreOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            register_named(&store, &first, "test")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let moved = config(dir.path(), &[("demo", "moved"), ("beta", "beta")]);
+        let lines = register_named(&store, &moved, "test").await.unwrap();
+        let (from, to) = (&first.repos["demo"].key, &moved.repos["demo"].key);
+        assert_eq!(
+            lines,
+            [format!(
+                "bosund: repository demo: its path moved from {from} to {to}; its items and \
+                 history follow it"
+            )]
+        );
+        assert!(
+            register_named(&store, &moved, "test")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.reader().repos().await.unwrap().len(), 2);
+
+        let renamed = config(dir.path(), &[("demo2", "moved"), ("beta", "beta")]);
+        assert!(
+            register_named(&store, &renamed, "test")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let swapped = config(dir.path(), &[("demo2", "beta"), ("beta", "moved")]);
+        assert_eq!(
+            register_named(&store, &swapped, "test")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(store.reader().repos().await.unwrap().len(), 2);
+        store.close().await.unwrap();
+    }
 }

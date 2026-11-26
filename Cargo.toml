@@ -442,6 +442,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # row's path.
   "cfg(mutant_store_repo_by_path)",
   "cfg(mutant_store_repo_new_row_on_move)",
+  "cfg(mutant_store_repo_rename_refused)",
+  "cfg(mutant_store_repo_unnamed_items_kept)",
+  "cfg(mutant_store_repo_moves_unordered)",
   # #139: a card is self-contained: lint warns on a `#N` it leans on, and the session's prompt
   # says a `#N` is provenance only.
   "cfg(mutant_queue_lint_references_unwarned)",

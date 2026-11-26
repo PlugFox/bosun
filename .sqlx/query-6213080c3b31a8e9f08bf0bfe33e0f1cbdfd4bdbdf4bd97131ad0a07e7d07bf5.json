@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE repo SET name = NULL WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6213080c3b31a8e9f08bf0bfe33e0f1cbdfd4bdbdf4bd97131ad0a07e7d07bf5"
+}

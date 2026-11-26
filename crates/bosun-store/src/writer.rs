@@ -59,6 +59,18 @@ pub enum Write {
     /// root or alias that contains their cwd ([`bosun_core::repo_root`]); a root seen for the
     /// first time re-attributes every stored message.
     Repo(Repo),
+    /// Every repository an identity's configuration names, registered as one set (#132), as
+    /// the daemon does at start. Each is written as a named [`Write::Repo`] is, and the set
+    /// settles what one write cannot:
+    ///
+    /// - A row at a configured path whose name the set does not have (the repository was
+    ///   renamed, or migration 16 named the row after an old item prefix) gives up the name:
+    ///   the configured name takes the row over, or merges it into its own.
+    /// - Moves out of a path come before moves into it, so one repository can take a path
+    ///   another leaves in the same edit, a swap included.
+    /// - An unnamed row whose items are the name's (`<name>#<card>`, left there by a move
+    ///   before migration 16) is merged into the named row, and its path becomes an alias.
+    Configured(Vec<Configured>),
     /// A commit of the repository with path key `repo` (or the repository `repo` is an alias
     /// of), which is registered by path if it is not yet.
     /// Keyed by (repository, sha): a stored commit is never changed, so writing it again
@@ -255,6 +267,15 @@ pub enum Write {
     Truncate,
 }
 
+/// A repository the configuration names ([`Write::Configured`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Configured {
+    /// The configuration name (`repo.<name>`).
+    pub name: String,
+    /// The canonical path key (`bosun_core::canonical_path`), as the configuration holds it.
+    pub path: String,
+}
+
 /// A repository root. Keyed by `name` when it has one (a configured repository), else by
 /// `path`: writing it again updates the row, and a named one written at another path moves its
 /// row there ([`Write::Repo`]).
@@ -430,6 +451,7 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
         } => upsert_gap(conn, &provider, &file_key, &gap, parser_version).await,
         Write::ChangePrice(change) => change_price(conn, &change).await,
         Write::Repo(repo) => upsert_repo(conn, &repo).await.map(drop),
+        Write::Configured(repos) => register_configured(conn, &repos).await,
         Write::Commit { repo, commit } => insert_commit(conn, &repo, &commit).await,
         Write::Session { provider, meta } => upsert_session(conn, &provider, &meta).await,
         Write::ToolResult(result) => apply_tool_result(conn, &result).await,
@@ -621,7 +643,7 @@ pub(crate) async fn repo_at(conn: &mut SqliteConnection, key: &str) -> Result<Op
 pub(crate) async fn upsert_repo(conn: &mut SqliteConnection, repo: &Repo) -> Result<i64, Error> {
     let key = canonical_path(&repo.path, style_of(&repo.path));
     let (id, new_root) = match &repo.name {
-        Some(name) => named_repo(conn, name, &key).await?,
+        Some(name) => named_repo(conn, name, &key, false).await?,
         None => unnamed_repo(conn, &key).await?,
     };
     sqlx::query!(
@@ -656,12 +678,126 @@ async fn unnamed_repo(conn: &mut SqliteConnection, key: &str) -> Result<(i64, bo
     Ok((id, true))
 }
 
+/// Registers the configured set `repos` ([`Write::Configured`]).
+async fn register_configured(
+    conn: &mut SqliteConnection,
+    repos: &[Configured],
+) -> Result<(), Error> {
+    let repos: Vec<(&str, String)> = repos
+        .iter()
+        .map(|r| (r.name.as_str(), canonical_path(&r.path, style_of(&r.path))))
+        .collect();
+    let configured = |name: &str| repos.iter().any(|(n, _)| *n == name);
+    // A row at a configured path under a name the configuration no longer has gives the name
+    // up: the configured name then takes it over (or merges it) as an unnamed row.
+    // Mutant (`mutant_store_repo_rename_refused`): a renamed repository's row keeps its old
+    // name, so registering the new name at its path is refused and the store does not open.
+    if !cfg!(mutant_store_repo_rename_refused) {
+        for (_, key) in &repos {
+            let at_path = sqlx::query!(
+                r#"SELECT id AS "id!: i64", name FROM repo WHERE path = ?"#,
+                key
+            )
+            .fetch_optional(&mut *conn)
+            .await?;
+            if let Some(row) = at_path
+                && row.name.as_deref().is_some_and(|other| !configured(other))
+            {
+                sqlx::query!("UPDATE repo SET name = NULL WHERE id = ?", row.id)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+        }
+    }
+    // Moves out before moves in: each row that moves leaves its path first (the path becomes
+    // an alias of it, and the row is parked at a path no repository has), so a path one
+    // repository leaves is free for another, whatever the order of the set.
+    let mut parked = Vec::new();
+    // Mutant (`mutant_store_repo_moves_unordered`): no row leaves its path first, so a swap
+    // finds the other repository still at the path it takes, and is refused.
+    for (name, key) in repos
+        .iter()
+        .filter(|_| !cfg!(mutant_store_repo_moves_unordered))
+    {
+        let of_name = sqlx::query!(
+            r#"SELECT id AS "id!: i64", path FROM repo WHERE name = ?"#,
+            name
+        )
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(row) = of_name.filter(|row| row.path != *key) {
+            alias(conn, &row.path, row.id).await?;
+            let park = format!("<parked {}>", row.id);
+            sqlx::query!("UPDATE repo SET path = ? WHERE id = ?", park, row.id)
+                .execute(&mut *conn)
+                .await?;
+            parked.push(*name);
+        }
+    }
+    let mut new_root = false;
+    for (name, key) in &repos {
+        let (id, new) = named_repo(conn, name, key, parked.contains(name)).await?;
+        new_root |= new;
+        new_root |= merge_unnamed_items(conn, name, id).await?;
+    }
+    if new_root {
+        reattribute(conn).await?;
+    }
+    Ok(())
+}
+
+/// Merges into row `into` (of `name`) each unnamed row that holds an item of `name`, and
+/// keeps that row's path as an alias; whether any was merged.
+async fn merge_unnamed_items(
+    conn: &mut SqliteConnection,
+    name: &str,
+    into: i64,
+) -> Result<bool, Error> {
+    // Mutant (`mutant_store_repo_unnamed_items_kept`): an unnamed row keeps the name's older
+    // items, which the loop never sees.
+    if cfg!(mutant_store_repo_unnamed_items_kept) {
+        return Ok(false);
+    }
+    let prefix = format!("{name}#");
+    let rows = sqlx::query!(
+        r#"SELECT r.id AS "id!: i64", r.path FROM repo r
+           WHERE r.name IS NULL AND r.id <> ?1
+             AND EXISTS (SELECT 1 FROM item i
+                         WHERE i.repo_id = r.id
+                           AND substr(i.item_key, 1, length(?2)) = ?2)"#,
+        into,
+        prefix,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in &rows {
+        merge_repo(conn, row.id, into).await?;
+        alias(conn, &row.path, into).await?;
+    }
+    Ok(!rows.is_empty())
+}
+
+/// Records `path` as an alias of row `id` (a path it was at before).
+async fn alias(conn: &mut SqliteConnection, path: &str, id: i64) -> Result<(), Error> {
+    sqlx::query!(
+        "INSERT INTO repo_alias (path, repo_id) VALUES (?, ?)
+         ON CONFLICT (path) DO UPDATE SET repo_id = excluded.repo_id",
+        path,
+        id,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// The row of `name`, at `key` once written, and whether a root is new (messages attribute
-/// differently).
+/// differently). `parked`: the row of `name` left its old path already, and that path is an
+/// alias of it.
 async fn named_repo(
     conn: &mut SqliteConnection,
     name: &str,
     key: &str,
+    parked: bool,
 ) -> Result<(i64, bool), Error> {
     let at_path = sqlx::query!(
         r#"SELECT id AS "id!: i64", name FROM repo WHERE path = ?"#,
@@ -713,14 +849,9 @@ async fn named_repo(
         return unnamed_repo(conn, key).await;
     }
     let id = of_name.id;
-    sqlx::query!(
-        "INSERT INTO repo_alias (path, repo_id) VALUES (?, ?)
-         ON CONFLICT (path) DO UPDATE SET repo_id = excluded.repo_id",
-        of_name.path,
-        id,
-    )
-    .execute(&mut *conn)
-    .await?;
+    if !parked {
+        alias(conn, &of_name.path, id).await?;
+    }
     if let Some(row) = at_path {
         merge_repo(conn, row.id, id).await?;
     }
@@ -1828,6 +1959,185 @@ pub(crate) mod tests {
             store.reader().commit_shas("/w/new").await.unwrap(),
             ["aaa", "bbb", "both", "ccc"]
         );
+        store.close().await.unwrap();
+    }
+
+    fn configured(repos: &[(&str, &str)]) -> Write {
+        Write::Configured(
+            repos
+                .iter()
+                .map(|(name, path)| crate::Configured {
+                    name: (*name).to_owned(),
+                    path: (*path).to_owned(),
+                })
+                .collect(),
+        )
+    }
+
+    fn new_item(key: &str, name: &str, repo: &str) -> Write {
+        Write::Item(crate::NewItem {
+            item: ItemId::new(key),
+            name: name.to_owned(),
+            repo: repo.to_owned(),
+            card_key: None,
+            at_ms: 1,
+        })
+    }
+
+    /// The (name, path) of every row, and the repository name of each item.
+    async fn rows_and_items(store: &Store) -> (Vec<(Option<String>, String)>, Vec<String>) {
+        let rows = store
+            .reader()
+            .repos()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.name, r.path))
+            .collect();
+        let items = store
+            .reader()
+            .items(false)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| format!("{}@{}", i.item.id, i.repo_name.unwrap_or_default()))
+            .collect();
+        (rows, items)
+    }
+
+    /// #132: a repository renamed in the configuration at the same path keeps its row: its
+    /// items and messages stay on it, under the new name.
+    #[tokio::test]
+    async fn a_renamed_repository_keeps_its_row_with_its_items_and_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("bosun.db"), Options::default())
+            .await
+            .unwrap();
+        let mut message = record("m", "f1", 1, 1, &[]);
+        message.cwd = "/w/repo/src".to_owned();
+        store
+            .writer()
+            .write(vec![
+                configured(&[("demo", "/w/repo")]),
+                new_item("demo#1", "demo", "/w/repo"),
+                source_file("f1"),
+                write(message),
+            ])
+            .await
+            .unwrap();
+
+        store
+            .writer()
+            .write(vec![configured(&[("demo2", "/w/repo")])])
+            .await
+            .unwrap();
+        let (rows, items) = rows_and_items(&store).await;
+        assert_eq!(rows, [(Some("demo2".to_owned()), "/w/repo".to_owned())]);
+        assert_eq!(items, ["demo#1@demo2"]);
+        let of_message: Option<String> =
+            sqlx::query_scalar("SELECT r.name FROM message m JOIN repo r ON r.id = m.repo_id")
+                .fetch_one(store.reader().pool())
+                .await
+                .unwrap();
+        assert_eq!(of_message.as_deref(), Some("demo2"));
+        store.close().await.unwrap();
+    }
+
+    /// #132: two repositories that swap paths in one edit both move, whatever the order of
+    /// the set: each keeps its row and items.
+    #[tokio::test]
+    async fn two_repositories_that_swap_paths_keep_their_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("bosun.db"), Options::default())
+            .await
+            .unwrap();
+        store
+            .writer()
+            .write(vec![
+                configured(&[("a", "/w/q"), ("b", "/w/p")]),
+                new_item("a#1", "a", "/w/q"),
+                new_item("b#1", "b", "/w/p"),
+            ])
+            .await
+            .unwrap();
+        store
+            .writer()
+            .write(vec![configured(&[("a", "/w/p"), ("b", "/w/q")])])
+            .await
+            .unwrap();
+        let (rows, items) = rows_and_items(&store).await;
+        assert_eq!(
+            rows,
+            [
+                (Some("a".to_owned()), "/w/p".to_owned()),
+                (Some("b".to_owned()), "/w/q".to_owned()),
+            ]
+        );
+        assert_eq!(items, ["a#1@a", "b#1@b"]);
+        // Neither path each left stays an alias of it: the other repository is configured
+        // there.
+        let aliases: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_alias")
+            .fetch_one(store.reader().pool())
+            .await
+            .unwrap();
+        assert_eq!(aliases, 0);
+        store.close().await.unwrap();
+    }
+
+    /// #132: an unnamed row that holds older items of a name (migration 16 named only the row
+    /// of the newest item) is merged into the named row, so the loop sees those items; its
+    /// path becomes an alias.
+    #[tokio::test]
+    async fn an_unnamed_row_with_a_names_items_is_merged_into_the_named_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("bosun.db"), Options::default())
+            .await
+            .unwrap();
+        store
+            .writer()
+            .write(vec![
+                configured(&[("demo", "/w/new")]),
+                new_item("demo#2", "demo", "/w/new"),
+                Write::Repo(Repo {
+                    name: None,
+                    path: "/w/old".to_owned(),
+                    remote: None,
+                    default_branch: None,
+                }),
+            ])
+            .await
+            .unwrap();
+        // As migration 16 leaves it: the older item on an unnamed row (no `Write` puts it
+        // there, so a connection of its own does).
+        let mut conn = SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("bosun.db")),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO item (item_key, repo_id, created_ms, updated_ms)
+             SELECT 'demo#1', id, 1, 1 FROM repo WHERE path = '/w/old'",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        conn.close().await.unwrap();
+        store
+            .writer()
+            .write(vec![configured(&[("demo", "/w/new")])])
+            .await
+            .unwrap();
+        let (rows, items) = rows_and_items(&store).await;
+        assert_eq!(rows, [(Some("demo".to_owned()), "/w/new".to_owned())]);
+        assert_eq!(items, ["demo#1@demo", "demo#2@demo"]);
+        let aliased: Option<String> = sqlx::query_scalar(
+            "SELECT r.name FROM repo_alias a JOIN repo r ON r.id = a.repo_id
+             WHERE a.path = '/w/old'",
+        )
+        .fetch_optional(store.reader().pool())
+        .await
+        .unwrap();
+        assert_eq!(aliased.as_deref(), Some("demo"));
         store.close().await.unwrap();
     }
 

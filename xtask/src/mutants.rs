@@ -3275,7 +3275,42 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_runner_no_protected_rules",
+        issue: PROTECTED_RULES_CARD,
+        breaks: "a session's `--disallowedTools` carries no `Edit(...)` rules for its protected \
+                 paths, so the CLI lets it edit them",
+        package: "bosun-runner",
+        check: Check::Test("claude::tests::protected_entries_become_edit_deny_rules"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_protected_ignores_allowance",
+        issue: PROTECTED_RULES_CARD,
+        breaks: "a session is denied edits of the protected paths its card allows",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::denials::a_session_is_denied_edits_of_its_protected_paths_less_the_cards_allowance",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_prompt_without_item_section",
+        issue: PROTECTED_RULES_CARD,
+        breaks: "the appended system prompt does not name the item, its verdict or its \
+                 protected paths, so a compacted session loses them",
+        package: "bosun-runner",
+        check: Check::Test(
+            "prompt::tests::the_system_prompt_names_the_item_its_verdict_and_its_protected_paths",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #7 that denies a session edits of its protected paths with `Edit(...)` rules
+/// and names the item, its verdict and those paths in the system prompt (its own number was
+/// not known when it was written; its parent's stands in).
+const PROTECTED_RULES_CARD: u32 = 7;
 
 /// The card of #8 that carries Git LFS objects into the daemon's clone before a checkout and
 /// into the user's repository at landing, and pins Git LFS's filter in the clone (its own

@@ -11,7 +11,8 @@
 //!        --setting-sources project
 //!        --append-system-prompt-file <file>
 //!        --permission-mode dontAsk
-//!        --allowedTools <rule>... --disallowedTools <rule>...
+//!        --allowedTools <rule>...
+//!        --disallowedTools <push rule>... <protected rule>... <rule>...
 //!        [--model <model>] [--effort <level>]
 //! ```
 //!
@@ -28,6 +29,10 @@
 //!   prompt of every later session, unreviewed. What an agent learns goes into its summary.
 //! - The tools of `bosun` and of the repository's servers are pre-allowed; the policy's
 //!   rules follow. Push is denied unless the policy allows it ([`PUSH_RULES`]).
+//! - `--disallowedTools` carries, after the push rules and before the policy's own deny rules,
+//!   two `Edit(...)` rules for each protected path the session may not edit
+//!   ([`protected_rules`]), so the CLI refuses such an edit when it happens; the guard before
+//!   the verdict still judges every path the commits touch.
 //! - `--effort <level>` is passed only when the card or the repository names a level (one of
 //!   `bosun_core::EFFORT_LEVELS`, checked by the configuration and by lint); without one the
 //!   CLI uses its own default.
@@ -221,16 +226,61 @@ pub fn allowed_tools(ctx: &SessionContext) -> Vec<String> {
     out
 }
 
-/// The rules of `--disallowedTools`: [`PUSH_RULES`] unless the policy allows push, then the
-/// policy's rules.
+/// The rules of `--disallowedTools`: [`PUSH_RULES`] unless the policy allows push, the
+/// [`protected_rules`] of each of the policy's protected paths, then the policy's rules.
 #[must_use]
 pub fn disallowed_tools(ctx: &SessionContext) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if !ctx.policy.allow_push {
         out.extend(PUSH_RULES.iter().map(|rule| (*rule).to_owned()));
     }
+    // Mutant (`mutant_runner_no_protected_rules`): the protected paths get no rules.
+    if !cfg!(mutant_runner_no_protected_rules) {
+        out.extend(
+            ctx.policy
+                .protected
+                .iter()
+                .flat_map(|entry| protected_rules(entry)),
+        );
+    }
     out.extend(ctx.policy.deny.iter().cloned());
     out
+}
+
+/// The two deny rules of a protected path (#7), a repository-relative `/`-separated entry
+/// without wildcards (`bosun_config::Policy::protected`).
+///
+/// - An entry with a `/` names that path: `Edit(/<entry>)` and `Edit(/<entry>/**)`, anchored at
+///   the working directory, the top of the repository.
+/// - A bare name names a file or directory of that name at any depth: `Edit(<entry>)` and
+///   `Edit(**/<entry>/**)`.
+/// - An entry starting with `!` or `#` gets a `\` before it, gitignore's escape, so it is never
+///   a negation or a comment.
+///
+/// The syntax, from <https://code.claude.com/docs/en/permissions> ("Read and Edit"): "`Edit`
+/// rules apply to all built-in tools that edit files", and `Write(path)` and `NotebookEdit`
+/// rules are accepted but never matched, so only `Edit` rules are generated. Paths use gitignore
+/// pattern syntax: "`/path` Path relative to the settings source", which for "CLI flags or
+/// session rules" is "`<primary working directory>/path`"; "Bare filenames follow gitignore
+/// semantics and match at any depth"; "`*` matches within a single path segment [...] while
+/// `**` matches across directories"; "A deny or ask pattern that starts with `!` is a gitignore
+/// negation"; "On Windows, paths are normalized to POSIX form before matching". Deny is
+/// evaluated before allow, so the rules hold against the default `Edit` allowance. They "don't
+/// apply to arbitrary subprocesses": the rules are a courtesy, refusing an edit as it happens;
+/// the guard before the verdict is the lock. Bash command lines are not pattern-matched.
+#[must_use]
+pub fn protected_rules(entry: &str) -> [String; 2] {
+    let entry = entry.trim_matches('/');
+    let escaped = if entry.starts_with(['!', '#']) {
+        format!("\\{entry}")
+    } else {
+        entry.to_owned()
+    };
+    if entry.contains('/') {
+        [format!("Edit(/{escaped})"), format!("Edit(/{escaped}/**)")]
+    } else {
+        [format!("Edit({escaped})"), format!("Edit(**/{escaped}/**)")]
+    }
 }
 
 /// Why [`mcp_config`] refused its input.

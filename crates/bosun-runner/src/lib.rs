@@ -138,6 +138,10 @@ pub struct ToolPolicy {
     pub deny: Vec<String>,
     /// Whether `git push` is allowed. Off by default: push is denied (#7).
     pub allow_push: bool,
+    /// Repository-relative, `/`-separated paths the session may not edit: the repository's
+    /// protected paths less the card's `allow-protected` (#7). A runner turns them into deny
+    /// rules; the guard before the verdict is the enforcement.
+    pub protected: Vec<String>,
 }
 
 impl Default for ToolPolicy {
@@ -159,6 +163,7 @@ impl Default for ToolPolicy {
             .to_vec(),
             deny: Vec::new(),
             allow_push: false,
+            protected: Vec::new(),
         }
     }
 }

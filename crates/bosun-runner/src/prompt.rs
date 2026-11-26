@@ -11,8 +11,10 @@
 //!   `--append-system-prompt-file`): the repository's standing instructions for unattended work
 //!   and the exit protocol, whose last bullet says that the session cannot read GitHub: a
 //!   `#N` in the task is provenance, not a reference to look up, and what the task lacks is a
-//!   question (`ask_question`), not a guess (#139). It is the same for every attempt of an
-//!   item, so a resumed session keeps it.
+//!   question (`ask_question`), not a guess (#139); then a section `## This item` naming the
+//!   item id, the verdict command and the paths the session may not edit, so a session whose
+//!   user message was compacted away still knows them (#7). It is the same for every attempt
+//!   of an item, so a resumed session keeps it.
 //!
 //! A runner without a system-prompt file puts [`Prompt::system`] before [`Prompt::user`].
 //!
@@ -71,6 +73,8 @@ pub struct Comment {
 /// What a prompt is built from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptInput {
+    /// The item's id, as `<repo>#<n>`.
+    pub item: String,
     /// The snapshot's prose: the issue's title and body.
     pub prose: String,
     /// The verdict command.
@@ -98,6 +102,9 @@ pub struct PromptInput {
     /// The rebase conflict this session was started for (#8, "Landing"), in worktree mode;
     /// `None` for every other session.
     pub conflict: Option<Conflict>,
+    /// The repository-relative paths the session may not edit: the policy's protected paths
+    /// less the card's `allow-protected`; empty when there are none.
+    pub protected: Vec<String>,
 }
 
 /// A rebase of the item's branch onto its target that conflicted (#8): the session started in
@@ -368,8 +375,34 @@ pub fn build(input: &PromptInput) -> Prompt {
     if !cfg!(mutant_runner_prompt_without_provenance_rule) {
         system.push_str(PROVENANCE_RULE);
     }
+    // Mutant (`mutant_runner_prompt_without_item_section`): the section is left out.
+    if !cfg!(mutant_runner_prompt_without_item_section) {
+        system.push_str(&item_section(input));
+    }
 
     Prompt { user, system }
+}
+
+/// The system prompt's `## This item`: the item id, its verdict command and its protected
+/// paths. The user message carries them too, but a long session may compact it away; the
+/// appended system prompt stays.
+fn item_section(input: &PromptInput) -> String {
+    let mut out = format!(
+        "\n## This item\n\nThis session works on item `{}`. After you exit, the daemon runs \
+         its verdict command in the working tree:\n\n```sh\n{}\n```\n",
+        input.item,
+        input.verdict.trim_end()
+    );
+    if !input.protected.is_empty() {
+        let paths: Vec<String> = input.protected.iter().map(|p| format!("`{p}`")).collect();
+        let _ = write!(
+            out,
+            "\nThese paths are protected: {}. An edit of one is refused, and a commit that \
+             touches one sends the item to Needs you.\n",
+            paths.join(", ")
+        );
+    }
+    out
 }
 
 #[cfg(test)]
@@ -378,6 +411,7 @@ mod tests {
 
     fn input() -> PromptInput {
         PromptInput {
+            item: "demo#7".to_owned(),
             prose: "Add a flag\n\nThe CLI gains --dry-run.".to_owned(),
             verdict: "cargo test -p demo".to_owned(),
             attempt: 2,
@@ -394,7 +428,51 @@ mod tests {
             }],
             daemon_comment_ids: BTreeSet::new(),
             conflict: None,
+            protected: vec!["docs/frozen".to_owned(), ".gitignore".to_owned()],
         }
+    }
+
+    #[test]
+    fn the_system_prompt_names_the_item_its_verdict_and_its_protected_paths() {
+        let prompt = build(&input());
+        let system = &prompt.system;
+        let Some((_, section)) = system.split_once("## This item\n") else {
+            panic!("no item section in {system}");
+        };
+        for part in [
+            "`demo#7`",
+            "```sh\ncargo test -p demo\n```",
+            "`docs/frozen`",
+            "`.gitignore`",
+            "protected",
+            "Needs you",
+        ] {
+            assert!(
+                section.contains(part),
+                "the section lacks {part:?}: {system}"
+            );
+        }
+
+        let bare = build(&PromptInput {
+            protected: Vec::new(),
+            ..input()
+        });
+        let Some((_, section)) = bare.system.split_once("## This item\n") else {
+            panic!("no item section in {}", bare.system);
+        };
+        assert!(section.contains("`demo#7`"), "{section}");
+        assert!(section.contains("cargo test -p demo"), "{section}");
+        assert!(!section.contains("protected"), "{section}");
+
+        // The user message does not change with the new fields.
+        let other = build(&PromptInput {
+            item: "other#9".to_owned(),
+            protected: vec!["elsewhere".to_owned()],
+            ..input()
+        });
+        assert_eq!(other.user, prompt.user);
+        assert_eq!(bare.user, prompt.user);
+        assert!(!prompt.user.contains("## This item"), "{}", prompt.user);
     }
 
     fn conflict(files: Vec<String>) -> Conflict {

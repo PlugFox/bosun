@@ -489,6 +489,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_denials_not_written)",
   "cfg(mutant_report_denial_targets_on_public)",
   "cfg(mutant_report_drop_denied_calls)",
+  # #7: a session gets `Edit(...)` deny rules for its protected paths less the card's
+  # allowance, and the system prompt names the item, its verdict and those paths.
+  "cfg(mutant_runner_no_protected_rules)",
+  "cfg(mutant_loop_protected_ignores_allowance)",
+  "cfg(mutant_runner_prompt_without_item_section)",
 ] }
 
 [workspace.lints.clippy]

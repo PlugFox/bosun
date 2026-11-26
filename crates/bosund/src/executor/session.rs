@@ -300,8 +300,14 @@ fn entry_text(entry: &LiveEntry) -> String {
 }
 
 /// The prompt of the attempt: the snapshot's prose and verdict, its inlined comments, and the
-/// previous attempt's verdict output and refusal from the store (#2: never from the board).
-async fn prompt_of(shared: &Shared, claimed: &Claimed, run: &Run) -> prompt::Prompt {
+/// previous attempt's verdict output and refusal from the store (#2: never from the board),
+/// and the item's id and `protected` paths for the system prompt.
+async fn prompt_of(
+    shared: &Shared,
+    claimed: &Claimed,
+    run: &Run,
+    protected: &[String],
+) -> prompt::Prompt {
     let reader = &shared.deps.reader;
     let previous = reader
         .verdict_runs(&run.item)
@@ -326,6 +332,7 @@ async fn prompt_of(shared: &Shared, claimed: &Claimed, run: &Run) -> prompt::Pro
         .into_iter()
         .collect();
     prompt::build(&prompt::PromptInput {
+        item: run.item.to_string(),
         prose: claimed.snapshot.body.clone(),
         verdict: claimed.snapshot.contract.verdict.clone(),
         attempt: run.attempt,
@@ -347,6 +354,7 @@ async fn prompt_of(shared: &Shared, claimed: &Claimed, run: &Run) -> prompt::Pro
             .collect(),
         daemon_comment_ids: daemon,
         conflict: conflict_of(shared, run).await,
+        protected: protected.to_vec(),
     })
 }
 
@@ -641,6 +649,55 @@ pub(crate) fn session_effort(contract: &bosun_queue::Contract, repo: &Repo) -> O
     contract.effort.clone().or_else(|| repo.effort.clone())
 }
 
+/// The paths a session may not edit (#7): the policy's protected entries less the card's
+/// `allow-protected`. They become the runner's `Edit(...)` deny rules and the system prompt's
+/// list. An entry is left out when it and an allowance overlap: for an entry with a `/`, when
+/// either covers the other (the path itself or anything under it); for a bare name, when the
+/// allowance is a path the name protects (a segment equal to it). ASCII case is ignored, as in
+/// the policy. Leaving an entry out only loses the live refusal: the guard before the verdict
+/// still judges every path the commits touched.
+pub(crate) fn editable_protection(protected: &BTreeSet<String>, allowed: &[String]) -> Vec<String> {
+    if cfg!(mutant_loop_protected_ignores_allowance) {
+        // Mutant (`mutant_loop_protected_ignores_allowance`): the card's allowance is ignored.
+        return protected.iter().cloned().collect();
+    }
+    protected
+        .iter()
+        .filter(|entry| {
+            !allowed.iter().any(|allowance| {
+                let allowance = normal(allowance);
+                if entry.contains('/') {
+                    covers(&allowance, entry) || covers(entry, &allowance)
+                } else {
+                    allowance
+                        .split('/')
+                        .any(|segment| segment.eq_ignore_ascii_case(entry))
+                }
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// A repository-relative path without a leading `./` or a trailing `/`.
+fn normal(path: &str) -> String {
+    path.trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+/// Whether `entry` covers `path`: the path itself or anything under it, ASCII case ignored (as
+/// `bosun_git`'s allowance check).
+fn covers(entry: &str, path: &str) -> bool {
+    let entry = normal(entry).to_ascii_lowercase();
+    let path = normal(path).to_ascii_lowercase();
+    !entry.is_empty()
+        && (path == entry
+            || path
+                .strip_prefix(&entry)
+                .is_some_and(|rest| rest.starts_with('/')))
+}
+
 /// Where the session's MCP configuration goes: its directory, outside the working tree.
 fn mcp_path(dir: &Path, repo: &Repo) -> PathBuf {
     if cfg!(mutant_mcp_config_in_tree) {
@@ -793,7 +850,11 @@ pub(crate) async fn session(
         }
     };
 
-    let prompt = prompt_of(shared, claimed, run).await;
+    let protected = editable_protection(
+        &repo.policy.protected,
+        &claimed.snapshot.contract.allow_protected,
+    );
+    let prompt = prompt_of(shared, claimed, run, &protected).await;
     let dir = shared
         .options
         .work_dir
@@ -839,6 +900,7 @@ pub(crate) async fn session(
             allow_push: repo.policy.push,
             // The operator token's file (#67).
             deny: shared.deps.control.deny_rules(),
+            protected,
             ..ToolPolicy::default()
         },
         model: session_model(&claimed.snapshot.contract, repo),
@@ -1810,6 +1872,35 @@ mod tests {
             shim_cap(None, Duration::from_mins(30)),
             Duration::from_hours(24)
         );
+    }
+
+    #[test]
+    fn the_cards_allowance_lifts_the_protection_it_overlaps() {
+        let protected: BTreeSet<String> = ["docs/frozen", "harness.rs", ".gitignore", "tests/data"]
+            .map(str::to_owned)
+            .into();
+        let left = |allowed: &[&str]| {
+            let allowed: Vec<String> = allowed.iter().map(|a| (*a).to_owned()).collect();
+            editable_protection(&protected, &allowed)
+        };
+        let all: Vec<String> = protected.iter().cloned().collect();
+        assert_eq!(left(&[]), all);
+        // Under the entry, the entry itself, above it; case ignored.
+        for allowed in ["docs/frozen/a.md", "Docs/Frozen", "docs", "./docs/"] {
+            assert_eq!(
+                left(&[allowed]),
+                [".gitignore", "harness.rs", "tests/data"],
+                "{allowed}"
+            );
+        }
+        // A sibling with a shared prefix overlaps nothing.
+        assert_eq!(left(&["docs/frozen2"]), all);
+        // A bare name is lifted by a path it protects.
+        assert_eq!(
+            left(&["src/HARNESS.rs", "sub/.gitignore"]),
+            ["docs/frozen", "tests/data"]
+        );
+        assert_eq!(left(&["src/harness.rs.bak"]), all);
     }
 
     #[test]

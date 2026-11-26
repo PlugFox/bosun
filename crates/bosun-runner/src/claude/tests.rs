@@ -286,6 +286,40 @@ fn mcp_config_refuses_a_bad_server() {
 }
 
 #[test]
+fn protected_entries_become_edit_deny_rules() {
+    let mut ctx = ctx();
+    ctx.policy.protected = ["docs/frozen", "harness.rs", ".gitignore", "!odd"]
+        .map(str::to_owned)
+        .to_vec();
+    ctx.policy.deny.push("WebFetch".to_owned());
+    let argv = args(&ClaudeRunner::new("claude").command(&ctx));
+    let denied = values(&argv, "--disallowedTools");
+    assert_eq!(
+        denied,
+        [
+            "Bash(git push:*)",
+            "PowerShell(git push:*)",
+            "Edit(/docs/frozen)",
+            "Edit(/docs/frozen/**)",
+            "Edit(harness.rs)",
+            "Edit(**/harness.rs/**)",
+            "Edit(.gitignore)",
+            "Edit(**/.gitignore/**)",
+            r"Edit(\!odd)",
+            r"Edit(**/\!odd/**)",
+            "WebFetch",
+        ]
+    );
+    for prefix in ["Write(", "NotebookEdit("] {
+        assert!(!argv.iter().any(|a| a.starts_with(prefix)), "{argv:?}");
+    }
+    // The resumed session gets the same rules.
+    let session = SessionId::parse("00000000-0000-4000-8000-052100000000").unwrap();
+    let resumed = args(&ClaudeRunner::new("claude").resume_command(&session, &ctx));
+    assert_eq!(values(&resumed, "--disallowedTools"), denied);
+}
+
+#[test]
 fn the_tool_lists_come_from_the_policy_and_push_is_denied() {
     let mut ctx = ctx();
     ctx.policy.deny.push("WebFetch".to_owned());

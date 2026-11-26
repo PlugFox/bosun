@@ -11,11 +11,16 @@
 //! [`ForgeError::Unreachable`] (no answer: network, DNS, timeout, a 5xx), which the landing
 //! waits out. The argument lists are built by pure functions ([`list_args`], [`create_args`],
 //! [`edit_args`], [`view_args`]); a body goes to `gh` in a file, never on its command line.
+//!
+//! Every `gh` call, and every git of the landing that talks to the forge, ends within
+//! [`TOOL_TIMEOUT`] ([`output_within`]): one that hangs is killed and is
+//! [`ForgeError::Unreachable`], so neither the repository's loop nor its landing stalls on it.
 
 use std::fmt;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use bosun_identity::Env;
 
@@ -302,19 +307,68 @@ fn body_file(body: &str) -> Result<tempfile::NamedTempFile, ForgeError> {
     Ok(file)
 }
 
+/// How long one `gh` call or one git that talks to the forge may take before it is killed and
+/// taken for no answer.
+pub(crate) const TOOL_TIMEOUT: Duration = Duration::from_mins(2);
+
+/// Runs `command` (`what` names it) to its end, at most `limit`: its output, or, when it
+/// cannot be started, [`ForgeError::Refused`]. One still running at `limit` is killed and is
+/// [`ForgeError::Unreachable`]; whatever it started and left holding its pipes is not waited
+/// for. Standard input is closed and both outputs are read as it runs.
+pub(crate) fn output_within(
+    command: &mut Command,
+    limit: Duration,
+    what: &str,
+) -> Result<Output, ForgeError> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| ForgeError::Refused(format!("cannot run {what}: {e}")))?;
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => return Err(ForgeError::Unreachable(format!("{what}: {e}"))),
+        }
+        // Mutant (`mutant_forge_tool_without_timeout`): a call that hangs is waited for.
+        if Instant::now() >= deadline && !cfg!(mutant_forge_tool_without_timeout) {
+            child.kill().ok();
+            child.wait().ok();
+            return Err(ForgeError::Unreachable(format!(
+                "{what} did not answer within {} s",
+                limit.as_secs()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
 /// Runs `gh args` in `at`; its standard output, or the failure classified.
 fn gh(at: &At, args: &[String]) -> Result<String, ForgeError> {
     let mut command = Command::new("gh");
     at.env.apply(&mut command);
-    command
-        .args(args)
-        .current_dir(&at.dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let out = command
-        .output()
-        .map_err(|e| ForgeError::Refused(format!("cannot run gh: {e}")))?;
+    command.args(args).current_dir(&at.dir);
+    let out = output_within(&mut command, TOOL_TIMEOUT, "gh")?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
@@ -500,6 +554,29 @@ mod tests {
         let found = parse_list(&format!("[{fork},{silent},{own}]")).unwrap();
         assert_eq!(found.map(|p| p.number), Some(5));
         assert_eq!(parse_list(&format!("[{fork},{silent}]")).unwrap(), None);
+    }
+
+    /// #8: a call that hangs is killed at its limit and taken for no answer, so the loop and
+    /// the landing do not stall on it.
+    #[test]
+    fn a_tool_that_hangs_is_killed_and_unreachable() {
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("powershell");
+            c.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 10"]);
+            c
+        } else {
+            let mut c = Command::new("sleep");
+            c.arg("10");
+            c
+        };
+        let started = Instant::now();
+        let out = output_within(&mut command, Duration::from_millis(500), "a sleeper");
+        let took = started.elapsed();
+        assert!(
+            matches!(&out, Err(ForgeError::Unreachable(why)) if why.contains("did not answer")),
+            "{out:?}"
+        );
+        assert!(took < Duration::from_secs(5), "{took:?}");
     }
 
     #[test]

@@ -1004,9 +1004,7 @@ fn push(
         command.arg(format!("--force-with-lease={remote_ref}:{expected}"));
     }
     command.args([REMOTE, &spec]);
-    let out = command
-        .output()
-        .map_err(|e| ForgeError::Refused(format!("cannot run git: {e}")))?;
+    let out = forge::output_within(&mut command, forge::TOOL_TIMEOUT, "git push")?;
     if out.status.success() {
         return Ok(());
     }
@@ -1045,9 +1043,7 @@ fn push_url(git: &Git, env: &Env) -> Result<String, ForgeError> {
     let mut command = git.command();
     env.apply(&mut command);
     command.args(["remote", "get-url", "--push", REMOTE]);
-    let out = command
-        .output()
-        .map_err(|e| ForgeError::Refused(format!("cannot run git: {e}")))?;
+    let out = forge::output_within(&mut command, forge::TOOL_TIMEOUT, "git remote")?;
     let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     if !out.status.success() || url.is_empty() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
@@ -1067,9 +1063,7 @@ fn remote_head(
 ) -> Result<Option<String>, ForgeError> {
     let mut command = remote_command(git, env);
     command.args(["ls-remote", "--quiet", "--", url, remote_ref]);
-    let out = command
-        .output()
-        .map_err(|e| ForgeError::Refused(format!("cannot run git: {e}")))?;
+    let out = forge::output_within(&mut command, forge::TOOL_TIMEOUT, "git ls-remote")?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
         return Err(forge::classify(format!(

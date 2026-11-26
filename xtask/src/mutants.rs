@@ -2618,6 +2618,14 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_forge_tool_without_timeout",
+        issue: PR_CARD,
+        breaks: "a `gh` call or forge git that hangs stalls the repository's loop",
+        package: "bosund",
+        check: Check::Test("executor::forge::tests::a_tool_that_hangs_is_killed_and_unreachable"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_loop_pr_refusal_is_retried",
         issue: PR_CARD,
         breaks: "a refused push or pull request is retried as if the forge had not answered",

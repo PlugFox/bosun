@@ -223,7 +223,7 @@ pub(crate) fn card_of(item: &ItemId) -> Option<bosun_queue::ItemId> {
 }
 
 /// The (attempt, seq, index) of an effect key `<item>/a<attempt>/t<seq>/e<index>`.
-fn key_parts(key: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn key_parts(key: &str) -> Option<(u32, u32, u32)> {
     let mut parts = key.rsplitn(4, '/');
     let index = parts.next()?.strip_prefix('e')?.parse().ok()?;
     let seq = parts.next()?.strip_prefix('t')?.parse().ok()?;

@@ -5002,7 +5002,7 @@
   "x-api-version": 1,
   "x-methods": {
     "agent.ask_question": {
-      "description": "Records a question of the agent with its attempt and HEAD. A blocking one sends the      item to Needs you and ends the session after a short grace period; one that does not      block goes into the item report.",
+      "description": "Records a question of the agent with its attempt and HEAD. A blocking one sends the item to Needs you and ends the session after a short grace period; one that does not block goes into the item report.",
       "params": {
         "$ref": "#/$defs/AskQuestionParams"
       },
@@ -5011,7 +5011,7 @@
       }
     },
     "agent.hello": {
-      "description": "The handshake of an agent session's `bosun-mcp`: what its credential is bound to.      Refused for a credential that is not live or names another item.",
+      "description": "The handshake of an agent session's `bosun-mcp`: what its credential is bound to. Refused for a credential that is not live or names another item.",
       "params": {
         "$ref": "#/$defs/AgentHelloParams"
       },
@@ -5029,7 +5029,7 @@
       }
     },
     "agent.submit_summary": {
-      "description": "Records the agent's summary with its attempt and HEAD; the last one of an attempt      wins. It changes no state, whatever it says.",
+      "description": "Records the agent's summary with its attempt and HEAD; the last one of an attempt wins. It changes no state, whatever it says.",
       "params": {
         "$ref": "#/$defs/SubmitSummaryParams"
       },
@@ -5038,7 +5038,7 @@
       }
     },
     "control.kill": {
-      "description": "The kill switch: every child is killed now, every item parks, and no further board      write is made until it is released (`release`). Daemon-wide. Takes the operator token.",
+      "description": "The kill switch: every child is killed now, every item parks, and no further board write is made until it is released (`release`). Daemon-wide. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/KillParams"
       },
@@ -5047,7 +5047,7 @@
       }
     },
     "control.pause": {
-      "description": "Pauses one repository of the identity, or all of them: the current attempt finishes      and no new session starts until resume. Takes the operator token.",
+      "description": "Pauses one repository of the identity, or all of them: the current attempt finishes and no new session starts until resume. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/PauseParams"
       },
@@ -5056,7 +5056,7 @@
       }
     },
     "control.resume": {
-      "description": "Lifts a pause by hand of one repository or of the identity; for a repository, also its      automatic pause until the next interactive activity. Takes the operator token.",
+      "description": "Lifts a pause by hand of one repository or of the identity; for a repository, also its automatic pause until the next interactive activity. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/PauseParams"
       },
@@ -5065,7 +5065,7 @@
       }
     },
     "control.status": {
-      "description": "The control state of the identity and its repositories: the kill switch, pauses by hand      and automatic ones, the daily cap, and the hold in force on each repository.",
+      "description": "The control state of the identity and its repositories: the kill switch, pauses by hand and automatic ones, the daily cap, and the hold in force on each repository.",
       "params": {
         "$ref": "#/$defs/IdentityParams"
       },
@@ -5074,7 +5074,7 @@
       }
     },
     "doctor.probe": {
-      "description": "Starts the daemon's `gh` once (`gh --version`) and says whether it ran: a daemon that      cannot start children fails here (#131). Reads nothing of the identity's; needs no      operator token.",
+      "description": "Starts the daemon's `gh` once (`gh --version`) and says whether it ran: a daemon that cannot start children fails here (#131). Reads nothing of the identity's; needs no operator token.",
       "params": {
         "$ref": "#/$defs/IdentityParams"
       },
@@ -5119,7 +5119,7 @@
       }
     },
     "item.get": {
-      "description": "One item of the identity: its state, snapshot, transitions, attempts with their      sessions and verdict runs, and its agents' calls.",
+      "description": "One item of the identity: its state, snapshot, transitions, attempts with their sessions and verdict runs, and its agents' calls.",
       "params": {
         "$ref": "#/$defs/ItemParams"
       },
@@ -5128,7 +5128,7 @@
       }
     },
     "item.restart": {
-      "description": "Restarts an item in flight: puts the `restart` label on its card, so the loop kills      its session, takes a new snapshot and starts again. Refused while the kill switch is      thrown. Takes the operator token.",
+      "description": "Restarts an item in flight: puts the `restart` label on its card, so the loop kills its session, takes a new snapshot and starts again. Refused while the kill switch is thrown. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/RestartParams"
       },
@@ -5137,7 +5137,7 @@
       }
     },
     "lease.acquire": {
-      "description": "Asks for the leases of the named resources for a running process (a `bosun with`      command): the first call files the request, later calls with the same pid and set report      whether it is granted. Never says who holds a resource. Takes the operator token.",
+      "description": "Asks for the leases of the named resources for a running process (a `bosun with` command): the first call files the request, later calls with the same pid and set report whether it is granted. Never says who holds a resource. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/AcquireParams"
       },
@@ -5146,7 +5146,7 @@
       }
     },
     "lease.list": {
-      "description": "The resource instances the identity can lease, with their holders and waiting requests,      and its worktrees on disk or quarantined. Another identity's holder is shown only as      `busy`.",
+      "description": "The resource instances the identity can lease, with their holders and waiting requests, and its worktrees on disk or quarantined. Another identity's holder is shown only as `busy`.",
       "params": {
         "$ref": "#/$defs/IdentityParams"
       },
@@ -5155,7 +5155,7 @@
       }
     },
     "lease.release": {
-      "description": "Releases what a process holds and withdraws its request; releasing nothing is not an      error. Takes the operator token.",
+      "description": "Releases what a process holds and withdraws its request; releasing nothing is not an error. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/ReleaseParams"
       },
@@ -5164,7 +5164,7 @@
       }
     },
     "queue.get": {
-      "description": "The board of one repository of the identity, or of each: its columns in board order,      its hash, each card's state and snapshot hash, whether an edit waits for the next claim,      and the lint findings of the cards in Ready.",
+      "description": "The board of one repository of the identity, or of each: its columns in board order, its hash, each card's state and snapshot hash, whether an edit waits for the next claim, and the lint findings of the cards in Ready.",
       "params": {
         "$ref": "#/$defs/QueueParams"
       },
@@ -5200,7 +5200,7 @@
       }
     },
     "session.get": {
-      "description": "One session bosun spawned, by provider session id or by item (its latest), and      whether it still runs: what `session tail` follows.",
+      "description": "One session bosun spawned, by provider session id or by item (its latest), and whether it still runs: what `session tail` follows.",
       "params": {
         "$ref": "#/$defs/SessionParams"
       },
@@ -5209,7 +5209,7 @@
       }
     },
     "session.tail": {
-      "description": "The output lines of an item's sessions the daemon still holds, contiguous up to the stream's head, with the item's latest session and its context size: what a live tail      refetches after a resync.",
+      "description": "The output lines of an item's sessions the daemon still holds, contiguous up to the stream's head, with the item's latest session and its context size: what a live tail refetches after a resync.",
       "params": {
         "$ref": "#/$defs/TailParams"
       },
@@ -5227,7 +5227,7 @@
       }
     },
     "status.overview": {
-      "description": "The Overview of the identity: per repository its state, the item in flight with its      attempt and time in state, the last verdict, and the control state.",
+      "description": "The Overview of the identity: per repository its state, the item in flight with its attempt and time in state, the last verdict, and the control state.",
       "params": {
         "$ref": "#/$defs/IdentityParams"
       },

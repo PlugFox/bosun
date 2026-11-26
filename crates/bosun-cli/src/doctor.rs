@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use bosun_api::rpc::code;
-use bosun_api::{IdentityParams, ProbeResult, RepoOverview, method};
+use bosun_api::{IdentityParams, Method, ProbeResult, RepoOverview, method};
 use bosun_client::{Client, Endpoint, Error};
 use bosun_config::{Config, Disk, DiskProbe, Queue, SystemProbe, tools};
 use serde::Serialize;
@@ -207,12 +207,13 @@ pub(crate) async fn run(inputs: &Inputs) -> Vec<Check> {
     });
     let mut client = daemon(&inputs.endpoint, &mut checks).await;
     if let Some(config) = &config {
-        checks.extend(probes(inputs, config, client.as_mut()).await);
+        checks.extend(probes(inputs, config, &mut client).await);
     }
     if let Some(config) = &config {
-        checks.extend(match client {
-            Some(mut client) => served_config(config, &served(inputs, config, &mut client).await),
-            None => vec![Check::skip("served_config", "the daemon did not answer")],
+        checks.extend(if client.is_some() {
+            served_config(config, &served(inputs, config, &mut client).await)
+        } else {
+            vec![Check::skip("served_config", "the daemon did not answer")]
         });
     }
     checks.push(log(inputs));
@@ -1006,27 +1007,41 @@ async fn daemon(endpoint: &Result<Endpoint, String>, checks: &mut Vec<Check>) ->
 /// How long `doctor.probe` may take: the daemon gives its `gh --version` 30 s.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
 
+/// Calls `M` on `client` within `limit`: `None` when there is no client to ask. A call that
+/// times out leaves its reply unread on the connection, where the next call would read it as
+/// its own (and fail on its id): so its connection is dropped, and nothing more is asked.
+async fn ask<M: Method>(
+    client: &mut Option<Client>,
+    limit: Duration,
+    params: &M::Params,
+) -> Option<Result<M::Result, Error>> {
+    let answered = tokio::time::timeout(limit, client.as_mut()?.call::<M>(params)).await;
+    if answered.is_err() && !cfg!(mutant_doctor_timeout_keeps_client) {
+        // Mutant (`mutant_doctor_timeout_keeps_client`): the connection is kept, so the next
+        // call reads the late reply and fails.
+        *client = None;
+    }
+    Some(answered.unwrap_or(Err(Error::Timeout)))
+}
+
 /// `daemon_gh` of each configured identity (of `--identity` only, when given): `doctor.probe`
-/// on the client that answered `hello`, or skipped when none did.
-async fn probes(inputs: &Inputs, config: &Config, mut client: Option<&mut Client>) -> Vec<Check> {
+/// on the client that answered `hello`, or skipped when none did (or an earlier call timed
+/// out, which drops it).
+async fn probes(inputs: &Inputs, config: &Config, client: &mut Option<Client>) -> Vec<Check> {
     let mut checks = Vec::new();
     for name in config.identities.keys() {
         if inputs.identity.as_ref().is_some_and(|only| only != name) {
             continue;
         }
-        let Some(client) = client.as_deref_mut() else {
-            checks.push(Check::skip("daemon_gh", "the daemon did not answer").of(name));
-            continue;
+        let params = IdentityParams {
+            identity: name.clone(),
         };
-        let answer = tokio::time::timeout(
-            PROBE_TIMEOUT,
-            client.call::<method::DoctorProbe>(&IdentityParams {
-                identity: name.clone(),
-            }),
-        )
-        .await
-        .unwrap_or(Err(Error::Timeout));
-        checks.push(daemon_gh(name, answer));
+        checks.push(
+            match ask::<method::DoctorProbe>(client, PROBE_TIMEOUT, &params).await {
+                Some(answer) => daemon_gh(name, answer),
+                None => Check::skip("daemon_gh", "the daemon did not answer").of(name),
+            },
+        );
     }
     checks
 }
@@ -1045,7 +1060,8 @@ pub(crate) fn daemon_gh(identity: &str, answer: Result<ProbeResult, Error>) -> C
         Ok(probe) => Check::fail(
             "daemon_gh",
             format!("bosund cannot start {}: {}", probe.program, probe.detail),
-            "the daemon cannot start a child process (for one, a daemon whose console host was              ended): run `bosun install`, which stops it by its pid and starts it again",
+            "the daemon cannot start a child process (for one, a daemon whose console host was \
+             ended): run `bosun install`, which stops it by its pid and starts it again",
         ),
         Err(Error::Rpc(e)) if e.code == code::METHOD_NOT_FOUND => Check::warn(
             "daemon_gh",
@@ -1076,21 +1092,23 @@ const RESTART: &str = "restart the daemon (log in again, or run bosun install)";
 async fn served(
     inputs: &Inputs,
     config: &Config,
-    client: &mut Client,
+    client: &mut Option<Client>,
 ) -> BTreeMap<String, Result<Vec<RepoOverview>, String>> {
     let mut served = BTreeMap::new();
     for name in config.identities.keys() {
         if inputs.identity.as_ref().is_some_and(|only| only != name) {
             continue;
         }
-        let asked = tokio::time::timeout(
-            bosun_client::CONNECT_TIMEOUT,
-            client.call::<method::StatusOverview>(&IdentityParams {
-                identity: name.clone(),
-            }),
-        )
-        .await
-        .unwrap_or(Err(Error::Timeout));
+        let params = IdentityParams {
+            identity: name.clone(),
+        };
+        let asked = ask::<method::StatusOverview>(client, bosun_client::CONNECT_TIMEOUT, &params)
+            .await
+            .unwrap_or_else(|| {
+                Err(Error::Protocol(
+                    "not asked: the daemon did not answer an earlier call in time".to_owned(),
+                ))
+            });
         let answer = match asked {
             Ok(overview) => Ok(overview.repos),
             Err(Error::Rpc(e)) if e.code == code::UNKNOWN_IDENTITY => Err(NOT_SERVED.to_owned()),
@@ -1193,16 +1211,33 @@ pub(crate) fn served_config(
                 }
             }
         }
-        // One configured under another identity is named there, above.
-        for found in repos.iter().filter(|r| !config.repos.contains_key(&r.repo)) {
-            checks.push(warn(
-                identity,
-                format!(
-                    "repository {} is removed: its loop claims nothing new and its item in \
-                     flight goes to Needs you; the rest {NEXT_START}",
-                    found.repo
-                ),
-            ));
+        for found in repos {
+            match config.repos.get(&found.repo) {
+                None => checks.push(warn(
+                    identity,
+                    format!(
+                        "repository {} is removed: its loop claims nothing new and its item in \
+                         flight goes to Needs you; the rest {NEXT_START}",
+                        found.repo
+                    ),
+                )),
+                // Configured under another identity: named under that one above when it was
+                // asked too, else (`--identity`) here.
+                Some(repo) if repo.identity != *identity => {
+                    let detail = format!(
+                        "repository {}: its identity changed: {NEXT_START}",
+                        found.repo
+                    );
+                    // Mutant (`mutant_doctor_misses_identity_move`): a served repository
+                    // configured under another identity is not compared.
+                    if !cfg!(mutant_doctor_misses_identity_move)
+                        && !checks.iter().any(|c| c.detail == detail)
+                    {
+                        checks.push(warn(identity, detail));
+                    }
+                }
+                Some(_) => {}
+            }
         }
     }
     if checks.is_empty() {
@@ -1514,6 +1549,89 @@ mod tests {
         let checks = served_config(&config, &matching);
         assert_eq!(checks.len(), 1, "{checks:#?}");
         assert_eq!(checks[0].status, Status::Ok, "{checks:#?}");
+
+        // With `--identity test` only `test` is asked: a repository it serves that the file
+        // now gives to `other` is named all the same, once.
+        let beta = d.join("beta").display().to_string();
+        let moved_away = text.replace(
+            &format!("path = '{beta}'\nidentity = 'test'\n"),
+            &format!("path = '{beta}'\nidentity = 'other'\n"),
+        );
+        let config = bosun_config::parse(&moved_away, &NoProbe).unwrap();
+        assert_eq!(config.repos["beta"].identity, "other");
+        let only_test = BTreeMap::from([(
+            "test".to_owned(),
+            Ok(vec![
+                overview("beta", None),
+                overview("demo", Some(board.display().to_string())),
+            ]),
+        )]);
+        let checks = served_config(&config, &only_test);
+        let details: Vec<&str> = checks.iter().map(|c| c.detail.as_str()).collect();
+        assert_eq!(
+            details,
+            ["repository beta: its identity changed: takes effect at the next daemon start"],
+            "{checks:#?}"
+        );
+        // Both asked: it is named once.
+        let both = BTreeMap::from([
+            ("other".to_owned(), Ok(Vec::new())),
+            ("test".to_owned(), only_test["test"].clone()),
+        ]);
+        assert_eq!(served_config(&config, &both).len(), 1);
+    }
+
+    /// #192: a call that times out leaves its reply unread on the connection, so the client
+    /// is dropped and nothing more is asked on it (the next call would read that reply as its
+    /// own and fail).
+    #[tokio::test]
+    async fn a_call_that_times_out_drops_its_connection() {
+        use bosun_api::rpc::{Request, Response};
+        use bosun_api::{API_VERSION, HelloResult};
+        use bosun_client::framing;
+
+        let (near, far) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(far);
+            let mut read = tokio::io::BufReader::new(read);
+            while let Ok(Some(line)) = framing::read_line(&mut read).await {
+                let request: Request = serde_json::from_str(&line).unwrap();
+                let id = request.id.clone().unwrap();
+                let result = if request.method == "hello" {
+                    serde_json::to_value(HelloResult {
+                        api_version: API_VERSION,
+                        daemon_version: "0.0.0".to_owned(),
+                        pid: 1,
+                    })
+                    .unwrap()
+                } else {
+                    // Every probe is answered late.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    serde_json::to_value(ProbeResult {
+                        identity: "test".to_owned(),
+                        ok: true,
+                        program: "gh".to_owned(),
+                        detail: "gh version 0.0.0".to_owned(),
+                    })
+                    .unwrap()
+                };
+                let response = Response::result(id, result);
+                if framing::write_message(&mut write, &response).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let mut client = Some(Client::over(Box::new(near)).await.unwrap());
+        let params = IdentityParams {
+            identity: "test".to_owned(),
+        };
+        let limit = Duration::from_millis(100);
+        let first = ask::<method::DoctorProbe>(&mut client, limit, &params).await;
+        assert!(matches!(first, Some(Err(Error::Timeout))), "{first:?}");
+        assert!(client.is_none(), "the connection is dropped");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let second = ask::<method::DoctorProbe>(&mut client, limit, &params).await;
+        assert!(second.is_none(), "nothing more is asked: {second:?}");
     }
 
     #[test]

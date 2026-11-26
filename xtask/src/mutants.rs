@@ -2913,6 +2913,14 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("doctor::tests::the_doctor_names_what_waits_for_the_next_daemon_start"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_doctor_misses_identity_move",
+        issue: 190,
+        breaks: "bosun doctor --identity says ok for a served repository the file gives to another identity",
+        package: "bosun-cli",
+        check: Check::Test("doctor::tests::the_doctor_names_what_waits_for_the_next_daemon_start"),
+        platform: None,
+    },
     // `bosun with` across a daemon restart (finding 4 of #186).
     Mutant {
         name: "mutant_cli_with_release_not_reconnected",
@@ -2978,6 +2986,14 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test(
             "doctor::tests::the_daemon_gh_check_fails_when_the_daemon_cannot_start_gh",
         ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_doctor_timeout_keeps_client",
+        issue: 192,
+        breaks: "after a timed-out call bosun doctor reads its late reply as the next call's",
+        package: "bosun-cli",
+        check: Check::Test("doctor::tests::a_call_that_times_out_drops_its_connection"),
         platform: None,
     },
     // bosun-mcp keeps working while the daemon restarts (#8, buffered calls).

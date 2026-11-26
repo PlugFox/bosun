@@ -348,6 +348,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #192 (#131, part 2): `bosun doctor` asks the daemon to start its `gh`.
   "cfg(mutant_api_probe_always_ok)",
   "cfg(mutant_doctor_daemon_gh_ignored)",
+  "cfg(mutant_doctor_timeout_keeps_client)",
   # #157: landing in worktree mode.
   "cfg(mutant_loop_accept_pre_rebase_verdict)",
   "cfg(mutant_loop_land_while_deferred)",
@@ -460,6 +461,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_reload_relogs_pending)",
   "cfg(mutant_loop_removed_repo_keeps_item)",
   "cfg(mutant_doctor_ignores_served_config)",
+  "cfg(mutant_doctor_misses_identity_move)",
 ] }
 
 [workspace.lints.clippy]

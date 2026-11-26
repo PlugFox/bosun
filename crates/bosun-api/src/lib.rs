@@ -239,21 +239,25 @@ pub mod method {
         "agent.hello",
         crate::AgentHelloParams,
         crate::AgentHelloResult,
-        "The handshake of an agent session's `bosun-mcp`: what its credential is bound to.      Refused for a credential that is not live or names another item."
+        "The handshake of an agent session's `bosun-mcp`: what its credential is bound to. Refused \
+     for a credential that is not live or names another item."
     );
     method!(
         AgentAskQuestion,
         "agent.ask_question",
         crate::AskQuestionParams,
         crate::AgentAck,
-        "Records a question of the agent with its attempt and HEAD. A blocking one sends the      item to Needs you and ends the session after a short grace period; one that does not      block goes into the item report."
+        "Records a question of the agent with its attempt and HEAD. A blocking one sends the item \
+     to Needs you and ends the session after a short grace period; one that does not block goes \
+     into the item report."
     );
     method!(
         AgentSubmitSummary,
         "agent.submit_summary",
         crate::SubmitSummaryParams,
         crate::AgentAck,
-        "Records the agent's summary with its attempt and HEAD; the last one of an attempt      wins. It changes no state, whatever it says."
+        "Records the agent's summary with its attempt and HEAD; the last one of an attempt wins. \
+     It changes no state, whatever it says."
     );
     method!(
         AgentNote,
@@ -267,42 +271,49 @@ pub mod method {
         "control.status",
         crate::IdentityParams,
         crate::ControlStatus,
-        "The control state of the identity and its repositories: the kill switch, pauses by hand      and automatic ones, the daily cap, and the hold in force on each repository."
+        "The control state of the identity and its repositories: the kill switch, pauses by hand \
+     and automatic ones, the daily cap, and the hold in force on each repository."
     );
     method!(
         ControlPause,
         "control.pause",
         crate::PauseParams,
         crate::ControlStatus,
-        "Pauses one repository of the identity, or all of them: the current attempt finishes      and no new session starts until resume. Takes the operator token."
+        "Pauses one repository of the identity, or all of them: the current attempt finishes and \
+     no new session starts until resume. Takes the operator token."
     );
     method!(
         ControlResume,
         "control.resume",
         crate::PauseParams,
         crate::ControlStatus,
-        "Lifts a pause by hand of one repository or of the identity; for a repository, also its      automatic pause until the next interactive activity. Takes the operator token."
+        "Lifts a pause by hand of one repository or of the identity; for a repository, also its \
+     automatic pause until the next interactive activity. Takes the operator token."
     );
     method!(
         ControlKill,
         "control.kill",
         crate::KillParams,
         crate::KillResult,
-        "The kill switch: every child is killed now, every item parks, and no further board      write is made until it is released (`release`). Daemon-wide. Takes the operator token."
+        "The kill switch: every child is killed now, every item parks, and no further board write \
+     is made until it is released (`release`). Daemon-wide. Takes the operator token."
     );
     method!(
         StatusOverview,
         "status.overview",
         crate::IdentityParams,
         crate::Overview,
-        "The Overview of the identity: per repository its state, the item in flight with its      attempt and time in state, the last verdict, and the control state."
+        "The Overview of the identity: per repository its state, the item in flight with its \
+     attempt and time in state, the last verdict, and the control state."
     );
     method!(
         QueueGet,
         "queue.get",
         crate::QueueParams,
         crate::QueueView,
-        "The board of one repository of the identity, or of each: its columns in board order,      its hash, each card's state and snapshot hash, whether an edit waits for the next claim,      and the lint findings of the cards in Ready."
+        "The board of one repository of the identity, or of each: its columns in board order, its \
+     hash, each card's state and snapshot hash, whether an edit waits for the next claim, and the \
+     lint findings of the cards in Ready."
     );
     method!(
         QueueLint,
@@ -316,28 +327,34 @@ pub mod method {
         "item.get",
         crate::ItemParams,
         crate::ItemDetail,
-        "One item of the identity: its state, snapshot, transitions, attempts with their      sessions and verdict runs, and its agents' calls."
+        "One item of the identity: its state, snapshot, transitions, attempts with their sessions \
+     and verdict runs, and its agents' calls."
     );
     method!(
         ItemRestart,
         "item.restart",
         crate::RestartParams,
         crate::RestartResult,
-        "Restarts an item in flight: puts the `restart` label on its card, so the loop kills      its session, takes a new snapshot and starts again. Refused while the kill switch is      thrown. Takes the operator token."
+        "Restarts an item in flight: puts the `restart` label on its card, so the loop kills its \
+     session, takes a new snapshot and starts again. Refused while the kill switch is thrown. \
+     Takes the operator token."
     );
     method!(
         SessionGet,
         "session.get",
         crate::SessionParams,
         crate::SessionInfo,
-        "One session bosun spawned, by provider session id or by item (its latest), and      whether it still runs: what `session tail` follows."
+        "One session bosun spawned, by provider session id or by item (its latest), and whether it \
+     still runs: what `session tail` follows."
     );
     method!(
         SessionTail,
         "session.tail",
         crate::TailParams,
         crate::SessionTail,
-        "The output lines of an item's sessions the daemon still holds, contiguous up to the stream's head, with the item's latest session and its context size: what a live tail      refetches after a resync."
+        "The output lines of an item's sessions the daemon still holds, contiguous up to the \
+     stream's head, with the item's latest session and its context size: what a live tail \
+     refetches after a resync."
     );
     method!(
         TokensPace,
@@ -351,28 +368,34 @@ pub mod method {
         "lease.acquire",
         crate::AcquireParams,
         crate::AcquireResult,
-        "Asks for the leases of the named resources for a running process (a `bosun with`      command): the first call files the request, later calls with the same pid and set report      whether it is granted. Never says who holds a resource. Takes the operator token."
+        "Asks for the leases of the named resources for a running process (a `bosun with` \
+     command): the first call files the request, later calls with the same pid and set report \
+     whether it is granted. Never says who holds a resource. Takes the operator token."
     );
     method!(
         LeaseRelease,
         "lease.release",
         crate::ReleaseParams,
         crate::ReleaseResult,
-        "Releases what a process holds and withdraws its request; releasing nothing is not an      error. Takes the operator token."
+        "Releases what a process holds and withdraws its request; releasing nothing is not an \
+     error. Takes the operator token."
     );
     method!(
         LeaseList,
         "lease.list",
         crate::IdentityParams,
         crate::Resources,
-        "The resource instances the identity can lease, with their holders and waiting requests,      and its worktrees on disk or quarantined. Another identity's holder is shown only as      `busy`."
+        "The resource instances the identity can lease, with their holders and waiting requests, \
+     and its worktrees on disk or quarantined. Another identity's holder is shown only as `busy`."
     );
     method!(
         DoctorProbe,
         "doctor.probe",
         crate::IdentityParams,
         crate::ProbeResult,
-        "Starts the daemon's `gh` once (`gh --version`) and says whether it ran: a daemon that      cannot start children fails here (#131). Reads nothing of the identity's; needs no      operator token."
+        "Starts the daemon's `gh` once (`gh --version`) and says whether it ran: a daemon that \
+     cannot start children fails here (#131). Reads nothing of the identity's; needs no operator \
+     token."
     );
 }
 

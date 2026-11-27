@@ -589,8 +589,8 @@ mod tests {
         assert_eq!(split_item("demo#x"), None);
     }
 
-    /// #8: an item whose lease request waits says, in `bosun status` and `bosun item`, which
-    /// resource it waits for and who holds it.
+    /// #5: a card that waits on an open blocker says, in `bosun status` and `bosun item`,
+    /// which blockers and their stored states.
     #[test]
     fn a_card_waiting_on_a_blocker_says_which_and_its_state() {
         let overview: Overview = serde_json::from_value(serde_json::json!({
@@ -718,6 +718,8 @@ waits on demo#1 (needs_you)
         );
     }
 
+    /// #8: an item whose lease request waits says, in `bosun status` and `bosun item`, which
+    /// resource it waits for and who holds it.
     #[test]
     fn a_waiting_item_says_what_it_waits_for() {
         let waiting = serde_json::json!([{"resource": "rig", "holders": ["item demo#3"]}]);

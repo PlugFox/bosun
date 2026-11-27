@@ -59,8 +59,8 @@
 //! verdict = { timeout = "30m", unready_exit = 75 } # and `shell`, default `sh` (from Git on
 //!                               # Windows); `unready_exit` is off by default
 //! landing = { mode = "merge", target = "main", merge = { method = "squash", push = false } }
-//! auto_pause = false           # default: `daemon.auto_pause`; false with a `worktree`
-//! worktree = { root ='C:\wt\bosun', setup = "cargo fetch", disk_floor = "20GB", shared_build = { dir = 'C:\wt\bosun-target', resource = "target", env = "CARGO_TARGET_DIR" } }
+//! auto_pause = false            # default: `daemon.auto_pause`; false with a `worktree`
+//! worktree = { root = 'C:\wt\bosun', setup = "cargo fetch", disk_floor = "20GB", shared_build = { dir = 'C:\wt\bosun-target', resource = "target", env = "CARGO_TARGET_DIR" } }
 //!
 //! [repo.bosun.policy]
 //! protected = ["tests/harness", "xtask/src/lint.rs"]  # `.gitignore` is always added

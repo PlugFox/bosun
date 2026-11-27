@@ -22,8 +22,9 @@ pub struct Finding {
 }
 
 /// Per counter (`(name, regex)`), the lines of the files `glob` names in `rev`'s tree that
-/// match the regex: `git grep -I --count -E -e <regex> <rev> -- ":(glob)<glob>"`, the counts of
-/// the files summed. The regex is git's extended regex (POSIX ERE); `glob` is a
+/// match the regex: `git grep --no-color -I --count -E -e <regex> <rev> -- ":(glob)<glob>"`, the
+/// counts of the files summed (`--no-color`: a repository's `color.ui=always` would wrap the
+/// count lines in escape codes). The regex is git's extended regex (POSIX ERE); `glob` is a
 /// repository-relative `:(glob)` pathspec; binary files are skipped. A counter nothing matches
 /// counts 0.
 ///
@@ -39,7 +40,12 @@ pub fn count(
     let pathspec = format!(":(glob){glob}");
     let mut counts = BTreeMap::new();
     for &(name, regex) in counters {
-        let mut args = vec!["grep", "-I", "--count", "-E", "-e", regex];
+        let mut args = vec!["grep"];
+        // Mutant (`mutant_git_census_colour`): the count lines take the repository's colour.
+        if !cfg!(mutant_git_census_colour) {
+            args.push("--no-color");
+        }
+        args.extend(["-I", "--count", "-E", "-e", regex]);
         // Mutant (`mutant_git_census_reads_working_tree`): the working tree is grepped instead
         // of the commit's tree.
         if !cfg!(mutant_git_census_reads_working_tree) {
@@ -157,6 +163,26 @@ mod tests {
         .unwrap();
         assert_eq!(counts["assertions"], 2, "{counts:?}");
         assert_eq!(counts["nothing"], 0, "{counts:?}");
+    }
+
+    #[test]
+    fn counts_with_colour_forced_in_the_repository_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        // The temporary repository's own config, never the global one.
+        git(repo, &["config", "color.ui", "always"]);
+        std::fs::write(
+            repo.join("a.rs"),
+            "fn one() { assert!(true); }
+",
+        )
+        .unwrap();
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-q", "-m", "tests"]);
+
+        let counts = count(&Git::new(repo), "HEAD", "*.rs", &[("assertions", "assert")]).unwrap();
+        assert_eq!(counts["assertions"], 1, "{counts:?}");
     }
 
     #[test]

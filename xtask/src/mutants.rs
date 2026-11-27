@@ -3150,6 +3150,10 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // Red on every platform: the check compares the hash at the defaults with the same
+    // configuration's hash under the encoding without the `fast_death/2` part, computed in the
+    // test; the mutant adds that part to the one and not the other. (The pinned value it once
+    // depended on is `cfg(windows)` only, so on Linux it stayed green.)
     Mutant {
         name: "mutant_config_fast_death_always_hashed",
         issue: FAST_DEATH_CARD,
@@ -3392,6 +3396,14 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test(
             "census::tests::a_drop_of_a_kept_counter_or_a_rise_of_a_capped_one_is_a_finding_unless_allowed",
         ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_census_colour",
+        issue: TOOLCHAIN_FIX_CARD,
+        breaks: "the census greps with the repository's colour: escape codes break the counts",
+        package: "bosun-git",
+        check: Check::Test("census::tests::counts_with_colour_forced_in_the_repository_config"),
         platform: None,
     },
     Mutant {
@@ -4446,33 +4458,30 @@ const NOTIFY_CARD: u32 = 9;
 /// what Windows' credential store takes and gives each channel row its own entry (its own
 /// number was not known when it was written; its parent's stands in).
 const NOTIFY_SECRETS_FIX_CARD: u32 = 9;
-/// The card of #7 that sets the automatic pause per repository (`repo.<name>.auto_pause`), off
-/// by default in worktree mode (its own number was not known when it was written; its parent's
-/// stands in).
-const AUTO_PAUSE_CARD: u32 = 7;
+
+/// #214, the card of #7 that sets the automatic pause per repository
+/// (`repo.<name>.auto_pause`), off by default in worktree mode.
+const AUTO_PAUSE_CARD: u32 = 214;
 
 /// The configuration test of that card, which hosts two mutants.
 const AUTO_PAUSE_CONFIG_TEST: &str = "tests::a_repositorys_auto_pause_defaults_to_the_global_value_without_a_worktree_and_off_with_one";
 
-/// The card of #7 that counts a repository's tests, assertions and switched-off tests at an
-/// item's base and at the commit its verdict judged (`repo.<name>.policy.census`) and sends a
-/// wrong-way move to Needs you (its own number was not known when it was written; its parent's
-/// stands in).
-const CENSUS_CARD: u32 = 7;
+/// #197, the card of #7 that counts a repository's tests, assertions and switched-off tests at
+/// an item's base and at the commit its verdict judged (`repo.<name>.policy.census`) and sends a
+/// wrong-way move to Needs you.
+const CENSUS_CARD: u32 = 197;
 
 /// The first scene of that card.
 const CENSUS_SCENE: &str =
     "executor::tests::census::an_item_that_deletes_an_assertion_goes_to_needs_you_with_the_counts";
 
-/// The card of #7 that denies a session edits of its protected paths with `Edit(...)` rules
-/// and names the item, its verdict and those paths in the system prompt (its own number was
-/// not known when it was written; its parent's stands in).
-const PROTECTED_RULES_CARD: u32 = 7;
+/// #198, the card of #7 that denies a session edits of its protected paths with `Edit(...)`
+/// rules and names the item, its verdict and those paths in the system prompt.
+const PROTECTED_RULES_CARD: u32 = 198;
 
-/// The card of #8 that carries Git LFS objects into the daemon's clone before a checkout and
-/// into the user's repository at landing, and pins Git LFS's filter in the clone (its own
-/// number was not known when it was written; its parent's stands in).
-const LFS_CARD: u32 = 8;
+/// #212, the card of #8 that carries Git LFS objects into the daemon's clone before a checkout
+/// and into the user's repository at landing, and pins Git LFS's filter in the clone.
+const LFS_CARD: u32 = 212;
 
 /// #213, the card of #8 that pushes the Git LFS objects of a `pr` landing's commits to the
 /// forge before the branch, and refuses such a landing on a machine without git-lfs.
@@ -4501,10 +4510,14 @@ const WAITING_CARDS_CARD: u32 = 199;
 /// restart.
 const BUFFERED_CALLS_CARD: u32 = 193;
 
-/// The card of #7 that pauses a repository whose sessions keep dying at once (the fast-death
-/// breaker). The session that wrote it was not told the card's own number, so it records the
-/// parent's.
-const FAST_DEATH_CARD: u32 = 7;
+/// #196, the card of #7 that pauses a repository whose sessions keep dying at once (the
+/// fast-death breaker).
+const FAST_DEATH_CARD: u32 = 196;
+
+/// The card of #12 found in the review of run 6: mutant children without the developer's git
+/// configuration, a platform-independent fast-death hash check, a census that greps without
+/// colour (its own number was not known when it was written; its parent's stands in).
+const TOOLCHAIN_FIX_CARD: u32 = 12;
 
 /// #191, the card of #186 (its finding 4) that lets `bosun with` survive a daemon restart.
 const WITH_RECONNECT_CARD: u32 = 191;
@@ -4632,6 +4645,16 @@ fn judge(baseline: Step, mutated: Step) -> Outcome {
 
 /// Runs `cargo` with the mutant's cfg when `mutated`. Returns whether it succeeded.
 fn cargo(mutant: &Mutant, mutated: bool, args: &[&str]) -> Result<bool, String> {
+    let status = command(mutant, mutated, args)?
+        .status()
+        .map_err(|e| format!("cannot run cargo: {e}"))?;
+    Ok(status.success())
+}
+
+/// The `cargo` command of [`cargo`], in the verdict's git environment (E26): an empty global
+/// git configuration and no system one, so that a developer's `filter.lfs.process` or colour
+/// cannot do the work a mutated line no longer does and keep its check green.
+fn command(mutant: &Mutant, mutated: bool, args: &[&str]) -> Result<Command, String> {
     let mut flags = std::env::var("RUSTFLAGS").unwrap_or_default();
     let label = if mutated {
         flags.push_str(" --cfg ");
@@ -4642,16 +4665,30 @@ fn cargo(mutant: &Mutant, mutated: bool, args: &[&str]) -> Result<bool, String> 
     };
     // One target directory per cfg, so that the changed RUSTFLAGS do not invalidate the main
     // build cache.
-    let target_dir = workspace_root().join("target").join("mutants").join(label);
+    let mutants = workspace_root().join("target").join("mutants");
+    let target_dir = mutants.join(label);
+    let git_config = empty_git_config(&mutants)?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    let status = Command::new(cargo)
+    let mut command = Command::new(cargo);
+    command
         .args(args)
         .current_dir(workspace_root())
         .env("RUSTFLAGS", flags.trim())
         .env("CARGO_TARGET_DIR", target_dir)
-        .status()
-        .map_err(|e| format!("cannot run cargo: {e}"))?;
-    Ok(status.success())
+        .env("GIT_CONFIG_GLOBAL", git_config)
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    Ok(command)
+}
+
+/// An empty file under `dir` to stand for the global git configuration, emptied again if
+/// something wrote to it.
+fn empty_git_config(dir: &Path) -> Result<PathBuf, String> {
+    let path = dir.join("empty.gitconfig");
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    if std::fs::metadata(&path).map_or(true, |m| m.len() != 0) {
+        std::fs::write(&path, "").map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(path)
 }
 
 fn builds(mutant: &Mutant, mutated: bool) -> Result<bool, String> {
@@ -4782,7 +4819,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn a_build_failure_is_not_red() {
@@ -4808,6 +4845,34 @@ mod tests {
             package: "p",
             check: Check::Cargo(&[]),
             platform,
+        }
+    }
+
+    #[test]
+    fn mutant_children_run_without_the_developers_git_config() {
+        let m = mutant("mutant_a", None);
+        for mutated in [false, true] {
+            let command = command(&m, mutated, &["test"]).unwrap();
+            let env: BTreeMap<_, _> = command
+                .get_envs()
+                .map(|(k, v)| (k.to_os_string(), v.map(std::ffi::OsStr::to_os_string)))
+                .collect();
+            let global = env
+                .get(std::ffi::OsStr::new("GIT_CONFIG_GLOBAL"))
+                .cloned()
+                .flatten()
+                .expect("GIT_CONFIG_GLOBAL is set");
+            let global = PathBuf::from(global);
+            assert!(
+                global.starts_with(workspace_root().join("target").join("mutants")),
+                "{}",
+                global.display()
+            );
+            assert_eq!(std::fs::read(&global).unwrap(), b"", "{}", global.display());
+            assert_eq!(
+                env.get(std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM")),
+                Some(&Some("1".into()))
+            );
         }
     }
 

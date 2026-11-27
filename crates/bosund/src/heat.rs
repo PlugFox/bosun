@@ -2,7 +2,9 @@
 //! repository's window and writes the reconciliation's batch (the landings the repository's done
 //! items made first, [`bosun_heat::link`]), `heat.list` reads the proposals, `heat.dismiss`
 //! dismisses one and `heat.land` records by hand that one's remedy landed (both with the
-//! operator token).
+//! operator token). An evaluation also measures each landed proposal whose follow-up is due
+//! ([`bosun_heat::measure`]); `heat.list` shows the before, the after and the outcome, and the
+//! standing of each detector ([`bosun_heat::standings`]).
 //!
 //! Each identity has its own [`Heat`] handle over its own store and repositories, so an
 //! evaluation asked for one identity reads and writes that identity's rows only. One evaluation
@@ -19,8 +21,9 @@ use std::time::Duration;
 
 use bosun_api::rpc::{ErrorObject, code};
 use bosun_api::{
-    HeatDismissParams, HeatEvaluateParams, HeatEvaluation, HeatInsufficient, HeatLandParams,
-    HeatListParams, HeatProposals, HeatRepoEvaluation, Method, ProposalView, method,
+    DetectorStanding, HeatDismissParams, HeatEvaluateParams, HeatEvaluation, HeatInsufficient,
+    HeatLandParams, HeatListParams, HeatProposals, HeatRepoEvaluation, Method, ProposalView,
+    method,
 };
 use bosun_config::Repo;
 use bosun_core::proposal::{LandedHow, ProposalState, is_active};
@@ -164,6 +167,7 @@ fn summary(key: &str, evaluation: &bosun_heat::Evaluation) -> HeatRepoEvaluation
         cooled_down: s.cooled_down,
         skipped: s.skipped,
         landed: s.landed,
+        measured: s.measured,
         insufficient: evaluation
             .insufficient
             .iter()
@@ -266,12 +270,22 @@ async fn list(served: &Served, p: &HeatListParams) -> Result<HeatProposals, Erro
                 })?,
         ),
     };
-    let rows = served
-        .store
-        .reader()
-        .proposals(repo)
-        .await
-        .map_err(failed)?;
+    let reader = served.store.reader();
+    let every = reader.proposals(None).await.map_err(failed)?;
+    let detectors = bosun_heat::standings(&every)
+        .into_iter()
+        .map(|s| DetectorStanding {
+            detector: s.detector,
+            measured: s.measured,
+            improved: s.improved,
+            dismissed: s.dismissed,
+            flagged: s.flagged.map(str::to_owned),
+        })
+        .collect();
+    let rows = match repo {
+        None => every,
+        Some(_) => reader.proposals(repo).await.map_err(failed)?,
+    };
     let proposals = rows
         .into_iter()
         .filter(|row| row.seen_count >= 2 && (p.all || is_active(row.state)))
@@ -280,6 +294,7 @@ async fn list(served: &Served, p: &HeatListParams) -> Result<HeatProposals, Erro
     Ok(HeatProposals {
         identity: served.name.clone(),
         proposals,
+        detectors,
     })
 }
 
@@ -386,8 +401,30 @@ async fn land(served: &Served, p: &HeatLandParams) -> Result<ProposalView, Error
     Ok(view(served, row))
 }
 
+/// The confounder a follow-up recorded in `params`, as one line.
+fn confounder(params: &Value) -> Option<String> {
+    let c = params.get("confounder")?;
+    let models = |name: &str| -> String {
+        c.get(name)
+            .and_then(Value::as_array)
+            .map_or_else(String::new, |models| {
+                models
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+    };
+    Some(format!(
+        "models before: {}; after: {}",
+        models("models_before"),
+        models("models_after")
+    ))
+}
+
 fn view(served: &Served, row: ProposalRow) -> ProposalView {
     let evidence = serde_json::from_str(&row.evidence_json).unwrap_or_default();
+    let params: Value = serde_json::from_str(&row.params_json).unwrap_or(Value::Null);
     ProposalView {
         repo: served.repo(&row.repo),
         key: row.key,
@@ -417,6 +454,16 @@ fn view(served: &Served, row: ProposalRow) -> ProposalView {
         landed_ms: row.landed_ms,
         followup_due_ms: row.followup_due_ms,
         item: row.item.map(|item| item.0),
+        after_value: row.after_value,
+        after_scaled: params.get("after_scaled").and_then(Value::as_i64),
+        after_sample: row.after_sample,
+        outcome: row.outcome.map(|o| o.as_str().to_owned()),
+        measured_ms: row.measured_ms,
+        guard_metric: row.guard_metric,
+        guard_baseline: row.guard_baseline,
+        guard_after: row.guard_after,
+        drift: params.get("drift").and_then(Value::as_i64),
+        confounder: confounder(&params),
         evidence,
     }
 }

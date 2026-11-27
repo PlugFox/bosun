@@ -107,8 +107,9 @@ pub use event::{
     SubscribeResult, Tail,
 };
 pub use heat::{
-    HeatDismissParams, HeatEvaluateParams, HeatEvaluation, HeatInsufficient, HeatLandParams,
-    HeatListParams, HeatMetric, HeatMetrics, HeatProposals, HeatRepoEvaluation, ProposalView,
+    DetectorStanding, HeatDismissParams, HeatEvaluateParams, HeatEvaluation, HeatInsufficient,
+    HeatLandParams, HeatListParams, HeatMetric, HeatMetrics, HeatProposals, HeatRepoEvaluation,
+    ProposalView,
 };
 pub use item::{
     AgentCallView, AttemptView, ContextSize, ItemDetail, ItemParams, RestartParams, RestartResult,

@@ -124,6 +124,9 @@ pub struct HeatRepoEvaluation {
     /// a `Proposal: <key>` line, done with a pass.
     #[serde(default)]
     pub landed: u64,
+    /// Landed proposals whose follow-up was measured (one baseline window after the landing).
+    #[serde(default)]
+    pub measured: u64,
     /// The detectors silent below the minimum sample.
     pub insufficient: Vec<HeatInsufficient>,
     /// Why this repository's evaluation failed; its counts are then zero and nothing was
@@ -158,6 +161,27 @@ pub struct HeatProposals {
     pub identity: String,
     /// By creation, oldest first.
     pub proposals: Vec<ProposalView>,
+    /// How each detector's proposals of the identity fared, by detector, computed at query time
+    /// over every repository of the identity (sightings left out).
+    #[serde(default)]
+    pub detectors: Vec<DetectorStanding>,
+}
+
+/// How one detector's proposals fared at their follow-ups. A flagged detector is a candidate for
+/// removal; nothing is disabled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DetectorStanding {
+    pub detector: String,
+    /// Proposals measured with an outcome other than `insufficient`.
+    pub measured: u64,
+    /// Of those, the ones `reached` or `moved`.
+    pub improved: u64,
+    /// Proposals the user dismissed.
+    pub dismissed: u64,
+    /// `rarely_moves` (at least 5 measured, fewer than 30% improved) or `mostly_dismissed` (at
+    /// least 70% of at least 5 dismissed or measured were dismissed); `null` when not flagged.
+    #[serde(default)]
+    pub flagged: Option<String>,
 }
 
 /// One proposal: a metric of one subject over a window, its value, threshold and target, all in
@@ -217,6 +241,36 @@ pub struct ProposalView {
     /// The item that landed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
+    /// The follow-up's value of the metric after the landing, as measured, in `unit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_value: Option<i64>,
+    /// `after_value` at the baseline's sample (`after * sample / after_sample`), what the
+    /// follow-up compared, for a count of sessions; absent for a metric compared as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_scaled: Option<i64>,
+    /// The sample `after_value` is over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_sample: Option<u64>,
+    /// `reached`, `moved`, `not_moved` or `insufficient`; set for a measured proposal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_ms: Option<i64>,
+    /// The guard metric the follow-up checked, its baseline and its value after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_metric: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_baseline: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_after: Option<i64>,
+    /// The before recomputed by the current code over the frozen window minus `baseline_value`:
+    /// definition drift, absent when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift: Option<i64>,
+    /// A change between the windows that may explain the outcome (the models of the run
+    /// sessions), one line; absent when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confounder: Option<String>,
     /// The evidence, redacted lines.
     pub evidence: Vec<String>,
 }

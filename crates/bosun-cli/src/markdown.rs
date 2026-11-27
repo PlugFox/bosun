@@ -1030,6 +1030,16 @@ mod tests {
             landed_ms: None,
             followup_due_ms: None,
             item: None,
+            after_value: None,
+            after_scaled: None,
+            after_sample: None,
+            outcome: None,
+            measured_ms: None,
+            guard_metric: None,
+            guard_baseline: None,
+            guard_after: None,
+            drift: None,
+            confounder: None,
             evidence: Vec::new(),
         }
     }
@@ -1069,6 +1079,7 @@ mod tests {
         let list = bosun_api::HeatProposals {
             identity: "work".to_owned(),
             proposals: vec![d1, d3],
+            detectors: Vec::new(),
         };
         let mut text = String::new();
         heat::heat_proposals(&list, &mut text);
@@ -1114,6 +1125,7 @@ mod tests {
         let empty = bosun_api::HeatProposals {
             identity: "work".to_owned(),
             proposals: Vec::new(),
+            detectors: Vec::new(),
         };
         let mut text = String::new();
         heat::heat_proposals(&empty, &mut text);
@@ -1122,6 +1134,103 @@ mod tests {
             !text.lines().any(|l| l.starts_with('|')),
             "no table:\n{text}"
         );
+    }
+
+    /// #11 D: a landed or measured proposal shows how and when it landed, its before (the
+    /// value), its after (the scaled figure, marked so), its outcome, its guard's before and
+    /// after and its drift; a flagged detector gets one `candidate for removal:` line under the
+    /// table, and none is printed without a flag (`mutant_heat_list_drops_outcome` leaves the
+    /// outcome column out).
+    #[test]
+    fn bosun_heat_shows_before_and_after_and_flags_a_detector() {
+        // 2026-11-20, UTC.
+        let landed_ms = 1_793_491_200_000 + 19 * 86_400_000;
+        let mut moved = proposal("0123456789abcdef", "file_read_across_runs", "src/big.rs");
+        moved.state = "measured".to_owned();
+        moved.landed_how = Some("marker".to_owned());
+        moved.landed_ms = Some(landed_ms);
+        moved.followup_due_ms = Some(landed_ms + 14 * 86_400_000);
+        moved.after_value = Some(36);
+        moved.after_scaled = Some(12);
+        moved.after_sample = Some(336);
+        moved.outcome = Some("moved".to_owned());
+        moved.measured_ms = moved.followup_due_ms;
+        moved.guard_metric = Some("dir_read_bytes_per_closed_item".to_owned());
+        moved.guard_baseline = Some(60_000);
+        moved.guard_after = Some(20_000);
+        moved.drift = Some(2);
+        moved.confounder = Some("models before: m1; after: m2".to_owned());
+        let mut not_moved = proposal("1111111111111111", "file_reread_in_session", "src/b.rs");
+        not_moved.state = "measured".to_owned();
+        not_moved.landed_how = Some("item".to_owned());
+        not_moved.landed_ms = Some(landed_ms);
+        not_moved.after_value = Some(90);
+        not_moved.outcome = Some("not_moved".to_owned());
+        let mut landed = proposal("2222222222222222", "file_read_across_runs", "src/c.rs");
+        landed.state = "landed".to_owned();
+        landed.landed_how = Some("manual".to_owned());
+        landed.landed_ms = Some(landed_ms);
+        let standing = |detector: &str, flagged: Option<&str>| bosun_api::DetectorStanding {
+            detector: detector.to_owned(),
+            measured: 6,
+            improved: 1,
+            dismissed: 2,
+            flagged: flagged.map(str::to_owned),
+        };
+        let mut list = bosun_api::HeatProposals {
+            identity: "work".to_owned(),
+            proposals: vec![moved, not_moved, landed],
+            detectors: vec![
+                standing("file_read_across_runs", Some("rarely_moves")),
+                standing("file_reread_in_session", None),
+            ],
+        };
+        let mut text = String::new();
+        heat::heat_proposals(&list, &mut text);
+        let (header, rows) = table_of(&text);
+        assert_eq!(rows.len(), 3, "{text}");
+        let column = |name: &str| {
+            header
+                .iter()
+                .position(|h| h == name)
+                .unwrap_or_else(|| panic!("no column {name:?}:\n{text}"))
+        };
+        let outcomes: Vec<&str> = rows.iter().map(|r| r[column("outcome")].as_str()).collect();
+        assert_eq!(outcomes, ["moved", "not_moved", ""], "{text}");
+        let moved = &rows[0];
+        assert_eq!(moved[column("value")], "91", "the before:\n{text}");
+        let after = &moved[column("after")];
+        assert!(
+            after.starts_with("12") && after.contains("scaled"),
+            "{after:?}:\n{text}"
+        );
+        assert_eq!(moved[column("landed")], "marker 2026-11-20", "{text}");
+        assert_eq!(moved[column("guard before")], "60000", "{text}");
+        assert_eq!(moved[column("guard after")], "20000", "{text}");
+        assert_eq!(moved[column("drift")], "2", "{text}");
+        assert_eq!(
+            moved[column("confounder")],
+            "models before: m1; after: m2",
+            "{text}"
+        );
+        assert_eq!(rows[1][column("after")], "90", "unscaled:\n{text}");
+        assert_eq!(rows[2][column("after")], "", "{text}");
+        assert_eq!(rows[2][column("landed")], "manual 2026-11-20", "{text}");
+        let flags: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("candidate for removal:"))
+            .collect();
+        assert_eq!(
+            flags,
+            ["candidate for removal: file_read_across_runs \
+                 (rarely_moves: 1 of 6 measured moved, 2 dismissed)"],
+            "{text}"
+        );
+
+        list.detectors = vec![standing("file_read_across_runs", None)];
+        let mut text = String::new();
+        heat::heat_proposals(&list, &mut text);
+        assert!(!text.contains("candidate for removal:"), "{text}");
     }
 
     #[test]

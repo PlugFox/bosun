@@ -1,16 +1,19 @@
 //! One evaluation of heat (#11, part D) for one repository: the window's rows of every
 //! provider, the detectors run once over them ([`detect`], which groups by provider itself),
 //! the landings of the stored proposals by the repository's done items ([`crate::link`]),
-//! and the reconciliation of their findings with the stored proposals ([`reconcile`]). The
-//! only part of heat's proposals that reads the store; it writes nothing: the daemon, the
+//! and the reconciliation of their findings with the stored proposals ([`reconcile`]); then the
+//! follow-up of each landed proposal that is due ([`measure`]), over its frozen window and the
+//! window after its landing, each read again. The only part of heat's proposals that reads the store; it writes nothing: the daemon, the
 //! store's single writer, writes the returned batch in one transaction.
 
+use bosun_core::PriceTable;
 use bosun_core::proposal::ProposalState;
 use bosun_core::{State, canonical_path, style_of};
-use bosun_store::{Reader, Write};
+use bosun_store::{ItemHistory, ProposalRow, Reader, RunCommitRow, ToolRow, UsageRow, Write};
 
 use crate::detect::{Insufficient, Thresholds, detect};
 use crate::exact::Scope;
+use crate::followup::measure;
 use crate::landing::{LinkItem, plan};
 use crate::metrics::Inputs;
 use crate::reconcile::Summary;
@@ -93,10 +96,62 @@ pub async fn evaluate(
             landing: landing.as_ref(),
         })
         .collect();
-    let reconciled = plan(&detection.findings, &existing, &items, now_ms);
+    let mut reconciled = plan(&detection.findings, &existing, &items, now_ms);
+    // The follow-ups. A row landed by this batch is not due yet (one window after its landing),
+    // and `plan` gives a landed row no other write.
+    for row in existing.iter().filter(|row| due(row, now_ms)) {
+        let (Some(landed_ms), Some(_)) = (row.landed_ms, row.followup_due_ms) else {
+            continue;
+        };
+        let length = row.window_to_ms - row.window_from_ms;
+        let before = Window::read(reader, row.window_from_ms, row.window_to_ms).await?;
+        let after_to = now_ms.min(landed_ms + 2 * length);
+        let after = Window::read(reader, landed_ms, after_to.max(landed_ms)).await?;
+        if let Some(write) = measure(row, &before.inputs(), &after.inputs(), now_ms) {
+            reconciled.summary.measured += 1;
+            reconciled.writes.push(write);
+        }
+    }
     Ok(Evaluation {
         writes: reconciled.writes,
         summary: reconciled.summary,
         insufficient: detection.insufficient,
     })
+}
+
+/// Whether the follow-up of `row` is due at `now_ms`.
+fn due(row: &ProposalRow, now_ms: i64) -> bool {
+    row.state == ProposalState::Landed && row.followup_due_ms.is_some_and(|due| due <= now_ms)
+}
+
+/// The rows of one window, each reader read once.
+struct Window {
+    table: PriceTable,
+    usage: Vec<UsageRow>,
+    calls: Vec<ToolRow>,
+    histories: Vec<ItemHistory>,
+    run_commits: Vec<RunCommitRow>,
+}
+
+impl Window {
+    async fn read(reader: &Reader, from_ms: i64, to_ms: i64) -> Result<Self, bosun_store::Error> {
+        let (table, usage) = reader.usage(from_ms, to_ms).await?;
+        Ok(Self {
+            table,
+            usage,
+            calls: reader.tool_calls(from_ms, to_ms).await?,
+            histories: reader.item_histories(from_ms, to_ms).await?,
+            run_commits: reader.run_commits(from_ms, to_ms).await?,
+        })
+    }
+
+    fn inputs(&self) -> Inputs<'_> {
+        Inputs {
+            table: &self.table,
+            usage: &self.usage,
+            calls: &self.calls,
+            histories: &self.histories,
+            run_commits: &self.run_commits,
+        }
+    }
 }

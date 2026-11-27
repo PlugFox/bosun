@@ -62,6 +62,8 @@ pub struct Summary {
     pub skipped: u64,
     /// Proposals whose remedy landed ([`crate::link`]).
     pub landed: u64,
+    /// Landed proposals whose follow-up was measured ([`crate::measure`]).
+    pub measured: u64,
 }
 
 /// The writes of one reconciliation and its summary.

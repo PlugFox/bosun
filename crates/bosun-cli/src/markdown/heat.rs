@@ -9,12 +9,16 @@
 //! `heat`: one document per identity, its proposals of `heat.list` in one table, one row each:
 //! its metric and unit, current value, threshold, target, window (dates, UTC) and sample, all
 //! exact, and apart, in a column whose header says so, the estimated impact in eqv tokens
-//! (empty when there is none). Below the table, the first [`EVIDENCE_LINES`] evidence lines of
-//! each proposal, as stored (redacted).
+//! (empty when there is none). For a landed or measured proposal, how and when it landed, and
+//! for a measured one the follow-up: the after value (the figure compared at the baseline's
+//! sample when the metric was scaled, marked so; the value column is the before), the outcome,
+//! the guard's before and after, the definition drift and a confounder when there is one. Below
+//! the table, one line per detector flagged as a candidate for removal, then the first
+//! [`EVIDENCE_LINES`] evidence lines of each proposal, as stored (redacted).
 
 use std::fmt::Write as _;
 
-use bosun_api::{HeatMetric, HeatMetrics, HeatProposals};
+use bosun_api::{HeatMetric, HeatMetrics, HeatProposals, ProposalView};
 
 use super::{Table, repo};
 use crate::time;
@@ -105,11 +109,46 @@ fn date(ms: i64) -> String {
     time::format(ms).chars().take(10).collect()
 }
 
+/// The after cell: the compared figure, marked as scaled when it was, else the value.
+fn after(p: &ProposalView) -> String {
+    match (p.after_scaled, p.after_value) {
+        (Some(scaled), Some(value)) => format!("{scaled} (scaled from {value})"),
+        (Some(scaled), None) => format!("{scaled} (scaled)"),
+        (None, Some(value)) => value.to_string(),
+        (None, None) => String::new(),
+    }
+}
+
+fn optional(value: Option<i64>) -> String {
+    value.map_or_else(String::new, |v| v.to_string())
+}
+
+/// One line per detector flagged as a candidate for removal, then a blank line; nothing when
+/// none is.
+fn flags(list: &HeatProposals, out: &mut String) {
+    let mut flagged = false;
+    for d in &list.detectors {
+        let Some(reason) = &d.flagged else {
+            continue;
+        };
+        flagged = true;
+        let _ = writeln!(
+            out,
+            "candidate for removal: {} ({reason}: {} of {} measured moved, {} dismissed)",
+            d.detector, d.improved, d.measured, d.dismissed
+        );
+    }
+    if flagged {
+        out.push('\n');
+    }
+}
+
 /// One identity's heat proposals.
 pub(crate) fn heat_proposals(list: &HeatProposals, out: &mut String) {
     let _ = writeln!(out, "# bosun heat: {}\n", list.identity);
     if list.proposals.is_empty() {
-        out.push_str("No proposal.\n");
+        out.push_str("No proposal.\n\n");
+        flags(list, out);
         return;
     }
     // Mutant (`mutant_heat_list_drops_target`): the target column is left out.
@@ -134,6 +173,20 @@ pub(crate) fn heat_proposals(list: &HeatProposals, out: &mut String) {
         ("sample", true),
         ("state", false),
         ("impact, eqv tokens (estimate)", true),
+        ("landed", false),
+        ("after", true),
+    ]);
+    // Mutant (`mutant_heat_list_drops_outcome`): the outcome column is left out.
+    let outcome = !cfg!(mutant_heat_list_drops_outcome);
+    if outcome {
+        columns.push(("outcome", false));
+    }
+    columns.extend([
+        ("guard", false),
+        ("guard before", true),
+        ("guard after", true),
+        ("drift", true),
+        ("confounder", false),
     ]);
     let mut table = Table::new(&columns);
     for p in &list.proposals {
@@ -158,10 +211,27 @@ pub(crate) fn heat_proposals(list: &HeatProposals, out: &mut String) {
             p.state.clone(),
             p.impact_eqv_estimate
                 .map_or_else(String::new, |i| i.to_string()),
+            match (&p.landed_how, p.landed_ms) {
+                (Some(how), Some(at)) => format!("{how} {}", date(at)),
+                (Some(how), None) => how.clone(),
+                _ => String::new(),
+            },
+            after(p),
+        ]);
+        if outcome {
+            cells.push(p.outcome.clone().unwrap_or_default());
+        }
+        cells.extend([
+            p.guard_metric.clone().unwrap_or_default(),
+            optional(p.guard_baseline),
+            optional(p.guard_after),
+            optional(p.drift),
+            p.confounder.clone().unwrap_or_default(),
         ]);
         table.row(cells);
     }
     table.render(out);
+    flags(list, out);
     for p in &list.proposals {
         if p.evidence.is_empty() {
             continue;

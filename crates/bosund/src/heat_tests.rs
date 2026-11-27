@@ -445,3 +445,46 @@ async fn a_manual_landing_is_recorded_with_an_annotation() {
     assert_eq!(annotations("b").await.len(), 1);
     world.close().await;
 }
+
+/// #11 D: an evaluation past a landed proposal's due time measures its follow-up in the same
+/// batch; with no run session after the landing it waits, and at two windows it is
+/// `insufficient`, listed with its outcome; `heat.list` carries the detectors' standings.
+#[tokio::test]
+async fn a_due_followup_is_measured_by_an_evaluation_and_listed() {
+    let world = World::new().await;
+    seed_b(&world).await;
+    evaluate(&world, "b").await;
+    evaluate(&world, "b").await;
+    let key = only(&world).await["key"].as_str().unwrap().to_owned();
+    let params = json!({"operator": crate::notify_tests::TOKEN, "identity": "b", "key": key});
+    let landed = world.ok("heat.land", params).await;
+    let due = landed["followup_due_ms"].as_i64().unwrap();
+    let landed_ms = landed["landed_ms"].as_i64().unwrap();
+
+    let served = &world.state.identities["b"];
+    let repo = served.repos[0].1.key.clone();
+    let reader = served.store.reader();
+    let waiting = bosun_heat::evaluate(reader, &repo, due).await.unwrap();
+    assert_eq!(waiting.summary.measured, 0, "{waiting:?}");
+    assert!(waiting.writes.is_empty(), "{waiting:?}");
+
+    let last = landed_ms + 2 * 14 * DAY;
+    let evaluation = bosun_heat::evaluate(reader, &repo, last).await.unwrap();
+    assert_eq!(evaluation.summary.measured, 1, "{evaluation:?}");
+    served.store.writer().write(evaluation.writes).await.unwrap();
+    let listed = only(&world).await;
+    assert_eq!(listed["state"], "measured", "{listed}");
+    assert_eq!(listed["outcome"], "insufficient", "{listed}");
+    assert_eq!(listed["after_value"], Value::Null, "{listed}");
+
+    let list = world
+        .ok("heat.list", json!({"identity": "b", "all": true}))
+        .await;
+    assert_eq!(
+        list["detectors"],
+        json!([{"detector": "file_read_across_runs", "measured": 0, "improved": 0,
+                "dismissed": 0, "flagged": null}]),
+        "{list}"
+    );
+    world.close().await;
+}

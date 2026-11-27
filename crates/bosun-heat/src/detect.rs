@@ -256,12 +256,16 @@ fn in_scope<'a>(row: &'a UsageRow, scope: Scope<'_>) -> Option<&'a str> {
     (in_range && scope.holds_repo(Some(repo))).then_some(repo)
 }
 
-/// The findings of every enabled detector over `inputs` in `scope`, per repository and
-/// provider, and the detectors that stay silent below the minimum sample. Findings come in
-/// detector order (D1, D2, D3), each detector's ranked (see [`files`]); deterministic for
-/// equal input.
-#[must_use]
-pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) -> Detection {
+/// The rows of `inputs` in `scope`, per (repository, provider) group, and the paths of each
+/// repository any call wrote.
+type Gathered<'a> = (
+    BTreeMap<(&'a str, &'a str), Group<'a>>,
+    BTreeMap<&'a str, BTreeSet<&'a str>>,
+);
+
+/// The groups of `inputs` in `scope`: their run sessions, closed items and file reads, and the
+/// paths written per repository.
+fn gather<'a>(inputs: &Inputs<'a>, scope: Scope<'_>) -> Gathered<'a> {
     let mut groups: BTreeMap<(&str, &str), Group<'_>> = BTreeMap::new();
     let mut written: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for row in inputs.usage {
@@ -293,6 +297,88 @@ pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) ->
             .closed_items += 1;
     }
 
+    (groups, written)
+}
+
+/// A detector's metric of one subject in one group, with the group's sample: what
+/// [`value_of`] answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Measure {
+    /// The metric, in the detector's unit (0 for a subject the group never touched).
+    pub(crate) value: u64,
+    /// The sample the value is over, in the detector's sample unit.
+    pub(crate) sample: u64,
+    pub(crate) closed_items: u64,
+    pub(crate) run_sessions: u64,
+}
+
+/// The metric of the detector `detector_id` for `subject` in the group of `provider` in
+/// `scope` (which names one repository), computed by the very function [`detect`] uses, so a
+/// follow-up's before and after cannot drift from the trigger; `None` for a detector this
+/// function does not know. A group with no row is all zeros.
+pub(crate) fn value_of(
+    detector_id: &str,
+    inputs: &Inputs<'_>,
+    scope: Scope<'_>,
+    provider: &str,
+    subject: &str,
+) -> Option<Measure> {
+    let detector = *DETECTORS.iter().find(|d| d.id == detector_id)?;
+    let (groups, written) = gather(inputs, scope);
+    let none = BTreeSet::new();
+    let empty = Group::default();
+    let (repo, group) = groups
+        .iter()
+        .find(|((_, p), _)| *p == provider)
+        .map_or((scope.repo.unwrap_or_default(), &empty), |((r, _), g)| {
+            (*r, g)
+        });
+    let thresholds = Thresholds::default();
+    let context = Context {
+        repo,
+        provider,
+        run_sessions: group.run_sessions.len() as u64,
+        closed_items: group.closed_items,
+        files: &group.files,
+        written: written.get(repo).unwrap_or(&none),
+        scope,
+        thresholds: &thresholds,
+    };
+    Some(Measure {
+        value: files::value(detector, &context, subject).unwrap_or(0),
+        sample: files::sample(detector, &context).0,
+        closed_items: context.closed_items,
+        run_sessions: context.run_sessions,
+    })
+}
+
+/// The result bytes of the single-file reads of `provider`'s run sessions in `scope` (as D3
+/// counts them) of every file `under` accepts, and the group's closed items.
+pub(crate) fn read_bytes(
+    inputs: &Inputs<'_>,
+    scope: Scope<'_>,
+    provider: &str,
+    under: impl Fn(&str) -> bool,
+) -> (u64, u64) {
+    let (groups, _) = gather(inputs, scope);
+    groups
+        .iter()
+        .filter(|((_, p), _)| *p == provider)
+        .fold((0, 0), |(bytes, items), (_, group)| {
+            (
+                bytes + group.files.bytes(&under),
+                items + group.closed_items,
+            )
+        })
+}
+
+/// The findings of every enabled detector over `inputs` in `scope`, per repository and
+/// provider, and the detectors that stay silent below the minimum sample. Findings come in
+/// detector order (D1, D2, D3), each detector's ranked (see [`files`]); deterministic for
+/// equal input.
+#[must_use]
+pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) -> Detection {
+    let (groups, written) = gather(inputs, scope);
     let none = BTreeSet::new();
     let mut detection = Detection::default();
     for ((repo, provider), group) in &groups {

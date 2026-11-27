@@ -125,6 +125,61 @@ pub(crate) fn rank(finding: &Finding) -> u64 {
     }
 }
 
+impl FileReads<'_> {
+    /// The result bytes of the single-file reads of every path `under` accepts.
+    pub(crate) fn bytes(&self, under: impl Fn(&str) -> bool) -> u64 {
+        self.paths
+            .iter()
+            .filter(|(path, _)| under(path))
+            .flat_map(|(_, sessions)| sessions.values())
+            .map(|r| r.bytes)
+            .sum()
+    }
+}
+
+/// The sample of `detector`'s value in a group: run sessions for D1 and D2, closed items for D3.
+pub(crate) fn sample(detector: Detector, context: &Context<'_, '_>) -> (u64, &'static str) {
+    if detector == UNCHANGED_FILE_READ_BYTES {
+        (context.closed_items, "closed_item")
+    } else {
+        (context.run_sessions, "session")
+    }
+}
+
+/// The value of `detector` for the file `path` whose reads per session are `sessions`: D1 the
+/// run sessions that read it, D2 its most reads in one of them, D3 the result bytes of its
+/// single-file reads per closed item. `None` where the detector does not apply: D3 for a file
+/// written in the window or a group without a closed item, and an unknown detector.
+fn value_over(
+    detector: Detector,
+    context: &Context<'_, '_>,
+    path: &str,
+    sessions: &BTreeMap<&str, Reads>,
+) -> Option<u64> {
+    match detector.id {
+        id if id == FILE_READ_ACROSS_RUNS.id => Some(sessions.len() as u64),
+        id if id == FILE_REREAD_IN_SESSION.id => {
+            Some(sessions.values().map(|r| r.reads).max().unwrap_or(0))
+        }
+        id if id == UNCHANGED_FILE_READ_BYTES.id => {
+            if context.written.contains(path) || context.closed_items == 0 {
+                return None;
+            }
+            let bytes: u64 = sessions.values().map(|r| r.bytes).sum();
+            Some(bytes / context.closed_items)
+        }
+        _ => None,
+    }
+}
+
+/// The value of `detector` for the file `path` in `context`'s group (see [`value_over`]); a
+/// file the group never read has no reads.
+pub(crate) fn value(detector: Detector, context: &Context<'_, '_>, path: &str) -> Option<u64> {
+    let none = BTreeMap::new();
+    let sessions = context.files.paths.get(path).unwrap_or(&none);
+    value_over(detector, context, path, sessions)
+}
+
 /// D1: per file, the run sessions that read it.
 fn d1(context: &Context<'_, '_>) -> Vec<Finding> {
     // Mutant (`mutant_heat_d1_threshold_inf`): D1 never fires.
@@ -133,10 +188,12 @@ fn d1(context: &Context<'_, '_>) -> Vec<Finding> {
     } else {
         context.thresholds.d1_sessions
     };
-    let sample = (context.run_sessions, "session");
+    let sample = sample(FILE_READ_ACROSS_RUNS, context);
     let mut out = Vec::new();
     for (path, sessions) in &context.files.paths {
-        let value = sessions.len() as u64;
+        let Some(value) = value_over(FILE_READ_ACROSS_RUNS, context, path, sessions) else {
+            continue;
+        };
         if value >= threshold {
             let evidence = evidence(sessions.iter());
             let finding = context.finding(
@@ -160,10 +217,12 @@ fn d2(context: &Context<'_, '_>) -> Vec<Finding> {
     } else {
         context.thresholds.d2_reads
     };
-    let sample = (context.run_sessions, "session");
+    let sample = sample(FILE_REREAD_IN_SESSION, context);
     let mut out = Vec::new();
     for (path, sessions) in &context.files.paths {
-        let value = sessions.values().map(|r| r.reads).max().unwrap_or(0);
+        let Some(value) = value_over(FILE_REREAD_IN_SESSION, context, path, sessions) else {
+            continue;
+        };
         if value >= threshold {
             let evidence = evidence(sessions.iter().filter(|(_, r)| r.reads >= threshold));
             let finding = context.finding(
@@ -187,15 +246,14 @@ fn d3(context: &Context<'_, '_>) -> Vec<Finding> {
     } else {
         context.thresholds.d3_bytes_per_item
     };
-    let sample = (context.closed_items, "closed_item");
+    let sample = sample(UNCHANGED_FILE_READ_BYTES, context);
     let mut out = Vec::new();
     for (path, sessions) in &context.files.paths {
-        if context.written.contains(path) || context.closed_items == 0 {
+        let Some(value) = value_over(UNCHANGED_FILE_READ_BYTES, context, path, sessions) else {
             continue;
-        }
-        let evidence = evidence(sessions.iter());
-        let value = evidence.result_bytes / context.closed_items;
+        };
         if value >= threshold {
+            let evidence = evidence(sessions.iter());
             let finding = context.finding(
                 UNCHANGED_FILE_READ_BYTES,
                 path,

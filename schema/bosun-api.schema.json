@@ -1180,6 +1180,47 @@
       ],
       "type": "object"
     },
+    "DetectorStanding": {
+      "description": "How one detector's proposals fared at their follow-ups. A flagged detector is a candidate for\nremoval; nothing is disabled.",
+      "properties": {
+        "detector": {
+          "type": "string"
+        },
+        "dismissed": {
+          "description": "Proposals the user dismissed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "flagged": {
+          "default": null,
+          "description": "`rarely_moves` (at least 5 measured, fewer than 30% improved) or `mostly_dismissed` (at\nleast 70% of at least 5 dismissed or measured were dismissed); `null` when not flagged.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "improved": {
+          "description": "Of those, the ones `reached` or `moved`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "measured": {
+          "description": "Proposals measured with an outcome other than `insufficient`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "detector",
+        "measured",
+        "improved",
+        "dismissed"
+      ],
+      "type": "object"
+    },
     "DriftedFile": {
       "description": "A counted source file with unknown or unbilled lines.",
       "properties": {
@@ -2506,6 +2547,14 @@
     "HeatProposals": {
       "description": "Result of `heat.list`: the identity's proposals (findings seen in two evaluations in a row).",
       "properties": {
+        "detectors": {
+          "default": [],
+          "description": "How each detector's proposals of the identity fared, by detector, computed at query time\nover every repository of the identity (sightings left out).",
+          "items": {
+            "$ref": "#/$defs/DetectorStanding"
+          },
+          "type": "array"
+        },
         "identity": {
           "type": "string"
         },
@@ -2573,6 +2622,13 @@
         "landed": {
           "default": 0,
           "description": "Proposals whose remedy landed: an item of their card, or one whose card names them in\na `Proposal: <key>` line, done with a pass.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "measured": {
+          "default": 0,
+          "description": "Landed proposals whose follow-up was measured (one baseline window after the landing).",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -3881,10 +3937,42 @@
     "ProposalView": {
       "description": "One proposal: a metric of one subject over a window, its value, threshold and target, all in\nexact units.",
       "properties": {
+        "after_sample": {
+          "description": "The sample `after_value` is over.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "after_scaled": {
+          "description": "`after_value` at the baseline's sample (`after * sample / after_sample`), what the\nfollow-up compared, for a count of sessions; absent for a metric compared as it is.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "after_value": {
+          "description": "The follow-up's value of the metric after the landing, as measured, in `unit`.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "baseline_value": {
           "description": "The metric's value over the window, in `unit`.",
           "format": "int64",
           "type": "integer"
+        },
+        "confounder": {
+          "description": "A change between the windows that may explain the outcome (the models of the run\nsessions), one line; absent when there is none.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "created_ms": {
           "format": "int64",
@@ -3906,6 +3994,14 @@
             "null"
           ]
         },
+        "drift": {
+          "description": "The before recomputed by the current code over the frozen window minus `baseline_value`:\ndefinition drift, absent when there is none.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "estimate": {
           "description": "`true` for a metric guessed from bytes; a trigger is always exact.",
           "type": "boolean"
@@ -3922,6 +4018,27 @@
           "format": "int64",
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "guard_after": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "guard_baseline": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "guard_metric": {
+          "description": "The guard metric the follow-up checked, its baseline and its value after.",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -3970,8 +4087,22 @@
           "format": "int64",
           "type": "integer"
         },
+        "measured_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "metric": {
           "type": "string"
+        },
+        "outcome": {
+          "description": "`reached`, `moved`, `not_moved` or `insufficient`; set for a measured proposal.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "provider": {
           "type": "string"

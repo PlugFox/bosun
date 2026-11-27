@@ -4078,6 +4078,54 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_followup_before_due",
+        issue: 229,
+        breaks: "a landed proposal is measured before its follow-up is due",
+        package: "bosun-heat",
+        check: Check::Test(
+            "followup::tests::a_split_document_shows_the_metric_moving_after_its_landing",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_followup_ignores_guard",
+        issue: 229,
+        breaks: "the follow-up's file guard is computed but not applied",
+        package: "bosun-heat",
+        check: Check::Test(
+            "followup::tests::a_metric_that_fell_only_because_the_file_was_renamed_is_not_moved",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_followup_unscaled",
+        issue: 229,
+        breaks: "the follow-up compares D1's count of sessions unscaled",
+        package: "bosun-heat",
+        check: Check::Test(
+            "followup::tests::a_count_of_sessions_is_compared_at_the_baseline_sample",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_flag_never",
+        issue: 229,
+        breaks: "no detector is flagged as a candidate for removal",
+        package: "bosun-heat",
+        check: Check::Test("followup::tests::a_detector_with_one_moved_in_six_is_flagged"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_list_drops_outcome",
+        issue: 229,
+        breaks: "`bosun heat` prints a measured proposal without its outcome",
+        package: "bosun-cli",
+        check: Check::Test(
+            "markdown::tests::bosun_heat_shows_before_and_after_and_flags_a_detector",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

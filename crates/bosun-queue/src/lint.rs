@@ -5,6 +5,10 @@
 //! - The verdict shell exists, and every program the verdict names resolves through it (D4 of
 //!   #7: `sh -c`, with `sh` taken from the Git installation on Windows). Words that are
 //!   expansions (`$CARGO`, `$(...)`, globs) cannot be resolved statically and are skipped.
+//! - No pipeline that runs under `pipefail` (the verdict's own `set -o pipefail`; see
+//!   [`crate::shell`] for how it is followed) pipes into a quiet `grep` (`-q`, `--quiet`,
+//!   `--silent`; also `egrep` and `fgrep`): `grep -q` exits at its first match, the command
+//!   before it may then fail on the broken pipe, and the verdict's result depends on timing.
 //! - Every `blocked-by` target exists, and no card blocks itself.
 //! - Every resource in `needs` is known.
 //!
@@ -58,6 +62,16 @@ pub enum Code {
     BlocksItself,
     /// A resource in `needs` that the configuration does not declare.
     UnknownResource(String),
+    /// The verdict turns on `pipefail` and pipes into a quiet `grep` (error).
+    ///
+    /// An error, not a warning: `grep -q` exits at its first match and closes the pipe, so the
+    /// command writing into it fails on its next write (SIGPIPE, or `EPIPE` and a non-zero exit),
+    /// and under `pipefail` that failure is the pipeline's status. Whether the verdict goes red
+    /// then depends on timing, so the card cannot be trusted to judge its own item: every red
+    /// run spends an attempt and a session on work that may be correct. Refusing at lint costs
+    /// no session, and the fix is one flag. The warnings are for verdicts that pass with nothing
+    /// worth quoting: a weaker verdict, but still a sound one.
+    QuietGrepUnderPipefail,
     /// The verdict's last step sends stdout to `/dev/null` (warning).
     StdoutDiscarded,
     /// The verdict ends in `tail -1` of something that is not a test runner (warning).
@@ -91,6 +105,12 @@ impl fmt::Display for Finding {
             Code::UnknownBlocker(item) => write!(f, "`blocked-by` names {item}, which does not exist"),
             Code::BlocksItself => f.write_str("`blocked-by` names the card itself"),
             Code::UnknownResource(r) => write!(f, "`needs` names `{r}`, which is not a configured resource"),
+            Code::QuietGrepUnderPipefail => f.write_str(
+                "the verdict sets `pipefail` and pipes into a quiet `grep`: `grep -q` exits at its \
+                 first match, and the broken pipe of the command before it fails the verdict even \
+                 when the match was found; drop `-q` (the matched line becomes the verdict line) \
+                 or drop `pipefail`",
+            ),
             Code::StdoutDiscarded => f.write_str(
                 "the verdict's last step sends stdout to /dev/null: it passes with nothing to quote",
             ),
@@ -211,6 +231,12 @@ pub fn lint(card: &Card, context: &LintContext<'_>) -> Lint {
                 lint.error(Code::ProgramMissing(program.clone()));
             }
         }
+        // Mutant (`mutant_queue_lint_quiet_grep_unflagged`): the rule is skipped.
+        if !cfg!(mutant_queue_lint_quiet_grep_unflagged)
+            && analysis.pipelines.iter().any(quiet_grep_under_pipefail)
+        {
+            lint.error(Code::QuietGrepUnderPipefail);
+        }
         if stdout_discarded(analysis.last_pipeline.last()) {
             lint.warning(Code::StdoutDiscarded);
         }
@@ -254,6 +280,53 @@ fn stdout_discarded(step: Option<&Step>) -> bool {
             stdout && r.target == "/dev/null"
         })
     })
+}
+
+/// Whether `pipeline` starts with `pipefail` on and a step that reads from its pipe is a quiet
+/// `grep`.
+fn quiet_grep_under_pipefail(pipeline: &shell::Pipeline) -> bool {
+    pipeline.pipefail && pipeline.steps.iter().skip(1).any(is_quiet_grep)
+}
+
+/// The `grep` options that take an argument, which may follow in the same cluster.
+const GREP_ARGUMENT_LETTERS: &[char] = &['e', 'f', 'm', 'A', 'B', 'C', 'd', 'D'];
+
+/// Whether `step` runs `grep` (`egrep`, `fgrep`) with `-q`, `--quiet` or `--silent` before a
+/// `--`, alone or in a short-option cluster ahead of any letter that takes an argument.
+fn is_quiet_grep(step: &Step) -> bool {
+    if !matches!(step.program_name(), Some("grep" | "egrep" | "fgrep")) {
+        return false;
+    }
+    let mut args = step.args();
+    while let Some(arg) = args.next() {
+        match arg {
+            "--" => return false,
+            "-q" | "--quiet" | "--silent" => return true,
+            _ => {}
+        }
+        let Some(letters) = arg.strip_prefix('-') else {
+            continue;
+        };
+        if letters.is_empty()
+            || letters.starts_with('-')
+            || !letters.chars().all(|c| c.is_ascii_alphabetic())
+        {
+            continue;
+        }
+        for (at, c) in letters.char_indices() {
+            if c == 'q' {
+                return true;
+            }
+            if GREP_ARGUMENT_LETTERS.contains(&c) {
+                // The rest of the cluster is its argument; with nothing after it, the next word.
+                if at + 1 == letters.len() {
+                    args.next();
+                }
+                break;
+            }
+        }
+    }
+    false
 }
 
 /// Programs whose output ends in their own summary line.
@@ -602,7 +675,7 @@ mod tests {
         }
     }
 
-    const INSTALLED: &[&str] = &["cargo", "grep", "tail", "sh", "adb", "echo"];
+    const INSTALLED: &[&str] = &["cargo", "grep", "egrep", "tail", "sh", "adb", "echo", "set"];
 
     fn run(card: &Card) -> Lint {
         let resolver = FnResolver(|p: &str| INSTALLED.contains(&p));
@@ -760,6 +833,52 @@ mod tests {
             run(&card(1, Some("cargo test 2>/dev/null"), "")).findings,
             []
         );
+    }
+
+    #[test]
+    fn a_quiet_grep_behind_a_pipe_under_pipefail_is_refused() {
+        for verdict in [
+            "set -o pipefail; cargo test 2>&1 | grep -q 'test result: ok'",
+            "set -euo pipefail\ncargo test | grep --quiet ok",
+            "set -eo pipefail; cargo test | grep --silent ok",
+            "set -o pipefail && cargo test | grep -Eq '^ok' && echo done",
+            "set -o pipefail; cargo test | egrep -iq ok",
+        ] {
+            let lint = run(&card(1, Some(verdict), ""));
+            assert_eq!(codes(&lint), [&Code::QuietGrepUnderPipefail], "{verdict}");
+            assert_eq!(lint.findings[0].severity, Severity::Error, "{verdict}");
+            assert!(!lint.claimable(), "{verdict}");
+            let shown = lint.findings[0].to_string();
+            assert!(
+                shown.contains("pipefail") && shown.contains("-q"),
+                "{shown}"
+            );
+        }
+        // One finding per verdict, whatever the number of quiet `grep`s.
+        let lint = run(&card(
+            1,
+            Some("set -o pipefail; cargo test | grep -q a; cargo test | grep -q b"),
+            "",
+        ));
+        assert_eq!(codes(&lint), [&Code::QuietGrepUnderPipefail]);
+    }
+
+    #[test]
+    fn a_quiet_grep_without_pipefail_or_without_a_pipe_is_clean() {
+        for verdict in [
+            "cargo test 2>&1 | grep -q ok",
+            "set -o pipefail; grep -q mutant_demo xtask/src/mutants.rs && \
+             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 cargo test -q -p demo --lib -- \
+             --exact tests::a_demo 2>&1 | grep -E '^test result: ok\\. 1 passed'",
+            "cargo test | grep -q ok; set -o pipefail",
+            "set -o pipefail; set +o pipefail; cargo test | grep -q ok",
+            "set -o pipefail; cargo test | grep -eq ok",
+            "set -o pipefail; cargo test | grep -- -q",
+        ] {
+            let lint = run(&card(1, Some(verdict), ""));
+            assert_eq!(lint.findings, [], "{verdict}");
+            assert!(lint.claimable(), "{verdict}");
+        }
     }
 
     #[test]

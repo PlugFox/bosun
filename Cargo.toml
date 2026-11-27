@@ -554,6 +554,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_telegram_token_in_error)",
   "cfg(mutant_telegram_ignore_retry_after)",
   "cfg(mutant_redact_skip_telegram_token)",
+  # #203: a quiet `grep` behind a pipe under the verdict's own `pipefail` is refused at lint.
+  "cfg(mutant_queue_lint_quiet_grep_unflagged)",
+  "cfg(mutant_queue_lint_pipefail_always_on)",
 ] }
 
 [workspace.lints.clippy]

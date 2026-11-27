@@ -1,5 +1,13 @@
-//! Just enough of the POSIX shell grammar to lint a verdict: the programs it runs and the shape
-//! of its last pipeline. Never used to run anything; the verdict shell does that.
+//! Just enough of the POSIX shell grammar to lint a verdict: the programs it runs, its
+//! pipelines and whether `pipefail` is on for each, and the shape of its last pipeline. Never
+//! used to run anything; the verdict shell does that.
+//!
+//! `pipefail` is followed in text order, as the verdict's own text sets it (bosun never adds
+//! it): a pipeline of one step whose program is `set` turns it on with `-o pipefail` or a
+//! short-option cluster ending in `o` (`-eo pipefail`, `-euo pipefail`), and off with the same
+//! after `+` (`+o pipefail`, `+eo pipefail`), for the pipelines after it. Control flow is not
+//! followed: a `set -o pipefail` inside an `if` (or a subshell) turns it on for everything
+//! after it in the text.
 //!
 //! A function the script defines (`name() ...`, `function name ...`) is not a program: calls to
 //! it after its definition are left out of [`Analysis::programs`]; a call before it is still a
@@ -61,6 +69,15 @@ impl Step {
     }
 }
 
+/// One pipeline of the command.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Pipeline {
+    /// Its steps; each after the first reads from a pipe.
+    pub(crate) steps: Vec<Step>,
+    /// Whether `pipefail` is on when it starts; see the module docs.
+    pub(crate) pipefail: bool,
+}
+
 /// What [`analyse`] found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Analysis {
@@ -68,6 +85,8 @@ pub(crate) struct Analysis {
     pub(crate) programs: Vec<String>,
     /// The steps of the last pipeline.
     pub(crate) last_pipeline: Vec<Step>,
+    /// Every pipeline, in text order.
+    pub(crate) pipelines: Vec<Pipeline>,
     /// The command uses syntax this reader does not follow; see the module docs.
     pub(crate) opaque: bool,
 }
@@ -277,11 +296,55 @@ fn end_step(step: &mut Step, pipeline: &mut Vec<Step>) {
         pipeline.push(std::mem::take(step));
     }
 }
-fn end_pipeline(step: &mut Step, pipeline: &mut Vec<Step>, pipelines: &mut Vec<Vec<Step>>) {
+
+/// Whether `pipefail` is on: its state at the start of the next pipeline.
+#[derive(Debug, Clone, Copy)]
+struct Pipefail(bool);
+
+fn end_pipeline(
+    step: &mut Step,
+    pipeline: &mut Vec<Step>,
+    pipelines: &mut Vec<Pipeline>,
+    pipefail: &mut Pipefail,
+) {
     end_step(step, pipeline);
-    if !pipeline.is_empty() {
-        pipelines.push(std::mem::take(pipeline));
+    if pipeline.is_empty() {
+        return;
     }
+    let steps = std::mem::take(pipeline);
+    let after = match &steps[..] {
+        [only] if only.program_name() == Some("set") => set_pipefail(only, pipefail.0),
+        _ => pipefail.0,
+    };
+    pipelines.push(Pipeline {
+        steps,
+        pipefail: pipefail.0,
+    });
+    // Mutant (`mutant_queue_lint_pipefail_always_on`): `pipefail` is on from the start and
+    // never changes.
+    if !cfg!(mutant_queue_lint_pipefail_always_on) {
+        pipefail.0 = after;
+    }
+}
+
+/// `pipefail` after the `set` command `step`, when it was `on` before.
+fn set_pipefail(step: &Step, mut on: bool) -> bool {
+    // After `--` the words are positional parameters.
+    let args: Vec<&str> = step.args().take_while(|&a| a != "--").collect();
+    for pair in args.windows(2) {
+        if pair[1] != "pipefail" {
+            continue;
+        }
+        let option = pair[0];
+        let Some(sign) = option.chars().next().filter(|c| matches!(c, '-' | '+')) else {
+            continue;
+        };
+        let letters = &option[1..];
+        if letters.ends_with('o') && letters.chars().all(|c| c.is_ascii_alphabetic()) {
+            on = sign == '-';
+        }
+    }
+    on
 }
 
 /// Records `name` as a function the script defines.
@@ -297,7 +360,8 @@ fn define(functions: &mut BTreeSet<String>, name: String) {
 pub(crate) fn analyse(command: &str) -> Analysis {
     let (tokens, mut opaque) = lex(command);
     let mut analysis = Analysis::default();
-    let mut pipelines: Vec<Vec<Step>> = Vec::new();
+    let mut pipelines: Vec<Pipeline> = Vec::new();
+    let mut pipefail = Pipefail(cfg!(mutant_queue_lint_pipefail_always_on));
     let mut pipeline: Vec<Step> = Vec::new();
     let mut step = Step::default();
     let mut command_position = true;
@@ -336,7 +400,7 @@ pub(crate) fn analyse(command: &str) -> Analysis {
                 command_position = true;
             }
             Token::Op(_) => {
-                end_pipeline(&mut step, &mut pipeline, &mut pipelines);
+                end_pipeline(&mut step, &mut pipeline, &mut pipelines, &mut pipefail);
                 command_position = true;
             }
             Token::Redirect(fd, op) => {
@@ -394,8 +458,9 @@ pub(crate) fn analyse(command: &str) -> Analysis {
             }
         }
     }
-    end_pipeline(&mut step, &mut pipeline, &mut pipelines);
-    analysis.last_pipeline = pipelines.pop().unwrap_or_default();
+    end_pipeline(&mut step, &mut pipeline, &mut pipelines, &mut pipefail);
+    analysis.last_pipeline = pipelines.last().map_or_default(|p| p.steps.clone());
+    analysis.pipelines = pipelines;
     analysis.opaque = opaque;
     analysis
 }
@@ -453,6 +518,31 @@ mod tests {
             ["b", "d", "e"]
         );
         assert_eq!(programs("f(){ true; };f"), ["true"]);
+    }
+
+    #[test]
+    fn pipefail_is_followed_in_text_order() {
+        let pipefail = |command: &str| -> Vec<bool> {
+            analyse(command)
+                .pipelines
+                .iter()
+                .map(|p| p.pipefail)
+                .collect()
+        };
+        assert_eq!(
+            pipefail("a | b; set -o pipefail; c | d; set +eo pipefail; e"),
+            [false, false, true, true, false]
+        );
+        assert_eq!(
+            pipefail("set -euo pipefail\nif x; then set +o pipefail; fi; y"),
+            [false, true, true, false]
+        );
+        // Not `set` alone in its pipeline, or not an option that takes `pipefail`.
+        assert_eq!(pipefail("set -o pipefail | cat; a"), [false, false]);
+        assert_eq!(pipefail("set -oe pipefail; a"), [false, false]);
+        assert_eq!(pipefail("set -- -o pipefail; a"), [false, false]);
+        let analysis = analyse("set -o pipefail; a | b");
+        assert_eq!(analysis.pipelines[1].steps, analysis.last_pipeline);
     }
 
     #[test]

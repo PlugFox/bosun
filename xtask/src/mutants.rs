@@ -3546,7 +3546,29 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("publish::redact::tests::a_telegram_bot_token_is_redacted"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_queue_lint_quiet_grep_unflagged",
+        issue: QUIET_GREP_CARD,
+        breaks: "a verdict that sets `pipefail` and pipes into `grep -q` lints clean, and goes \
+                 red on correct work when the command before the `grep` hits a broken pipe",
+        package: "bosun-queue",
+        check: Check::Test("lint::tests::a_quiet_grep_behind_a_pipe_under_pipefail_is_refused"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_queue_lint_pipefail_always_on",
+        issue: QUIET_GREP_CARD,
+        breaks: "lint reads every pipeline as running under `pipefail` and refuses a quiet \
+                 `grep` that is safe",
+        package: "bosun-queue",
+        check: Check::Test("lint::tests::a_quiet_grep_without_pipefail_or_without_a_pipe_is_clean"),
+        platform: None,
+    },
 ];
+
+/// #203, the card of #5 that refuses at lint a verdict that sets `pipefail` and pipes into a
+/// quiet `grep`.
+const QUIET_GREP_CARD: u32 = 203;
 
 /// The card of #9 that adds the `telegram` channel kind (its own number was not known when it
 /// was written; its parent's stands in).

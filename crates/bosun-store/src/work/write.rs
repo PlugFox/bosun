@@ -237,6 +237,11 @@ pub(crate) async fn record_transition(
     for effect in &t.effects {
         enqueue(conn, item_row, effect, at_ms).await?;
     }
+    // Every path into Needs you notifies (#9), in this transaction: a replayed transition
+    // returned above, and the notice's key is the transition's, so it is queued once.
+    if let bosun_core::State::NeedsYou(why) = t.to {
+        crate::notify::queue_needs_you(conn, item_row, t, codec::reason(why), at_ms).await?;
+    }
     Ok(())
 }
 

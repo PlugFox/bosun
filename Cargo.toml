@@ -522,6 +522,14 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_notify_no_operator_token)",
   "cfg(mutant_doctor_notify_secret_unchecked)",
   "cfg(mutant_cli_notify_secret_argument)",
+  # #9: notices delivered through each identity's notification outbox.
+  "cfg(mutant_notify_no_gap)",
+  "cfg(mutant_notify_keep_stale)",
+  "cfg(mutant_store_notify_every_channel)",
+  "cfg(mutant_notify_no_dedup_key)",
+  "cfg(mutant_notify_shared_channel)",
+  "cfg(mutant_loop_no_drained_notice)",
+  "cfg(mutant_loop_no_breaker_notice)",
 ] }
 
 [workspace.lints.clippy]

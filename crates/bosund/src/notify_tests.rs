@@ -11,16 +11,18 @@ use tempfile::TempDir;
 use crate::api::{Answer, Connection, handle_line};
 use crate::state::{self, State};
 
-const TOKEN: &str = "bosun-operator-notify-tests";
+pub(crate) const TOKEN: &str = "bosun-operator-notify-tests";
 const SECRET: &str = "synthetic-secret-4f1c9a";
 
-struct World {
-    dir: TempDir,
-    state: State,
+/// Two identities, `a` (repository `alpha`) and `b` (`beta`), served from one configuration;
+/// `notify_outbox_tests` shares it.
+pub(crate) struct World {
+    pub(crate) dir: TempDir,
+    pub(crate) state: State,
 }
 
 impl World {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         let mut config = String::new();
@@ -39,11 +41,7 @@ impl World {
         }
         let path = d.join("config.toml");
         std::fs::write(&path, config).unwrap();
-        let config = bosun_config::load(&path, &SystemProbe::new()).unwrap();
-        let identities = state::open(&config, "notify-epoch", crate::events::Options::default())
-            .await
-            .map_err(|(_, e)| e)
-            .unwrap();
+        let identities = Self::open(&path).await;
         Self {
             state: State {
                 started_ms: 0,
@@ -56,6 +54,23 @@ impl World {
             },
             dir,
         }
+    }
+
+    /// Opens every identity of the configuration in `dir`.
+    async fn open(path: &std::path::Path) -> std::collections::BTreeMap<String, state::Served> {
+        let config = bosun_config::load(path, &SystemProbe::new()).unwrap();
+        state::open(&config, "notify-epoch", crate::events::Options::default())
+            .await
+            .map_err(|(_, e)| e)
+            .unwrap()
+    }
+
+    /// Shuts every identity down and opens them again on the same configuration: a daemon
+    /// restart, as far as the stores and their drainers go.
+    pub(crate) async fn restart(&mut self) {
+        let identities = std::mem::take(&mut self.state.identities);
+        state::shut_down(identities).await;
+        self.state.identities = Self::open(&self.dir.path().join("config.toml")).await;
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, Value> {
@@ -72,7 +87,7 @@ impl World {
         }
     }
 
-    async fn ok(&self, method: &str, params: Value) -> Value {
+    pub(crate) async fn ok(&self, method: &str, params: Value) -> Value {
         self.call(method, params.clone())
             .await
             .unwrap_or_else(|e| panic!("{method} {params}: {e}"))
@@ -106,7 +121,7 @@ impl World {
             .await
     }
 
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         state::shut_down(self.state.identities).await;
     }
 }

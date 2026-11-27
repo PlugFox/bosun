@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE notify_outbox SET tries = tries + 1, last_error = ?, retry_at_ms = ?\n             WHERE id = ? AND sent_ms IS NULL AND dropped_ms IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "057ea8c330d10cbd2e072f889af3e6e73911f920b6dac76e509221ff86bd71db"
+}

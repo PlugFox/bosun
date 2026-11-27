@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO notify_outbox (channel_id, key, event, repo, item, facts,\n                                                  created_ms)\n             SELECT c.id, ?, ?, ?, ?, ?, ? FROM notify_channel c\n             WHERE c.removed_ms IS NULL\n               AND EXISTS (SELECT 1 FROM json_each(c.events) e WHERE e.value = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "a518481d25dcd9db0930a55af9e1383bba3daf5a6e61ae2e57cb8bbc9eb91135"
+}

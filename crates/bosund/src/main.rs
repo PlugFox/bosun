@@ -63,6 +63,9 @@ mod leases;
 mod listen;
 mod log;
 mod notify;
+mod notify_outbox;
+#[cfg(test)]
+mod notify_outbox_tests;
 #[cfg(test)]
 mod notify_tests;
 mod overview;

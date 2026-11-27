@@ -68,7 +68,7 @@ pub(crate) struct Served {
     /// each valid edit of the configuration ([`follow_budget`]).
     pub(crate) budget: std::sync::Mutex<Budget>,
     /// The identity's notification channels' credential store (#9): the OS's, one in memory
-    /// in tests.
+    /// in tests; and the drainer of its notification outbox.
     pub(crate) notify: crate::notify::Handle,
 }
 
@@ -226,6 +226,10 @@ pub(crate) async fn run(
             )
         }
     };
+    // The notification drainers hold their sends while the kill switch is thrown.
+    for served in identities.values() {
+        served.notify.attach(operator.clone());
+    }
     // Kept to withdraw the token at the end: the state may outlive shutdown.
     let control = operator.clone();
     let state = Arc::new(State {
@@ -323,6 +327,8 @@ pub(crate) async fn open(
     options: events::Options,
 ) -> Result<BTreeMap<String, Served>, (BTreeMap<String, Served>, String)> {
     let mut identities = BTreeMap::new();
+    // Every opened identity's reader: what `mutant_notify_shared_channel` reaches across.
+    let everyone = crate::notify_outbox::Everyone::default();
     for plan in bosun_ingest::plans(config) {
         let store = match Store::open(&plan.database, StoreOptions::default()).await {
             Ok(store) => store,
@@ -386,6 +392,8 @@ pub(crate) async fn open(
             repos.clone(),
         );
         let commit_task = commits.spawn();
+        // The identity's notification drainer (#9): its own store and credential store only.
+        let notify = crate::notify::Handle::started(&plan.identity, &store, &everyone);
         let author_allowlist = config
             .identities
             .get(&plan.identity)
@@ -412,7 +420,7 @@ pub(crate) async fn open(
                 events: Events::new(epoch, options),
                 boot,
                 budget: std::sync::Mutex::new(config.budget.clone()),
-                notify: crate::notify::Handle::new(),
+                notify,
             },
         );
     }
@@ -423,6 +431,7 @@ pub(crate) async fn shut_down(identities: BTreeMap<String, Served>) {
     for (name, served) in identities {
         served.commit_task.abort();
         let _ = served.commit_task.await;
+        served.notify.stop().await;
         if let Err(e) = served.ingest.shutdown().await {
             crate::log::log!("bosund: identity {name}: ingest: {e}");
         }

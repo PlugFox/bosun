@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE notify_outbox SET sent_ms = ? WHERE id = ? AND sent_ms IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "70b2a40bd90f1b99df11d4a8f154d1fb327270a9aa78f1091637c11aab65d043"
+}

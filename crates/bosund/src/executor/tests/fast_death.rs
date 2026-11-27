@@ -33,7 +33,7 @@ fn fast_deaths(sub: &mut Subscriber) -> Vec<serde_json::Value> {
     }
 }
 
-fn tripped(scene: &Scene) -> Option<String> {
+pub(super) fn tripped(scene: &Scene) -> Option<String> {
     let now = scene.clock.wall_ms();
     let status = scene.control.status("test", &["demo".into()], now);
     status.repos.into_iter().find(|r| r.repo == "demo")?.tripped

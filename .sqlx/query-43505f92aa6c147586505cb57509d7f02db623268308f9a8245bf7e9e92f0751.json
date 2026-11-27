@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO notify_outbox (channel_id, key, event, repo, item, facts,\n                                                  created_ms)\n             SELECT id, ?, ?, ?, ?, ?, ? FROM notify_channel",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "43505f92aa6c147586505cb57509d7f02db623268308f9a8245bf7e9e92f0751"
+}

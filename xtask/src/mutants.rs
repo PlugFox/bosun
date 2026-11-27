@@ -3411,7 +3411,81 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("notify::tests::the_secret_is_read_from_stdin_never_from_the_arguments"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_notify_no_gap",
+        issue: NOTIFY_OUTBOX_CARD,
+        breaks: "the delivery policy ignores a channel's minimum gap between messages",
+        package: "bosun-notify",
+        check: Check::Test("policy::tests::a_burst_within_the_gap_is_one_message"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_notify_keep_stale",
+        issue: NOTIFY_OUTBOX_CARD,
+        breaks: "the delivery policy never drops a notice for its age",
+        package: "bosun-notify",
+        check: Check::Test(
+            "policy::tests::a_notification_older_than_the_maximum_age_is_dropped_not_sent",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_notify_every_channel",
+        issue: NOTIFY_OUTBOX_CARD,
+        breaks: "a queued notice fans out to every channel, its events and removal ignored",
+        package: "bosun-store",
+        check: Check::Test(
+            "notify::tests::a_needs_you_transition_queues_one_row_per_subscribed_channel",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_notify_no_dedup_key",
+        issue: NOTIFY_OUTBOX_CARD,
+        breaks: "every queued notice gets a fresh key, so a replay is queued and delivered again",
+        // The cfg changes bosun-store; its check is the daemon's restart test.
+        package: "bosund",
+        check: Check::Test(
+            "notify_outbox_tests::a_needs_you_notification_is_delivered_once_across_a_daemon_restart",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_notify_shared_channel",
+        issue: NOTIFY_OUTBOX_CARD,
+        breaks: "each identity's drainer sends through the channels of every served identity",
+        package: "bosund",
+        check: Check::Test(
+            "notify_outbox_tests::a_needs_you_item_of_one_identity_never_reaches_another_identitys_channel",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_no_drained_notice",
+        issue: NOTIFY_OUTBOX_CARD,
+        breaks: "the loop never queues the `ready_drained` notice",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::notify::a_needs_you_card_and_a_drained_ready_column_queue_one_notification_each",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_no_breaker_notice",
+        issue: NOTIFY_OUTBOX_CARD,
+        breaks: "the fast-death breaker's pause queues no `repo_paused` notice",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::notify::a_breaker_pause_queues_one_repo_paused_notification",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #9 that delivers notices through each identity's notification outbox: the
+/// delivery policy, the rendering, the outbox rows queued with their events, and the drainer
+/// (its own number was not known when it was written; its parent's stands in).
+const NOTIFY_OUTBOX_CARD: u32 = 9;
 
 /// The card of #9 that builds what every notification channel stands on: `bosun-notify` with
 /// the credential store, the channel rows of each identity, `notify.channel.*`, `bosun notify`

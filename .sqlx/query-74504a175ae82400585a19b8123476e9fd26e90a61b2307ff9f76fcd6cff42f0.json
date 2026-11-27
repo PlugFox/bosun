@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE notify_outbox SET dropped_ms = ?, last_error = ?\n             WHERE id = ? AND sent_ms IS NULL AND dropped_ms IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "74504a175ae82400585a19b8123476e9fd26e90a61b2307ff9f76fcd6cff42f0"
+}

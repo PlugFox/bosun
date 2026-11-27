@@ -44,6 +44,7 @@ mod landing;
 mod leases;
 mod lfs;
 mod moved;
+mod notify;
 mod recovery;
 mod refusals;
 mod removal;

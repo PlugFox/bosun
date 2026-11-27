@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE notify_channel SET last_sent_ms = ?\n             WHERE id = (SELECT channel_id FROM notify_outbox WHERE id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "c01d9ea2a6e5b2bb7e6a7440aab4b63dd0c3824d646f71cca4a02029babec39c"
+}

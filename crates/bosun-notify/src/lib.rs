@@ -12,6 +12,10 @@
 //!   backups reveals a token.
 //! - [`text`]: what any message goes through before it is sent: plain text (no markup mode),
 //!   the redactor of `bosun_core::publish`, and a length cap.
+//! - [`render`]: the text of a queued [`Notice`], or of a coalesced burst of them: ids,
+//!   states, reasons and numbers only.
+//! - [`policy`]: when a channel's pending notices go out (the minimum gap, the coalescing, the
+//!   maximum age, the backoff), pure.
 //!
 //! Channels belong to an identity (#2): an entry name carries the identity, and there is no
 //! channel shared across identities.
@@ -20,7 +24,11 @@
 //! composes it with the store.
 
 pub mod fake;
+pub mod policy;
+pub mod render;
 pub mod secret;
+
+pub use render::{Notice, render};
 
 use std::collections::BTreeMap;
 use std::fmt;

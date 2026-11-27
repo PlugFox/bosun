@@ -11,12 +11,15 @@
 //! - `list` reads each entry only to say whether it is there, and drops the value at once.
 //! - `test` sends one message now, outside any outbox.
 //!
+//! The [`Handle`] also holds the identity's notification drainer
+//! ([`crate::notify_outbox`]), which delivers the notices its outbox queues.
+//!
 //! Adds and removes of one identity run one at a time ([`Handle`]), so a refused add never
 //! deletes the entry of a channel another add just wrote. The secret is in no log line, error,
 //! event or result. The credential store is called on the blocking pool: the OS may take its
 //! time (a locked keychain, a D-Bus round trip).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, PoisonError};
 
 use bosun_api::notify::EVENTS;
 use bosun_api::rpc::{ErrorObject, code};
@@ -25,20 +28,27 @@ use bosun_api::{
 };
 use bosun_notify::secret::Secrets;
 use bosun_notify::{Kinds, Notifier};
-use bosun_store::{ChannelRow, NewChannel, Write};
+use bosun_store::{ChannelRow, NewChannel, Store, Write};
 use serde_json::Value;
+use tokio::task::JoinHandle;
 
 use crate::api::{call, failed};
+use crate::control::Control;
 use crate::executor::{blocking, now_ms};
+use crate::notify_outbox::{Drainer, Everyone};
 use crate::state::{Served, State};
 
-/// The notification side of one identity: its credential store. The next card adds the
-/// drainer of its outbox.
+/// The notification side of one identity: its credential store and the drainer of its
+/// notification outbox ([`crate::notify_outbox`]).
 #[derive(Debug)]
 pub(crate) struct Handle {
     secrets: Arc<dyn Secrets>,
     /// Held across an add or a remove: its entry and its row change together.
     writes: tokio::sync::Mutex<()>,
+    /// The daemon's control, for the kill switch: attached once the daemon has it.
+    control: Arc<OnceLock<Control>>,
+    /// The drainer's task; aborted at shutdown.
+    drainer: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl Handle {
@@ -51,6 +61,59 @@ impl Handle {
         Self {
             secrets,
             writes: tokio::sync::Mutex::new(()),
+            control: Arc::default(),
+            drainer: StdMutex::new(None),
+        }
+    }
+
+    /// A handle of `identity` whose drainer runs on `store`; `store`'s reader joins
+    /// `everyone`.
+    pub(crate) fn started(identity: &str, store: &Store, everyone: &Everyone) -> Self {
+        let handle = Self::new();
+        handle.start(identity, store, everyone.clone());
+        everyone
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(store.reader().clone());
+        handle
+    }
+
+    /// Starts the drainer of `identity`'s outbox in `store`.
+    fn start(&self, identity: &str, store: &Store, everyone: Everyone) {
+        let task = Drainer {
+            identity: identity.to_owned(),
+            reader: store.reader().clone(),
+            writer: store.writer().clone(),
+            secrets: self.secrets.clone(),
+            control: self.control.clone(),
+            everyone,
+        }
+        .spawn();
+        if let Some(old) = self
+            .drainer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(task)
+        {
+            old.abort();
+        }
+    }
+
+    /// Gives the drainer the daemon's control: from now on the kill switch holds its sends.
+    pub(crate) fn attach(&self, control: Control) {
+        let _ = self.control.set(control);
+    }
+
+    /// Stops the drainer, before the store closes.
+    pub(crate) async fn stop(&self) {
+        let task = self
+            .drainer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
         }
     }
 

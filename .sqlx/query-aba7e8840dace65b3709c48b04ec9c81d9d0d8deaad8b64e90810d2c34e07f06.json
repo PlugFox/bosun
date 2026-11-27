@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE notify_outbox SET dropped_ms = ?, last_error = 'the channel was removed'\n         WHERE sent_ms IS NULL AND dropped_ms IS NULL AND channel_id IN (\n             SELECT id FROM notify_channel WHERE name = ? AND removed_ms IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "aba7e8840dace65b3709c48b04ec9c81d9d0d8deaad8b64e90810d2c34e07f06"
+}

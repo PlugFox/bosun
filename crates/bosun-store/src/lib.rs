@@ -51,7 +51,7 @@ mod writer;
 pub use activity::RecentSession;
 pub use error::Error;
 pub use link::{CommitLink, Link, LinkedSession};
-pub use notify::{ChannelRow, NewChannel, valid_name as valid_channel_name};
+pub use notify::{ChannelRow, NewChannel, NewNotice, NoticeRow, valid_name as valid_channel_name};
 pub use read::{Bill, By, Group, Reader, RepoRow};
 pub use report::{CheckRow, ToolRow, UsageRow, VersionHealth, WindowSums};
 pub use work::{

@@ -16,12 +16,14 @@
 //!   the session's event with [`bosun_core::Event::FastDeath`], so the tripping session charges
 //!   its item nothing and the item waits parked (`paused`); it pauses the repository in
 //!   [`crate::control::Control`] ([`crate::control::Control::trip`]) until `bosun resume`, and
-//!   says why in `status`, the `fast_deaths` event and the daemon's log. The crashes before the
+//!   says why in `status`, the `fast_deaths` event, the daemon's log and a `repo_paused`
+//!   notice in the identity's notification outbox (#9). The crashes before the
 //!   tripping one were charged as any crash.
 //!
 //! The streak and the trip are in memory only: a daemon restart starts the streak at zero and
 //! lifts the trip, as it lifts a pause by hand.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bosun_api::EventBody;
@@ -78,7 +80,7 @@ impl Loop {
     /// Observes the session a [`Done::Event`] reports the end of, if any, and returns what the
     /// loop applies. Every session is observed, its item current or not: a blocking question's
     /// kill ends a session after its item has left the loop, and resets the streak.
-    pub(super) fn observe_session(&mut self, done: Done) -> Done {
+    pub(super) async fn observe_session(&mut self, done: Done) -> Done {
         let Done::Event {
             item,
             event,
@@ -88,7 +90,7 @@ impl Loop {
         else {
             return done;
         };
-        let event = self.fast_death(&item, event, end);
+        let event = self.fast_death(&item, event, end).await;
         Done::Event {
             item,
             event,
@@ -100,7 +102,7 @@ impl Loop {
     /// Observes how a session of the repository ended, before its `event` is applied; returns
     /// the event to apply: `event` itself, or [`Event::FastDeath`] when this session tripped the
     /// breaker, which then pauses the repository and says so.
-    fn fast_death(&mut self, item: &ItemId, event: Event, end: SessionEnd) -> Event {
+    async fn fast_death(&mut self, item: &ItemId, event: Event, end: SessionEnd) -> Event {
         // Mutant (`mutant_loop_no_fast_death_breaker`): nothing is observed.
         if cfg!(mutant_loop_no_fast_death_breaker) {
             return event;
@@ -128,6 +130,7 @@ impl Loop {
              resume",
             within.as_secs()
         );
+        self.queue_paused(&repo, item, sessions, within, now).await;
         self.shared.publish(EventBody::FastDeaths {
             repo: repo.clone(),
             item: item.to_string(),
@@ -142,6 +145,47 @@ impl Loop {
             return event;
         }
         Event::FastDeath { attempt, spawn }
+    }
+}
+
+impl Loop {
+    /// Queues the `repo_paused` notice of a trip at `at_ms` (#9): keyed by the repository and
+    /// the pause's time, with the breaker's figures.
+    async fn queue_paused(
+        &self,
+        repo: &str,
+        item: &ItemId,
+        sessions: u32,
+        within: Duration,
+        at_ms: i64,
+    ) {
+        // Mutant (`mutant_loop_no_breaker_notice`): the breaker's pause queues nothing.
+        if cfg!(mutant_loop_no_breaker_notice) {
+            return;
+        }
+        let notice = bosun_store::NewNotice {
+            key: format!("repo_paused:{repo}/{at_ms}"),
+            event: "repo_paused".to_owned(),
+            repo: repo.to_owned(),
+            item: Some(item.to_string()),
+            facts: BTreeMap::from([
+                ("sessions".to_owned(), sessions.to_string()),
+                ("within_s".to_owned(), within.as_secs().to_string()),
+                ("item".to_owned(), item.to_string()),
+            ]),
+            at_ms,
+        };
+        if let Err(e) = self
+            .shared
+            .deps
+            .writer
+            .write(vec![bosun_store::Write::NoticeQueued(notice)])
+            .await
+        {
+            self.shared.trouble(format!(
+                "the notice of the breaker's pause cannot be queued: {e}"
+            ));
+        }
     }
 }
 

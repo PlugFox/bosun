@@ -645,6 +645,9 @@ pub(crate) struct Loop {
     pulls: pulls::Watch,
     /// The fast-death breaker's streak, across items ([`breaker`]).
     streak: breaker::Streak,
+    /// The item the loop last claimed, when it has claimed one since it last queued the
+    /// `ready_drained` notice (#9): the next poll with nothing claimable queues it.
+    claimed_since_drained: Option<ItemId>,
 }
 
 /// Aborts its task when dropped: the drainer ends with its loop.
@@ -721,6 +724,7 @@ impl Loop {
             pace,
             pulls: pulls::Watch::default(),
             streak: breaker::Streak::default(),
+            claimed_since_drained: None,
         }
     }
 
@@ -1788,7 +1792,7 @@ impl Loop {
 
     async fn on_done(&mut self, done: Done) {
         // Before anything else: the breaker observes the session of its item, current or not.
-        let done = self.observe_session(done);
+        let done = self.observe_session(done).await;
         let item = match &done {
             Done::Claim { item, .. } | Done::Event { item, .. } | Done::Followed { item, .. } => {
                 item.clone()
@@ -2134,6 +2138,9 @@ impl Loop {
             self.bounce(&item, &Event::Cycle).await;
         }
         let Some(next) = plan.claim.first() else {
+            if self.gates(now).hold(&repo_name, now).is_none() {
+                self.ready_drained().await;
+            }
             return;
         };
         let Some(card) = changes
@@ -2174,7 +2181,41 @@ impl Loop {
             rebased: Arc::default(),
             census_logged: false,
         });
+        self.claimed_since_drained = Some(next.clone());
         self.apply(Event::Claim).await;
+    }
+
+    /// Nothing is claimable: queues the `ready_drained` notice (#9) if the loop claimed an item
+    /// since it last queued one, keyed by the last item it claimed. A loop that never claimed,
+    /// and every idle poll after the first, queues nothing.
+    async fn ready_drained(&mut self) {
+        // Mutant (`mutant_loop_no_drained_notice`): a drained Ready column queues nothing.
+        if cfg!(mutant_loop_no_drained_notice) {
+            return;
+        }
+        let Some(last) = self.claimed_since_drained.take() else {
+            return;
+        };
+        let repo = self.shared.options.repo.clone();
+        let notice = bosun_store::NewNotice {
+            key: format!("ready_drained:{repo}/{last}"),
+            event: "ready_drained".to_owned(),
+            repo,
+            item: Some(last.to_string()),
+            facts: std::collections::BTreeMap::from([("item".to_owned(), last.to_string())]),
+            at_ms: now_ms(),
+        };
+        if let Err(e) = self
+            .shared
+            .deps
+            .writer
+            .write(vec![Write::NoticeQueued(notice)])
+            .await
+        {
+            self.shared.trouble(format!(
+                "the notice of the drained Ready column cannot be queued: {e}"
+            ));
+        }
     }
 
     /// Records the item of `card`; `false` when the store refused (the loop halts).

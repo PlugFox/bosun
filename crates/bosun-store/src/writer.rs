@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::error::{Error, from_db, to_db};
-use crate::notify::{self, NewChannel};
+use crate::notify::{self, NewChannel, NewNotice};
 use crate::read;
 use crate::work::write as work;
 use crate::work::{
@@ -271,6 +271,24 @@ pub enum Write {
     /// The live channel `name` is removed: its row is kept, marked, and the name is free.
     /// Fails ([`Error::UnknownRow`]) when no live channel has it.
     ChannelRemoved { name: String, at_ms: i64 },
+    /// A notice (#9): one row per live channel whose events have it; a key a channel has
+    /// already queues nothing for it.
+    NoticeQueued(NewNotice),
+    /// The notification drainer sent `ids` in one message at `at_ms`: they are sent, and their
+    /// channel last sent then.
+    NoticesSent { ids: Vec<i64>, at_ms: i64 },
+    /// A send of `ids` failed and may pass: one more try each, retried from `retry_at_ms`.
+    NoticesFailed {
+        ids: Vec<i64>,
+        error: String,
+        retry_at_ms: i64,
+    },
+    /// `ids` are never to be sent: too old, refused for good, or their channel unbuildable.
+    NoticesDropped {
+        ids: Vec<i64>,
+        why: String,
+        at_ms: i64,
+    },
     /// Mutant `mutant_ingest_reingest_truncates` (#21): deletes every ingested row, as a
     /// reingest that truncates before it rebuilds would.
     #[cfg(mutant_ingest_reingest_truncates)]
@@ -592,6 +610,14 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
         } => work::worktree_user_base(conn, &path, &user_base_json).await,
         Write::ChannelAdded(new) => notify::add(conn, &new).await,
         Write::ChannelRemoved { name, at_ms } => notify::remove(conn, &name, at_ms).await,
+        Write::NoticeQueued(notice) => notify::queue(conn, &notice).await,
+        Write::NoticesSent { ids, at_ms } => notify::sent(conn, &ids, at_ms).await,
+        Write::NoticesFailed {
+            ids,
+            error,
+            retry_at_ms,
+        } => notify::failed(conn, &ids, &error, retry_at_ms).await,
+        Write::NoticesDropped { ids, why, at_ms } => notify::dropped(conn, &ids, &why, at_ms).await,
         #[cfg(mutant_ingest_reingest_truncates)]
         Write::Truncate => {
             conn.execute(

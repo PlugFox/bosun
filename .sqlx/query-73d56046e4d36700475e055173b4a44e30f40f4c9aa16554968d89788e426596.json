@@ -1,0 +1,134 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT o.id AS \"id!: i64\", o.key, o.event, o.repo, o.item, o.facts, o.created_ms,\n                      o.tries, o.last_error, o.retry_at_ms\n               FROM notify_outbox o JOIN notify_channel c ON c.id = o.channel_id\n               WHERE c.name = ? AND c.removed_ms IS NULL\n                 AND o.sent_ms IS NULL AND o.dropped_ms IS NULL\n               ORDER BY o.created_ms, o.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "key",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "key"
+          }
+        }
+      },
+      {
+        "name": "event",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "event"
+          }
+        }
+      },
+      {
+        "name": "repo",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "repo"
+          }
+        }
+      },
+      {
+        "name": "item",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "item"
+          }
+        }
+      },
+      {
+        "name": "facts",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "facts"
+          }
+        }
+      },
+      {
+        "name": "created_ms",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "created_ms"
+          }
+        }
+      },
+      {
+        "name": "tries",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "tries"
+          }
+        }
+      },
+      {
+        "name": "last_error",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "last_error"
+          }
+        }
+      },
+      {
+        "name": "retry_at_ms",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notify_outbox",
+            "name": "retry_at_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "73d56046e4d36700475e055173b4a44e30f40f4c9aa16554968d89788e426596"
+}

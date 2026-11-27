@@ -124,6 +124,18 @@ impl Config {
     /// runs, so changing it while an item is in flight does not send that item to Needs you.
     #[must_use]
     pub fn repo_hash(&self, name: &str) -> Option<String> {
+        self.repo_hash_with(name, FastDeath::WhenNotDefault)
+    }
+
+    /// [`Config::repo_hash`] under the encoding before the fast-death keys existed: the
+    /// `fast_death/2` part is left out whatever its values, so a test can tell what a hash of a
+    /// configuration at their defaults must equal on any platform.
+    #[cfg(test)]
+    pub(crate) fn repo_hash_without_fast_death(&self, name: &str) -> Option<String> {
+        self.repo_hash_with(name, FastDeath::Never)
+    }
+
+    fn repo_hash_with(&self, name: &str, fast_death: FastDeath) -> Option<String> {
         let repo = self.repos.get(name)?;
         let identity = self.identities.get(&repo.identity)?;
         let mut canon = Canon::new("bosun-config/repo/1");
@@ -132,7 +144,7 @@ impl Config {
         canon.str(&repo.identity);
         self::identity(&mut canon, identity);
         budget(&mut canon, &self.budget);
-        daemon(&mut canon, &self.daemon);
+        daemon(&mut canon, &self.daemon, fast_death);
         extensions(&mut canon, repo);
         Some(canon.finish())
     }
@@ -311,7 +323,16 @@ fn budget(canon: &mut Canon, budget: &Budget) {
         .u64(budget.reserve_eqv);
 }
 
-fn daemon(canon: &mut Canon, daemon: &Daemon) {
+/// Whether the encoding has the fast-death part: `Never` only for the test-only encoding
+/// before the keys existed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FastDeath {
+    WhenNotDefault,
+    #[cfg_attr(not(test), allow(dead_code))]
+    Never,
+}
+
+fn daemon(canon: &mut Canon, daemon: &Daemon, fast_death: FastDeath) {
     canon
         .bool(daemon.auto_pause)
         .duration(daemon.auto_pause_idle)
@@ -326,9 +347,10 @@ fn daemon(canon: &mut Canon, daemon: &Daemon) {
     let defaults = Daemon::default();
     // Mutant (`mutant_config_fast_death_always_hashed`): they are encoded even at their
     // defaults, so every existing hash changes.
-    if cfg!(mutant_config_fast_death_always_hashed)
-        || daemon.fast_death_sessions != defaults.fast_death_sessions
-        || daemon.fast_death_within != defaults.fast_death_within
+    if fast_death == FastDeath::WhenNotDefault
+        && (cfg!(mutant_config_fast_death_always_hashed)
+            || daemon.fast_death_sessions != defaults.fast_death_sessions
+            || daemon.fast_death_within != defaults.fast_death_within)
     {
         canon
             .str("fast_death/2")

@@ -1406,8 +1406,14 @@ fn the_fast_death_keys_change_the_hash_only_when_not_default() {
     let hash = |text: &str| parse(text, &Local).unwrap().repo_hash("bosun").unwrap();
     let with = |daemon: &str| format!("[daemon]\npark_cap = 4\n{daemon}{}", with_repo(""));
     let bare = hash(&with(""));
-    // Computed with the encoding before the fast-death keys existed; `abs` makes the paths,
-    // and so the hash, platform-specific.
+    // At their defaults the keys leave the hash what the encoding before them gives, computed
+    // here from the same configuration, so this holds on every platform.
+    let before = parse(&with(""), &Local)
+        .unwrap()
+        .repo_hash_without_fast_death("bosun")
+        .unwrap();
+    assert_eq!(bare, before, "the encoding before the fast-death keys");
+    // And pinned, as an extra: `abs` makes the paths, and so the value, platform-specific.
     #[cfg(windows)]
     assert_eq!(
         bare,

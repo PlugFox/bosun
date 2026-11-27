@@ -58,7 +58,8 @@
 //! effort = "high"               # the sessions' default effort level; default: none passed
 //! verdict = { timeout = "30m" } # and `shell`, default `sh` (from Git on Windows)
 //! landing = { mode = "merge", target = "main", merge = { method = "squash", push = false } }
-//! worktree = { root = 'C:\wt\bosun', setup = "cargo fetch", disk_floor = "20GB", shared_build = { dir = 'C:\wt\bosun-target', resource = "target", env = "CARGO_TARGET_DIR" } }
+//! auto_pause = false           # default: `daemon.auto_pause`; false with a `worktree`
+//! worktree = { root ='C:\wt\bosun', setup = "cargo fetch", disk_floor = "20GB", shared_build = { dir = 'C:\wt\bosun-target', resource = "target", env = "CARGO_TARGET_DIR" } }
 //!
 //! [repo.bosun.policy]
 //! protected = ["tests/harness", "xtask/src/lint.rs"]  # `.gitignore` is always added
@@ -150,6 +151,13 @@
 //!   sweep may kill a process of your own with that name that you started while the attempt
 //!   ran. Default: no sweep. The key is its own opt-in, independent of `worktree`. (Not the
 //!   worktree sweep, which closes item worktrees nobody owns.)
+//! - `repo.<name>.auto_pause` (#7, #8): whether an interactive session in the repository's
+//!   checkout pauses it ([`Repo::auto_pause`]). Default: `daemon.auto_pause` for a repository
+//!   without `worktree`, and false for one with it: in worktree mode the items work in the
+//!   daemon's own clone and worktrees, not in the user's checkout, so the user's interactive work
+//!   and the items no longer share a tree; `true` keeps the pause. It decides when the loop
+//!   claims, not how an item runs, so it is not part of [`Config::repo_hash`]: changing it while
+//!   an item is in flight does not send that item to Needs you.
 //! - `[resource.<name>]` (#8): a resource items may name in `needs`. `kind` is required. They
 //!   are read at daemon start (an edit takes effect at the next start) and leased in worktree
 //!   mode: a card of a repository with `repo.<name>.worktree` may need them, and holds them from
@@ -305,6 +313,25 @@ pub struct Repo {
     pub worktree: Option<Worktree>,
     /// `sweep`: the process sweep after each attempt (#8, E12). Default `None`: no sweep.
     pub sweep: Option<Sweep>,
+    /// `auto_pause`: whether an interactive session in the checkout pauses the repository
+    /// (#7). Default `None`: see [`Repo::auto_pause`]. Not part of [`Config::repo_hash`].
+    pub auto_pause: Option<bool>,
+}
+
+impl Repo {
+    /// Whether an interactive session in the repository's checkout pauses it automatically:
+    /// `repo.<name>.auto_pause` when set; otherwise `false` for a repository with `worktree`,
+    /// whose items work in the daemon's own clone and never share a tree with the user (#8,
+    /// E5); otherwise `daemon.auto_pause`.
+    #[must_use]
+    pub fn auto_pause(&self, daemon: &Daemon) -> bool {
+        // Mutant (`mutant_config_auto_pause_worktree_default_on`): the worktree is ignored, and
+        // the global value is the default everywhere.
+        let worktree =
+            self.worktree.is_some() && !cfg!(mutant_config_auto_pause_worktree_default_on);
+        self.auto_pause
+            .unwrap_or(if worktree { false } else { daemon.auto_pause })
+    }
 }
 
 /// `repo.<name>.sweep` (#8, E12): what is killed after an attempt's session has ended.
@@ -680,6 +707,7 @@ pub fn parse(text: &str, probe: &dyn DiskProbe) -> Result<Config, Error> {
                         })
                     }),
                     sweep: r.sweep,
+                    auto_pause: r.auto_pause,
                 },
             ))
         })

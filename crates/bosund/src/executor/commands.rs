@@ -283,7 +283,8 @@ impl Loop {
                 Read::Revert => {
                     acted = true;
                     crate::log::log!(
-                        "bosund: repository {repo_name}: {id}: a change bosun did not make is                          reverted to {}",
+                        "bosund: repository {repo_name}: {id}: a change bosun did not make is \
+                         reverted to {}",
                         item.state.as_str()
                     );
                     self.revert(&item).await;

@@ -500,6 +500,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_census_ignores_allowance)",
   "cfg(mutant_git_census_reads_working_tree)",
   "cfg(mutant_git_census_cap_unchecked)",
+  # #7: the automatic pause per repository (`repo.<name>.auto_pause`), off by default in
+  # worktree mode and not part of the repository's configuration hash.
+  "cfg(mutant_config_auto_pause_worktree_default_on)",
+  "cfg(mutant_config_auto_pause_hashed)",
+  "cfg(mutant_control_auto_pause_global_only)",
 ] }
 
 [workspace.lints.clippy]

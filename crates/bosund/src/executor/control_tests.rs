@@ -67,7 +67,7 @@ impl Scene {
     }
 
     /// Registers the checkout as a repository root of the store, as the ingest does at start.
-    async fn register_root(&self) {
+    pub(super) async fn register_root(&self) {
         let key = self.config().repos["demo"].key.clone();
         self.store
             .writer()
@@ -81,7 +81,7 @@ impl Scene {
             .unwrap();
     }
 
-    async fn usage(&self, n: u64, session: &str, input: u64) {
+    pub(super) async fn usage(&self, n: u64, session: &str, input: u64) {
         let writes = message(n, session, self.clock.wall_ms(), input, &self.repo);
         self.store.writer().write(writes).await.unwrap();
     }

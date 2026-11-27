@@ -12,6 +12,10 @@
 //!   caps (the card's, else `[budget]`). An item over a cap is killed and goes to Needs you; the
 //!   figure is the `budget_exceeded` event, the daemon's log, and the item's note, which its
 //!   Needs-you comment and sticky report show (#111).
+//! - The automatic pause applies where [`bosun_config::Repo::auto_pause`] says so:
+//!   `repo.<name>.auto_pause` when set, otherwise off for a repository with `worktree` (its
+//!   items work in the daemon's clone, not in the user's checkout, #8 E5) and
+//!   `daemon.auto_pause` for one without. With it off, an automatic pause in force is lifted.
 
 use std::time::Duration;
 
@@ -181,7 +185,8 @@ impl Loop {
 
     /// The automatic pause: an interactive session (one bosun did not spawn) with a message in
     /// the checkout within `daemon.auto_pause_idle` pauses the repository until it has been
-    /// idle that long. Activity before a resume by hand does not count.
+    /// idle that long. Activity before a resume by hand does not count. Off for the repository
+    /// ([`bosun_config::Repo::auto_pause`]), an automatic pause in force is lifted.
     async fn auto_pause(&mut self, now: i64) {
         let config = self.config();
         let repo_name = self.shared.options.repo.clone();
@@ -190,7 +195,14 @@ impl Loop {
         };
         let control = &self.shared.deps.control;
         let mut until = None;
-        if config.daemon.auto_pause {
+        // Mutant (`mutant_control_auto_pause_global_only`): the global key decides for every
+        // repository, worktree mode included.
+        let on = if cfg!(mutant_control_auto_pause_global_only) {
+            config.daemon.auto_pause
+        } else {
+            repo.auto_pause(&config.daemon)
+        };
+        if on {
             let idle = i64::try_from(config.daemon.auto_pause_idle.as_millis()).unwrap_or(i64::MAX);
             let since = now.saturating_sub(idle);
             let resumed = control.resumed_at(&repo_name).unwrap_or(i64::MIN);

@@ -120,6 +120,8 @@ impl Config {
     /// the repository's own keys (its policy included), the identity it binds, `[budget]` and
     /// `[daemon]`. Other repositories, other identities, `[retention]` and the notices are not
     /// part of it, so editing them during a session does not disturb this repository's item.
+    /// Neither is `repo.<name>.auto_pause`: it decides when the loop claims, not how an item
+    /// runs, so changing it while an item is in flight does not send that item to Needs you.
     #[must_use]
     pub fn repo_hash(&self, name: &str) -> Option<String> {
         let repo = self.repos.get(name)?;
@@ -226,6 +228,14 @@ fn extensions(canon: &mut Canon, repo: &Repo) {
     // the hash it had before the key existed.
     if always || repo.effort.is_some() {
         canon.str("effort/2").opt_str(repo.effort.as_deref());
+    }
+    // `auto_pause` is deliberately absent (#7): it decides when the loop claims, not how an
+    // item runs, so changing it while an item is in flight must not send it to Needs you.
+    // Mutant (`mutant_config_auto_pause_hashed`): the key is encoded when set.
+    if cfg!(mutant_config_auto_pause_hashed)
+        && let Some(auto_pause) = repo.auto_pause
+    {
+        canon.str("auto_pause/2").bool(auto_pause);
     }
 }
 

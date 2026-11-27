@@ -104,7 +104,8 @@ fn script_path(args: &[String]) -> Result<PathBuf, String> {
         .map(|exe| exe.with_extension("script"))
         .filter(|script| script.is_file())
         .ok_or_else(|| {
-            "no script: pass --fake-script <path>, set FAKE_AGENT_SCRIPT, or put one next to the              executable"
+            "no script: pass --fake-script <path>, set FAKE_AGENT_SCRIPT, or put one next to the \
+             executable"
                 .to_owned()
         })
 }

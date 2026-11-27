@@ -479,7 +479,8 @@ pub(crate) fn auto_memory(name: &str, config_dir: &Path, root: &Path) -> Check {
             format!("repo.{name}: auto memory at {}", dir.display()),
         )
         .fix(
-            "bosun sessions no longer read or write it (#135); review it for notes that              sessions bosun ran before wrote, and remove what you did not mean to keep",
+            "bosun sessions no longer read or write it (#135); review it for notes that \
+             sessions bosun ran before wrote, and remove what you did not mean to keep",
         )
     } else {
         Check::ok(

@@ -384,7 +384,8 @@ fn identities_never_share_a_bundle_path() {
 #[test]
 fn landing_shapes_are_checked() {
     let found = problems(&with_repo(
-        "landing = { mode = 'push', target = 'refs/heads/main', merge = { method = 'rebase',          when = 'now' }, pr = { draft = 'yes', reviewers = [' x'], labels = [''], auto = 1 } }
+        "landing = { mode = 'push', target = 'refs/heads/main', merge = { method = 'rebase', \
+         when = 'now' }, pr = { draft = 'yes', reviewers = [' x'], labels = [''], auto = 1 } }
 ",
     ));
     let expected = [
@@ -1331,4 +1332,44 @@ fn a_census_policy_reads_its_glob_and_counters() {
         "6b58c1cfd201e82a3efcb3e28d636bb72f3e388a6d40fbfa7aedb08473d9260d"
     );
     assert_ne!(with.repos["bosun"].policy.hash(), without);
+}
+
+#[test]
+fn a_repositorys_auto_pause_defaults_to_the_global_value_without_a_worktree_and_off_with_one() {
+    let worktree = format!("worktree = {{ root = '{}' }}\n", abs("wt/bosun"));
+    let resolved = |daemon: &str, rest: &str| {
+        let config = parse(&format!("{daemon}{}", with_repo(rest)), &Local).unwrap();
+        config.repos["bosun"].auto_pause(&config.daemon)
+    };
+    let off = "[daemon]\nauto_pause = false\n";
+    // Without a worktree: the global value.
+    assert!(resolved("", ""));
+    assert!(!resolved(off, ""));
+    // With one: off, whatever the global value (mutant_config_auto_pause_worktree_default_on).
+    assert!(!resolved("", &worktree));
+    assert!(!resolved(off, &worktree));
+    // The repository's own value wins.
+    assert!(resolved("", &format!("{worktree}auto_pause = true\n")));
+    assert!(resolved(off, &format!("{worktree}auto_pause = true\n")));
+    assert!(!resolved("", "auto_pause = false\n"));
+    assert!(resolved(off, "auto_pause = true\n"));
+    let config = parse(&with_repo("auto_pause = false\n"), &Local).unwrap();
+    assert_eq!(config.repos["bosun"].auto_pause, Some(false));
+    assert!(config.notices.is_empty(), "{:?}", config.notices);
+
+    let found = problems(&with_repo("auto_pause = 'yes'\n"));
+    assert!(
+        found.iter().any(|p| p.contains("repo.bosun.auto_pause")),
+        "{found:?}"
+    );
+
+    // Not part of the configuration hash (mutant_config_auto_pause_hashed).
+    let hash = |text: &str| parse(text, &Local).unwrap().repo_hash("bosun").unwrap();
+    for base in [String::new(), worktree] {
+        let bare = hash(&with_repo(&base));
+        for value in ["true", "false"] {
+            let set = with_repo(&format!("{base}auto_pause = {value}\n"));
+            assert_eq!(hash(&set), bare, "{set}");
+        }
+    }
 }

@@ -3341,7 +3341,41 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_config_auto_pause_worktree_default_on",
+        issue: AUTO_PAUSE_CARD,
+        breaks: "a repository with `worktree` is paused automatically by default, as one without",
+        package: "bosun-config",
+        check: Check::Test(AUTO_PAUSE_CONFIG_TEST),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_auto_pause_hashed",
+        issue: AUTO_PAUSE_CARD,
+        breaks: "`repo.<name>.auto_pause` is part of the repository's configuration hash",
+        package: "bosun-config",
+        check: Check::Test(AUTO_PAUSE_CONFIG_TEST),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_control_auto_pause_global_only",
+        issue: AUTO_PAUSE_CARD,
+        breaks: "the loop pauses every repository by `daemon.auto_pause`, worktree mode included",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::auto_pause::a_worktree_repository_is_not_paused_by_interactive_work_unless_it_opts_in",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #7 that sets the automatic pause per repository (`repo.<name>.auto_pause`), off
+/// by default in worktree mode (its own number was not known when it was written; its parent's
+/// stands in).
+const AUTO_PAUSE_CARD: u32 = 7;
+
+/// The configuration test of that card, which hosts two mutants.
+const AUTO_PAUSE_CONFIG_TEST: &str = "tests::a_repositorys_auto_pause_defaults_to_the_global_value_without_a_worktree_and_off_with_one";
 
 /// The card of #7 that counts a repository's tests, assertions and switched-off tests at an
 /// item's base and at the commit its verdict judged (`repo.<name>.policy.census`) and sends a

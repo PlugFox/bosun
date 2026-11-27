@@ -14,8 +14,9 @@ loop may stay behind in the repository.
 ## Before you start
 
 - Let a run in progress finish, or stop it, before you change anything. Do not mix the two
-  loops on one checkout: bosun works in the repository's main checkout in stage 1, one item at a
-  time.
+  loops on one checkout: for a repository without `worktree` (stage 1), bosun works in the
+  repository's main checkout, one item at a time. With `worktree` it works in a clone of its own
+  ([Worktree mode](#worktree-mode)).
 - Keep the old run logs if you want them; bosun does not read them. It ingests the agent's own
   transcripts (stage 0, #6), including the sessions of past runs that the agent still keeps, and
   bills them correctly per turn.
@@ -96,11 +97,143 @@ push = false
   `.gitignore` line. Nothing is deleted.
 - `policy.push`: `false` by default; the agent's environment has no GitHub write credentials
   (#2).
-- `landing.mode`: `local`, the only mode in stage 1. The item's commits stay on the branch of
-  the main checkout.
+- `landing.mode`: `local`, the only mode for a repository without `worktree` (stage 1). The
+  item's commits stay on the branch of the main checkout. `merge` and `pr` need `worktree`
+  ([Worktree mode](#worktree-mode)).
 
 The policy and the repository's configuration are hashed at claim; a change of either during a
 session sends the item to Needs you.
+
+## Worktree mode
+
+Once a repository runs under bosun as above, it can move on from the main checkout: with
+`repo.<name>.worktree` (#8) the items no longer work in your checkout but in worktrees of a
+clone the daemon owns, so you can keep working in the checkout while an item runs. Without the
+key nothing below applies and the repository behaves as in stage 1.
+
+```toml
+[repo.app]
+path = 'C:\src\app'
+identity = 'personal'
+build_dirs = ["target"]
+queue = { kind = "projects", owner = "me", number = 1 }
+model = "opus"
+landing = { mode = "local" }  # or "merge", or "pr"
+worktree = { root = 'C:\wt\app', setup = "cargo fetch", disk_floor = "20GB", shared_build = { dir = 'C:\wt\app-target', resource = "target" } }
+
+[repo.app.policy]
+protected = ["tests/harness", "tools/gate.sh"]
+
+[resource.target]
+kind = "build-dir"
+capacity = 1                  # exclusive
+scope = "machine"             # or "identity", "repository"
+```
+
+### The clone and the worktrees
+
+- `worktree.root` is where the item worktrees go. It is required and lies outside the
+  repository's `path` (neither the path nor under it).
+- The daemon makes a bare clone at `<root>/.clone` whose origin is your checkout
+  (`C:\wt\app\.clone`, cloned from `C:\src\app`). Worktrees share refs and git configuration
+  with their repository, so they hang off this clone, never off your checkout. The clone owns
+  its objects (never `--shared`, never `--reference`); anything else found at its path is an
+  error and is left as it is.
+- A bare clone copies none of your checkout's local git configuration: not its filters, hooks,
+  `core.autocrlf`, LFS or submodule settings. The daemon writes only fixed values into the
+  clone's own configuration: the line-ending policy is pinned to git's defaults
+  (`core.autocrlf=false`, `core.eol=native`; the repository's `.gitattributes` still decides),
+  `core.longpaths=true` on Windows, and the Git LFS filter when `git lfs` is installed. What
+  you set globally or for the system applies to the clone as to any repository, except the
+  line endings. A repository that needs more prepares its worktrees with `setup`.
+- At claim the target branch is fetched from your checkout into the clone, fast-forward only: a
+  target you rewrote is an error, not an overwrite.
+- `setup` is a shell command run in each new worktree, the way a verdict runs; if it fails,
+  the item goes to Needs you with no session started and no worktree left behind. `teardown`
+  runs in a worktree before it is removed. `disk_floor` is the free space below which no new
+  worktree is made (sizes in `B`, `KB`, `MB`, `GB`, `TB` or `KiB`, `MiB`, `GiB`, `TiB`).
+
+### `shared_build` and resources
+
+- `worktree.shared_build` is the one build directory the repository's worktrees share. Its
+  `dir` is absolute and neither holds nor lies under the repository's `path` or `worktree.root`
+  (`cargo clean` deletes it whole); its `resource` names a `[resource.<name>]` with
+  `capacity = 1`. Every process the daemon starts in a worktree (setup, teardown, sessions,
+  verdicts) gets the directory as `env` (default `CARGO_TARGET_DIR`), under an exclusive lease
+  of the resource held from the session through the landing's re-verdict.
+- It is the default for Rust: per-worktree targets cost disk (12-15 GB each). Leaving out
+  `shared_build` gives each worktree its own build directory, the opt-in of a repository that
+  raises concurrency.
+- `[resource.<name>]` declares something items lease: `kind` (required, free text such as
+  `build-dir`, `gpu`, `device`), `capacity` (holders at once, default 1, exclusive) and
+  `scope`, what it is shared within: `machine` (the default), `identity` or `repository`.
+  Resources are read at daemon start; an edit takes effect at the next start.
+- A card names the resources it needs in its `bosun` block (`needs = ["device"]`) and holds
+  them from before its first session until it leaves the loop. Only a card of a repository
+  with `worktree` may need one; without it `bosun lint` refuses the card, as in stage 1.
+
+### `bosun with`
+
+Interactive work that needs the same resource takes the daemon's lease instead of a lock file
+of its own:
+
+```sh
+bosun with target -- cargo build
+bosun with --repo app device -- ./flash.sh
+```
+
+`bosun with [--repo <name>] <resource>... -- <command> [args...]` waits until the whole set is
+granted (saying so on stderr), runs the command with your terminal, releases the lease and
+exits with the command's exit code. A daemon that cannot be reached or refuses is an error and
+the command is not run; Ctrl-C while waiting withdraws the request. A daemon restart is
+survived. With several identities configured, `--identity` (or `--repo`) says whose lease it
+is.
+
+### Landing
+
+`landing.mode` says how a verified item's commits reach the target (`landing.target`, default
+the branch the item was claimed from):
+
+- `local` (the default): `merge` with the method `ff` and no push.
+- `merge`: `merge.method` is `ff` (default), `squash` or `no-ff`; `merge.push` stays `false`
+  (`true` is not available yet).
+- `pr`: the verified head is pushed to the branch `bosun/<slug>` of `origin`, under the
+  identity's credentials, and a pull request into the target is opened (`pr.draft`, default
+  true; `pr.reviewers`, `pr.labels`). The item is based on and rebased onto the target as it is
+  on the forge, never your local branch. Nothing is merged: your target and your checkout never
+  move.
+
+In `local` and `merge` the daemon's clone offers the verified commit, your repository fetches
+it (objects only), and the target is fast-forwarded there: by ref when no checkout has it
+checked out, by `merge --ff-only` in a clean checkout. A dirty or busy checkout of the target
+defers the landing: it is reported once and retried while the item stays in Landing, and the
+repository claims nothing meanwhile. A target you committed on in the meantime is rebased onto
+and verified again before it lands.
+
+### The protected list
+
+`policy.protected`, `.gitignore` (always protected) and a card's `allow-protected` apply in
+worktree mode as before: an item whose commits touch a protected path goes to Needs you
+without a verdict.
+
+### What your checkout sees
+
+- No ref of the daemon's: the item refs under `refs/bosun/` exist only in the clone.
+- At landing, the objects of the landed commit are fetched into your repository (and the Git
+  LFS objects it points to); no `FETCH_HEAD` is written, and no gc or maintenance is started
+  there.
+- The target moves only by a clean fast-forward, and in `pr` mode not at all.
+- Your own commits and edits in the checkout do not send an item to Needs you (edits are
+  reported); switching the checkout's branch while an item runs does, before its verdict.
+
+### The automatic pause
+
+For a repository without `worktree`, an interactive session in its checkout pauses it
+(`daemon.auto_pause`, default on) until the session has been idle for `daemon.auto_pause_idle`.
+In worktree mode the items and your interactive work no longer share a tree, so the automatic
+pause is off by default. Set `repo.<name>.auto_pause = true` to keep it (or `false` to turn it
+off for one repository without `worktree`). The key is not part of the repository's
+configuration hash: changing it does not disturb an item in flight.
 
 ## Checklist
 
@@ -112,3 +245,7 @@ session sends the item to Needs you.
 4. Turn each queue-file item into a card with a `bosun` block, run `bosun lint` on it, and move it
    to Ready.
 5. Run `bosun doctor`: `stop_hook` is `ok` for the repository, and no check fails.
+6. Optionally, once items land as you expect, move the repository to worktree mode: add
+   `worktree` (a `root` outside the repository, `setup`, a `shared_build` with its
+   `[resource.<name>]`), choose `landing.mode`, and set `repo.<name>.auto_pause = true` if you
+   still want your interactive sessions to pause it ([Worktree mode](#worktree-mode)).

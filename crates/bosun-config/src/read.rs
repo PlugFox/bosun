@@ -85,6 +85,7 @@ pub(crate) struct DraftRepo {
     pub(crate) mcp_servers: BTreeMap<String, McpServer>,
     pub(crate) worktree: Option<DraftWorktree>,
     pub(crate) sweep: Option<Sweep>,
+    pub(crate) auto_pause: Option<bool>,
 }
 
 /// `repo.<name>.landing`, with where its mode and `merge.push` are written, for the checks
@@ -405,6 +406,7 @@ impl Reader<'_> {
             mcp_servers: BTreeMap::new(),
             worktree: None,
             sweep: None,
+            auto_pause: None,
         };
         let Some(table) = item.as_table_like() else {
             return repo;
@@ -449,6 +451,7 @@ impl Reader<'_> {
                         repo.sweep = Some(self.sweep(table, &what));
                     }
                 }
+                "auto_pause" => repo.auto_pause = self.bool(item, &what),
                 _ => self.ignored(key_at, &what),
             }
         }
@@ -476,7 +479,8 @@ impl Reader<'_> {
             self.problem(
                 at,
                 format!(
-                    "`{path}` has a `queue` and no `model`: the default model of its sessions,                      e.g. `model = \"opus\"`"
+                    "`{path}` has a `queue` and no `model`: the default model of its sessions, \
+                     e.g. `model = \"opus\"`"
                 ),
             );
         }

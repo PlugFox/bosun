@@ -3970,6 +3970,60 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("detect::files::tests::a_window_below_the_minimum_sample_fires_nothing"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_propose_on_first_sight",
+        issue: 226,
+        breaks: "a finding is a proposal at its first evaluation",
+        package: "bosun-heat",
+        check: Check::Test("reconcile::tests::a_finding_seen_once_is_not_yet_a_proposal"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_no_rate_limit",
+        issue: 226,
+        breaks: "every candidate is promoted, past 3 per evaluation and 10 active",
+        package: "bosun-heat",
+        check: Check::Test("reconcile::tests::the_rate_limit_keeps_the_largest_findings"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_reconcile_no_dedup",
+        issue: 226,
+        breaks: "a finding of an active proposal opens a second sighting",
+        package: "bosun-heat",
+        check: Check::Test(
+            "reconcile::tests::a_detector_does_not_fire_twice_for_the_same_file_while_open",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_expire_never",
+        issue: 226,
+        breaks: "an open proposal not seen for two windows never expires",
+        package: "bosun-heat",
+        check: Check::Test("reconcile::tests::an_open_proposal_not_seen_for_two_windows_expires"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_evidence_unredacted",
+        issue: 226,
+        breaks: "a proposal's evidence is stored unredacted",
+        package: "bosun-heat",
+        check: Check::Test(
+            "reconcile::tests::evidence_is_redacted_and_capped_before_it_is_written",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_evaluate_other_identity",
+        issue: 226,
+        breaks: "heat.evaluate for one identity evaluates every identity",
+        package: "bosund",
+        check: Check::Test(
+            "heat_tests::an_evaluation_stores_proposals_only_in_the_identity_that_owns_the_repository",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

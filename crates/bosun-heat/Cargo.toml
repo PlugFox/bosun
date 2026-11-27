@@ -12,12 +12,13 @@ publish.workspace = true
 bosun-api = { path = "../bosun-api" }
 bosun-core = { path = "../bosun-core" }
 bosun-store = { path = "../bosun-store" }
+# The evidence and parameters of a proposal, stored as JSON.
+serde_json.workspace = true
 
 # The tests ingest the synthetic corpus into a real store and compare the report with a
 # committed golden file.
 [dev-dependencies]
 bosun-ingest = { path = "../bosun-ingest" }
-serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 

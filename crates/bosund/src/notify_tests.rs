@@ -93,7 +93,7 @@ impl World {
             .unwrap_or_else(|e| panic!("{method} {params}: {e}"))
     }
 
-    async fn refused(&self, method: &str, params: Value) -> i64 {
+    pub(crate) async fn refused(&self, method: &str, params: Value) -> i64 {
         let error = self.call(method, params).await.unwrap_err();
         error["code"].as_i64().unwrap()
     }

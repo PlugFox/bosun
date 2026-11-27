@@ -613,6 +613,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_heat_d3_rank_by_opens)",
   "cfg(mutant_heat_exec_counts_as_read)",
   "cfg(mutant_heat_no_minimum_sample)",
+  "cfg(mutant_heat_propose_on_first_sight)",
+  "cfg(mutant_heat_no_rate_limit)",
+  "cfg(mutant_heat_reconcile_no_dedup)",
+  "cfg(mutant_heat_expire_never)",
+  "cfg(mutant_heat_evidence_unredacted)",
+  "cfg(mutant_heat_evaluate_other_identity)",
 ] }
 
 [workspace.lints.clippy]

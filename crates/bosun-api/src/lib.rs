@@ -33,6 +33,8 @@
 //! | `report.exact` | [`ReportParams`] | [`Report`] |
 //! | `report.estimates` | [`ReportParams`] | [`Estimates`] |
 //! | `heat.metrics` | [`ReportParams`] | [`HeatMetrics`] |
+//! | `heat.evaluate` | [`HeatEvaluateParams`] | [`HeatEvaluation`] |
+//! | `heat.list` | [`HeatListParams`] | [`HeatProposals`] |
 //! | `events.subscribe` | [`SubscribeParams`] | [`SubscribeResult`], then the notifications of [`event`] |
 //! | `agent.hello` | [`AgentHelloParams`] | [`AgentHelloResult`] |
 //! | `agent.ask_question` | [`AskQuestionParams`] | [`AgentAck`] |
@@ -102,7 +104,10 @@ pub use event::{
     Event, EventBody, EventFilter, OutputStream, Resync, ResyncReason, SubscribeParams,
     SubscribeResult, Tail,
 };
-pub use heat::{HeatMetric, HeatMetrics};
+pub use heat::{
+    HeatEvaluateParams, HeatEvaluation, HeatInsufficient, HeatListParams, HeatMetric, HeatMetrics,
+    HeatProposals, HeatRepoEvaluation, ProposalView,
+};
 pub use item::{
     AgentCallView, AttemptView, ContextSize, ItemDetail, ItemParams, RestartParams, RestartResult,
     SessionInfo, SessionParams, SessionTail, SnapshotView, TailParams, TransitionView, VerdictView,
@@ -247,6 +252,20 @@ pub mod method {
         crate::ReportParams,
         crate::HeatMetrics,
         "The generic metrics of each repository over the range, per provider and session kind:      eqv per commit, context at session start, repeated reads and the cost of finding per      session, the share of cache reads, the tool error rate, time parked and the flaky verdict      rate per closed item. Each says whether it is exact or an estimate and whether it compares      across providers."
+    );
+    method!(
+        HeatEvaluate,
+        "heat.evaluate",
+        crate::HeatEvaluateParams,
+        crate::HeatEvaluation,
+        "Runs heat's detectors now over the 14 days before, for one repository of the identity      or each of them, and reconciles their findings with the stored proposals: a finding seen      in two evaluations in a row becomes a proposal, within 3 new per evaluation and 10 active      per repository. Returns what it did, per repository."
+    );
+    method!(
+        HeatList,
+        "heat.list",
+        crate::HeatListParams,
+        crate::HeatProposals,
+        "The identity's heat proposals: active ones (open, published, landed), or every state      with `all`. Each holds its metric, value, threshold, target and window in exact units."
     );
     method!(
         EventsSubscribe,
@@ -462,6 +481,8 @@ pub const METHODS: &[&str] = &[
     method::ReportExact::NAME,
     method::ReportEstimates::NAME,
     method::HeatMetrics::NAME,
+    method::HeatEvaluate::NAME,
+    method::HeatList::NAME,
     method::EventsSubscribe::NAME,
     method::AgentHello::NAME,
     method::AgentAskQuestion::NAME,
@@ -778,6 +799,8 @@ pub fn schema() -> Value {
     add_method::<method::ReportExact>(&mut generator, &mut methods);
     add_method::<method::ReportEstimates>(&mut generator, &mut methods);
     add_method::<method::HeatMetrics>(&mut generator, &mut methods);
+    add_method::<method::HeatEvaluate>(&mut generator, &mut methods);
+    add_method::<method::HeatList>(&mut generator, &mut methods);
     add_method::<method::EventsSubscribe>(&mut generator, &mut methods);
     add_method::<method::AgentHello>(&mut generator, &mut methods);
     add_method::<method::AgentAskQuestion>(&mut generator, &mut methods);

@@ -77,3 +77,124 @@ pub struct HeatMetric {
     /// Whether the figure can be compared between providers.
     pub runner_comparable: bool,
 }
+
+/// Params of `heat.evaluate`: an identity and, optionally, one of its repositories by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HeatEvaluateParams {
+    pub identity: String,
+    /// A repository's name in the configuration; every repository of the identity when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
+/// Result of `heat.evaluate`: what the evaluation did, per repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HeatEvaluation {
+    pub identity: String,
+    /// The evaluation's time: the window is the 14 days before it.
+    pub at_ms: i64,
+    /// By repository, in configuration order.
+    pub repos: Vec<HeatRepoEvaluation>,
+}
+
+/// One repository's evaluation, in counts. A finding seen once is a sighting, not listed by
+/// `heat.list`; seen at the next evaluation again it is promoted to a proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HeatRepoEvaluation {
+    pub repo: RepoRef,
+    /// The detectors' findings.
+    pub findings: u64,
+    /// New sightings stored.
+    pub sightings: u64,
+    /// Sightings found again and promoted to proposals.
+    pub promoted: u64,
+    /// Sightings found again the rate limit held back (3 per evaluation, 10 active).
+    pub held_back: u64,
+    /// Proposals found again.
+    pub seen: u64,
+    /// Sightings not found again, forgotten.
+    pub forgotten: u64,
+    /// Open proposals not found for two windows, expired.
+    pub expired: u64,
+    /// Findings of a subject in its 90-day cooldown, dropped.
+    pub cooled_down: u64,
+    /// Findings of no known subject kind, or repeated.
+    pub skipped: u64,
+    /// The detectors silent below the minimum sample.
+    pub insufficient: Vec<HeatInsufficient>,
+    /// Why this repository's evaluation failed; its counts are then zero and nothing was
+    /// written for it.
+    pub error: Option<String>,
+}
+
+/// A detector silent in one provider's group below the minimum sample.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HeatInsufficient {
+    pub detector: String,
+    pub provider: String,
+    pub closed_items: u64,
+    pub run_sessions: u64,
+}
+
+/// Params of `heat.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HeatListParams {
+    pub identity: String,
+    /// A repository's name in the configuration; every repository of the identity when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// Every state, not only the active ones (`open`, `published`, `landed`).
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// Result of `heat.list`: the identity's proposals (findings seen in two evaluations in a row).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HeatProposals {
+    pub identity: String,
+    /// By creation, oldest first.
+    pub proposals: Vec<ProposalView>,
+}
+
+/// One proposal: a metric of one subject over a window, its value, threshold and target, all in
+/// exact units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProposalView {
+    /// The proposal's key: what a user names it by.
+    pub key: String,
+    pub repo: RepoRef,
+    pub provider: String,
+    pub detector: String,
+    pub detector_version: u32,
+    /// The class of remedy proposed.
+    pub remedy: String,
+    /// `file`, `dir`, `test`, `tool_target`, `command` or `repo`.
+    pub subject_kind: String,
+    /// A repository-relative path for a file or a directory.
+    pub subject: String,
+    pub metric: String,
+    pub unit: String,
+    /// `true` for a metric guessed from bytes; a trigger is always exact.
+    pub estimate: bool,
+    /// The metric's value over the window, in `unit`.
+    pub baseline_value: i64,
+    /// The threshold the value reached.
+    pub threshold: i64,
+    /// The value the remedy aims at.
+    pub target_value: i64,
+    pub window_from_ms: i64,
+    pub window_to_ms: i64,
+    /// The observations the value is computed from.
+    pub sample: u64,
+    /// An ESTIMATE of the tokens at stake, for ranking and display only: never added to an
+    /// exact figure.
+    pub impact_eqv_estimate: Option<u64>,
+    /// `open`, `published`, `landed`, `measured`, `dismissed` or `expired`.
+    pub state: String,
+    pub created_ms: i64,
+    pub last_seen_ms: i64,
+    /// The evaluations that found it.
+    pub seen_count: u64,
+    /// The evidence, redacted lines.
+    pub evidence: Vec<String>,
+}

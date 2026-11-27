@@ -22,19 +22,28 @@
 //!
 //! [`detect`] runs the detectors of heat (#11 D) over the same rows: deterministic rules, each
 //! with a threshold and a named remedy class, silent below a minimum sample.
+//!
+//! [`reconcile`] turns one evaluation's findings into the writes of heat's proposals: a
+//! finding is a proposal at the second evaluation in a row, deduplicated, cooled down and
+//! rate-limited. [`evaluate`] reads one repository's window and returns that batch; the daemon
+//! writes it.
 
 mod curve;
 mod detect;
 mod estimate;
+mod evaluate;
 mod exact;
 mod items;
 mod metrics;
+mod reconcile;
 
 pub use detect::{
     Detection, Detector, Evidence, FILE_READ_ACROSS_RUNS, FILE_REREAD_IN_SESSION, FileEvidence,
     Finding, Insufficient, Thresholds, UNCHANGED_FILE_READ_BYTES, detect,
 };
 pub use estimate::{BYTES_PER_TOKEN, estimates};
+pub use evaluate::{Evaluation, WINDOW_MS, evaluate};
 pub use exact::{Scope, exact};
 pub use items::item_row;
 pub use metrics::{Exactness, Inputs, Metric, heat_metrics, metrics};
+pub use reconcile::{EVIDENCE_CAP, MAX_ACTIVE, MAX_NEW, Reconciled, Summary, reconcile};

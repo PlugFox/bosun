@@ -60,6 +60,8 @@ pub(crate) struct Served {
     pub(crate) commits: Commits,
     /// Its timer task; aborted at shutdown.
     pub(crate) commit_task: JoinHandle<()>,
+    /// Heat's evaluations of the repositories (#11 D): only `heat.evaluate` runs one.
+    pub(crate) heat: crate::heat::Heat,
     /// The identity's events; the loop (#62) publishes here too.
     pub(crate) events: Events,
     /// This start's number in the identity's store: what crash recovery (#68) runs under.
@@ -406,6 +408,8 @@ pub(crate) async fn open(
         identities.insert(
             plan.identity.clone(),
             Served {
+                // Before `repos` and `store`, which move into the struct below.
+                heat: crate::heat::Heat::of(&store, repos.clone()),
                 name: plan.identity,
                 database: plan.database,
                 transcripts: plan.claude_projects,

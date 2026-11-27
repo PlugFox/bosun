@@ -59,6 +59,9 @@ mod doctor;
 mod events;
 mod executor;
 mod health;
+mod heat;
+#[cfg(test)]
+mod heat_tests;
 mod item;
 mod leases;
 mod listen;

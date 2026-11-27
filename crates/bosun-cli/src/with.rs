@@ -1,10 +1,28 @@
-//! `bosun with [--repo <name>] <resource>... -- <command> [args...]` (#8, "Leases"; E16): runs a
-//! command under the daemon's leases of the named resources, the leases items take, so
-//! interactive work and scripts need no lock files of their own.
+//! `bosun with [--repo <name>] [--wait <dur>] [--timeout <dur>] <resource>... -- <command>
+//! [args...]` (#8, "Leases"; E16; #207): runs a command under the daemon's leases of the named
+//! resources, the leases items take, so interactive work and scripts need no lock files of
+//! their own.
 //!
 //! - It connects, reads the operator token (as `pause` does, `control.rs`) and asks
 //!   `lease.acquire` for its own pid; it polls every [`POLL`] until the whole set is granted,
 //!   saying on stderr when it starts waiting and how long it waited.
+//! - `--wait <dur>` (`<digits><s|m|h|d>`, `time.rs`) bounds that wait, measured from the first
+//!   `lease.acquire`; `0s` asks once and does not wait. When the set is not granted by then
+//!   (also in the middle of a reconnect), the request is withdrawn as after Ctrl-C (below),
+//!   the command is not run and the exit code is 75 ([`exit::NOT_GRANTED`], sysexits'
+//!   `EX_TEMPFAIL`, "try again later"). Without it the wait is unbounded.
+//! - `--timeout <dur>` (more than zero) bounds the command, measured from its start. Past it,
+//!   `bosun` kills the command's process tree, waits for it to end, releases the lease and
+//!   exits 124 ([`exit::TIMED_OUT`], GNU `timeout`'s code). On Windows the kill is
+//!   `%SystemRoot%\System32\taskkill.exe /T /F /PID <pid>`: `/T` follows parent pids, so a
+//!   descendant whose parent already ended is not reached (a Job object would reach it, but
+//!   that is `unsafe` FFI, not in a client crate). On Unix it is `SIGKILL` to the command's pid
+//!   through `kill`, and its descendants are not reached. A kill that fails is said on stderr
+//!   and `bosun` keeps waiting for the command: it never runs on without the lease.
+//! - Inside a verdict: 75 is the conventional "not ready" code (sysexits' `EX_TEMPFAIL`) that a
+//!   repository can declare as its verdict's not-ready exit (`repo.<name>.verdict.unready_exit`,
+//!   #204), so a verdict whose `bosun with --wait` runs out is then retried uncounted instead of
+//!   failing; 124 (`--timeout`) is a failure like any other non-zero exit.
 //! - Then it runs the command with inherited standard input, output and error, waits for it,
 //!   releases the lease (`lease.release`) and exits with the command's exit code; a command
 //!   killed by a signal is 128 + the signal, as a shell reports it.
@@ -34,6 +52,11 @@
 //!   `.COM;.EXE;.BAT;.CMD`), so `npm`, `yarn` or `gradlew` find their `.cmd` or `.bat`. The
 //!   standard library runs a `.bat`/`.cmd` through `cmd.exe` with its own argument escaping and
 //!   refuses an argument it cannot escape safely; that refusal is "cannot run".
+//! - On Windows a program `bash` or `sh` (bare, in any case, with or without `.exe`) is Git for
+//!   Windows' `bin\bash.exe` / `bin\sh.exe` (else `usr\bin\...`) of the installation `git.exe`
+//!   on `PATH` belongs to, found as the verdict shell's `sh` is (`bosun_config::tools::git_shell`):
+//!   the first `bash.exe` on `PATH` is often `System32\bash.exe`, the WSL launcher, which may
+//!   hang. Found nowhere, it is looked up as any program; a path (`.\bash`) is spawned as given.
 //! - Windows limitation: `taskkill /F` of `bosun.exe` alone leaves the command running without
 //!   the lease. Ending it with `bosun` needs a Job object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`),
 //!   that is `unsafe` FFI, which a client crate does not have. Closing the console ends both.
@@ -52,6 +75,7 @@ use bosun_api::{AcquireParams, Method, ReleaseParams, method};
 use bosun_client::{Client, Error};
 use clap::Args;
 
+use crate::time::Span;
 use crate::{Failure, Global, exit, identities};
 
 /// How often a waiting request is asked about, and how often a lost daemon is reconnected to.
@@ -75,6 +99,14 @@ pub(crate) struct WithArgs {
     /// The resources to lease, by their names in the configuration (`[resource.<name>]`).
     #[arg(value_name = "RESOURCE", required = true, num_args = 1..)]
     resources: Vec<String>,
+    /// Gives up when the leases are not granted within this long (30s, 10m, 2h, 1d; 0s: do
+    /// not wait): the request is withdrawn, the command is not run, and the exit code is 75.
+    #[arg(long, value_name = "DUR", value_parser = crate::time::parse_wait)]
+    wait: Option<Span>,
+    /// Kills the command's process tree when it runs longer than this (more than zero); the
+    /// leases are released and the exit code is 124.
+    #[arg(long, value_name = "DUR", value_parser = crate::time::parse_timeout)]
+    timeout: Option<Span>,
     /// The command and its arguments, after `--`.
     #[arg(value_name = "COMMAND", required = true, last = true, num_args = 1..)]
     command: Vec<String>,
@@ -147,6 +179,14 @@ where
     };
     let mut interrupts = interrupts()?;
     let started = Instant::now();
+    let deadline = if cfg!(mutant_cli_with_wait_unbounded) {
+        // Mutant (`mutant_cli_with_wait_unbounded`): `--wait` is ignored and the wait goes on.
+        None
+    } else {
+        args.wait
+            .as_ref()
+            .map(|wait| tokio::time::Instant::now() + wait.duration)
+    };
     let first = match daemon.call::<method::LeaseAcquire>(&ask).await {
         Ok(answer) => answer,
         Err(refused) => {
@@ -176,13 +216,18 @@ where
                     } else {
                         daemon.call::<method::LeaseAcquire>(&ask).await
                     }
-                } => Some(polled),
-                () = interrupts.recv() => None,
+                } => Ok(polled),
+                () = interrupts.recv() => Err(Stopped::Interrupted),
+                () = until(deadline) => Err(Stopped::OutOfTime),
             };
-            let Some(polled) = polled else {
-                let withdrawn = daemon.interrupted(&release, &mut interrupts).await;
-                eprintln!("bosun: {}", withdrawal_note(&names, &withdrawn));
-                return Ok(INTERRUPTED);
+            let polled = match polled {
+                Ok(polled) => polled,
+                Err(stopped) => {
+                    let withdrawn = daemon.interrupted(&release, &mut interrupts).await;
+                    let (note, code) = stopped.note(&names, args.wait.as_ref(), &withdrawn);
+                    eprintln!("bosun: {note}");
+                    return Ok(code);
+                }
             };
             match polled {
                 Ok(answer) if answer.granted => break,
@@ -204,28 +249,8 @@ where
             started.elapsed().as_secs_f64()
         );
     }
-    let ran = run_under_lease(&args.command).await;
-    let released = if cfg!(mutant_cli_with_release_not_reconnected) {
-        // Mutant (`mutant_cli_with_release_not_reconnected`): the release is sent once on the
-        // connection it has, so a restarted daemon never hears it.
-        daemon
-            .client
-            .call::<method::LeaseRelease>(&release(&daemon.operator))
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    } else {
-        daemon
-            .call::<method::LeaseRelease>(&release)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.message)
-    };
-    if let Err(e) = released {
-        eprintln!(
-            "bosun: the lease of {names} is not released ({e}); the daemon releases it as this process ends"
-        );
-    }
+    let ran = run_under_lease(&args.command, args.timeout.as_ref()).await;
+    daemon.release(&release).await;
     ran
 }
 
@@ -242,14 +267,59 @@ struct Daemon<C> {
     restarts: u32,
 }
 
+/// Why a wait ended before the grant.
+enum Stopped {
+    /// Ctrl-C.
+    Interrupted,
+    /// `--wait` ran out.
+    OutOfTime,
+}
+
+impl Stopped {
+    /// What `bosun` says and the exit code, given `--wait` and how the withdrawal went.
+    fn note(
+        &self,
+        names: &str,
+        wait: Option<&Span>,
+        withdrawn: &Result<(), String>,
+    ) -> (String, i32) {
+        match self {
+            Self::Interrupted => (withdrawal_note(names, withdrawn), INTERRUPTED),
+            Self::OutOfTime => (
+                format!(
+                    "{names} not granted within {}; the request {}",
+                    wait.map_or("", |w| w.text.as_str()),
+                    withdrawn_tail(withdrawn)
+                ),
+                i32::from(exit::NOT_GRANTED),
+            ),
+        }
+    }
+}
+
+/// Done at `deadline`; never without one.
+async fn until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// What `bosun` says after Ctrl-C while waiting, given how the withdrawal went.
 fn withdrawal_note(names: &str, withdrawn: &Result<(), String>) -> String {
+    format!(
+        "interrupted; the request for {names} {}",
+        withdrawn_tail(withdrawn)
+    )
+}
+
+/// How a withdrawal went, as the end of a sentence about the request.
+fn withdrawn_tail(withdrawn: &Result<(), String>) -> String {
     match withdrawn {
-        Ok(()) => format!("interrupted; the request for {names} is withdrawn"),
-        Err(e) => format!(
-            "interrupted; the request for {names} may not be withdrawn ({e}); the daemon drops \
-             it as this process ends"
-        ),
+        Ok(()) => "is withdrawn".to_owned(),
+        Err(e) => {
+            format!("may not be withdrawn ({e}); the daemon drops it as this process ends")
+        }
     }
 }
 
@@ -301,6 +371,32 @@ where
                 // The daemon did not restart: the token is simply refused.
                 return Err(Failure::from(error));
             }
+        }
+    }
+
+    /// Releases the lease after the command (reconnecting as [`Daemon::call`] does); a release
+    /// that fails is said on stderr, and the command's exit code stands.
+    async fn release(&mut self, release: impl Fn(&str) -> ReleaseParams) {
+        let released = if cfg!(mutant_cli_with_release_not_reconnected) {
+            // Mutant (`mutant_cli_with_release_not_reconnected`): the release is sent once on
+            // the connection it has, so a restarted daemon never hears it.
+            self.client
+                .call::<method::LeaseRelease>(&release(&self.operator))
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            self.call::<method::LeaseRelease>(&release)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.message)
+        };
+        if let Err(e) = released {
+            eprintln!(
+                "bosun: the lease of {} is not released ({e}); the daemon releases it as this \
+                 process ends",
+                self.names
+            );
         }
     }
 
@@ -380,35 +476,104 @@ where
 }
 
 /// Runs `command` while the lease is held: its exit code. On Unix a SIGTERM or SIGHUP to
-/// `bosun` meanwhile is passed on to the command, and `bosun` keeps waiting for it.
-async fn run_under_lease(command: &[String]) -> Result<i32, Failure> {
-    #[cfg(unix)]
+/// `bosun` meanwhile is passed on to the command, and `bosun` keeps waiting for it. Past
+/// `timeout` the command's process tree is killed and, once it ended, the code is
+/// [`exit::TIMED_OUT`].
+async fn run_under_lease(command: &[String], timeout: Option<&Span>) -> Result<i32, Failure> {
     let mut stops = Stops::new()?;
     let mut child = spawn_command(
         command,
         std::env::var_os("PATH").as_deref(),
         std::env::var_os("PATHEXT").as_deref(),
     )?;
+    // The command's pid stays its own until `wait` returns: the `Child` is not waited yet (on
+    // Windows it holds the process handle, so the pid is not reused).
     let pid = child.id();
     let waited = tokio::task::spawn_blocking(move || child.wait());
     tokio::pin!(waited);
-    #[cfg(unix)]
+    let kill_at = if cfg!(mutant_cli_with_timeout_ignored) {
+        // Mutant (`mutant_cli_with_timeout_ignored`): `--timeout` is ignored and the command
+        // runs as long as it likes.
+        None
+    } else {
+        timeout.map(|t| tokio::time::Instant::now() + t.duration)
+    };
+    let mut timed_out = false;
     let status = loop {
         tokio::select! {
             biased;
             status = &mut waited => break status,
             signal = stops.recv() => forward(pid, signal),
+            () = until(kill_at), if !timed_out => {
+                timed_out = true;
+                let limit = timeout.map_or("", |t| t.text.as_str());
+                match kill_tree(pid) {
+                    Ok(()) => eprintln!(
+                        "bosun: the command ran past --timeout {limit}; its process tree was killed"
+                    ),
+                    Err(e) => eprintln!(
+                        "bosun: the command ran past --timeout {limit}, but its process tree \
+                         could not be killed ({e}); waiting for it to end"
+                    ),
+                }
+            }
         }
-    };
-    #[cfg(not(unix))]
-    let status = {
-        let _ = pid;
-        waited.await
     };
     let status = status
         .map_err(|e| Failure::new(exit::FAILED, e.to_string()))?
         .map_err(|e| Failure::new(exit::FAILED, format!("waiting for the command: {e}")))?;
+    if timed_out {
+        return Ok(i32::from(exit::TIMED_OUT));
+    }
     Ok(exit_code(status))
+}
+
+/// Kills the process tree of `pid`: on Windows `taskkill /T /F` (from `%SystemRoot%`, not
+/// `PATH`), which follows parent pids and so misses a descendant whose parent already ended;
+/// on Unix `SIGKILL` to `pid` alone, through `kill`.
+fn kill_tree(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    let mut kill = {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let taskkill = Path::new(&root).join("System32").join("taskkill.exe");
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the CLI ends the process tree of the command it started"
+        )]
+        let mut kill = std::process::Command::new(taskkill);
+        if cfg!(mutant_cli_with_timeout_kills_only_the_command) {
+            // Mutant (`mutant_cli_with_timeout_kills_only_the_command`): no `/T`, so the
+            // command's children run on.
+            kill.arg("/F");
+        } else {
+            kill.args(["/T", "/F"]);
+        }
+        kill.arg("/PID").arg(pid.to_string());
+        kill
+    };
+    #[cfg(not(windows))]
+    let mut kill = {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the CLI ends the command it started"
+        )]
+        let mut kill = std::process::Command::new("kill");
+        kill.arg("-KILL").arg(pid.to_string());
+        kill
+    };
+    let output = kill
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
 /// Runs `command` with inherited standard streams and waits for it: its exit code. The program
@@ -444,7 +609,7 @@ fn spawn_command(
         .split_first()
         .ok_or_else(|| Failure::new(exit::USAGE, "no command after --"))?;
     let resolved = if cfg!(windows) {
-        resolve(program, path, pathext, Path::is_file)
+        windows_program(program, path, pathext)
     } else {
         let _ = (path, pathext);
         None
@@ -458,6 +623,40 @@ fn spawn_command(
         None => std::process::Command::new(program).args(rest).spawn(),
     };
     spawned.map_err(|e| Failure::new(exit::FAILED, format!("cannot run {program}: {e}")))
+}
+
+/// The full path `program` runs as on Windows, `path` and `pathext` standing for `PATH` and
+/// `PATHEXT`: Git for Windows' shell for a bare `bash` or `sh` ([`git_shell_name`]), else
+/// what [`resolve`] finds. `None` means "spawn `program` as given".
+fn windows_program(
+    program: &str,
+    path: Option<&OsStr>,
+    pathext: Option<&OsStr>,
+) -> Option<PathBuf> {
+    if let Some(shell) = git_shell_name(program)
+        && !cfg!(mutant_cli_with_shell_from_path)
+    {
+        // Mutant (`mutant_cli_with_shell_from_path`): `bash` and `sh` are looked up through
+        // `PATH` like any program, so the first `bash.exe` there (WSL's launcher) runs.
+        if let Some(found) = bosun_config::tools::git_shell(shell, path) {
+            return Some(found);
+        }
+    }
+    resolve(program, path, pathext, Path::is_file)
+}
+
+/// `bash` or `sh` when `program` is that shell by a bare name (ASCII case-insensitive, with or
+/// without `.exe`); `None` for anything else, a path to one included.
+fn git_shell_name(program: &str) -> Option<&'static str> {
+    let stem = program
+        .len()
+        .checked_sub(4)
+        .and_then(|at| Some((program.get(..at)?, program.get(at..)?)))
+        .filter(|(_, ext)| ext.eq_ignore_ascii_case(".exe"))
+        .map_or(program, |(stem, _)| stem);
+    ["bash", "sh"]
+        .into_iter()
+        .find(|shell| stem.eq_ignore_ascii_case(shell))
 }
 
 /// The extensions a bare program name is tried with when `PATHEXT` is unset or empty.
@@ -546,6 +745,26 @@ impl Stops {
         }
     }
 }
+
+/// Elsewhere there is nothing to pass on: no stop ever comes.
+#[cfg(not(unix))]
+struct Stops;
+
+#[cfg(not(unix))]
+impl Stops {
+    #[expect(clippy::unnecessary_wraps, reason = "the Unix one can fail")]
+    fn new() -> Result<Self, Failure> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) -> &'static str {
+        std::future::pending().await
+    }
+}
+
+/// Never called: [`Stops::recv`] never returns here.
+#[cfg(not(unix))]
+fn forward(_pid: u32, _signal: &str) {}
 
 /// Sends `signal` (`-TERM`, `-HUP`) to the command's pid alone, never to a process group.
 #[cfg(unix)]
@@ -660,12 +879,35 @@ mod tests {
         assert_eq!(args.resources, ["rig"]);
         assert_eq!(args.command, ["make"]);
         assert_eq!(cli.global.identity.as_deref(), Some("work"));
+        assert_eq!((&args.wait, &args.timeout), (&None, &None));
+
+        let cli = parse(&[
+            "with",
+            "--wait",
+            "0s",
+            "--timeout",
+            "5m",
+            "rig",
+            "--",
+            "make",
+        ])
+        .unwrap();
+        let Command::With(args) = &cli.command else {
+            panic!("{cli:?}");
+        };
+        assert_eq!(args.wait.as_ref().map(|w| w.duration), Some(Duration::ZERO));
+        assert_eq!(
+            args.timeout.as_ref().map(|t| t.duration),
+            Some(Duration::from_secs(300))
+        );
 
         for bad in [
             &["with", "--", "cargo", "test"][..],
             &["with", "rig"],
             &["with", "rig", "--"],
             &["with"],
+            &["with", "--timeout", "0s", "rig", "--", "make"],
+            &["with", "--wait", "soon", "rig", "--", "make"],
         ] {
             let error = parse(bad).expect_err(&format!("{bad:?}"));
             assert!(error.use_stderr(), "{bad:?}: a usage error, not help");
@@ -914,6 +1156,8 @@ mod tests {
         WithArgs {
             repo: None,
             resources: vec!["rig".to_owned()],
+            wait: None,
+            timeout: None,
             command: command.iter().map(|&s| s.to_owned()).collect(),
         }
     }
@@ -949,10 +1193,20 @@ mod tests {
         patience: Duration,
         ctrl_c: CtrlC,
     ) -> Result<i32, Failure> {
-        let args = with_args(command);
+        with_these(daemon, &with_args(command), patience, ctrl_c).await
+    }
+
+    /// Runs `with_daemon` with `args` against `daemon`, with `patience` and Ctrl-C from
+    /// `ctrl_c`.
+    async fn with_these(
+        daemon: &StandIn,
+        args: &WithArgs,
+        patience: Duration,
+        ctrl_c: CtrlC,
+    ) -> Result<i32, Failure> {
         let daemon = daemon.clone();
         with_daemon(
-            &args,
+            args,
             "demo".to_owned(),
             move || daemon.clone().connect(),
             patience,
@@ -1188,6 +1442,167 @@ mod tests {
         assert!(failure.message.contains("rig"), "{failure:?}");
         assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
         assert!(!ran.exists(), "the command did not run");
+    }
+
+    /// `with rig --wait <wait> -- <command>`.
+    fn waiting(wait: &str, command: &[&str]) -> WithArgs {
+        WithArgs {
+            wait: Some(crate::time::parse_wait(wait).unwrap()),
+            ..with_args(command)
+        }
+    }
+
+    /// #207: past `--wait` the request is withdrawn (an accepted `lease.release` after the last
+    /// `lease.acquire`), the command is not run and the exit code is 75; `--wait 0s` asks once
+    /// and does not wait; a grant within the bound runs the command.
+    #[tokio::test]
+    async fn a_wait_past_its_bound_withdraws_and_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let ran_arg = ran.to_str().unwrap();
+        let command = ["git", "init", "-q", ran_arg];
+        let pid = std::process::id();
+
+        for (wait, at_least, at_most) in [
+            ("1s", Duration::from_secs(1), Duration::from_secs(10)),
+            ("0s", Duration::ZERO, Duration::from_millis(900)),
+        ] {
+            let daemon = StandIn::new(&refused(10_000));
+            let started = Instant::now();
+            let code = tokio::time::timeout(
+                Duration::from_secs(10),
+                with_these(
+                    &daemon,
+                    &waiting(wait, &command),
+                    RECONNECT_PATIENCE,
+                    CtrlC(None),
+                ),
+            )
+            .await
+            .expect("--wait bounds the wait")
+            .unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!(code, i32::from(exit::NOT_GRANTED), "--wait {wait}");
+            assert!(
+                elapsed >= at_least && elapsed < at_most,
+                "--wait {wait}: {elapsed:?}"
+            );
+            assert!(!ran.exists(), "--wait {wait}: the command did not run");
+            let log = daemon.log();
+            let last_ask = log
+                .iter()
+                .rposition(|r| r.method == "lease.acquire")
+                .expect("asked");
+            assert!(
+                log[last_ask..]
+                    .iter()
+                    .any(|r| r.method == "lease.release" && r.pid == pid && r.accepted),
+                "--wait {wait}: withdrawn after the last ask: {log:#?}"
+            );
+            if wait == "0s" {
+                let asks = log.iter().filter(|r| r.method == "lease.acquire").count();
+                assert_eq!(asks, 1, "--wait 0s asks once: {log:#?}");
+            }
+        }
+
+        // Granted on the third ask, well within the bound: the command runs.
+        let daemon = StandIn::new(&refused(2));
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            with_these(
+                &daemon,
+                &waiting("10s", &command),
+                RECONNECT_PATIENCE,
+                CtrlC(None),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(ran.join(".git").is_dir(), "the command ran");
+    }
+
+    /// #207: past `--timeout` the command's process tree is killed (the child `cmd` it started
+    /// too, which would write `marker` 3 s in), the lease is released and the exit code is 124.
+    /// `ping -n <n> 127.0.0.1` stands in for `sleep`: Windows has no `sleep`, `timeout /t`
+    /// refuses to run with redirected input ("Input redirection is not supported"), and `ping`
+    /// waits about a second between its echoes on any console or none.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_command_past_its_timeout_is_killed_with_its_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hang.cmd");
+        let marker = dir.path().join("marker");
+        std::fs::write(
+            &script,
+            "@start \"\" /b cmd /c \"ping -n 4 127.0.0.1 >nul & echo late> \"%~dp0marker\"\"\r\n\
+             @ping -n 60 127.0.0.1 >nul\r\n",
+        )
+        .unwrap();
+        let daemon = StandIn::new(&[]);
+        let args = WithArgs {
+            timeout: Some(crate::time::parse_timeout("1s").unwrap()),
+            ..with_args(&[script.to_str().unwrap()])
+        };
+        let code = tokio::time::timeout(
+            Duration::from_secs(15),
+            with_these(&daemon, &args, RECONNECT_PATIENCE, CtrlC(None)),
+        )
+        .await
+        .expect("--timeout ends the command")
+        .unwrap();
+        assert_eq!(code, i32::from(exit::TIMED_OUT));
+        let log = daemon.log();
+        assert!(
+            log.last().is_some_and(|r| r.method == "lease.release"
+                && r.pid == std::process::id()
+                && r.accepted),
+            "released after the kill: {log:#?}"
+        );
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!marker.exists(), "the command's child was killed with it");
+    }
+
+    /// #207: on Windows `bash` and `sh` at the head of a command are Git for Windows' shells,
+    /// of the installation `git.exe` on `PATH` belongs to, not the first `bash.exe` on `PATH`
+    /// (often WSL's launcher); anything else still resolves through `PATHEXT`, and a path is
+    /// spawned as given. `PATH` is passed in, never the process's own.
+    #[cfg(windows)]
+    #[test]
+    fn bash_and_sh_are_git_for_windows_not_the_first_on_path() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let git = root.path().join("git");
+        for dir in [&first, &git.join("cmd"), &git.join("bin")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for file in [
+            first.join("bash.exe"),
+            first.join("sh.exe"),
+            first.join("npm.cmd"),
+            git.join("cmd").join("git.exe"),
+            git.join("bin").join("bash.exe"),
+            git.join("bin").join("sh.exe"),
+        ] {
+            std::fs::write(file, "").unwrap();
+        }
+        let path = std::env::join_paths([&first, &git.join("cmd")]).unwrap();
+        let pathext = std::ffi::OsString::from(".COM;.EXE;.BAT;.CMD");
+        let program = |name: &str| windows_program(name, Some(&path), Some(&pathext));
+
+        for (name, shell) in [
+            ("bash", "bash.exe"),
+            ("sh", "sh.exe"),
+            ("BASH.EXE", "bash.exe"),
+            ("Sh.exe", "sh.exe"),
+        ] {
+            assert_eq!(program(name), Some(git.join("bin").join(shell)), "{name}");
+        }
+        assert_eq!(program("npm"), Some(first.join("npm.cmd")));
+        assert_eq!(program(r".\bash"), None, "a path is spawned as given");
+        assert_eq!(git_shell_name("bashful"), None);
+        assert_eq!(git_shell_name(r"C:\x\bash.exe"), None);
     }
 
     #[cfg(windows)]

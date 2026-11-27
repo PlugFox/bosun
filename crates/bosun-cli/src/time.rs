@@ -10,6 +10,8 @@
 //!   (7 d): `90m`, `36h`, `7d`, `2w`.
 //!
 //! "Now" is read once per command, so `--since 7d --until 1d` is an exact six-day range.
+//!
+//! `bosun with --wait` and `--timeout` take a [`Span`] of the same grammar without `w`.
 
 const SECOND: i64 = 1000;
 const MINUTE: i64 = 60 * SECOND;
@@ -50,6 +52,55 @@ pub(crate) fn parse_bound(text: &str) -> Result<Bound, String> {
              (2026-11-01) nor a duration before now (90m, 36h, 7d, 2w)"
         )
     })
+}
+
+/// A span of time from the command line (`bosun with --wait`, `--timeout`): a whole number and
+/// a unit, `s`, `m`, `h` or `d` (24 h), the grammar of a duration before now without `w`. It
+/// keeps the text it was written as, for the messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Span {
+    pub(crate) text: String,
+    pub(crate) duration: std::time::Duration,
+}
+
+impl std::fmt::Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+/// Parses a span; `0s` is allowed (`--wait 0s`: do not wait at all).
+///
+/// # Errors
+///
+/// A text that is not `<digits><s|m|h|d>`.
+pub(crate) fn parse_wait(text: &str) -> Result<Span, String> {
+    let shaped = !text.ends_with('w');
+    match parse_ago(text).filter(|_| shaped) {
+        Some(Ok(ms)) => Ok(Span {
+            text: text.to_owned(),
+            duration: std::time::Duration::from_millis(ms.unsigned_abs()),
+        }),
+        Some(Err(e)) => Err(e),
+        None => Err(format!(
+            "`{text}` is not a duration: a whole number and s, m, h or d (30s, 10m, 2h, 1d)"
+        )),
+    }
+}
+
+/// Parses a span that is more than zero (`--timeout`).
+///
+/// # Errors
+///
+/// What [`parse_wait`] refuses, and a span of zero.
+pub(crate) fn parse_timeout(text: &str) -> Result<Span, String> {
+    let span = parse_wait(text)?;
+    if span.duration.is_zero() {
+        return Err(format!(
+            "`{text}` is no time at all: a timeout is more than zero"
+        ));
+    }
+    Ok(span)
 }
 
 /// `Some` when `text` has the shape of a duration (digits and a unit letter).
@@ -233,6 +284,33 @@ mod tests {
         for bad in ["d", "7", "-7d", "7 d", "7y", "99999999999999999999d"] {
             assert!(parse_bound(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn spans_of_wait_and_timeout() {
+        let span = |t: &str| parse_wait(t).map(|s| s.duration.as_secs());
+        assert_eq!(span("0s"), Ok(0));
+        assert_eq!(span("90s"), Ok(90));
+        assert_eq!(span("10m"), Ok(600));
+        assert_eq!(span("2h"), Ok(7200));
+        assert_eq!(span("1d"), Ok(86_400));
+        assert_eq!(parse_wait("1s").unwrap().to_string(), "1s");
+        for bad in [
+            "",
+            "s",
+            "1",
+            "-1s",
+            "1 s",
+            "1w",
+            "1y",
+            "99999999999999999999d",
+        ] {
+            assert!(parse_wait(bad).is_err(), "{bad}");
+            assert!(parse_timeout(bad).is_err(), "{bad}");
+        }
+        assert!(parse_timeout("0s").is_err());
+        assert!(parse_timeout("0m").is_err());
+        assert_eq!(parse_timeout("5m").map(|s| s.duration.as_secs()), Ok(300));
     }
 
     #[test]

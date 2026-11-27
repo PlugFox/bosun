@@ -37,7 +37,7 @@ pub fn verdict_shell(configured: Option<&str>, path: Option<&OsStr>) -> Option<P
         return find_program(program, path);
     }
     if cfg!(windows) {
-        git_sh(&dirs(path))
+        git_shell("sh", path)
     } else {
         find_program("sh", path).or_else(|| Some(PathBuf::from("/bin/sh")).filter(|p| p.is_file()))
     }
@@ -47,11 +47,17 @@ fn dirs(path: Option<&OsStr>) -> Vec<PathBuf> {
     path.map_or_else(Vec::new, |p| std::env::split_paths(p).collect())
 }
 
-/// `sh.exe` of the Git for Windows installation that provides `git.exe` on `dirs`, else of the
-/// default installation directory. Not `sh.exe` from `PATH` itself: that may be another
-/// toolchain's (MSYS2, Cygwin, a WSL launcher).
-fn git_sh(dirs: &[PathBuf]) -> Option<PathBuf> {
-    let mut roots: Vec<PathBuf> = dirs
+/// The shell `name` (`sh` or `bash`) of Git for Windows: `<root>\bin\<name>.exe`, else
+/// `<root>\usr\bin\<name>.exe`, of the installation that provides `git.exe` on `path`, else of
+/// the default installation directories (`%ProgramFiles%`, `%ProgramW6432%`, `%LOCALAPPDATA%`,
+/// each with `Git` and `Programs\Git`). Not `<name>.exe` from `PATH` itself: that may be another
+/// toolchain's (MSYS2, Cygwin, a WSL launcher). The verdict shell's `sh` on Windows
+/// ([`verdict_shell`]) and the `bash`/`sh` of `bosun with` are both found here, so the two
+/// cannot drift.
+#[must_use]
+pub fn git_shell(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    let exe = format!("{name}.exe");
+    let mut roots: Vec<PathBuf> = dirs(path)
         .iter()
         .filter(|d| d.join("git.exe").is_file())
         .filter_map(|d| {
@@ -78,8 +84,8 @@ fn git_sh(dirs: &[PathBuf]) -> Option<PathBuf> {
         .iter()
         .flat_map(|root| {
             [
-                root.join("bin").join("sh.exe"),
-                root.join("usr").join("bin").join("sh.exe"),
+                root.join("bin").join(&exe),
+                root.join("usr").join("bin").join(&exe),
             ]
         })
         .find(|p| p.is_file())

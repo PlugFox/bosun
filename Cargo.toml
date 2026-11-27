@@ -377,6 +377,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_cli_with_release_not_reconnected)",
   "cfg(mutant_cli_with_wait_not_reconnected)",
   "cfg(mutant_cli_with_runs_after_daemon_lost)",
+  # #207: `bosun with --wait`, `--timeout` and Git for Windows' shell.
+  "cfg(mutant_cli_with_wait_unbounded)",
+  "cfg(mutant_cli_with_timeout_ignored)",
+  "cfg(mutant_cli_with_timeout_kills_only_the_command)",
+  "cfg(mutant_cli_with_shell_from_path)",
   # #192 (#131, part 2): `bosun doctor` asks the daemon to start its `gh`.
   "cfg(mutant_api_probe_always_ok)",
   "cfg(mutant_doctor_daemon_gh_ignored)",

@@ -18,7 +18,8 @@
 //! bosun lint <repo>#<card> | bosun lint --repo <name> <card>
 //! bosun session tail <repo>#<card> | <session id>
 //! bosun tui [--identity <name>]
-//! bosun with [--repo <name>] [--identity <name>] <resource>... -- <command> [args...]
+//! bosun with [--repo <name>] [--identity <name>] [--wait <dur>] [--timeout <dur>]
+//!            <resource>... -- <command> [args...]
 //! bosun notify add <name> --kind <kind> [--param key=value]... [--events <e>,...]
 //!                         [--min-gap <seconds>] --identity <name>   < secret
 //! bosun notify list [--identity <name>]
@@ -102,9 +103,19 @@
 //!   code is the usual one. While the command runs, Ctrl-C is the command's; on Unix a SIGTERM
 //!   or SIGHUP to `bosun` is passed on to the command, and `bosun` waits for it, releases the
 //!   lease and exits with its code. On Windows a bare name is looked up through `PATHEXT`, so a
-//!   `.cmd` or `.bat` (`npm`, `gradlew`) runs; `taskkill /F` of `bosun.exe` alone leaves the
+//!   `.cmd` or `.bat` (`npm`, `gradlew`) runs, and `bash` or `sh` at the head of the command is
+//!   Git for Windows' shell, found as the verdict shell's `sh` is (never the first `bash.exe` on
+//!   `PATH`, which may be WSL's launcher); `taskkill /F` of `bosun.exe` alone leaves the
 //!   command running without the lease (ending it too needs a Job object, which is `unsafe`
-//!   FFI). It ignores `--format`.
+//!   FFI). `--wait <dur>` bounds the wait: when the set is not granted by then, the request is
+//!   withdrawn, the command is not run and the exit code is 75. `--timeout <dur>` bounds the
+//!   command: past it, its process tree is killed (`taskkill /T /F` on Windows, which misses a
+//!   descendant whose parent already ended; `kill -KILL` of the command alone on Unix), the
+//!   lease is released and the exit code is 124. Inside a verdict, 75 is the conventional "not
+//!   ready" code (sysexits' `EX_TEMPFAIL`) a repository can declare as its verdict's not-ready
+//!   exit (`repo.<name>.verdict.unready_exit`, #204), so a verdict whose `bosun with --wait`
+//!   runs out is retried uncounted instead of failing; 124 is a failure like any other
+//!   non-zero exit. It ignores `--format`.
 //! - `notify`: the identity's notification channels (`notify.channel.*`, `notify.rs`): `add`
 //!   one (its secret read from standard input, one line, never from an argument), `list` them
 //!   with whether each one's secret is in the OS credential store, `remove` one, `test` one by
@@ -158,6 +169,8 @@
 //! | 5 | the identity is unknown to the daemon |
 //! | 6 | the daemon speaks an API version this `bosun` does not know |
 //! | 7 | `doctor`: a check did not pass |
+//! | 75 | `with`: the leases were not granted within `--wait` |
+//! | 124 | `with`: the command ran past `--timeout` |
 //!
 //! Once its command ran, `with` exits with the command's own code instead (130 when Ctrl-C
 //! ends its wait).
@@ -208,6 +221,10 @@ mod exit {
     pub(crate) const UNKNOWN_IDENTITY: u8 = 5;
     pub(crate) const VERSION: u8 = 6;
     pub(crate) const CHECK_FAILED: u8 = 7;
+    /// `with`: the leases were not granted within `--wait` (sysexits' `EX_TEMPFAIL`).
+    pub(crate) const NOT_GRANTED: u8 = 75;
+    /// `with`: the command ran past `--timeout` (GNU `timeout`'s code).
+    pub(crate) const TIMED_OUT: u8 = 124;
 }
 
 /// The exit codes as `--help` prints them.
@@ -220,7 +237,10 @@ Exit codes:
   4  the daemon is not running
   5  the identity is unknown to the daemon
   6  the daemon speaks an API version this bosun does not know
-  7  doctor: a check did not pass";
+  7  doctor: a check did not pass
+  75  with: the leases were not granted within --wait
+  124  with: the command ran past --timeout
+Otherwise with exits with its command's own code.";
 
 /// The command line of bosun: token sums, the report, ingest status and reingest, asked of
 /// the daemon.
@@ -323,8 +343,14 @@ enum Command {
     /// While the command runs, Ctrl-C is the command's to handle; on Unix a SIGTERM or SIGHUP to
     /// bosun is passed on to the command, and bosun waits for it before it releases the leases.
     /// On Windows a bare command name is looked up through PATHEXT, so `npm` or `gradlew` finds
-    /// its .cmd or .bat. Windows limitation: `taskkill /F` of bosun.exe alone leaves the command
-    /// running without the leases; closing the console ends both.
+    /// its .cmd or .bat, and `bash` or `sh` runs as Git for Windows' shell, not the first
+    /// bash.exe on PATH (which may be WSL's). Windows limitation: `taskkill /F` of bosun.exe
+    /// alone leaves the command running without the leases; closing the console ends both.
+    ///
+    /// --wait gives up after a time: the request is withdrawn, the command is not run, and
+    /// bosun exits 75 (`EX_TEMPFAIL`, "try again later"). --timeout kills the command's process
+    /// tree after a time (on Windows `taskkill /T`, which misses a descendant whose parent
+    /// already ended; on Unix SIGKILL to the command alone), releases the leases and exits 124.
     #[command(after_help = EXIT_CODES)]
     With(with::WithArgs),
     /// The identity's notification channels: add (the secret from standard input), list,
@@ -1008,6 +1034,8 @@ mod tests {
             exit::UNKNOWN_IDENTITY,
             exit::VERSION,
             exit::CHECK_FAILED,
+            exit::NOT_GRANTED,
+            exit::TIMED_OUT,
         ] {
             assert!(EXIT_CODES.contains(&format!("\n  {code}  ")), "{code}");
         }

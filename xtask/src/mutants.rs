@@ -2990,6 +2990,39 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("with::tests::ctrl_c_mid_call_withdraws_on_a_connection_of_its_own"),
         platform: None,
     },
+    // `bosun with --wait`, `--timeout` and Git for Windows' shell (#207).
+    Mutant {
+        name: "mutant_cli_with_wait_unbounded",
+        issue: 207,
+        breaks: "bosun with ignores --wait and waits for the leases for ever",
+        package: "bosun-cli",
+        check: Check::Test("with::tests::a_wait_past_its_bound_withdraws_and_runs_nothing"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_cli_with_timeout_ignored",
+        issue: 207,
+        breaks: "bosun with ignores --timeout and its command runs as long as it likes",
+        package: "bosun-cli",
+        check: Check::Test("with::tests::a_command_past_its_timeout_is_killed_with_its_children"),
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_cli_with_timeout_kills_only_the_command",
+        issue: 207,
+        breaks: "past --timeout bosun with kills its command without /T, and its children run on",
+        package: "bosun-cli",
+        check: Check::Test("with::tests::a_command_past_its_timeout_is_killed_with_its_children"),
+        platform: Some(Platform::Windows),
+    },
+    Mutant {
+        name: "mutant_cli_with_shell_from_path",
+        issue: 207,
+        breaks: "bosun with runs the first bash.exe on PATH (WSL's launcher), not Git for Windows' bash",
+        package: "bosun-cli",
+        check: Check::Test("with::tests::bash_and_sh_are_git_for_windows_not_the_first_on_path"),
+        platform: Some(Platform::Windows),
+    },
     // `bosun doctor` asks the daemon to start its `gh` (#131, part 2).
     Mutant {
         name: "mutant_api_probe_always_ok",

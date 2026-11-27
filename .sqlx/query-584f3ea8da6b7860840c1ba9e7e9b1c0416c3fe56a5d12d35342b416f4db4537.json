@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO proposal (\n             proposal_key, dedup_key, repo_id, provider, detector, detector_version, remedy,\n             subject_kind, subject, metric, unit, exactness, baseline_value, threshold,\n             target_value, window_from_ms, window_to_ms, sample, guard_metric, guard_baseline,\n             impact_eqv_estimate, params_json, evidence_json, state, created_ms, last_seen_ms,\n             seen_count)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open',\n                 ?, ?, 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 25
+    },
+    "nullable": []
+  },
+  "hash": "584f3ea8da6b7860840c1ba9e7e9b1c0416c3fe56a5d12d35342b416f4db4537"
+}

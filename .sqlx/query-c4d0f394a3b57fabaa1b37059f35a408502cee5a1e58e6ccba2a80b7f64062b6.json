@@ -1,0 +1,530 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.id AS \"id!: i64\", p.proposal_key, p.dedup_key, r.path AS \"repo!: String\",\n                      p.provider, p.detector, p.detector_version, p.remedy, p.subject_kind,\n                      p.subject, p.metric, p.unit, p.exactness, p.baseline_value, p.threshold,\n                      p.target_value, p.window_from_ms, p.window_to_ms, p.sample, p.guard_metric,\n                      p.guard_baseline, p.guard_after, p.impact_eqv_estimate, p.params_json,\n                      p.evidence_json, p.state, p.created_ms, p.last_seen_ms, p.seen_count,\n                      p.card_key, p.issue_number, p.published_ms,\n                      i.item_key AS \"item_key?: String\", p.landed_sha, p.landed_ms,\n                      p.landed_how, p.followup_due_ms, p.after_value, p.after_sample,\n                      p.measured_ms, p.outcome, p.dismissed_ms, p.dismiss_reason\n               FROM proposal p JOIN repo r ON r.id = p.repo_id\n               LEFT JOIN item i ON i.id = p.item_id\n               WHERE (?1 IS NULL OR p.repo_id = ?1) AND (?2 IS NULL OR p.proposal_key = ?2)\n               ORDER BY p.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "proposal_key",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "proposal_key"
+          }
+        }
+      },
+      {
+        "name": "dedup_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "dedup_key"
+          }
+        }
+      },
+      {
+        "name": "repo!: String",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repo",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "provider",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "detector",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "detector"
+          }
+        }
+      },
+      {
+        "name": "detector_version",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "detector_version"
+          }
+        }
+      },
+      {
+        "name": "remedy",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "remedy"
+          }
+        }
+      },
+      {
+        "name": "subject_kind",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "subject_kind"
+          }
+        }
+      },
+      {
+        "name": "subject",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "subject"
+          }
+        }
+      },
+      {
+        "name": "metric",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "metric"
+          }
+        }
+      },
+      {
+        "name": "unit",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "unit"
+          }
+        }
+      },
+      {
+        "name": "exactness",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "exactness"
+          }
+        }
+      },
+      {
+        "name": "baseline_value",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "baseline_value"
+          }
+        }
+      },
+      {
+        "name": "threshold",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "threshold"
+          }
+        }
+      },
+      {
+        "name": "target_value",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "target_value"
+          }
+        }
+      },
+      {
+        "name": "window_from_ms",
+        "ordinal": 16,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "window_from_ms"
+          }
+        }
+      },
+      {
+        "name": "window_to_ms",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "window_to_ms"
+          }
+        }
+      },
+      {
+        "name": "sample",
+        "ordinal": 18,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "sample"
+          }
+        }
+      },
+      {
+        "name": "guard_metric",
+        "ordinal": 19,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "guard_metric"
+          }
+        }
+      },
+      {
+        "name": "guard_baseline",
+        "ordinal": 20,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "guard_baseline"
+          }
+        }
+      },
+      {
+        "name": "guard_after",
+        "ordinal": 21,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "guard_after"
+          }
+        }
+      },
+      {
+        "name": "impact_eqv_estimate",
+        "ordinal": 22,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "impact_eqv_estimate"
+          }
+        }
+      },
+      {
+        "name": "params_json",
+        "ordinal": 23,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "params_json"
+          }
+        }
+      },
+      {
+        "name": "evidence_json",
+        "ordinal": 24,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "evidence_json"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 25,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "created_ms",
+        "ordinal": 26,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "created_ms"
+          }
+        }
+      },
+      {
+        "name": "last_seen_ms",
+        "ordinal": 27,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "last_seen_ms"
+          }
+        }
+      },
+      {
+        "name": "seen_count",
+        "ordinal": 28,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "seen_count"
+          }
+        }
+      },
+      {
+        "name": "card_key",
+        "ordinal": 29,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "card_key"
+          }
+        }
+      },
+      {
+        "name": "issue_number",
+        "ordinal": 30,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "issue_number"
+          }
+        }
+      },
+      {
+        "name": "published_ms",
+        "ordinal": 31,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "published_ms"
+          }
+        }
+      },
+      {
+        "name": "item_key?: String",
+        "ordinal": 32,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "item",
+            "name": "item_key"
+          }
+        }
+      },
+      {
+        "name": "landed_sha",
+        "ordinal": 33,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "landed_sha"
+          }
+        }
+      },
+      {
+        "name": "landed_ms",
+        "ordinal": 34,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "landed_ms"
+          }
+        }
+      },
+      {
+        "name": "landed_how",
+        "ordinal": 35,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "landed_how"
+          }
+        }
+      },
+      {
+        "name": "followup_due_ms",
+        "ordinal": 36,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "followup_due_ms"
+          }
+        }
+      },
+      {
+        "name": "after_value",
+        "ordinal": 37,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "after_value"
+          }
+        }
+      },
+      {
+        "name": "after_sample",
+        "ordinal": 38,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "after_sample"
+          }
+        }
+      },
+      {
+        "name": "measured_ms",
+        "ordinal": 39,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "measured_ms"
+          }
+        }
+      },
+      {
+        "name": "outcome",
+        "ordinal": 40,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "outcome"
+          }
+        }
+      },
+      {
+        "name": "dismissed_ms",
+        "ordinal": 41,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "dismissed_ms"
+          }
+        }
+      },
+      {
+        "name": "dismiss_reason",
+        "ordinal": 42,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "dismiss_reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "c4d0f394a3b57fabaa1b37059f35a408502cee5a1e58e6ccba2a80b7f64062b6"
+}

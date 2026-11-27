@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE proposal SET state = ?, seen_count = seen_count + 1, last_seen_ms = ?\n         WHERE proposal_key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "64a2335a07b3b66abf0e5cc94d1950434891893acc64fe44d5620d7e5d286591"
+}

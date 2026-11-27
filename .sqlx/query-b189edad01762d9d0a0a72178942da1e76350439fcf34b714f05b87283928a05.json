@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT proposal_key FROM proposal\n         WHERE repo_id = ? AND dedup_key = ? AND state IN ('open', 'published', 'landed')",
+  "describe": {
+    "columns": [
+      {
+        "name": "proposal_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proposal",
+            "name": "proposal_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b189edad01762d9d0a0a72178942da1e76350439fcf34b714f05b87283928a05"
+}

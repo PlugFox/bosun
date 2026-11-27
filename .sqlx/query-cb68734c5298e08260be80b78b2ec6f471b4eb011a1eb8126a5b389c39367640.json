@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE proposal SET state = ?, after_value = ?, after_sample = ?,\n                                     outcome = ?, measured_ms = ?,\n                                     params_json = coalesce(?, params_json)\n                 WHERE proposal_key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "cb68734c5298e08260be80b78b2ec6f471b4eb011a1eb8126a5b389c39367640"
+}

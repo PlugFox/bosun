@@ -601,6 +601,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_heat_error_rate_counts_all_calls)",
   # #223: `bosun heat metrics` labels each row exact or estimate.
   "cfg(mutant_heat_metrics_md_estimate_unlabelled)",
+  # #11 D: heat's proposals are stored complete, deduplicated and cooled down.
+  "cfg(mutant_proposal_no_dedup)",
+  "cfg(mutant_proposal_allow_incomplete)",
+  "cfg(mutant_proposal_no_cooldown)",
+  "cfg(mutant_proposal_measured_reopens)",
 ] }
 
 [workspace.lints.clippy]

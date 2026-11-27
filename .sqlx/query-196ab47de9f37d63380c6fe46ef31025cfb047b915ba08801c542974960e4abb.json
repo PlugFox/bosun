@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE proposal SET guard_metric = ?, guard_baseline = ?, guard_after = ?\n                     WHERE proposal_key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "196ab47de9f37d63380c6fe46ef31025cfb047b915ba08801c542974960e4abb"
+}

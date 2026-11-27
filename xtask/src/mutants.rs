@@ -3882,6 +3882,44 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("markdown::tests::the_golden_heat_metrics_render_as_the_snapshot"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_proposal_no_dedup",
+        issue: 11,
+        breaks: "a proposal's own key stands for its dedup key: a second active proposal of one                  subject is stored",
+        package: "bosun-store",
+        check: Check::Test(
+            "proposal::tests::a_second_active_proposal_for_the_same_subject_is_refused",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_proposal_allow_incomplete",
+        issue: 11,
+        breaks: "an incomplete proposal reaches the INSERT and is refused without naming what                  it lacks",
+        package: "bosun-store",
+        check: Check::Test(
+            "proposal::tests::a_proposal_without_a_target_or_a_window_is_not_stored",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_proposal_no_cooldown",
+        issue: 11,
+        breaks: "a repeat of a dismissed proposal is stored inside the cooldown",
+        package: "bosun-store",
+        check: Check::Test(
+            "proposal::tests::a_dismissed_proposal_suppresses_its_key_for_the_cooldown",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_proposal_measured_reopens",
+        issue: 11,
+        breaks: "a measured proposal seen again opens",
+        package: "bosun-core",
+        check: Check::Test("proposal::tests::a_measured_proposal_cannot_reopen"),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

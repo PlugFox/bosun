@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE proposal SET state = ?, item_id = ?, landed_sha = ?, landed_ms = ?,\n                                     landed_how = ?, followup_due_ms = ?\n                 WHERE proposal_key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "c2164d0160f328a2a3e366cb5f02c37de0b64d7983b1e30e18a0280d559ac7d7"
+}

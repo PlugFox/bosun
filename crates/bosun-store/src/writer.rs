@@ -20,6 +20,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::error::{Error, from_db, to_db};
 use crate::notify::{self, NewChannel, NewNotice};
+use crate::proposal::{self, NewProposal, ProposalStep};
 use crate::read;
 use crate::work::write as work;
 use crate::work::{
@@ -287,6 +288,18 @@ pub enum Write {
     NoticesDropped {
         ids: Vec<i64>,
         why: String,
+        at_ms: i64,
+    },
+    /// A heat proposal a detector found (#11 D), stored `open`. Refused by name when it lacks a
+    /// metric, a value, a target or a window, when its repository already has an active
+    /// proposal of the same (detector, provider, subject), and inside the cooldown of that key.
+    ProposalOpened(NewProposal),
+    /// The detector found the subject of the open or published proposal `key` again.
+    ProposalSeen { key: String, at_ms: i64 },
+    /// One arrow of the proposal machine ([`bosun_core::proposal::step`]) on proposal `key`.
+    ProposalStep {
+        key: String,
+        step: ProposalStep,
         at_ms: i64,
     },
     /// Mutant `mutant_ingest_reingest_truncates` (#21): deletes every ingested row, as a
@@ -626,6 +639,9 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             retry_at_ms,
         } => notify::failed(conn, &ids, &error, retry_at_ms).await,
         Write::NoticesDropped { ids, why, at_ms } => notify::dropped(conn, &ids, &why, at_ms).await,
+        Write::ProposalOpened(new) => proposal::open(conn, &new).await,
+        Write::ProposalSeen { key, at_ms } => proposal::seen(conn, &key, at_ms).await,
+        Write::ProposalStep { key, step, at_ms } => proposal::step(conn, &key, &step, at_ms).await,
         #[cfg(mutant_ingest_reingest_truncates)]
         Write::Truncate => {
             conn.execute(
@@ -935,6 +951,13 @@ async fn merge_repo(conn: &mut SqliteConnection, from: i64, into: i64) -> Result
         r#"UPDATE OR IGNORE "commit" SET repo_id = ?2 WHERE repo_id = ?1"#,
         "UPDATE OR IGNORE run_commit SET repo_id = ?2 WHERE repo_id = ?1",
         "UPDATE repo_alias SET repo_id = ?2 WHERE repo_id = ?1",
+        // A subject both rows have an active proposal of keeps `into`'s: `from`'s expires (a
+        // merge is not a lifecycle event, and the partial unique index would refuse the move).
+        "UPDATE proposal SET state = 'expired'
+         WHERE repo_id = ?1 AND state IN ('open', 'published', 'landed')
+           AND dedup_key IN (SELECT dedup_key FROM proposal
+                             WHERE repo_id = ?2 AND state IN ('open', 'published', 'landed'))",
+        "UPDATE proposal SET repo_id = ?2 WHERE repo_id = ?1",
     ] {
         sqlx::query(statement)
             .bind(from)

@@ -1,7 +1,8 @@
 //! Domain types of bosun: the provider-neutral event model, the merge rule, path
 //! canonicalisation, prices and the bill (#3, #17); the item and attempt state machines, the
 //! scheduler and the crash recovery plan of the loop (#7, #49); the resource leases (#8, #121);
-//! the sanitiser, the secret redactor and the item report renderer of [`publish`] (#5, #8, #56).
+//! the sanitiser, the secret redactor and the item report renderer of [`publish`] (#5, #8, #56);
+//! the lifecycle of heat's proposals, [`proposal`] (#11).
 //!
 //! This crate performs no I/O: no async runtime, no database, no HTTP client. The rule is
 //! enforced by `cargo xtask check-deps` (#12), not by convention.
@@ -15,6 +16,7 @@ mod lease;
 mod merge;
 mod path;
 mod price;
+pub mod proposal;
 pub mod publish;
 mod recover;
 mod schedule;

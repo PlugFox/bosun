@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE proposal SET state = ?, dismissed_ms = ?, dismiss_reason = ?\n                 WHERE proposal_key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "33ee36e41f440c5e89dd3c0f2978e84ba7297538da6bafea4836081af9f9ba5a"
+}

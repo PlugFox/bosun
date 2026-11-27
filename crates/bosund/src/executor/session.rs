@@ -653,10 +653,21 @@ pub(crate) fn session_effort(contract: &bosun_queue::Contract, repo: &Repo) -> O
 /// `allow-protected`. They become the runner's `Edit(...)` deny rules and the system prompt's
 /// list. An entry is left out when it and an allowance overlap: for an entry with a `/`, when
 /// either covers the other (the path itself or anything under it); for a bare name, when the
-/// allowance is a path the name protects (a segment equal to it). ASCII case is ignored, as in
-/// the policy. Leaving an entry out only loses the live refusal: the guard before the verdict
-/// still judges every path the commits touched.
-pub(crate) fn editable_protection(protected: &BTreeSet<String>, allowed: &[String]) -> Vec<String> {
+/// allowance is a path the name protects (a segment equal to it), or one that may hold such a
+/// path: an allowance that is not an existing regular file of the working tree (`is_file`, on
+/// the repository-relative path), a directory or a path that does not exist yet. ASCII case is
+/// ignored, as in the policy.
+///
+/// The guard (`bosun_git::protect::protected`) lets a card edit every path an allowance covers,
+/// `web/.gitignore` under `allow-protected = ["web"]` included; the runner's deny rules win over
+/// its allow rules, so a bare entry's `Edit(...)` rule cannot be carved out under the directory
+/// and is left out instead. Leaving an entry out only loses the live refusal: the guard before
+/// the verdict still judges every path the commits touched.
+pub(crate) fn editable_protection(
+    protected: &BTreeSet<String>,
+    allowed: &[String],
+    is_file: impl Fn(&str) -> bool,
+) -> Vec<String> {
     if cfg!(mutant_loop_protected_ignores_allowance) {
         // Mutant (`mutant_loop_protected_ignores_allowance`): the card's allowance is ignored.
         return protected.iter().cloned().collect();
@@ -672,6 +683,10 @@ pub(crate) fn editable_protection(protected: &BTreeSet<String>, allowed: &[Strin
                     allowance
                         .split('/')
                         .any(|segment| segment.eq_ignore_ascii_case(entry))
+                        // Mutant (`mutant_loop_bare_name_ignores_directory_allowance`): only a
+                        // segment equal to the name lifts it.
+                        || (!cfg!(mutant_loop_bare_name_ignores_directory_allowance)
+                            && !is_file(&allowance))
                 }
             })
         })
@@ -707,6 +722,20 @@ fn mcp_path(dir: &Path, repo: &Repo) -> PathBuf {
     dir.join("mcp.json")
 }
 
+/// How a session whose agent could not be started ended, for the fast-death breaker (#7): a
+/// crash by itself that lived no time at all.
+fn unstarted() -> Option<SessionEnd> {
+    if cfg!(mutant_breaker_blind_to_spawn_failure) {
+        // Mutant (`mutant_breaker_blind_to_spawn_failure`): the breaker never sees it.
+        return None;
+    }
+    Some(SessionEnd {
+        crashed: true,
+        by_itself: true,
+        lived: Duration::ZERO,
+    })
+}
+
 /// The id a resumed session continues: the attempt's last run's.
 async fn resumed_id(shared: &Shared, run: &Run) -> Option<SessionId> {
     let runs = shared.deps.reader.runs(&run.item).await.ok()?;
@@ -731,13 +760,22 @@ pub(crate) async fn session(
     mut kill: watch::Receiver<Signal>,
     on_blocking: Box<dyn Fn() + Send + Sync>,
 ) -> Ended {
+    // An early return that is not the agent's: the breaker does not observe it (#7). These are
+    // a kill (a withdrawn lease request, a setup killed after a reset), a repository or an
+    // identity the configuration no longer has, and what the daemon could not prepare (the
+    // reset, the credential, the session files, the environment, the run row, the shim's row).
+    // A refused lease, an identity refusal and a failed setup return events of their own, also
+    // unobserved.
     let crash = Some((run.exited(Exit::Crash), None));
+    // The agent's own fast death: its CLI is missing or cannot be started. The breaker counts
+    // it (#7), or a repository whose agent is broken would crash every attempt unpaused.
+    let unstarted = Some((run.exited(Exit::Crash), unstarted()));
     let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
         return crash;
     };
     let Some(program) = shared.options.agent.clone() else {
         shared.trouble("the agent CLI `claude` was not found on PATH");
-        return crash;
+        return unstarted;
     };
     // Its leases (#8), before its first session: the loop stays responsive meanwhile, and a
     // kill withdraws the request. A later session holds them already and goes on at once, but
@@ -853,6 +891,7 @@ pub(crate) async fn session(
     let protected = editable_protection(
         &repo.policy.protected,
         &claimed.snapshot.contract.allow_protected,
+        |allowance| repo.path.join(allowance).is_file(),
     );
     let prompt = prompt_of(shared, claimed, run, &protected).await;
     let dir = shared
@@ -1034,7 +1073,7 @@ pub(crate) async fn session(
                 &[],
             )
             .await;
-            return crash;
+            return unstarted;
         }
     };
     // The fast-death breaker measures a session from here (#7).
@@ -1888,7 +1927,8 @@ mod tests {
             .into();
         let left = |allowed: &[&str]| {
             let allowed: Vec<String> = allowed.iter().map(|a| (*a).to_owned()).collect();
-            editable_protection(&protected, &allowed)
+            // Every allowance a file: only the segments decide.
+            editable_protection(&protected, &allowed, |_| true)
         };
         let all: Vec<String> = protected.iter().cloned().collect();
         assert_eq!(left(&[]), all);
@@ -1908,6 +1948,43 @@ mod tests {
             ["docs/frozen", "tests/data"]
         );
         assert_eq!(left(&["src/harness.rs.bak"]), all);
+    }
+
+    /// The policy's bare names and a path entry, as a repository's.
+    fn bare_and_path() -> BTreeSet<String> {
+        [".gitignore", "harness.rs", "docs/frozen"]
+            .map(str::to_owned)
+            .into()
+    }
+
+    /// `allow-protected = ["web"]`, a directory: the guard lets the card edit `web/.gitignore`,
+    /// so no bare name keeps a deny rule that would refuse it; a path entry it does not overlap
+    /// stays (`mutant_loop_bare_name_ignores_directory_allowance`: `.gitignore` and
+    /// `harness.rs` stay). A path that does not exist yet lifts them as well.
+    #[test]
+    fn a_directory_allowance_lifts_a_bare_name_under_it() {
+        let protected = bare_and_path();
+        let files = ["deny.toml", "web/index.html"];
+        let is_file = |path: &str| files.contains(&path);
+        for allowance in ["web", "./web/", "web/new"] {
+            assert_eq!(
+                editable_protection(&protected, &[allowance.to_owned()], is_file),
+                ["docs/frozen"],
+                "{allowance}"
+            );
+        }
+    }
+
+    /// `allow-protected = ["deny.toml"]`, a regular file: it holds no `.gitignore`, so the bare
+    /// names keep their deny rules.
+    #[test]
+    fn a_file_allowance_keeps_the_bare_names() {
+        let protected = bare_and_path();
+        let is_file = |path: &str| path == "deny.toml";
+        assert_eq!(
+            editable_protection(&protected, &["deny.toml".to_owned()], is_file),
+            [".gitignore", "docs/frozen", "harness.rs"]
+        );
     }
 
     #[test]

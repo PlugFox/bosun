@@ -78,7 +78,7 @@ fn denied_of(scene: &Scene, n: u64) -> Vec<String> {
 }
 
 /// The policy protects `docs/frozen` and `harness.rs` (and always `.gitignore`); card 2 allows
-/// `docs/frozen`. Card 1's session is denied edits of all three, card 2's of the two it was not
+/// `docs/frozen`, a file. Card 1's session is denied edits of all three, card 2's of the two it was not
 /// allowed, after the push rules. `mutant_runner_no_protected_rules` leaves every protected rule
 /// out; `mutant_loop_protected_ignores_allowance` denies card 2 `docs/frozen` too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -89,6 +89,12 @@ async fn a_session_is_denied_edits_of_its_protected_paths_less_the_cards_allowan
         scene.config_text("'docs/frozen', 'harness.rs'"),
     )
     .unwrap();
+    // A regular file: an allowance of a directory, or of a path not there yet, would lift the
+    // bare names too (#238).
+    std::fs::create_dir_all(scene.repo.join("docs")).unwrap();
+    std::fs::write(scene.repo.join("docs/frozen"), "frozen\n").unwrap();
+    scene.git(&["add", "docs/frozen"]);
+    scene.git(&["commit", "-q", "-m", "Frozen"]);
     scene.write_board(&[
         card(1, "Plain", "test -f one.txt", "Item one."),
         card_allowing(2, "Allowed", "test -f two.txt", "docs/frozen"),

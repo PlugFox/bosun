@@ -105,6 +105,48 @@ async fn three_sessions_dying_at_once_pause_the_repository_until_resume() {
     assert_eq!((item.attempts, item.failed), (1, 0));
 }
 
+/// An agent CLI that cannot be spawned (its path does not exist): every session dies before it
+/// starts, and those are fast deaths too. After three in a row the breaker trips: the
+/// repository is paused, card 1 waits parked and card 2 is never claimed
+/// (`mutant_breaker_blind_to_spawn_failure`: nothing trips, card 1 drains to Needs you).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_whose_agent_cannot_be_spawned_trips_the_fast_death_breaker() {
+    let mut scene = Scene::new().await;
+    scene.agent_program = Some(scene.path("bin").join("no-such-agent"));
+    let mut sub = subscribe_fast_deaths(&scene);
+    scene.write_board(&[
+        card(1, "Cannot start", "test -f one.txt", "Item one."),
+        card(2, "Waits", "test -f two.txt", "Item two."),
+    ]);
+    let (task, watcher) = scene.start(None);
+    let mut state = None;
+    wait_for("card 1 to park or end", LIMIT, async || {
+        state = scene.state(1).await;
+        matches!(state, Some(State::Parked(_) | State::NeedsYou(_)))
+    })
+    .await;
+    let Some(State::Parked(park)) = state else {
+        panic!("card 1 is {state:?}, not parked");
+    };
+    assert_eq!(park.reason, ParkReason::Paused);
+    let why = tripped(&scene).expect("the repository is tripped");
+    assert!(why.contains("3 sessions"), "{why}");
+    let events = fast_deaths(&mut sub);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["repo"], "demo");
+    assert_eq!(events[0]["sessions"], 3);
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    task.abort();
+    watcher.abort();
+    assert!(
+        matches!(scene.state(2).await, None | Some(State::Ready)),
+        "card 2 was claimed: {:?}",
+        scene.state(2).await
+    );
+    assert!(matches!(scene.state(1).await, Some(State::Parked(_))));
+}
+
 /// Three quick crashes in all, never three in a row: a passing session between them resets the
 /// streak, and both cards end Done (`mutant_loop_fast_death_streak_never_resets`: card 2's
 /// second crash trips the breaker).

@@ -660,6 +660,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_heat_t1_threshold_inf)",
   "cfg(mutant_heat_m1_threshold_inf)",
   "cfg(mutant_heat_ignore_parser_version)",
+  # #238: a session whose agent cannot be spawned is a fast death; a directory allowance lifts
+  # the bare-name protections under it.
+  "cfg(mutant_breaker_blind_to_spawn_failure)",
+  "cfg(mutant_loop_bare_name_ignores_directory_allowance)",
 ] }
 
 [workspace.lints.clippy]

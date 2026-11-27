@@ -4370,6 +4370,28 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #238: a session whose agent cannot be spawned is a fast death; a directory allowance
+    // lifts the bare-name protections under it.
+    Mutant {
+        name: "mutant_breaker_blind_to_spawn_failure",
+        issue: 238,
+        breaks: "an agent CLI that cannot be spawned crashes every attempt and never trips the breaker",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::fast_death::a_session_whose_agent_cannot_be_spawned_trips_the_fast_death_breaker",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_bare_name_ignores_directory_allowance",
+        issue: 238,
+        breaks: "a directory allowance keeps the bare-name deny rules that refuse the paths under it",
+        package: "bosund",
+        check: Check::Test(
+            "executor::session::tests::a_directory_allowance_lifts_a_bare_name_under_it",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #11 (part D) that adds the tool detectors X1, T1 and M1 of #210 over the columns

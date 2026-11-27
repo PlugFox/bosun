@@ -386,6 +386,8 @@ struct Scene {
     endpoint: bosun_client::Endpoint,
     /// The MCP server sessions get: the real `bosun-mcp` unless a scenario breaks it.
     mcp: PathBuf,
+    /// The agent CLI the loop gets: [`Scene::agent`] unless a scenario breaks it.
+    agent_program: Option<PathBuf>,
     /// How long after spawn `bosun-mcp` has to say hello.
     handshake: Duration,
     /// The control state of #67, and the loop's events.
@@ -611,6 +613,7 @@ impl Scene {
             credentials,
             endpoint,
             mcp: bosun_mcp().to_owned(),
+            agent_program: None,
             handshake: Duration::from_secs(30),
             control,
             events: Events::new("test", EventOptions::default()),
@@ -820,7 +823,7 @@ impl Scene {
         let options = Options {
             repo: self.name.clone(),
             daemon_id: "test-host/test-user".to_owned(),
-            agent: Some(self.agent()),
+            agent: Some(self.agent_program.clone().unwrap_or_else(|| self.agent())),
             work_dir: self.path("work"),
             poll: Duration::from_millis(50),
             idle_backoff: false,

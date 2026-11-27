@@ -684,6 +684,84 @@ fn a_resource_needs_a_positive_capacity_and_a_known_scope() {
 }
 
 #[test]
+fn a_resource_artifact_needs_a_local_path_a_device_path_and_a_digest_command() {
+    let config = parse(
+        "[resource.rig]\n\
+         kind = 'device'\n\
+         [resource.rig.artifact.app]\n\
+         local = 'out/app'\n\
+         device = '/tmp/app'\n\
+         digest = 'sha256sum \"$BOSUN_ARTIFACT_DEVICE\"'\n\
+         timeout = '30s'\n\
+         [resource.rig.artifact.lib]\n\
+         local = 'out/lib'\n\
+         device = '/tmp/lib'\n\
+         digest = 'sha256sum /tmp/lib'\n",
+        &Local,
+    )
+    .unwrap();
+    assert_eq!(config.notices, []);
+    let rig = &config.resources["rig"];
+    let app = &rig.artifacts["app"];
+    assert_eq!(
+        (app.local.as_str(), app.device.as_str(), app.digest.as_str()),
+        (
+            "out/app",
+            "/tmp/app",
+            "sha256sum \"$BOSUN_ARTIFACT_DEVICE\""
+        )
+    );
+    assert_eq!(app.timeout, Duration::from_secs(30));
+    assert_eq!(rig.artifacts["lib"].timeout, Duration::from_mins(2));
+    assert!(
+        parse("[resource.target]\nkind = 'build-dir'\n", &Local)
+            .unwrap()
+            .resources["target"]
+            .artifacts
+            .is_empty()
+    );
+
+    let found = problems(
+        "[resource.rig]\n\
+         kind = 'device'\n\
+         [resource.rig.artifact.nodigest]\n\
+         local = 'out/app'\n\
+         device = '/tmp/app'\n\
+         [resource.rig.artifact.nolocal]\n\
+         device = '/tmp/app'\n\
+         digest = 'true'\n\
+         [resource.rig.artifact.up]\n\
+         local = '../app'\n\
+         device = '/tmp/app'\n\
+         digest = 'true'\n\
+         [resource.rig.artifact.pushing]\n\
+         local = 'out/app'\n\
+         device = '/tmp/app'\n\
+         digest = 'true'\n\
+         push = 'adb push out/app /tmp/app'\n\
+         [resource.rig.artifact.'a b']\n\
+         local = 'out/app'\n\
+         device = '/tmp/app'\n\
+         digest = 'true'\n",
+    );
+    let expected = [
+        "`resource.rig.artifact.nodigest` has no `digest`",
+        "`resource.rig.artifact.nolocal` has no `local`",
+        "`resource.rig.artifact.up.local` is \"../app\"; a relative path has no `..` component",
+        "unknown key `resource.rig.artifact.pushing.push`; an artifact has `local`, `device`, \
+         `digest` and `timeout`",
+        "`resource.rig.artifact.a b`: a name is ASCII letters, digits, `-` and `_`",
+    ];
+    assert_eq!(found.len(), expected.len(), "{found:#?}");
+    for expected in expected {
+        assert!(
+            found.iter().any(|found| found.contains(expected)),
+            "{expected:?} is not in {found:#?}"
+        );
+    }
+}
+
+#[test]
 fn a_worktree_root_inside_the_repository_is_refused() {
     // The repository is `git/bosun`; on Windows the root is matched whatever its case.
     let inside = if cfg!(windows) {

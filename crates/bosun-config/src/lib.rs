@@ -89,6 +89,15 @@
 //! kind = "build-dir"            # free text: "build-dir", "gpu", "device", ...
 //! capacity = 1                  # holders at once, at least 1; default 1 (exclusive)
 //! scope = "machine"             # "machine", "identity" or "repository"; default "machine"
+//!
+//! [resource.phone]              # a synthetic device
+//! kind = "device"
+//!
+//! [resource.phone.artifact.app] # a file the verdict builds and pushes to the device (#44 C)
+//! local = "out/app"             # absolute, or relative to the verdict's working directory
+//! device = "/data/local/tmp/app"
+//! digest = 'adb shell sha256sum "$BOSUN_ARTIFACT_DEVICE"'
+//! timeout = "2m"                # the digest command's; default 2m
 //! ```
 //!
 //! - Paths are absolute; TOML literal strings (`'...'`) keep Windows backslashes as written.
@@ -177,6 +186,19 @@
 //!   mode: a card of a repository with `repo.<name>.worktree` may need them, and holds them from
 //!   before its first session until it leaves the loop. Without `repo.<name>.worktree` a card
 //!   that needs one is refused by lint, as in stage 1 (E19).
+//!   - `artifact.<artifact>` (#44 C): a file the verdict puts on the resource, a device the
+//!     worktree snapshot does not cover. `local` (required) is the built file: absolute, or
+//!     relative to the verdict's working directory (the run's own checkout), `/`-separated and
+//!     with no `..` component. `device` (required, non-empty) is its path on the device.
+//!     `digest` (required) is a shell command, run by the verdict's shell with
+//!     `BOSUN_ARTIFACT_LOCAL` (the absolute local path) and `BOSUN_ARTIFACT_DEVICE` set, that
+//!     prints the SHA-256 of the device's copy; `timeout` (default `2m`) bounds it. The verdict
+//!     command builds and pushes the artifact itself (`build && push && run`); the daemon never
+//!     pushes. After each verdict run of an item that leases the resource, the daemon asks the
+//!     device for its copy's digest and compares it with the run's build: a pass against another
+//!     copy is Needs you with `resource_unready`, a fail against one is a counted failure with
+//!     the mismatch noted, and a device that does not answer is not ready (#204). Any other key
+//!     (`push` among them) is refused.
 //! - `notify`, and every other key of #4 that a later stage reads (`repo.<name>.report`,
 //!   `daemon.http_port`, ...), is accepted and ignored with a [`Notice`]. Any other section is
 //!   an error.
@@ -404,7 +426,31 @@ pub struct Resource {
     pub capacity: u32,
     /// `scope`: what it is shared within. Default [`Scope::Machine`].
     pub scope: Scope,
+    /// `[resource.<name>.artifact.<artifact>]` (#44 C): files a verdict puts on the resource (a
+    /// device), by artifact name. After each verdict run that leases the resource, the daemon
+    /// checks that the device's copy is the build the run made. Default: none.
+    pub artifacts: BTreeMap<String, Artifact>,
 }
+
+/// `[resource.<name>.artifact.<artifact>]` (#44 C): a file the verdict builds and pushes to a
+/// device. The daemon never pushes it; it asks the device for its copy's digest after the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Artifact {
+    /// `local`: the built file, absolute, or relative to the verdict's working directory
+    /// (`/`-separated, no `..` component). Required.
+    pub local: String,
+    /// `device`: the file's path on the device, passed to `digest` as `BOSUN_ARTIFACT_DEVICE`.
+    /// Required, non-empty.
+    pub device: String,
+    /// `digest`: a shell command that prints the SHA-256 of the device's copy. Required.
+    pub digest: String,
+    /// `timeout`: how long `digest` may run. Default 2 minutes.
+    pub timeout: Duration,
+}
+
+/// The default [`Artifact::timeout`].
+pub const ARTIFACT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `repo.<name>.queue`: where the repository's items come from (#5).
 #[derive(Debug, Clone, PartialEq, Eq)]

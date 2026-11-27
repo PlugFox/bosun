@@ -131,6 +131,7 @@
 //! the board first, then the surviving children reaped, then the lost work handed back to the
 //! machine (resumed, verified again or landed again, uncounted).
 
+mod artifact;
 pub(crate) mod board;
 mod breaker;
 mod census;

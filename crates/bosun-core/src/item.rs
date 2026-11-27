@@ -8,7 +8,8 @@
 //!             |          |           |            +-> running     (re-verdict failed, or
 //!             |          |           |            |                first conflict: one session)
 //!             |          |           +-> running        (verdict failed, attempts left)
-//!             |          |           +-> needs_you      (attempts exhausted, guard, census)
+//!             |          |           +-> needs_you      (attempts exhausted, guard, census,
+//!             |          |           |                   a device copy not the run's build)
 //!             |          +-> parked -> running          (limit, pause, kill, daily cap)
 //!             |          |           +-> parked -> verifying  (verdict not ready, #204)
 //!             |          +-> needs_you                  (question, auth, budget,
@@ -436,6 +437,16 @@ pub enum Event {
         /// The verdict run that passed.
         run: u32,
     },
+    /// A verdict run that leases a device (#44 C) passed against a device copy that is not the
+    /// run's own build (another copy, none, or the run built none): sent in place of that run's
+    /// [`Event::Verdict`]. Needs you ([`Reason::ResourceUnready`]) at once; nothing is counted,
+    /// since running the verdict again changes nothing.
+    StaleArtifact {
+        /// The attempt.
+        attempt: u32,
+        /// The verdict run.
+        run: u32,
+    },
     /// The landing step finished.
     Landed,
     /// The landing step was refused.
@@ -511,6 +522,7 @@ impl Event {
             Self::Refused { .. } => "refused",
             Self::Verdict { .. } => "verdict",
             Self::CensusDropped { .. } => "census_dropped",
+            Self::StaleArtifact { .. } => "stale_artifact",
             Self::Landed => "landed",
             Self::LandingRefused => "landing_refused",
             Self::Rebased { .. } => "rebased",
@@ -885,7 +897,8 @@ impl Draft {
             Event::Preconditions { .. }
             | Event::Refused { .. }
             | Event::Verdict { .. }
-            | Event::CensusDropped { .. } => {
+            | Event::CensusDropped { .. }
+            | Event::StaleArtifact { .. } => {
                 self.verification(event)?;
             }
             Event::Landed
@@ -1004,6 +1017,23 @@ impl Draft {
                 // The verdict did pass: the attempt records it, and nothing is counted failed.
                 self.attempt_step(AttemptEvent::VerdictFinished(RunResult::Pass))?;
                 self.needs_you(Reason::CensusDrop);
+            }
+            Event::StaleArtifact { attempt, run } => {
+                // In Landing, the verdict of the rebased commit (#8), as `Event::Verdict`.
+                self.expect(&[State::Verifying, State::Landing])?;
+                self.current(*attempt)?;
+                if self.item.attempt.as_ref()?.run != *run {
+                    return None;
+                }
+                if cfg!(mutant_core_stale_artifact_counts) {
+                    // Mutant (`mutant_core_stale_artifact_counts`): the pass against a stale
+                    // device copy fails the attempt.
+                    self.attempt_mut().state = AttemptState::Fail;
+                    self.attempt_failed();
+                } else {
+                    // The run is not a pass, and a retry would pass against the same wrong copy.
+                    self.needs_you(Reason::ResourceUnready);
+                }
             }
             _ => return None,
         }
@@ -1689,6 +1719,43 @@ mod tests {
             step(&landing, &Event::CensusDropped { attempt, run }, &ctx()),
             None
         );
+    }
+
+    #[test]
+    fn a_pass_against_a_stale_device_copy_is_needs_you_at_once() {
+        let item = attempt(running(), &[]);
+        assert_eq!(item.state, State::Verifying);
+        let (attempt, _, run) = cur(&item);
+        // An older run's check is not this one's.
+        let older = Event::StaleArtifact {
+            attempt,
+            run: run.wrapping_sub(1),
+        };
+        assert_eq!(step(&item, &older, &ctx()), None);
+        let next = go(&item, &Event::StaleArtifact { attempt, run }, &ctx());
+        assert_eq!(next.item.state, State::NeedsYou(Reason::ResourceUnready));
+        assert_eq!(next.transition.cause, "stale_artifact");
+        let effects: Vec<_> = next.transition.effects.iter().map(|e| &e.kind).collect();
+        assert!(effects.contains(&&EffectKind::Comment(Reason::ResourceUnready)));
+        assert!(!effects.iter().any(|k| matches!(
+            k,
+            EffectKind::RunVerdict { .. } | EffectKind::Spawn { .. } | EffectKind::Land { .. }
+        )));
+        assert_eq!(
+            (next.item.failed, next.item.uncounted, next.item.unready),
+            (0, 0, 0)
+        );
+        assert_eq!(next.item.attempt_number(), item.attempt_number());
+        assert_eq!(next.item.attempts, item.attempts);
+
+        // From Landing: the re-verdict of the rebased commit.
+        let landing = self::attempt(running(), &[RunResult::Pass]);
+        assert_eq!(landing.state, State::Landing);
+        let landing = go(&landing, &Event::Rebased { attempt }, &ctx()).item;
+        let (attempt, _, run) = cur(&landing);
+        let next = go(&landing, &Event::StaleArtifact { attempt, run }, &ctx());
+        assert_eq!(next.item.state, State::NeedsYou(Reason::ResourceUnready));
+        assert_eq!(next.item.failed, 0);
     }
 
     #[test]
@@ -2654,6 +2721,7 @@ mod tests {
                     result: RunResult::Unready,
                 },
                 Event::CensusDropped { attempt, run },
+                Event::StaleArtifact { attempt, run },
             ]),
             State::Landing => events.extend([
                 Event::Landed,
@@ -2676,6 +2744,7 @@ mod tests {
                     run,
                     result: RunResult::Unready,
                 },
+                Event::StaleArtifact { attempt, run },
             ]),
             State::Done(_) => events.extend([Event::PullRequestClosed, Event::PullRequestClosed]),
             _ => {}

@@ -12,7 +12,8 @@ use toml_edit::{Document, Item, TableLike};
 use crate::error::{Location, Notice, Problem};
 use crate::policy::{Census, Policy, relative_entry};
 use crate::{
-    Budget, Daemon, Landing, LandingMode, McpServer, PullRequest, Queue, Resource, Sweep, Verdict,
+    ARTIFACT_TIMEOUT, Artifact, Budget, Daemon, Landing, LandingMode, McpServer, PullRequest,
+    Queue, Resource, Sweep, Verdict,
 };
 
 /// Sections of #4 that this version accepts and does not read.
@@ -957,6 +958,7 @@ impl Reader<'_> {
             kind: String::new(),
             capacity: 1,
             scope: Scope::Machine,
+            artifacts: BTreeMap::new(),
         };
         for (key, item) in table.iter() {
             let key_at = self.key_at(table, key, item);
@@ -975,11 +977,18 @@ impl Reader<'_> {
                     set(&mut resource.capacity, capacity);
                 }
                 "scope" => set(&mut resource.scope, self.scope(item, &what)),
+                "artifact" => {
+                    for (name, item, at) in self.named_tables(item, &what, key_at) {
+                        if let Some(artifact) = self.artifact(&format!("{what}.{name}"), item, at) {
+                            resource.artifacts.insert(name.to_owned(), artifact);
+                        }
+                    }
+                }
                 other => self.problem(
                     key_at,
                     format!(
-                        "unknown key `{path}.{other}`; a resource has `kind`, `capacity` and \
-                         `scope`"
+                        "unknown key `{path}.{other}`; a resource has `kind`, `capacity`, \
+                         `scope` and `artifact`"
                     ),
                 ),
             }
@@ -989,6 +998,75 @@ impl Reader<'_> {
         }
         resource.kind = kind?;
         Some(resource)
+    }
+
+    /// Reads `[resource.<name>.artifact.<artifact>]` (#44 C). An unknown key (a `push` among
+    /// them: the verdict pushes, never the daemon) is refused.
+    fn artifact(&mut self, path: &str, item: &Item, at: Option<Location>) -> Option<Artifact> {
+        let table = item.as_table_like()?;
+        let (mut local, mut device, mut digest) = (None, None, None);
+        let mut timeout = ARTIFACT_TIMEOUT;
+        for (key, item) in table.iter() {
+            let key_at = self.key_at(table, key, item);
+            let what = format!("{path}.{key}");
+            match key {
+                "local" => local = self.artifact_local(item, &what),
+                "device" => device = self.word(item, &what),
+                "digest" => {
+                    digest = self.command(item, &what);
+                    if digest.is_none() && item.is_str() {
+                        self.problem(key_at, format!("`{what}` is empty"));
+                    }
+                }
+                "timeout" => set(&mut timeout, self.duration(item, &what)),
+                other => self.problem(
+                    key_at,
+                    format!(
+                        "unknown key `{path}.{other}`; an artifact has `local`, `device`, \
+                         `digest` and `timeout`"
+                    ),
+                ),
+            }
+        }
+        // Mutant (`mutant_config_artifact_digest_optional`): an artifact without `digest` is
+        // accepted, a device copy nobody can ask about.
+        let required: &[&str] = if cfg!(mutant_config_artifact_digest_optional) {
+            &["local", "device"]
+        } else {
+            &["local", "device", "digest"]
+        };
+        for &key in required {
+            if table.get(key).is_none() {
+                self.problem(at, format!("`{path}` has no `{key}`"));
+            }
+        }
+        Some(Artifact {
+            local: local?,
+            device: device?,
+            digest: digest?,
+            timeout,
+        })
+    }
+
+    /// An artifact's `local`: absolute, or relative with `/` separators and no `..` component.
+    fn artifact_local(&mut self, item: &Item, what: &str) -> Option<String> {
+        let (text, at) = self.string(item, what)?;
+        let why = if text.is_empty() {
+            Some("it is not empty")
+        } else if PathBuf::from(text).is_absolute() {
+            None
+        } else if text.contains('\\') {
+            Some("a relative path is `/`-separated")
+        } else if text.split('/').any(|part| part == "..") {
+            Some("a relative path has no `..` component")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            self.problem(at, format!("`{what}` is {text:?}; {why}"));
+            return None;
+        }
+        Some(text.to_owned())
     }
 
     fn scope(&mut self, item: &Item, what: &str) -> Option<Scope> {

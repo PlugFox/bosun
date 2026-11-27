@@ -580,6 +580,13 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_core_unready_uncapped)",
   "cfg(mutant_config_unready_exit_any_code)",
   "cfg(mutant_loop_unready_counts)",
+  # #220: a device's state is not the item's until the item put it there.
+  "cfg(mutant_loop_skip_artifact_check)",
+  "cfg(mutant_loop_artifact_local_in_item_worktree)",
+  "cfg(mutant_loop_pass_without_artifact_stands)",
+  "cfg(mutant_loop_failed_run_against_stale_copy_uncounted)",
+  "cfg(mutant_core_stale_artifact_counts)",
+  "cfg(mutant_config_artifact_digest_optional)",
 ] }
 
 [workspace.lints.clippy]

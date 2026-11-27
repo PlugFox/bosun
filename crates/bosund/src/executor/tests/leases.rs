@@ -13,7 +13,7 @@ use super::*;
 const LIMIT: Duration = Duration::from_secs(180);
 
 /// A card with `verdict` (a TOML literal string) that needs `needs`.
-fn card_needing(id: u64, verdict: &str, needs: &[&str]) -> Card {
+pub(super) fn card_needing(id: u64, verdict: &str, needs: &[&str]) -> Card {
     let needs: Vec<String> = needs.iter().map(|n| format!("\"{n}\"")).collect();
     let needs = if needs.is_empty() {
         String::new()

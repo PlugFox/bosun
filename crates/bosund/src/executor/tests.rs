@@ -34,6 +34,7 @@ use super::*;
 use crate::config_watch;
 use crate::events::{Events, Options as EventOptions};
 
+mod artifacts;
 mod auto_pause;
 mod blocked;
 mod census;

@@ -17,7 +17,9 @@ use bosun_store::{VerdictEnd, VerdictStart, Write};
 use tokio::sync::{oneshot, watch};
 
 use super::workspace::Unopened;
-use super::{Claimed, Shared, Signal, blocking, git, identity, lookup, now_ms, outbox, workspace};
+use super::{
+    Claimed, Shared, Signal, artifact, blocking, git, identity, lookup, now_ms, outbox, workspace,
+};
 use crate::events;
 
 /// Resolves when `kill` is raised; never when its sender is gone without raising it.
@@ -349,7 +351,7 @@ async fn run_in(
     let spec = VerdictSpec {
         shell,
         command: command.clone(),
-        env: vars,
+        env: vars.clone(),
         // The checkout in stage 1; a checkout of the commit in worktree mode (#8).
         cwd: cwd.to_owned(),
         timeout: claimed
@@ -417,6 +419,43 @@ async fn run_in(
         }
     };
     let result = run_result(verdict.outcome);
+    // The device check (#44 C): after the run, before it is recorded, since a pass against a
+    // device copy that is not the run's own build does not stand.
+    let place = artifact::RunPlace {
+        shell: &spec.shell,
+        vars: &vars,
+        cwd,
+    };
+    let checked = artifact::check(
+        shared, config, repo, claimed, run, &place, result, &mut kill,
+    )
+    .await;
+    let Some(checked) = checked else {
+        // Killed during the check: a killed run; the unchecked run does not stand.
+        record_end(shared, run, &verdict, RunResult::Unready).await;
+        return (fail(RunResult::Fail), Vec::new());
+    };
+    if let Some(note) = &checked.note {
+        // Stored before the event is applied: the Needs-you comment quotes it.
+        outbox::note_unready(shared, &run.item, note).await;
+    }
+    match checked.decision {
+        artifact::Decision::Stands | artifact::Decision::Noted(_) => {}
+        artifact::Decision::Unready(_) => {
+            record_end(shared, run, &verdict, RunResult::Unready).await;
+            return (fail(RunResult::Unready), Vec::new());
+        }
+        artifact::Decision::Stale(_) => {
+            record_end(shared, run, &verdict, RunResult::Unready).await;
+            return (
+                Event::StaleArtifact {
+                    attempt: run.attempt,
+                    run: run.number,
+                },
+                Vec::new(),
+            );
+        }
+    }
     record_end(shared, run, &verdict, result).await;
     if result == RunResult::Unready
         && let Some(code) = repo.verdict.unready_exit

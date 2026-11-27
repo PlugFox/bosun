@@ -3731,6 +3731,65 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // A device's state is not the item's until the item put it there (#220).
+    Mutant {
+        name: "mutant_loop_skip_artifact_check",
+        issue: 220,
+        breaks: "the daemon never checks the device's copy: a pass against another build is Done",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::artifacts::a_pass_against_another_build_on_the_device_is_needs_you_and_counts_nothing",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_artifact_local_in_item_worktree",
+        issue: 220,
+        breaks: "a relative artifact is looked for in the item's worktree, not the run's checkout where the verdict built it",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::artifacts::a_verdict_that_puts_its_own_build_on_the_device_stands",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_pass_without_artifact_stands",
+        issue: 220,
+        breaks: "a passing run that built no artifact stands against whatever the device holds",
+        package: "bosund",
+        check: Check::Test(
+            "executor::artifact::tests::a_run_stands_only_against_the_runs_own_device_copy",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_failed_run_against_stale_copy_uncounted",
+        issue: 220,
+        breaks: "a failed run against another device copy goes to Needs you uncounted, not a counted failure",
+        package: "bosund",
+        check: Check::Test(
+            "executor::artifact::tests::a_run_stands_only_against_the_runs_own_device_copy",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_stale_artifact_counts",
+        issue: 220,
+        breaks: "a pass against a stale device copy fails the attempt instead of Needs you",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_pass_against_a_stale_device_copy_is_needs_you_at_once"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_artifact_digest_optional",
+        issue: 220,
+        breaks: "an artifact without a `digest` command is accepted",
+        package: "bosun-config",
+        check: Check::Test(
+            "tests::a_resource_artifact_needs_a_local_path_a_device_path_and_a_digest_command",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

@@ -502,6 +502,23 @@ impl Drainer {
             .map_err(|e| e.to_string())
     }
 
+    /// For [`Reason::AttemptsExhausted`], a counted failure against a stale device copy (#44 C):
+    /// the device check of the attempt that just failed, when it noted one, as `; the device
+    /// check of the last run: <note>`; else empty.
+    async fn device_check(&self, row: &OutboxRow, reason: Reason) -> Result<String, String> {
+        if reason == Reason::AttemptsExhausted
+            && let Some((attempt, _, _)) = key_parts(&row.effect_key)
+            && let Some(note) = self.note(&row.item, NOTE_UNREADY).await?
+            && note.starts_with(&format!("attempt {attempt}, "))
+        {
+            return Ok(format!(
+                "; the device check of the last run: {}",
+                publish::sanitise_inline(&note, 500)
+            ));
+        }
+        Ok(String::new())
+    }
+
     /// What a Needs-you row of [`Reason::LandingRefused`] says when its transition was a pull
     /// request closed unmerged (#8): the item's [`NOTE_PR_CLOSED`] note written for that very
     /// transition. `None` for any other refusal.
@@ -643,6 +660,7 @@ impl Drainer {
                 {
                     let _ = write!(body, ": {error}");
                 }
+                body.push_str(&self.device_check(row, other).await?);
                 // The figures of the census (#7), and how the card accepts them.
                 if other == Reason::CensusDrop
                     && let Some(note) = self.note(item, super::census::NOTE_CENSUS).await?

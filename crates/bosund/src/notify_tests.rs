@@ -342,3 +342,29 @@ async fn notify_test_sends_one_message_on_the_channel() {
     assert_eq!(bosun_notify::fake::sent("notify-tests-send-ops").len(), 1);
     world.close().await;
 }
+
+/// #9: a `telegram` channel is added through the registry alone: its chat is a parameter, its
+/// token (synthetic) goes to the credential store and into no result; a bad chat is refused.
+/// Nothing is sent: no test reaches Telegram.
+#[tokio::test]
+async fn a_telegram_channel_is_added_with_its_token_in_the_credential_store() {
+    let world = World::new().await;
+    let token = format!("123456789:{}", "A".repeat(35));
+    let mut params = add_params("a", "chat", "unused", &token);
+    params["kind"] = json!("telegram");
+    params["params"] = json!({"chat": "-1001234567890"});
+    let added = world.ok("notify.channel.add", params.clone()).await;
+    assert!(!added.to_string().contains(&token), "{added}");
+    assert_eq!(world.secret("a", "notify/a/chat").as_deref(), Some(&*token));
+    let list = world.list("a").await;
+    assert_eq!(list["channels"][0]["kind"], "telegram", "{list}");
+    assert!(!list.to_string().contains(&token), "{list}");
+
+    params["name"] = json!("other");
+    params["params"] = json!({"chat": "hello"});
+    assert_eq!(
+        world.refused("notify.channel.add", params).await,
+        i64::from(code::INVALID_PARAMS)
+    );
+    world.close().await;
+}

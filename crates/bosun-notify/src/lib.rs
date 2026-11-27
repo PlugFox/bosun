@@ -3,9 +3,10 @@
 //! - [`Notifier`]: one channel, built and ready to send one plain-text message. It is
 //!   synchronous; `bosund` calls it on its blocking pool.
 //! - [`build`]: the kind registry. It checks a channel's non-secret parameters (an unknown kind
-//!   or key is refused, with the known ones named) and builds its notifier. This version has one
-//!   kind, [`fake`], which a running daemon refuses ([`Kinds::fake`]); Telegram and the signed
-//!   webhook come next.
+//!   or key is refused, with the known ones named) and builds its notifier. The kinds:
+//!   [`telegram`] (a chat, through the Bot API; how to get a bot token and a chat id is in its
+//!   docs), and [`fake`], for tests, which a running daemon refuses ([`Kinds::fake`]). The
+//!   signed webhook comes next.
 //! - [`secret`]: the OS credential store, where a channel's secret lives (Windows Credential
 //!   Manager, macOS Keychain, Secret Service). The channel row in the identity's database keeps
 //!   only the entry's name ([`entry`]), never the secret, so neither the database nor one of its
@@ -27,6 +28,7 @@ pub mod fake;
 pub mod policy;
 pub mod render;
 pub mod secret;
+pub mod telegram;
 
 pub use render::{Notice, render};
 
@@ -98,7 +100,7 @@ pub struct Kinds {
 /// The kinds this version knows, under `kinds`.
 #[must_use]
 pub fn known_kinds(kinds: Kinds) -> Vec<&'static str> {
-    let mut known = Vec::new();
+    let mut known = vec![telegram::KIND];
     if kinds.fake {
         known.push(fake::KIND);
     }
@@ -125,17 +127,11 @@ pub fn build(
     }
     match kind {
         fake::KIND if kinds.fake => Ok(Box::new(fake::Fake::new(params)?)),
-        _ => {
-            let known = known_kinds(kinds);
-            Err(if known.is_empty() {
-                format!("unknown channel kind {kind:?}: this bosun knows no kind yet")
-            } else {
-                format!(
-                    "unknown channel kind {kind:?}; the known kinds: {}",
-                    known.join(", ")
-                )
-            })
-        }
+        telegram::KIND => Ok(Box::new(telegram::Telegram::new(params, secret)?)),
+        _ => Err(format!(
+            "unknown channel kind {kind:?}; the known kinds: {}",
+            known_kinds(kinds).join(", ")
+        )),
     }
 }
 

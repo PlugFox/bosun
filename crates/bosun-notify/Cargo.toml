@@ -12,6 +12,11 @@ publish.workspace = true
 # The redactor every text goes through before it is sent (#208).
 bosun-core = { path = "../bosun-core" }
 keyring-core.workspace = true
+# The Telegram Bot API over HTTPS, with the platform's trust store and the `ring` provider.
+rustls.workspace = true
+ureq.workspace = true
+# The request and the answer of the Bot API.
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store.workspace = true

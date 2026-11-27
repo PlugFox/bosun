@@ -2,9 +2,9 @@
 //! before publication.
 //!
 //! Shapes, not knowledge: the redactor knows the formats of the common credentials (GitHub,
-//! Anthropic, `OpenAI`, AWS, Slack, Google, GitLab, npm tokens, JWTs, private keys, credentials
-//! in URLs, `Authorization: Bearer`) and the `name = value` assignment of anything named like a
-//! secret. It is a second line: the agent's environment holds no GitHub write credential (#2).
+//! Anthropic, `OpenAI`, AWS, Slack, Google, GitLab, npm and Telegram bot tokens, JWTs, private
+//! keys, credentials in URLs, `Authorization: Bearer`) and the `name = value` assignment of
+//! anything named like a secret. It is a second line: the agent's environment holds no GitHub write credential (#2).
 
 use std::sync::LazyLock;
 
@@ -22,7 +22,8 @@ static PATTERNS: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
             format!("${{keep}}{REDACTED}${{tail}}"),
         )
     };
-    vec![
+    #[allow(unused_mut, reason = "the mutant below changes it")]
+    let mut patterns = vec![
         whole(
             r"-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----(?s:.*?)(?:-----END[A-Z0-9 ]*PRIVATE KEY-----|\z)",
         ),
@@ -42,7 +43,13 @@ static PATTERNS: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
             r#"access[_-]?key|private[_-]?key|credential)[a-z0-9_.-]*["']?\s*[:=]\s*["']?)"#,
             r#"[^\s"'`,;:][^\s"'`,;]{5,}"#,
         )),
-    ]
+    ];
+    // Mutant (`mutant_redact_skip_telegram_token`): the Telegram bot-token shape is left out.
+    if !cfg!(mutant_redact_skip_telegram_token) {
+        // A Telegram bot token: the bot's id, a colon, 35 characters.
+        patterns.push(whole(r"\b\d{6,12}:[A-Za-z0-9_-]{35}\b"));
+    }
+    patterns
 });
 
 /// `text` with every token-shaped string replaced by `[redacted]`.
@@ -123,6 +130,17 @@ mod tests {
             )),
             "a\n[redacted]\nb"
         );
+    }
+
+    #[test]
+    fn a_telegram_bot_token_is_redacted() {
+        let token = format!("123456789:{}", "A".repeat(35));
+        assert_eq!(
+            redact(&format!("the bot {token} end")),
+            "the bot [redacted] end"
+        );
+        let text = "lunch at 12:30, id 123456789:short";
+        assert_eq!(redact(text), text);
     }
 
     #[test]

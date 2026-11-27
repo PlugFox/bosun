@@ -3480,7 +3480,57 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_telegram_parse_mode",
+        issue: TELEGRAM_CARD,
+        breaks: "the Telegram request asks for a markup mode (`parse_mode`)",
+        package: "bosun-notify",
+        check: Check::Test("telegram::tests::a_message_is_posted_as_plain_text_to_the_chat"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_telegram_no_cap",
+        issue: TELEGRAM_CARD,
+        breaks: "a Telegram message is posted uncut and unscrubbed",
+        package: "bosun-notify",
+        check: Check::Test(
+            "telegram::tests::a_long_message_is_cut_to_the_cap_and_its_secrets_redacted",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_telegram_token_in_error",
+        issue: TELEGRAM_CARD,
+        breaks: "a Telegram error names the request URL with the bot token",
+        package: "bosun-notify",
+        check: Check::Test(
+            "telegram::tests::a_rate_limit_waits_as_told_and_no_error_names_the_token",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_telegram_ignore_retry_after",
+        issue: TELEGRAM_CARD,
+        breaks: "a Telegram 429 drops the service's `retry_after`",
+        package: "bosun-notify",
+        check: Check::Test(
+            "telegram::tests::a_rate_limit_waits_as_told_and_no_error_names_the_token",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_redact_skip_telegram_token",
+        issue: TELEGRAM_CARD,
+        breaks: "the redactor does not know the Telegram bot-token shape",
+        package: "bosun-core",
+        check: Check::Test("publish::redact::tests::a_telegram_bot_token_is_redacted"),
+        platform: None,
+    },
 ];
+
+/// The card of #9 that adds the `telegram` channel kind (its own number was not known when it
+/// was written; its parent's stands in).
+const TELEGRAM_CARD: u32 = 9;
 
 /// The card of #9 that delivers notices through each identity's notification outbox: the
 /// delivery policy, the rendering, the outbox rows queued with their events, and the drainer

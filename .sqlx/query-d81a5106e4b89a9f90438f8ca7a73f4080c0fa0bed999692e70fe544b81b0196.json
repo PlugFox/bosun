@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT name, kind, params, events, min_gap_ms, secret_entry, last_sent_ms,\n                    created_ms, changed_ms\n             FROM notify_channel WHERE removed_ms IS NULL ORDER BY name",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_channel",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_channel",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "params",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_channel",
+            "name": "params"
+          }
+        }
+      },
+      {
+        "name": "events",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_channel",
+            "name": "events"
+          }
+        }
+      },
+      {
+        "name": "min_gap_ms",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notify_channel",
+            "name": "min_gap_ms"
+          }
+        }
+      },
+      {
+        "name": "secret_entry",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "notify_channel",
+            "name": "secret_entry"
+          }
+        }
+      },
+      {
+        "name": "last_sent_ms",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notify_channel",
+            "name": "last_sent_ms"
+          }
+        }
+      },
+      {
+        "name": "created_ms",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notify_channel",
+            "name": "created_ms"
+          }
+        }
+      },
+      {
+        "name": "changed_ms",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "notify_channel",
+            "name": "changed_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "d81a5106e4b89a9f90438f8ca7a73f4080c0fa0bed999692e70fe544b81b0196"
+}

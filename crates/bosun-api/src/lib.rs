@@ -53,11 +53,16 @@
 //! | `lease.release` | [`ReleaseParams`] | [`ReleaseResult`] |
 //! | `lease.list` | [`IdentityParams`] | [`Resources`] |
 //! | `doctor.probe` | [`IdentityParams`] | [`ProbeResult`] |
+//! | `notify.channel.add` | [`ChannelAddParams`] | [`ChannelAdded`] |
+//! | `notify.channel.list` | [`IdentityParams`] | [`Channels`] |
+//! | `notify.channel.remove` | [`ChannelParams`] | [`ChannelRemoved`] |
+//! | `notify.channel.test` | [`ChannelParams`] | [`ChannelTested`] |
 //!
 //! The `agent.*` methods name no identity: their credential does ([`agent`]). `control.kill`
 //! names none either: the kill switch is daemon-wide. The `control.*` methods that change
-//! anything take the operator token ([`control`]), and so do `item.restart` and the `lease.*`
-//! methods ([`lease`]); `lease.release` names no identity: its holder is a process.
+//! anything take the operator token ([`control`]), and so do `item.restart`, the `lease.*`
+//! methods ([`lease`]) and the `notify.channel.*` methods that change or send anything
+//! ([`notify`]); `lease.release` names no identity: its holder is a process.
 
 pub mod agent;
 pub mod control;
@@ -67,6 +72,7 @@ pub mod event;
 pub mod item;
 mod items;
 pub mod lease;
+pub mod notify;
 pub mod pace;
 pub mod queue;
 mod report;
@@ -106,6 +112,10 @@ pub use items::{
 pub use lease::{
     AcquireParams, AcquireResult, BUSY, ReleaseParams, ReleaseResult, ResourceView, Resources,
     WaitingFor, WorktreeView,
+};
+pub use notify::{
+    ChannelAddParams, ChannelAdded, ChannelParams, ChannelRemoved, ChannelTested, ChannelView,
+    Channels,
 };
 pub use pace::{Pace, PaceParams, PaceReference};
 pub use queue::{
@@ -399,6 +409,34 @@ pub mod method {
      cannot start children fails here (#131). Reads nothing of the identity's; needs no operator \
      token."
     );
+    method!(
+        NotifyChannelAdd,
+        "notify.channel.add",
+        crate::ChannelAddParams,
+        crate::ChannelAdded,
+        "Adds a notification channel to the identity: its kind, non-secret parameters, events and      minimum gap in its database, its secret in the OS credential store under      `notify/<identity>/<name>`. The secret is in no row, log, error or result. Takes the      operator token."
+    );
+    method!(
+        NotifyChannelList,
+        "notify.channel.list",
+        crate::IdentityParams,
+        crate::Channels,
+        "The identity's live notification channels, each with its credential-store entry and      whether the entry is present, never the secret. Needs no operator token."
+    );
+    method!(
+        NotifyChannelRemove,
+        "notify.channel.remove",
+        crate::ChannelParams,
+        crate::ChannelRemoved,
+        "Removes a notification channel of the identity: deletes its credential-store entry, then      marks its row removed. Takes the operator token."
+    );
+    method!(
+        NotifyChannelTest,
+        "notify.channel.test",
+        crate::ChannelParams,
+        crate::ChannelTested,
+        "Sends a test message on a notification channel of the identity now, outside any outbox,      and says whether its service accepted it. Takes the operator token."
+    );
 }
 
 /// The names of every method, in the order of the module documentation.
@@ -433,6 +471,10 @@ pub const METHODS: &[&str] = &[
     method::LeaseRelease::NAME,
     method::LeaseList::NAME,
     method::DoctorProbe::NAME,
+    method::NotifyChannelAdd::NAME,
+    method::NotifyChannelList::NAME,
+    method::NotifyChannelRemove::NAME,
+    method::NotifyChannelTest::NAME,
 ];
 
 /// The prefix of the `agent.*` group: the only methods an agent credential admits.
@@ -698,6 +740,10 @@ pub fn schema() -> Value {
     add_method::<method::LeaseRelease>(&mut generator, &mut methods);
     add_method::<method::LeaseList>(&mut generator, &mut methods);
     add_method::<method::DoctorProbe>(&mut generator, &mut methods);
+    add_method::<method::NotifyChannelAdd>(&mut generator, &mut methods);
+    add_method::<method::NotifyChannelList>(&mut generator, &mut methods);
+    add_method::<method::NotifyChannelRemove>(&mut generator, &mut methods);
+    add_method::<method::NotifyChannelTest>(&mut generator, &mut methods);
     let notifications = json!({
         event::EVENT: {
             "description": "One event of the subscribed identity, in sequence order.",

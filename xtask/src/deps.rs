@@ -38,14 +38,16 @@ const CLIENT_EDGES: &[(&str, &str)] = &[("bosun-cli", "bosun-tui")];
 /// a client.
 const CLIENT_FORBIDDEN: &[&str] = &["bosun-store", "bosun-queue", "bosun-runner", "bosund"];
 
-/// The side-effect crates of stage 1 (#7, #12): none of them reaches `bosun-store` or another of
-/// them, except [`SIDE_EFFECT_ALLOWED`]. `bosund` composes them.
+/// The side-effect crates of stage 1 (#7, #12) and stage 3's notifier (#9): none of them
+/// reaches `bosun-store` or another of them, except [`SIDE_EFFECT_ALLOWED`]. `bosund` composes
+/// them.
 const SIDE_EFFECT: &[&str] = &[
     "bosun-queue",
     "bosun-runner",
     "bosun-git",
     "bosun-proc",
     "bosun-identity",
+    "bosun-notify",
 ];
 
 /// The one edge between side-effect crates: the runner spawns through `bosun-proc`.
@@ -472,12 +474,13 @@ mod tests {
         }
     }
 
-    const SIDE_EFFECT: [&str; 5] = [
+    const SIDE_EFFECT: [&str; 6] = [
         "bosun-queue",
         "bosun-runner",
         "bosun-git",
         "bosun-proc",
         "bosun-identity",
+        "bosun-notify",
     ];
 
     #[test]

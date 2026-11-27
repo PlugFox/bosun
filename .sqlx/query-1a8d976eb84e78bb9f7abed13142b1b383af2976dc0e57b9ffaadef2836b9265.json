@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO notify_channel (name, kind, params, events, min_gap_ms, secret_entry,\n                                     created_ms, changed_ms)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "1a8d976eb84e78bb9f7abed13142b1b383af2976dc0e57b9ffaadef2836b9265"
+}

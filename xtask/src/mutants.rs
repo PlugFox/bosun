@@ -3367,8 +3367,57 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_notify_secret_in_row",
+        issue: NOTIFY_CARD,
+        breaks: "`notify.channel.add` stores the channel's secret in its row's parameters too",
+        package: "bosund",
+        check: Check::Test(
+            "notify_tests::a_channel_secret_goes_to_the_credential_store_not_the_database",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_notify_list_every_identity",
+        issue: NOTIFY_CARD,
+        breaks: "`notify.channel.list` lists the channels of every served identity",
+        package: "bosund",
+        check: Check::Test("notify_tests::another_identitys_channels_are_never_listed_or_removed"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_notify_no_operator_token",
+        issue: NOTIFY_CARD,
+        breaks: "the `notify.channel.*` writes skip the operator token",
+        package: "bosund",
+        check: Check::Test("notify_tests::the_channel_writes_take_the_operator_token"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_doctor_notify_secret_unchecked",
+        issue: NOTIFY_CARD,
+        breaks: "`bosun doctor`'s `notify` check reports every channel ok, its secret missing or not",
+        package: "bosun-cli",
+        check: Check::Test(
+            "doctor::tests::the_notify_check_names_each_channel_and_whether_its_secret_is_present",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_cli_notify_secret_argument",
+        issue: NOTIFY_CARD,
+        breaks: "`bosun notify add` takes the secret as a `--secret` option",
+        package: "bosun-cli",
+        check: Check::Test("notify::tests::the_secret_is_read_from_stdin_never_from_the_arguments"),
+        platform: None,
+    },
 ];
 
+/// The card of #9 that builds what every notification channel stands on: `bosun-notify` with
+/// the credential store, the channel rows of each identity, `notify.channel.*`, `bosun notify`
+/// and doctor's `notify` check (its own number was not known when it was written; its parent's
+/// stands in).
+const NOTIFY_CARD: u32 = 9;
 /// The card of #7 that sets the automatic pause per repository (`repo.<name>.auto_pause`), off
 /// by default in worktree mode (its own number was not known when it was written; its parent's
 /// stands in).

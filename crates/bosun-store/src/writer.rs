@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::error::{Error, from_db, to_db};
+use crate::notify::{self, NewChannel};
 use crate::read;
 use crate::work::write as work;
 use crate::work::{
@@ -264,6 +265,12 @@ pub enum Write {
         path: String,
         user_base_json: String,
     },
+    /// A notification channel of the identity (#9). Refused ([`Error::Refused`]) for a name a
+    /// live channel has, or one that is not `[a-z0-9-]{1,32}`.
+    ChannelAdded(NewChannel),
+    /// The live channel `name` is removed: its row is kept, marked, and the name is free.
+    /// Fails ([`Error::UnknownRow`]) when no live channel has it.
+    ChannelRemoved { name: String, at_ms: i64 },
     /// Mutant `mutant_ingest_reingest_truncates` (#21): deletes every ingested row, as a
     /// reingest that truncates before it rebuilds would.
     #[cfg(mutant_ingest_reingest_truncates)]
@@ -583,6 +590,8 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
             path,
             user_base_json,
         } => work::worktree_user_base(conn, &path, &user_base_json).await,
+        Write::ChannelAdded(new) => notify::add(conn, &new).await,
+        Write::ChannelRemoved { name, at_ms } => notify::remove(conn, &name, at_ms).await,
         #[cfg(mutant_ingest_reingest_truncates)]
         Write::Truncate => {
             conn.execute(

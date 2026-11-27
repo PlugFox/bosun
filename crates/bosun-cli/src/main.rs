@@ -19,6 +19,11 @@
 //! bosun session tail <repo>#<card> | <session id>
 //! bosun tui [--identity <name>]
 //! bosun with [--repo <name>] [--identity <name>] <resource>... -- <command> [args...]
+//! bosun notify add <name> --kind <kind> [--param key=value]... [--events <e>,...]
+//!                         [--min-gap <seconds>] --identity <name>   < secret
+//! bosun notify list [--identity <name>]
+//! bosun notify remove <name> --identity <name>
+//! bosun notify test <name> --identity <name>
 //! ```
 //!
 //! Every command also takes `--format text|json` (default `text`; `report` also takes `md`,
@@ -64,8 +69,9 @@
 //! - `doctor`: checks the registration, the configuration, each identity's directories,
 //!   Claude Code's transcript retention, a stop hook left in a repository's agent settings
 //!   (`docs/migration.md`), the tools on the daemon's PATH (`git`, `sh`, `claude`,
-//!   `gh`), each identity's GitHub login, and the endpoint and who may open it, with the daemon
-//!   up or down (`doctor.rs`). It prints every check, failed or not; it exits 0 when none failed
+//!   `gh`), each identity's GitHub login, the endpoint and who may open it, and each
+//!   notification channel with whether its secret is present, with the daemon up or down
+//!   (`doctor.rs`). It prints every check, failed or not; it exits 0 when none failed
 //!   (warnings allowed) and 7 when one did.
 //!
 //! - `pause` and `resume`: pause one repository (`--repo`) or every repository of each
@@ -99,6 +105,11 @@
 //!   `.cmd` or `.bat` (`npm`, `gradlew`) runs; `taskkill /F` of `bosun.exe` alone leaves the
 //!   command running without the lease (ending it too needs a Job object, which is `unsafe`
 //!   FFI). It ignores `--format`.
+//! - `notify`: the identity's notification channels (`notify.channel.*`, `notify.rs`): `add`
+//!   one (its secret read from standard input, one line, never from an argument), `list` them
+//!   with whether each one's secret is in the OS credential store, `remove` one, `test` one by
+//!   sending a test message now. `add`, `remove` and `test` need `--identity` and send the
+//!   operator token.
 //!
 //! `--name` names the registration (default `bosun`): a second daemon, or a test.
 //!
@@ -165,6 +176,7 @@ mod control;
 mod doctor;
 mod install;
 mod markdown;
+mod notify;
 mod render;
 mod shape;
 mod time;
@@ -315,6 +327,10 @@ enum Command {
     /// running without the leases; closing the console ends both.
     #[command(after_help = EXIT_CODES)]
     With(with::WithArgs),
+    /// The identity's notification channels: add (the secret from standard input), list,
+    /// remove, test.
+    #[command(subcommand, after_help = EXIT_CODES)]
+    Notify(notify::NotifyCommand),
 }
 
 #[derive(Debug, Args)]
@@ -673,6 +689,7 @@ async fn own_terms(global: &Global, command: &Command) -> Option<Result<String, 
         Command::Lint(args) => work::lint(global, args).await,
         Command::Session(work::SessionCommand::Tail(args)) => work::tail(global, args).await,
         Command::Tui => tui(global).await,
+        Command::Notify(command) => notify::run(global, command).await,
         _ => return None,
     })
 }

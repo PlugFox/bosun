@@ -569,6 +569,222 @@
       ],
       "type": "object"
     },
+    "ChannelAddParams": {
+      "description": "Params of `notify.channel.add`.",
+      "properties": {
+        "events": {
+          "description": "The events it gets, each one of [`EVENTS`]; at least one.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "The channel's kind.",
+          "type": "string"
+        },
+        "min_gap_s": {
+          "description": "The least time between two of its messages, in seconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "description": "The channel's name within the identity: 1 to 32 of `a-z`, `0-9` and `-`.",
+          "type": "string"
+        },
+        "operator": {
+          "default": "",
+          "description": "The operator token the daemon wrote at start. Missing, it is refused like a wrong one.",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "The kind's non-secret parameters (a chat id, a URL). An unknown key is refused.",
+          "type": "object"
+        },
+        "secret": {
+          "description": "The secret, for a kind that needs one; stored in the OS credential store only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "name",
+        "kind",
+        "events",
+        "min_gap_s"
+      ],
+      "type": "object"
+    },
+    "ChannelAdded": {
+      "description": "Result of `notify.channel.add`.",
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/ChannelView"
+        },
+        "identity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "channel"
+      ],
+      "type": "object"
+    },
+    "ChannelParams": {
+      "description": "Params of `notify.channel.remove` and `notify.channel.test`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "name": {
+          "description": "The channel, by name.",
+          "type": "string"
+        },
+        "operator": {
+          "default": "",
+          "description": "The operator token the daemon wrote at start. Missing, it is refused like a wrong one.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "name"
+      ],
+      "type": "object"
+    },
+    "ChannelRemoved": {
+      "description": "Result of `notify.channel.remove`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "name"
+      ],
+      "type": "object"
+    },
+    "ChannelTested": {
+      "description": "Result of `notify.channel.test`. A send that failed is a result, not an API error.",
+      "properties": {
+        "accepted": {
+          "description": "The channel's service took the message.",
+          "type": "boolean"
+        },
+        "error": {
+          "description": "Why not, when it did not; never the secret.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "identity": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "name",
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "ChannelView": {
+      "description": "One live channel of the identity.",
+      "properties": {
+        "events": {
+          "description": "The events it gets.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "last_sent_ms": {
+          "description": "When its last message went out.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min_gap_s": {
+          "description": "The least time between two of its messages, in seconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Its non-secret parameters.",
+          "type": "object"
+        },
+        "secret_entry": {
+          "description": "The credential-store entry of its secret (service `bosun`): a name, never the secret.",
+          "type": "string"
+        },
+        "secret_present": {
+          "description": "Whether the credential store holds that entry.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "params",
+        "events",
+        "min_gap_s",
+        "secret_entry",
+        "secret_present"
+      ],
+      "type": "object"
+    },
+    "Channels": {
+      "description": "Result of `notify.channel.list`.",
+      "properties": {
+        "channels": {
+          "description": "Its live channels, by name.",
+          "items": {
+            "$ref": "#/$defs/ChannelView"
+          },
+          "type": "array"
+        },
+        "identity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "channels"
+      ],
+      "type": "object"
+    },
     "CheckTokens": {
       "description": "Token sums in the provider's categories: cache writes are not split by duration.",
       "properties": {
@@ -5318,6 +5534,42 @@
       },
       "result": {
         "$ref": "#/$defs/ReleaseResult"
+      }
+    },
+    "notify.channel.add": {
+      "description": "Adds a notification channel to the identity: its kind, non-secret parameters, events and      minimum gap in its database, its secret in the OS credential store under      `notify/<identity>/<name>`. The secret is in no row, log, error or result. Takes the      operator token.",
+      "params": {
+        "$ref": "#/$defs/ChannelAddParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ChannelAdded"
+      }
+    },
+    "notify.channel.list": {
+      "description": "The identity's live notification channels, each with its credential-store entry and      whether the entry is present, never the secret. Needs no operator token.",
+      "params": {
+        "$ref": "#/$defs/IdentityParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Channels"
+      }
+    },
+    "notify.channel.remove": {
+      "description": "Removes a notification channel of the identity: deletes its credential-store entry, then      marks its row removed. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/ChannelParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ChannelRemoved"
+      }
+    },
+    "notify.channel.test": {
+      "description": "Sends a test message on a notification channel of the identity now, outside any outbox,      and says whether its service accepted it. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/ChannelParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ChannelTested"
       }
     },
     "queue.get": {

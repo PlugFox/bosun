@@ -67,6 +67,9 @@ pub(crate) struct Served {
     /// `[budget]` as in force: `tokens.pace` reads its reference from it (#74). Replaced by
     /// each valid edit of the configuration ([`follow_budget`]).
     pub(crate) budget: std::sync::Mutex<Budget>,
+    /// The identity's notification channels' credential store (#9): the OS's, one in memory
+    /// in tests.
+    pub(crate) notify: crate::notify::Handle,
 }
 
 impl Served {
@@ -409,6 +412,7 @@ pub(crate) async fn open(
                 events: Events::new(epoch, options),
                 boot,
                 budget: std::sync::Mutex::new(config.budget.clone()),
+                notify: crate::notify::Handle::new(),
             },
         );
     }

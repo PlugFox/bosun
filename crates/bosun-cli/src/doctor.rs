@@ -2,7 +2,8 @@
 //!
 //! It reads the configuration through `bosun-config` and asks the OS; the daemon is asked
 //! `hello`, then `doctor.probe` of each identity for `daemon_gh`, then `status.overview` of
-//! each identity for `served_config`. Each check is `ok`,
+//! each identity for `served_config`, then `notify.channel.list` of each identity for `notify`.
+//! Each check is `ok`,
 //! `warn`, `fail` or `skip` (it could not run because an earlier check failed), and each
 //! warning and failure carries a fix.
 //!
@@ -26,6 +27,7 @@
 //! | `daemon` | the daemon does not answer `hello`, or speaks another API version (fail) |
 //! | `daemon_gh` | the daemon cannot start its `gh` (`doctor.probe` of each identity, run in the daemon's own process: fail, #131); the daemon does not know `doctor.probe` (warn); skipped when the daemon did not answer |
 //! | `served_config` | the configuration differs from what the daemon serves (`status.overview` of each identity) in a way that waits for the next daemon start: a repository added, removed, moved to another identity, or with another `path` or queue (its kind or `queue_source`); an identity the daemon does not serve (warn, #186); skipped when the daemon did not answer |
+//! | `notify` | per channel of the identity (`notify.channel.list`, #9): ok naming the channel, its kind and `secret present`; fail when its secret is missing from the OS credential store (fix: remove it and add it again); ok `no channels` when there is none; never a secret's value; warn when the daemon does not know the method; skipped when the daemon did not answer |
 //! | `log` | never fails: names the daemon's log file (`bosun_client::log`, #137), ok when it exists, skipped when the daemon has not written it yet |
 //!
 //! The per-identity checks carry the identity's name. The `PATH` the daemon gets is the one
@@ -65,7 +67,7 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use bosun_api::rpc::code;
-use bosun_api::{IdentityParams, Method, ProbeResult, RepoOverview, method};
+use bosun_api::{Channels, IdentityParams, Method, ProbeResult, RepoOverview, method};
 use bosun_client::{Client, Endpoint, Error};
 use bosun_config::{Config, Disk, DiskProbe, Queue, SystemProbe, tools};
 use serde::Serialize;
@@ -216,8 +218,75 @@ pub(crate) async fn run(inputs: &Inputs) -> Vec<Check> {
             vec![Check::skip("served_config", "the daemon did not answer")]
         });
     }
+    if let Some(config) = &config {
+        checks.extend(channels(inputs, config, &mut client).await);
+    }
     checks.push(log(inputs));
     checks
+}
+
+/// `notify` of each configured identity (of `--identity` only, when given), from
+/// `notify.channel.list` on the client that answered `hello`; skipped when none did.
+async fn channels(inputs: &Inputs, config: &Config, client: &mut Option<Client>) -> Vec<Check> {
+    let mut checks = Vec::new();
+    for name in config.identities.keys() {
+        if inputs.identity.as_ref().is_some_and(|only| only != name) {
+            continue;
+        }
+        let params = IdentityParams {
+            identity: name.clone(),
+        };
+        let answer =
+            ask::<method::NotifyChannelList>(client, bosun_client::CONNECT_TIMEOUT, &params).await;
+        checks.extend(notify(name, answer));
+    }
+    checks
+}
+
+/// `notify` (#9) of `identity` from the daemon's answer to `notify.channel.list` (`None`: the
+/// daemon did not answer): one check per channel, naming it, its kind and whether its secret
+/// is in the credential store, never the secret's value.
+pub(crate) fn notify(identity: &str, answer: Option<Result<Channels, Error>>) -> Vec<Check> {
+    let checks = match answer {
+        None => vec![Check::skip("notify", "the daemon did not answer")],
+        Some(Ok(list)) if list.channels.is_empty() => vec![Check::ok("notify", "no channels")],
+        Some(Ok(list)) => list
+            .channels
+            .iter()
+            .map(|c| {
+                // Mutant (`mutant_doctor_notify_secret_unchecked`): a missing secret is ok.
+                if c.secret_present || cfg!(mutant_doctor_notify_secret_unchecked) {
+                    Check::ok(
+                        "notify",
+                        format!("channel {} ({}): secret present", c.name, c.kind),
+                    )
+                } else {
+                    Check::fail(
+                        "notify",
+                        format!(
+                            "channel {} ({}): its secret is missing from the credential store                              (entry {})",
+                            c.name, c.kind, c.secret_entry
+                        ),
+                        format!(
+                            "remove it and add it again: `bosun notify remove {0} --identity                              {identity}`, then `bosun notify add {0} --kind {1} ... --identity                              {identity}` with the secret on standard input",
+                            c.name, c.kind
+                        ),
+                    )
+                }
+            })
+            .collect(),
+        Some(Err(Error::Rpc(e))) if e.code == code::METHOD_NOT_FOUND => vec![Check::warn(
+            "notify",
+            format!("this bosund does not know notify.channel.list: {}", e.message),
+            "install bosun and bosund of one release",
+        )],
+        Some(Err(e)) => vec![Check::fail(
+            "notify",
+            format!("notify.channel.list: {e}"),
+            "run bosund in a terminal to see why it does not answer",
+        )],
+    };
+    checks.into_iter().map(|c| c.of(identity)).collect()
 }
 
 /// The daemon's log file (#137): where to look when the daemon stops or refuses an attempt,
@@ -1433,6 +1502,64 @@ mod tests {
             }
         }
         assert_eq!(stop_hook("app", &root.join("absent")).status, Status::Skip);
+    }
+
+    /// #9: `notify` names each channel of the identity, its kind and whether its secret is
+    /// present, and fails a channel whose secret is missing, with the fix; no channel is ok,
+    /// and a daemon that did not answer skips it (`mutant_doctor_notify_secret_unchecked`
+    /// reports every channel ok).
+    #[test]
+    fn the_notify_check_names_each_channel_and_whether_its_secret_is_present() {
+        let channel = |name: &str, present: bool| bosun_api::ChannelView {
+            name: name.to_owned(),
+            kind: "fake".to_owned(),
+            params: BTreeMap::new(),
+            events: vec!["needs_you".to_owned()],
+            min_gap_s: 60,
+            secret_entry: format!("notify/a/{name}"),
+            secret_present: present,
+            last_sent_ms: None,
+        };
+        let list = Channels {
+            identity: "a".to_owned(),
+            channels: vec![channel("ops", true), channel("pager", false)],
+        };
+        let checks = notify("a", Some(Ok(list)));
+        assert_eq!(checks.len(), 2, "{checks:?}");
+        let (ops, pager) = (&checks[0], &checks[1]);
+        assert_eq!(ops.status, Status::Ok, "{ops:?}");
+        assert_eq!(ops.identity.as_deref(), Some("a"));
+        assert!(
+            ops.detail.contains("ops") && ops.detail.contains("fake"),
+            "{ops:?}"
+        );
+        assert!(ops.detail.contains("secret present"), "{ops:?}");
+        assert_eq!(pager.status, Status::Fail, "{pager:?}");
+        assert!(pager.detail.contains("pager"), "{pager:?}");
+        assert!(
+            pager
+                .fix
+                .as_deref()
+                .is_some_and(|f| f.contains("bosun notify remove pager")
+                    && f.contains("bosun notify add pager")),
+            "{pager:?}"
+        );
+
+        let none = notify(
+            "a",
+            Some(Ok(Channels {
+                identity: "a".to_owned(),
+                channels: Vec::new(),
+            })),
+        );
+        assert_eq!(none.len(), 1);
+        assert_eq!(none[0].status, Status::Ok);
+        assert_eq!(none[0].detail, "no channels");
+
+        let down = notify("a", None);
+        assert_eq!(down.len(), 1);
+        assert_eq!(down[0].status, Status::Skip);
+        assert_eq!(down[0].identity.as_deref(), Some("a"));
     }
 
     /// #131: `daemon_gh` fails, with the identity, the daemon's reason and `bosun install` as

@@ -1189,6 +1189,35 @@ mod tests {
         conn.close().await.unwrap();
     }
 
+    /// #9: migration 20 came after 21 was shipped; a database migrated to 21 without it gets it
+    /// at the next open, with a copy first.
+    #[tokio::test]
+    async fn a_database_at_21_without_20_gets_the_channel_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let without = Migrator::with_migrations(
+            MIGRATOR
+                .migrations
+                .iter()
+                .filter(|m| m.version != 20)
+                .cloned()
+                .collect(),
+        );
+        open(&path, &Options::default(), &without)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let store = open(&path, &Options::default(), &MIGRATOR).await.unwrap();
+        assert_eq!(
+            store.reader().channels().await.unwrap(),
+            Vec::<crate::ChannelRow>::new()
+        );
+        store.close().await.unwrap();
+        assert_eq!(backups(path.parent().unwrap()).len(), 1);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn database_files_are_private() {

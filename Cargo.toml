@@ -32,6 +32,17 @@ getrandom = { version = "0.4.3", default-features = false }
 # The Unix system calls of `bosun-proc` (#50): process groups, the parent-death signal, the
 # start time of a process.
 libc = "0.2.191"
+# The OS credential store of the notification channels' secrets (#9): the store-independent
+# API, and one platform store per OS below (Windows Credential Manager, macOS Keychain, Secret
+# Service on Linux and the other Unixes). Ours would need `unsafe` FFI, which #12 allows only in
+# `bosun-proc`, and the macOS and Linux sides would still need what these crates wrap. All
+# `MIT OR Apache-2.0`; each entry is built from its platform store object, never through
+# keyring-core's process-wide default store.
+keyring-core = "1.1.0"
+apple-native-keyring-store = { version = "1.0.3", features = ["keychain"] }
+# Through `windows-sys` 0.61.2, the version the workspace already has; no `search` (regex).
+windows-native-keyring-store = { version = "1.1.0", default-features = false }
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
 # File watching (#22): latency only; the rescan stays the source of truth.
 notify = "9.0.0"
 # The CommonMark parser of the publication sanitiser (#8, #56): parse only, no HTML writer, no
@@ -505,6 +516,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_config_auto_pause_worktree_default_on)",
   "cfg(mutant_config_auto_pause_hashed)",
   "cfg(mutant_control_auto_pause_global_only)",
+  # #9: notification channels per identity, their secrets in the OS credential store.
+  "cfg(mutant_notify_secret_in_row)",
+  "cfg(mutant_notify_list_every_identity)",
+  "cfg(mutant_notify_no_operator_token)",
+  "cfg(mutant_doctor_notify_secret_unchecked)",
+  "cfg(mutant_cli_notify_secret_argument)",
 ] }
 
 [workspace.lints.clippy]

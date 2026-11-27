@@ -62,6 +62,9 @@ mod item;
 mod leases;
 mod listen;
 mod log;
+mod notify;
+#[cfg(test)]
+mod notify_tests;
 mod overview;
 mod pace;
 mod state;

@@ -47,6 +47,8 @@ pub enum Error {
     Prices(bosun_core::TableError),
     /// A price change that does not follow the current row of its model and threshold.
     PriceChange(String),
+    /// A write the stored rows refuse (a notification channel name a live channel has).
+    Refused(String),
     /// The writer task has stopped.
     Closed,
 }
@@ -81,6 +83,7 @@ impl fmt::Display for Error {
             Self::Merge(e) => e.fmt(f),
             Self::Prices(e) => write!(f, "price table: {e}"),
             Self::PriceChange(why) => write!(f, "price change refused: {why}"),
+            Self::Refused(why) => f.write_str(why),
             Self::Closed => f.write_str("the store is closed"),
         }
     }

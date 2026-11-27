@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE notify_channel SET removed_ms = ?, changed_ms = ?\n         WHERE name = ? AND removed_ms IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "9eefd3b46f4affc24839017b94e97830c4cce8b683966c72ea885cb05ad2d031"
+}

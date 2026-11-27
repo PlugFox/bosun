@@ -14,6 +14,8 @@
 //! - Stage 2's tables (#8): worktrees, session shims and their output offsets, the history of
 //!   lease waits (the live leases are the daemon's, E15) and landings. Every write is keyed, so
 //!   a replay stores nothing new.
+//! - Stage 3's notification channels (#9): one row per channel of the identity, with the name
+//!   of the credential-store entry of its secret and never the secret ([`NewChannel`]).
 //! - Readers use a read-only pool ([`Reader`]). Every derived number (cost, eqv) is computed at
 //!   query time from raw token counts and the price rows.
 //!
@@ -39,6 +41,7 @@
 mod activity;
 mod error;
 mod link;
+mod notify;
 mod open;
 mod read;
 mod report;
@@ -48,6 +51,7 @@ mod writer;
 pub use activity::RecentSession;
 pub use error::Error;
 pub use link::{CommitLink, Link, LinkedSession};
+pub use notify::{ChannelRow, NewChannel, valid_name as valid_channel_name};
 pub use read::{Bill, By, Group, Reader, RepoRow};
 pub use report::{CheckRow, ToolRow, UsageRow, VersionHealth, WindowSums};
 pub use work::{

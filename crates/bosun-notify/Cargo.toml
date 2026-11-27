@@ -1,0 +1,26 @@
+[package]
+name = "bosun-notify"
+description = "Notifications of bosun: the notifier trait, the channel kinds and the OS credential store of their secrets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The redactor every text goes through before it is sent (#208).
+bosun-core = { path = "../bosun-core" }
+keyring-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store.workspace = true
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus-secret-service-keyring-store.workspace = true
+
+[lints]
+workspace = true

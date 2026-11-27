@@ -17,6 +17,8 @@ bosun-git = { path = "../bosun-git" }
 bosun-heat = { path = "../bosun-heat" }
 bosun-identity = { path = "../bosun-identity" }
 bosun-ingest = { path = "../bosun-ingest" }
+# Notification channels and the OS credential store of their secrets (#9).
+bosun-notify = { path = "../bosun-notify" }
 # Spawning into a container, the power request (#50), and the pipe's security descriptor (#71).
 bosun-proc = { path = "../bosun-proc" }
 bosun-queue = { path = "../bosun-queue" }

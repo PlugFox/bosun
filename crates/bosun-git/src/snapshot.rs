@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::refusal::{Refusal, covers};
+use crate::refusal::{Refusal, build_names, covers};
 use crate::{Error, Git};
 
 /// The ignored files of a working tree, recorded before a session.
@@ -77,7 +77,10 @@ pub fn ignored(
     if paths.is_empty() || cfg!(mutant_git_ignored_is_warning) {
         return Ok(Vec::new());
     }
-    Ok(vec![Refusal::NewIgnored { paths }])
+    Ok(vec![Refusal::NewIgnored {
+        paths,
+        build_names: build_names(build_dirs),
+    }])
 }
 
 /// Git's own configuration of a repository, recorded at claim: every file that changes what git

@@ -515,7 +515,8 @@ fn a_hidden_file_behind_a_new_gitignore_line_is_refused_but_not_in_a_build_dir()
     assert_eq!(
         ignored(&git, &before, &build).unwrap(),
         [Refusal::NewIgnored {
-            paths: vec!["fixture.dat".to_owned()]
+            paths: vec!["fixture.dat".to_owned()],
+            build_names: vec!["target".to_owned()],
         }]
     );
     assert!(dir.join("fixture.dat").exists(), "nothing is deleted");
@@ -535,7 +536,8 @@ fn a_hidden_file_behind_a_new_gitignore_line_is_refused_but_not_in_a_build_dir()
     assert_eq!(
         ignored(&git, &before, &build).unwrap(),
         [Refusal::NewIgnored {
-            paths: vec!["cache/x.bin".to_owned()]
+            paths: vec!["cache/x.bin".to_owned()],
+            build_names: vec!["target".to_owned()],
         }]
     );
 }

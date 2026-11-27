@@ -298,6 +298,9 @@ fn remark(detail: Option<&str>, waiting: &[WaitingFor]) -> String {
     }
 }
 
+/// The most characters of one refusal reason `bosun item` prints; the rest is counted.
+const REASON_CAP: usize = 2_000;
+
 fn render_item(d: &ItemDetail, out: &mut String) {
     let detail = remark(d.detail.as_deref(), &d.waiting);
     let _ = writeln!(
@@ -340,10 +343,17 @@ fn render_item(d: &ItemDetail, out: &mut String) {
         }
         for reason in &a.refusal {
             // The daemon's words; a quoted path or commit message stays on its line.
-            let reason: String = reason
+            let mut reason: String = reason
                 .chars()
                 .map(|c| if c.is_control() { ' ' } else { c })
                 .collect();
+            // A record written before the guard folded its list may hold thousands of paths.
+            let length = reason.chars().count();
+            // Mutant (`mutant_cli_item_refusal_uncut`): the reason is printed whole.
+            if length > REASON_CAP && !cfg!(mutant_cli_item_refusal_uncut) {
+                reason = reason.chars().take(REASON_CAP).collect();
+                let _ = write!(reason, "... [{} more characters]", length - REASON_CAP);
+            }
             let _ = writeln!(out, "  refused before its verdict: {reason}");
         }
     }
@@ -714,6 +724,46 @@ waits on demo#1 (needs_you)
         crate::control::render(&status, &mut out);
         assert!(
             out.contains(&format!("repo demo: hold pause: {why}\n")),
+            "{out}"
+        );
+    }
+
+    /// A reason of 100,000 characters (a record written before the guard folded its list) is
+    /// cut to [`REASON_CAP`](super::REASON_CAP) and says how much is left out.
+    /// `mutant_cli_item_refusal_uncut` prints it whole.
+    #[test]
+    fn a_huge_refusal_reason_is_cut_in_bosun_item() {
+        let reason = "crates/demo/target/f.o, ".repeat(5_000)[..100_000].to_owned();
+        let detail: ItemDetail = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "item": "demo#4",
+            "repo": { "name": "demo", "path": "/repos/demo" },
+            "state": "needs_you",
+            "detail": "attempts_exhausted",
+            "attempt": 1,
+            "failed": 1,
+            "created_ms": 0,
+            "updated_ms": 0,
+            "transitions": [],
+            "attempts": [{
+                "number": 1,
+                "state": "fail",
+                "started_ms": 0,
+                "sessions": [],
+                "verdicts": [],
+                "refusal": [reason],
+            }],
+            "calls": [],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render_item(&detail, &mut out);
+        assert!(out.chars().count() < 2_200, "{} characters", out.len());
+        assert!(
+            out.contains(
+                "... [98000 more characters]
+"
+            ),
             "{out}"
         );
     }

@@ -3628,7 +3628,49 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_git_ignored_unfolded",
+        issue: IGNORED_FOLD_CARD,
+        breaks: "a refusal for new ignored files lists every path, thousands of them, in the                  record, the log, the event stream and `bosun item`",
+        package: "bosun-git",
+        check: Check::Test(
+            "refusal::tests::thousands_of_new_ignored_files_fold_to_their_places_with_a_hint",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_ignored_unfolded",
+        issue: IGNORED_FOLD_CARD,
+        breaks: "a build below the root is refused with a reason that lists every file",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::ignored::a_build_below_the_root_is_refused_with_a_short_folded_reason",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_git_ignored_no_build_hint",
+        issue: IGNORED_FOLD_CARD,
+        breaks: "a refusal for files of a build run below the repository root does not say so",
+        package: "bosun-git",
+        check: Check::Test(
+            "refusal::tests::thousands_of_new_ignored_files_fold_to_their_places_with_a_hint",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_cli_item_refusal_uncut",
+        issue: IGNORED_FOLD_CARD,
+        breaks: "`bosun item` prints a huge stored refusal reason whole",
+        package: "bosun-cli",
+        check: Check::Test("work::tests::a_huge_refusal_reason_is_cut_in_bosun_item"),
+        platform: None,
+    },
 ];
+
+/// #218, the card of #7 that folds the new-ignored-files guard's list to its places and says
+/// when a build ran below the repository root.
+const IGNORED_FOLD_CARD: u32 = 218;
 
 /// The card of #7 that gives every Claude session a `PreCompact` hook printing the item's
 /// compaction instructions (its own number was not known when it was written; its parent's

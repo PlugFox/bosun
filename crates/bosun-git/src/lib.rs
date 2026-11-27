@@ -102,7 +102,7 @@ pub use invoke::{Error, Git, NO_HOOKS};
 pub use message::Expected;
 pub use precondition::{Reason, ancestry, check, clean_tree, messages, refs};
 pub use protect::protected;
-pub use refusal::Refusal;
+pub use refusal::{KNOWN_BUILD_NAMES, Refusal};
 pub use snapshot::{GitConfig, Ignored, config, ignored};
 pub use trailer::{
     CHECKOUT_VAR, HOOK_NAMES, Hooks, ITEM_VAR, Ident, MARKER_VAR, Missing, RUN_VAR, SESSION_VAR,

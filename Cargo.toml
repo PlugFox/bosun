@@ -567,6 +567,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #203: a quiet `grep` behind a pipe under the verdict's own `pipefail` is refused at lint.
   "cfg(mutant_queue_lint_quiet_grep_unflagged)",
   "cfg(mutant_queue_lint_pipefail_always_on)",
+  # #218: the new-ignored-files guard folds its list and says when a build ran below the root.
+  "cfg(mutant_git_ignored_unfolded)",
+  "cfg(mutant_git_ignored_no_build_hint)",
+  "cfg(mutant_cli_item_refusal_uncut)",
 ] }
 
 [workspace.lints.clippy]

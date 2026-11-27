@@ -67,7 +67,7 @@ fn agent_with(dir: &Path, env: &[(String, String)], args: &[&str]) -> String {
 }
 
 /// A repository on `main` with one commit.
-fn repository() -> TempDir {
+pub(crate) fn repository() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     agent(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
     commit(dir.path(), "a.txt", "Initial commit");
@@ -76,7 +76,7 @@ fn repository() -> TempDir {
 
 /// Writes `file` (its name as its content plus a counter, so each call changes it) and commits
 /// everything with `message`. Returns the sha.
-fn commit(dir: &Path, file: &str, message: &str) -> String {
+pub(crate) fn commit(dir: &Path, file: &str, message: &str) -> String {
     let path = dir.join(file);
     let old = std::fs::read_to_string(&path).unwrap_or_default();
     std::fs::write(&path, format!("{old}{file}\n")).unwrap();

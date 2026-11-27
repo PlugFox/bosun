@@ -74,6 +74,10 @@
 //! commit's tree; [`census::compare`] lists the kept counters that dropped and the capped ones
 //! that rose between the item's base and the judged commit.
 //!
+//! # Tracked files (#11 D)
+//!
+//! [`tracked::files`] lists the files of a revision's tree with given suffixes, read-only.
+//!
 //! It never reaches `bosun-store` or the other side-effect crates (#12).
 #![cfg_attr(
     test,
@@ -94,6 +98,7 @@ mod refusal;
 mod snapshot;
 #[cfg(test)]
 mod tests;
+pub mod tracked;
 mod trailer;
 pub mod worktree;
 

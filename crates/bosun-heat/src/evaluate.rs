@@ -32,7 +32,9 @@ pub struct Evaluation {
 }
 
 /// Evaluates the repository at path key `repo` at `now_ms`, over `[now_ms - WINDOW_MS,
-/// now_ms)`, with the default thresholds.
+/// now_ms)`, with the default thresholds. `documents` are the repository's tracked documents
+/// (repository-relative, `/`-separated), as the daemon listed them now; `None` when they could
+/// not be listed, which leaves U1 `insufficient`. A follow-up's windows see the same listing.
 ///
 /// # Errors
 ///
@@ -40,8 +42,10 @@ pub struct Evaluation {
 pub async fn evaluate(
     reader: &Reader,
     repo: &str,
+    documents: Option<Vec<String>>,
     now_ms: i64,
 ) -> Result<Evaluation, bosun_store::Error> {
+    let documents = documents.as_deref();
     let from_ms = now_ms - WINDOW_MS;
     let (table, usage) = reader.usage(from_ms, now_ms).await?;
     let calls = reader.tool_calls(from_ms, now_ms).await?;
@@ -53,6 +57,7 @@ pub async fn evaluate(
         calls: &calls,
         histories: &histories,
         run_commits: &run_commits,
+        documents,
     };
     let scope = Scope {
         from_ms,
@@ -107,7 +112,12 @@ pub async fn evaluate(
         let before = Window::read(reader, row.window_from_ms, row.window_to_ms).await?;
         let after_to = now_ms.min(landed_ms + 2 * length);
         let after = Window::read(reader, landed_ms, after_to.max(landed_ms)).await?;
-        if let Some(write) = measure(row, &before.inputs(), &after.inputs(), now_ms) {
+        if let Some(write) = measure(
+            row,
+            &before.inputs(documents),
+            &after.inputs(documents),
+            now_ms,
+        ) {
             reconciled.summary.measured += 1;
             reconciled.writes.push(write);
         }
@@ -145,13 +155,14 @@ impl Window {
         })
     }
 
-    fn inputs(&self) -> Inputs<'_> {
+    fn inputs<'a>(&'a self, documents: Option<&'a [String]>) -> Inputs<'a> {
         Inputs {
             table: &self.table,
             usage: &self.usage,
             calls: &self.calls,
             histories: &self.histories,
             run_commits: &self.run_commits,
+            documents,
         }
     }
 }

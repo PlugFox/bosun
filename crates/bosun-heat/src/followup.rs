@@ -21,6 +21,7 @@
 //! - **Guard.** For a file subject, the read bytes per closed item of the subject's directory
 //!   (recursively; the whole repository for a file at its root) must fall by at least 10% for
 //!   `reached` or `moved` to stand: a split or renamed file's old path drops to zero by itself.
+//!   For a directory subject (N1) the directory is the subject itself.
 //!   The separator is that of the repository's path style.
 //! - **Confounder.** The models of the provider's run sessions in each window, when they differ.
 
@@ -70,6 +71,24 @@ fn directory(subject: &str, style: PathStyle) -> &str {
         PathStyle::Unix => subject.rfind('/'),
     };
     last.map_or("", |at| &subject[..=at])
+}
+
+/// The prefix of the paths under the directory `subject` (N1's subject, `.` for the root)
+/// under `style`: the subject and a separator; empty for the root.
+fn dir_prefix(subject: &str, style: PathStyle) -> String {
+    if subject == "." || subject.is_empty() {
+        return String::new();
+    }
+    let separator = match style {
+        PathStyle::Windows => '\\',
+        PathStyle::Unix => '/',
+    };
+    format!("{}{separator}", subject.trim_end_matches(separator))
+}
+
+/// Whether a subject of `kind` has the guard: a file's directory, or the directory itself.
+fn guarded_kind(kind: SubjectKind) -> bool {
+    matches!(kind, SubjectKind::File | SubjectKind::Dir)
 }
 
 /// The models of `provider`'s run messages of `scope`'s repository in its range, sorted.
@@ -138,9 +157,12 @@ pub fn measure(
     let a = value_of(detector, after, after_scope, provider, subject)?;
 
     // The guard: the read bytes per closed item of the subject's directory.
-    let guard = if proposal.subject_kind == SubjectKind::File {
-        let dir = directory(subject, style_of(repo));
-        let under = |path: &str| path.starts_with(dir);
+    let guard = if guarded_kind(proposal.subject_kind) {
+        let dir = match proposal.subject_kind {
+            SubjectKind::Dir => dir_prefix(subject, style_of(repo)),
+            _ => directory(subject, style_of(repo)).to_owned(),
+        };
+        let under = |path: &str| path.starts_with(dir.as_str());
         let (bytes_before, items_before) = read_bytes(before, before_scope, provider, under);
         let (bytes_after, items_after) = read_bytes(after, after_scope, provider, under);
         if items_before == 0 || items_after == 0 {
@@ -186,7 +208,7 @@ pub fn measure(
         FollowupOutcome::NotMoved
     };
     // A baseline of 0 bytes (or a subject without a guard) means no guard.
-    let guarded = proposal.subject_kind == SubjectKind::File && guard_baseline > 0;
+    let guarded = guarded_kind(proposal.subject_kind) && guard_baseline > 0;
     let holds = !guarded
         || u128::from(guard_baseline.saturating_sub(guard_after)) * 10
             >= u128::from(guard_baseline);

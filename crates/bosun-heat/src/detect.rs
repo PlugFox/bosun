@@ -11,7 +11,9 @@
 //!   [`Finding::impact_eqv_estimate`] is an estimate, for ranking and display only.
 //!
 //! The file detectors (D1, D2, D3) are in [`files`]; the loop detectors (F1, F2, R1, V1, B1:
-//! flaky tests, refused calls, slow verdicts, budget stops) in [`loops`].
+//! flaky tests, refused calls, slow verdicts, budget stops) in [`loops`]; the context detectors
+//! (C1 the start context, N1 the cost of finding by directory, U1 the documents nobody opened)
+//! in [`context`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,8 +23,11 @@ use crate::estimate::BYTES_PER_TOKEN;
 use crate::exact::Scope;
 use crate::metrics::{Inputs, closed_items, join};
 
+pub(crate) mod context;
 mod files;
 mod loops;
+
+pub use context::{ANY_PROVIDER, INSTRUCTION_FILES};
 
 /// What a detector is, apart from its numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,8 +119,36 @@ pub const BUDGET_STOPS: Detector = Detector {
     unit: "items",
 };
 
+/// C1 (#11 D): the median start context of run sessions above a band: the standing
+/// instructions are too heavy.
+pub const START_CONTEXT: Detector = Detector {
+    id: "start_context",
+    version: 1,
+    remedy: "trim_standing_instructions",
+    metric: "context_at_start",
+    unit: "tokens",
+};
+
+/// N1 (#11 D): the cost of finding concentrated in one directory: it lacks a map.
+pub const FINDING_BY_DIRECTORY: Detector = Detector {
+    id: "finding_by_directory",
+    version: 1,
+    remedy: "add_map",
+    metric: "finding_bytes_share_of_directory",
+    unit: "ppm",
+};
+
+/// U1 (#210): tracked documents no session opened in the window: prune them or link them.
+pub const UNOPENED_DOCUMENTS: Detector = Detector {
+    id: "unopened_documents",
+    version: 1,
+    remedy: "prune_or_link",
+    metric: "unopened_documents",
+    unit: "documents",
+};
+
 /// Every detector, in the order of their findings: the byte detectors first.
-const DETECTORS: [Detector; 8] = [
+const DETECTORS: [Detector; 11] = [
     FILE_READ_ACROSS_RUNS,
     FILE_REREAD_IN_SESSION,
     UNCHANGED_FILE_READ_BYTES,
@@ -124,6 +157,9 @@ const DETECTORS: [Detector; 8] = [
     DENIED_TARGET_ACROSS_ITEMS,
     SLOW_VERDICT,
     BUDGET_STOPS,
+    FINDING_BY_DIRECTORY,
+    START_CONTEXT,
+    UNOPENED_DOCUMENTS,
 ];
 
 /// The thresholds of the detectors and the minimum sample. Thresholds from the configuration
@@ -150,6 +186,20 @@ pub struct Thresholds {
     pub v1_runs: u64,
     /// B1: the items stopped by their budget cap.
     pub b1_items: u64,
+    /// C1: the band of the median start context, in tokens (it fires above it), ...
+    pub c1_tokens: u64,
+    /// ... and its target.
+    pub c1_target: u64,
+    /// N1: the share of one directory in the finding bytes, in ppm, ...
+    pub n1_share_ppm: u64,
+    /// ... and its target.
+    pub n1_target_ppm: u64,
+    /// U1: the unopened documents, ...
+    pub u1_documents: u64,
+    /// ... and its target.
+    pub u1_target: u64,
+    /// U1: the globs of the documents, each `*.<suffix>` (see [`Thresholds::check`]).
+    pub documents: Vec<String>,
     /// The minimum sample: a group with fewer closed items than this and fewer run sessions
     /// than [`Self::min_run_sessions`] is insufficient.
     pub min_closed_items: u64,
@@ -171,10 +221,38 @@ impl Default for Thresholds {
             v1_slow_ms: 600_000,
             v1_runs: 2,
             b1_items: 2,
+            c1_tokens: 30_000,
+            c1_target: 20_000,
+            n1_share_ppm: 400_000,
+            n1_target_ppm: 200_000,
+            u1_documents: 10,
+            u1_target: 5,
+            documents: vec!["*.md".to_owned()],
             min_closed_items: 5,
             min_run_sessions: 10,
             disabled: Vec::new(),
         }
+    }
+}
+
+impl Thresholds {
+    /// Checks the thresholds: every document glob is of the shape `*.<suffix>`.
+    ///
+    /// # Errors
+    ///
+    /// The first glob of another shape, named.
+    pub fn check(&self) -> Result<(), String> {
+        self.document_suffixes().map(|_| ())
+    }
+
+    /// The suffixes of [`Self::documents`] (`md` for `*.md`), as the listing of a repository's
+    /// documents takes them.
+    ///
+    /// # Errors
+    ///
+    /// A glob of a shape other than `*.<suffix>`.
+    pub fn document_suffixes(&self) -> Result<Vec<&str>, String> {
+        context::suffixes(&self.documents)
     }
 }
 
@@ -190,6 +268,48 @@ pub enum Evidence {
     Verdicts(VerdictEvidence),
     /// B1: the items stopped by their budget.
     Budget(BudgetEvidence),
+    /// C1: the start contexts of the run sessions.
+    Start(StartEvidence),
+    /// N1: the finding bytes of the directory and of the largest ones.
+    Directory(DirectoryEvidence),
+    /// U1: the unopened documents.
+    Documents(DocumentEvidence),
+}
+
+/// The start contexts of a group's run sessions, in tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartEvidence {
+    /// The lower median.
+    pub median: u64,
+    /// The run sessions with a start.
+    pub sessions: u64,
+    /// Every start, summed.
+    pub total: u64,
+}
+
+/// The finding bytes of one directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryEvidence {
+    pub directory: String,
+    /// Its finding bytes.
+    pub bytes: u64,
+    /// Every finding byte of the group (single-path calls only).
+    pub total: u64,
+    /// The sessions it found in, sorted, at most [`MAX_SESSIONS`].
+    pub sessions: Vec<String>,
+    /// Every session, listed or not.
+    pub sessions_total: u64,
+    /// The largest directories and their bytes, largest first.
+    pub top: Vec<(String, u64)>,
+}
+
+/// The tracked documents no session opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentEvidence {
+    /// Sorted, at most 50.
+    pub documents: Vec<String>,
+    /// Every one, listed or not.
+    pub total: u64,
 }
 
 /// The flaky tests a finding counted, per attempt.
@@ -279,6 +399,8 @@ pub(crate) const MAX_SESSIONS: usize = 10;
 impl Evidence {
     /// The evidence as short lines: the numbers first, then one line per session.
     #[must_use]
+    // Long: one arm per family, each a few lines.
+    #[allow(clippy::too_many_lines)]
     pub fn lines(&self) -> Vec<String> {
         match self {
             Self::File(file) => {
@@ -359,6 +481,43 @@ impl Evidence {
                 )];
                 lines.extend(budget.items.iter().map(|i| format!("item {i}")));
                 more(&mut lines, budget.items_total, budget.items.len(), "items");
+                lines
+            }
+            Self::Start(start) => vec![format!(
+                "median start context {} tokens over {} run sessions ({} tokens in all)",
+                start.median, start.sessions, start.total
+            )],
+            Self::Directory(dir) => {
+                let mut lines = vec![format!(
+                    "{}: {} of {} finding bytes, in {} sessions",
+                    dir.directory, dir.bytes, dir.total, dir.sessions_total
+                )];
+                lines.extend(
+                    dir.top
+                        .iter()
+                        .map(|(d, bytes)| format!("directory {d}: {bytes} bytes")),
+                );
+                lines.extend(dir.sessions.iter().map(|s| format!("session {s}")));
+                more(
+                    &mut lines,
+                    dir.sessions_total,
+                    dir.sessions.len(),
+                    "sessions",
+                );
+                lines
+            }
+            Self::Documents(documents) => {
+                let mut lines = vec![format!(
+                    "{} tracked documents no session opened",
+                    documents.total
+                )];
+                lines.extend(documents.documents.iter().map(|d| format!("document {d}")));
+                more(
+                    &mut lines,
+                    documents.total,
+                    documents.documents.len(),
+                    "documents",
+                );
                 lines
             }
         }
@@ -581,7 +740,28 @@ pub(crate) fn value_of(
         scope,
         thresholds: &thresholds,
     };
-    let (value, sample) = if loops::is_loop(detector) {
+    if detector == UNOPENED_DOCUMENTS {
+        let (value, sample) = context::u1_value(inputs, scope, &thresholds)?;
+        return Some(Measure {
+            value,
+            sample,
+            closed_items: groups.values().map(|g| g.closed_items).sum(),
+            run_sessions: sample,
+        });
+    }
+    let (value, sample) = if context::is_context(detector) {
+        let key = (repo.to_owned(), provider.to_owned());
+        let start = (detector == START_CONTEXT)
+            .then(|| context::starts(inputs, scope).remove(&key))
+            .flatten();
+        let dirs = (detector == FINDING_BY_DIRECTORY)
+            .then(|| context::dirs(inputs, scope).remove(&key))
+            .flatten();
+        (
+            context::value(detector, start.as_ref(), dirs.as_ref(), subject),
+            context::sample(detector, &context, start.as_ref()).0,
+        )
+    } else if loops::is_loop(detector) {
         (
             loops::value(detector, &context, subject),
             loops::sample(&context).0,
@@ -627,6 +807,8 @@ pub(crate) fn read_bytes(
 #[must_use]
 pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) -> Detection {
     let (groups, written) = gather(inputs, scope);
+    let starts = context::starts(inputs, scope);
+    let dirs = context::dirs(inputs, scope);
     let none = BTreeSet::new();
     let mut detection = Detection::default();
     for ((repo, provider), group) in &groups {
@@ -649,7 +831,19 @@ pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) ->
             if thresholds.disabled.contains(&detector.id) {
                 continue;
             }
+            // U1 is one finding per repository, after the groups.
+            if detector == UNOPENED_DOCUMENTS {
+                continue;
+            }
+            let key = ((*repo).to_owned(), (*provider).to_owned());
+            let start = starts.get(&key);
             let per_item = detector == UNCHANGED_FILE_READ_BYTES;
+            // C1 and N1 are over sessions only: closed items do not make their sample.
+            let sufficient = if context::is_context(detector) {
+                context::sample(detector, &context, start).0 >= thresholds.min_run_sessions
+            } else {
+                sufficient
+            };
             if !sufficient || (per_item && context.closed_items == 0) {
                 detection.insufficient.push(Insufficient {
                     detector: detector.id,
@@ -660,12 +854,25 @@ pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) ->
                 });
                 continue;
             }
-            if loops::is_loop(detector) {
+            if detector == START_CONTEXT {
+                detection
+                    .findings
+                    .extend(start.and_then(|start| context::c1(&context, start)));
+            } else if detector == FINDING_BY_DIRECTORY {
+                detection
+                    .findings
+                    .extend(dirs.get(&key).and_then(|dirs| context::n1(&context, dirs)));
+            } else if loops::is_loop(detector) {
                 detection.findings.extend(loops::run(detector, &context));
             } else {
                 detection.findings.extend(files::run(detector, &context));
             }
         }
+    }
+    if !thresholds.disabled.contains(&UNOPENED_DOCUMENTS.id) {
+        let (findings, insufficient) = context::u1(inputs, scope, thresholds);
+        detection.findings.extend(findings);
+        detection.insufficient.extend(insufficient);
     }
     let order = |f: &Finding| DETECTORS.iter().position(|d| *d == f.detector);
     detection.findings.sort_by(|a, b| {

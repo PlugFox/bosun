@@ -46,10 +46,12 @@ mod metrics;
 mod reconcile;
 
 pub use detect::{
-    BUDGET_STOPS, BudgetEvidence, DENIED_TARGET_ACROSS_ITEMS, DenialEvidence, Detection, Detector,
-    Evidence, FILE_READ_ACROSS_RUNS, FILE_REREAD_IN_SESSION, FLAKY_TEST_ACROSS_ATTEMPTS,
-    FLAKY_TESTS_IN_ONE_MODULE, FileEvidence, Finding, Insufficient, SLOW_VERDICT, SlowRun,
-    TestAttempt, TestEvidence, Thresholds, UNCHANGED_FILE_READ_BYTES, VerdictEvidence, detect,
+    ANY_PROVIDER, BUDGET_STOPS, BudgetEvidence, DENIED_TARGET_ACROSS_ITEMS, DenialEvidence,
+    Detection, Detector, DirectoryEvidence, DocumentEvidence, Evidence, FILE_READ_ACROSS_RUNS,
+    FILE_REREAD_IN_SESSION, FINDING_BY_DIRECTORY, FLAKY_TEST_ACROSS_ATTEMPTS,
+    FLAKY_TESTS_IN_ONE_MODULE, FileEvidence, Finding, INSTRUCTION_FILES, Insufficient,
+    SLOW_VERDICT, START_CONTEXT, SlowRun, StartEvidence, TestAttempt, TestEvidence, Thresholds,
+    UNCHANGED_FILE_READ_BYTES, UNOPENED_DOCUMENTS, VerdictEvidence, detect,
 };
 pub use estimate::{BYTES_PER_TOKEN, estimates};
 pub use evaluate::{Evaluation, WINDOW_MS, evaluate};

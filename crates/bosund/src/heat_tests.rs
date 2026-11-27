@@ -464,14 +464,23 @@ async fn a_due_followup_is_measured_by_an_evaluation_and_listed() {
     let served = &world.state.identities["b"];
     let repo = served.repos[0].1.key.clone();
     let reader = served.store.reader();
-    let waiting = bosun_heat::evaluate(reader, &repo, due).await.unwrap();
+    let waiting = bosun_heat::evaluate(reader, &repo, None, due)
+        .await
+        .unwrap();
     assert_eq!(waiting.summary.measured, 0, "{waiting:?}");
     assert!(waiting.writes.is_empty(), "{waiting:?}");
 
-    let last = landed_ms + 2 * 14 * DAY;
-    let evaluation = bosun_heat::evaluate(reader, &repo, last).await.unwrap();
+    let final_ms = landed_ms + 2 * 14 * DAY;
+    let evaluation = bosun_heat::evaluate(reader, &repo, None, final_ms)
+        .await
+        .unwrap();
     assert_eq!(evaluation.summary.measured, 1, "{evaluation:?}");
-    served.store.writer().write(evaluation.writes).await.unwrap();
+    served
+        .store
+        .writer()
+        .write(evaluation.writes)
+        .await
+        .unwrap();
     let listed = only(&world).await;
     assert_eq!(listed["state"], "measured", "{listed}");
     assert_eq!(listed["outcome"], "insufficient", "{listed}");
@@ -486,5 +495,43 @@ async fn a_due_followup_is_measured_by_an_evaluation_and_listed() {
                 "dismissed": 0, "flagged": null}]),
         "{list}"
     );
+    world.close().await;
+}
+
+/// #11 D, #210: `beta` is a plain directory, so its documents cannot be listed: the evaluation
+/// answers without an error, U1 is `insufficient` and D1 is sighted, then proposed at the
+/// second evaluation as before (`mutant_heat_listing_failure_fails_evaluation` makes the failed
+/// listing the repository's error).
+#[tokio::test]
+async fn an_evaluation_survives_a_repository_whose_documents_cannot_be_listed() {
+    let world = World::new().await;
+    seed_b(&world).await;
+    let root = &world.state.identities["b"].repos[0].1.path;
+    assert!(
+        bosun_git::tracked::files(&bosun_git::Git::new(root), "HEAD", &["md"]).is_err(),
+        "{} must be no git repository",
+        root.display()
+    );
+
+    let first = evaluate(&world, "b").await;
+    assert_eq!(first["repo"]["name"], "beta", "{first}");
+    assert_eq!(first["error"], Value::Null, "{first}");
+    assert_eq!(first["findings"], 1, "{first}");
+    assert_eq!(first["sightings"], 1, "{first}");
+    let insufficient = first["insufficient"].as_array().unwrap();
+    assert!(
+        insufficient
+            .iter()
+            .any(|i| i["detector"] == "unopened_documents"
+                && i["provider"] == bosun_heat::ANY_PROVIDER),
+        "{first}"
+    );
+
+    let second = evaluate(&world, "b").await;
+    assert_eq!(second["error"], Value::Null, "{second}");
+    assert_eq!(second["promoted"], 1, "{second}");
+    let listed = only(&world).await;
+    assert_eq!(listed["detector"], "file_read_across_runs", "{listed}");
+    assert_eq!(listed["seen_count"], 2, "{listed}");
     world.close().await;
 }

@@ -229,6 +229,7 @@ pub(crate) fn inputs<'a>(
         calls,
         histories,
         run_commits,
+        documents: None,
     }
 }
 

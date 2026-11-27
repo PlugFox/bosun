@@ -4174,6 +4174,54 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_c1_threshold_inf",
+        issue: 231,
+        breaks: "C1 never fires: a heavy start context is not found",
+        package: "bosun-heat",
+        check: Check::Test("detect::context::tests::a_heavy_start_context_fires_per_provider"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_n1_threshold_inf",
+        issue: 231,
+        breaks: "N1 never fires: finding concentrated in one directory is not found",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::context::tests::finding_concentrated_in_one_directory_names_it",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_u1_threshold_inf",
+        issue: 231,
+        breaks: "U1 never fires: tracked documents nobody opened are not found",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::context::tests::a_tracked_document_nobody_opened_is_listed_and_instruction_files_are_not",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_u1_lists_instruction_files",
+        issue: 231,
+        breaks: "U1 lists the instruction files an agent loads by itself",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::context::tests::a_tracked_document_nobody_opened_is_listed_and_instruction_files_are_not",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_listing_failure_fails_evaluation",
+        issue: 231,
+        breaks: "a repository whose documents cannot be listed fails its evaluation",
+        package: "bosund",
+        check: Check::Test(
+            "heat_tests::an_evaluation_survives_a_repository_whose_documents_cannot_be_listed",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

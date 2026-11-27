@@ -320,8 +320,9 @@ fn a_window_below_the_minimum_sample_fires_nothing() {
         closed_items: 4,
         run_sessions: 9,
     };
-    // The file detectors first; the loop detectors (`detect::loops`) are silent too.
-    assert_eq!(detection.insufficient.len(), 8, "{detection:#?}");
+    // The file detectors first; the loop detectors (`detect::loops`) and the context ones
+    // (`detect::context`) are silent too.
+    assert_eq!(detection.insufficient.len(), 11, "{detection:#?}");
     assert_eq!(
         detection.insufficient[..3],
         [
@@ -343,7 +344,7 @@ fn a_window_below_the_minimum_sample_fires_nothing() {
             .iter()
             .all(|i| i.detector != FILE_REREAD_IN_SESSION.id)
     );
-    assert_eq!(detection.insufficient.len(), 7);
+    assert_eq!(detection.insufficient.len(), 10);
 
     // One more run session reaches the minimum.
     rows.run("s10");
@@ -358,7 +359,15 @@ fn a_window_below_the_minimum_sample_fires_nothing() {
         d2.iter().any(|f| f.subject == "docs/big.md"),
         "{detection:#?}"
     );
-    assert_eq!(detection.insufficient, []);
+    // But U1, which has no listing of the documents here.
+    assert_eq!(
+        detection
+            .insufficient
+            .iter()
+            .map(|i| i.detector)
+            .collect::<Vec<_>>(),
+        [crate::detect::UNOPENED_DOCUMENTS.id]
+    );
 
     let detection = rows.detect(&off);
     assert_eq!(

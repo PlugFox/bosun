@@ -636,6 +636,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_heat_r1_threshold_inf)",
   "cfg(mutant_heat_v1_threshold_inf)",
   "cfg(mutant_heat_denial_target_unredacted)",
+  "cfg(mutant_heat_c1_threshold_inf)",
+  "cfg(mutant_heat_n1_threshold_inf)",
+  "cfg(mutant_heat_u1_threshold_inf)",
+  "cfg(mutant_heat_u1_lists_instruction_files)",
+  "cfg(mutant_heat_listing_failure_fails_evaluation)",
 ] }
 
 [workspace.lints.clippy]

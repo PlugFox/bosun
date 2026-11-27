@@ -67,6 +67,9 @@ pub struct Inputs<'a> {
     pub calls: &'a [ToolRow],
     pub histories: &'a [ItemHistory],
     pub run_commits: &'a [RunCommitRow],
+    /// The tracked documents of the scope's repository, repository-relative and `/`-separated
+    /// (U1); `None` when they could not be listed.
+    pub documents: Option<&'a [String]>,
 }
 
 /// A tool call with the message that made it.
@@ -591,6 +594,7 @@ pub async fn heat_metrics(
         calls: &calls,
         histories: &histories,
         run_commits: &run_commits,
+        documents: None,
     };
     Ok(to_api(identity, scope, metrics(&inputs, scope), repo_ref))
 }

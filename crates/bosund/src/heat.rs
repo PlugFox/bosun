@@ -6,6 +6,11 @@
 //! ([`bosun_heat::measure`]); `heat.list` shows the before, the after and the outcome, and the
 //! standing of each detector ([`bosun_heat::standings`]).
 //!
+//! Before each repository's evaluation, its tracked documents (U1) are listed read-only at
+//! `HEAD` of its configured root ([`bosun_git::tracked::files`]); a listing that fails (no git
+//! repository, no `HEAD`, no git) is logged and leaves U1 `insufficient`, and the evaluation goes
+//! on.
+//!
 //! Each identity has its own [`Heat`] handle over its own store and repositories, so an
 //! evaluation asked for one identity reads and writes that identity's rows only. One evaluation
 //! runs at a time per identity: two calls never interleave their reads and writes.
@@ -123,23 +128,43 @@ impl Heat {
         let mut out = Vec::new();
         for (name, config) in repos {
             let key = config.key.as_str();
-            let outcome = match bosun_heat::evaluate(&self.reader, key, now_ms).await {
-                Ok(evaluation) => {
-                    let wrote = if evaluation.writes.is_empty() {
-                        Ok(())
+            let documents = match documents(config).await {
+                Ok(documents) => Ok(Some(documents)),
+                Err(e) => {
+                    crate::log::log!(
+                        "bosund: identity {identity}: heat of {name}: the documents are not                          listed, U1 is insufficient: {e}"
+                    );
+                    // Mutant (`mutant_heat_listing_failure_fails_evaluation`): a failed listing
+                    // is the repository's error.
+                    if cfg!(mutant_heat_listing_failure_fails_evaluation) {
+                        Err(e)
                     } else {
-                        self.writer.write(evaluation.writes.clone()).await
-                    };
-                    wrote.map(|()| evaluation)
+                        Ok(None)
+                    }
                 }
+            };
+            let outcome = match documents {
                 Err(e) => Err(e),
+                Ok(documents) => {
+                    match bosun_heat::evaluate(&self.reader, key, documents, now_ms).await {
+                        Ok(evaluation) => {
+                            let wrote = if evaluation.writes.is_empty() {
+                                Ok(())
+                            } else {
+                                self.writer.write(evaluation.writes.clone()).await
+                            };
+                            wrote.map(|()| evaluation).map_err(|e| e.to_string())
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
             };
             let summary = match outcome {
                 Ok(evaluation) => summary(key, &evaluation),
                 Err(e) => {
                     crate::log::log!("bosund: identity {identity}: heat of {name}: {e}");
                     HeatRepoEvaluation {
-                        error: Some(e.to_string()),
+                        error: Some(e),
                         ..summary(key, &bosun_heat::Evaluation::default())
                     }
                 }
@@ -148,6 +173,24 @@ impl Heat {
         }
         Ok(out)
     }
+}
+
+/// The tracked documents of `repo` at `HEAD` of its configured root, by the globs of the
+/// default thresholds, listed read-only on a blocking thread.
+///
+/// # Errors
+///
+/// The root is no git repository, has no `HEAD`, or git does not run.
+async fn documents(repo: &Repo) -> Result<Vec<String>, String> {
+    let path = repo.path.clone();
+    tokio::task::spawn_blocking(move || {
+        let thresholds = bosun_heat::Thresholds::default();
+        let suffixes = thresholds.document_suffixes()?;
+        bosun_git::tracked::files(&bosun_git::Git::new(path), "HEAD", &suffixes)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("the listing of the documents stopped: {e}"))?
 }
 
 fn summary(key: &str, evaluation: &bosun_heat::Evaluation) -> HeatRepoEvaluation {

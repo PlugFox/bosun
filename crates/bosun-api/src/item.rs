@@ -45,6 +45,10 @@ pub struct ItemDetail {
     /// waits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<crate::OpenBlocker>,
+    /// The resources it would lease whose probe fails, while it waits in Ready on them (#205),
+    /// as its own identity probed them. Absent unless it waits on a probe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unhealthy: Vec<crate::UnhealthyResource>,
     /// The snapshot its next attempt runs from, once claimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<SnapshotView>,

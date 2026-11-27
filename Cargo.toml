@@ -592,6 +592,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_probe_holds_the_repository)",
   "cfg(mutant_leases_probe_no_backoff)",
   "cfg(mutant_loop_probe_told_every_time)",
+  # #221: a card waiting on a failing probe is shown to its own identity and printed.
+  "cfg(mutant_api_probe_wait_unnamed)",
+  "cfg(mutant_cli_probe_wait_unprinted)",
 ] }
 
 [workspace.lints.clippy]

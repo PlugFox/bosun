@@ -31,6 +31,7 @@ pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Valu
                 let mut detail = detail(served, &item).await?;
                 detail.waiting = crate::leases::waiting_of(state, served, &item.item.id);
                 detail.blocked_by = crate::blockers::blocked_by(state, served, &item).await?;
+                detail.unhealthy = crate::blockers::unhealthy_of(state, served, &item);
                 Ok(detail)
             })
             .await
@@ -219,6 +220,7 @@ async fn detail(served: &Served, item: &StoredItem) -> Result<ItemDetail, ErrorO
         updated_ms: item.updated_ms,
         waiting: Vec::new(),
         blocked_by: Vec::new(),
+        unhealthy: Vec::new(),
         snapshot: snapshot.map(|s| SnapshotView {
             model: session_model(&s.contract_json),
             hash: s.hash,

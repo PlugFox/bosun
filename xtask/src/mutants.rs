@@ -3830,6 +3830,24 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_api_probe_wait_unnamed",
+        issue: 221,
+        breaks: "status.overview and item.get do not show a card waiting on a failing probe",
+        package: "bosund",
+        check: Check::Test(
+            "view_tests::a_card_waiting_on_a_failing_probe_is_shown_to_its_own_identity",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_cli_probe_wait_unprinted",
+        issue: 221,
+        breaks: "bosun status and bosun item print nothing of a card's failing probe",
+        package: "bosun-cli",
+        check: Check::Test("work::tests::a_card_waiting_on_a_failing_probe_names_the_resource"),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

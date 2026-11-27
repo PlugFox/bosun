@@ -127,7 +127,8 @@ pub use report::{
     ScanState, SessionAgreement, Trend, Undercount, VersionRow, WindowCurve,
 };
 pub use status::{
-    CurrentItem, LastVerdict, OpenBlocker, Overview, RepoOverview, StreamStatus, WaitingCard,
+    CurrentItem, LastVerdict, OpenBlocker, Overview, RepoOverview, StreamStatus, UnhealthyResource,
+    WaitingCard,
 };
 pub use wire::{Picodollars, Wide};
 

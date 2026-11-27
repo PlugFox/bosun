@@ -2557,6 +2557,13 @@
           },
           "type": "array"
         },
+        "unhealthy": {
+          "description": "The resources it would lease whose probe fails, while it waits in Ready on them (#205),\nas its own identity probed them. Absent unless it waits on a probe.",
+          "items": {
+            "$ref": "#/$defs/UnhealthyResource"
+          },
+          "type": "array"
+        },
         "updated_ms": {
           "description": "When it entered its state.",
           "format": "int64",
@@ -3770,7 +3777,7 @@
           ]
         },
         "waiting": {
-          "description": "The Ready cards that wait on an open blocker (#5), in board order, as the loop's last\nplan left them. Absent when none waits.",
+          "description": "The Ready cards that wait on an open blocker (#5) or a failing resource probe (#205),\nas the loop's last plan left them: the blocked ones in board order, then the ones that\nwait on a probe, in board order. Absent when none waits.",
           "items": {
             "$ref": "#/$defs/WaitingCard"
           },
@@ -5234,6 +5241,30 @@
       ],
       "type": "object"
     },
+    "UnhealthyResource": {
+      "description": "A resource instance whose probe fails, as one identity probed it (#205): another\nidentity's result is never shown (#2).",
+      "properties": {
+        "detail": {
+          "description": "What the last failing probe said.",
+          "type": "string"
+        },
+        "resource": {
+          "description": "The instance the identity leases: `<name>`, `<name>/<identity>` or `<name>/<repo>`.",
+          "type": "string"
+        },
+        "since_ms": {
+          "description": "When the first probe of its failing streak ended.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "resource",
+        "since_ms",
+        "detail"
+      ],
+      "type": "object"
+    },
     "UnpricedModel": {
       "description": "A model with no price at the time of some messages.",
       "properties": {
@@ -5343,10 +5374,10 @@
       "type": "object"
     },
     "WaitingCard": {
-      "description": "A Ready card that is not claimed because a blocker of it is open (#5).",
+      "description": "A Ready card that is not claimed because a blocker of it is open (#5) or a resource it\nwould lease fails its probe (#205).",
       "properties": {
         "blockers": {
-          "description": "Its open blockers, in its `blocked-by` order.",
+          "description": "Its open blockers, in its `blocked-by` order; empty when it waits only on a probe.",
           "items": {
             "$ref": "#/$defs/OpenBlocker"
           },
@@ -5355,6 +5386,13 @@
         "item": {
           "description": "The waiting card's item id, `<repo>#<card>`.",
           "type": "string"
+        },
+        "unhealthy": {
+          "description": "The resources it would lease whose probe fails, as its own identity probed them.\nAbsent when it waits on no probe.",
+          "items": {
+            "$ref": "#/$defs/UnhealthyResource"
+          },
+          "type": "array"
         }
       },
       "required": [

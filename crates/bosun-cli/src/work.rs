@@ -173,11 +173,38 @@ fn render_status(o: &Overview, out: &mut String) {
                 time::format(v.ended_ms)
             );
         }
-        // The Ready cards waiting on an open blocker (#5).
+        // The Ready cards waiting on an open blocker (#5) or a failing probe (#205).
         for w in &repo.waiting {
-            let _ = writeln!(out, "  waiting: {} on {}", w.item, blockers(&w.blockers));
+            let on: Vec<String> = (!w.blockers.is_empty())
+                .then(|| blockers(&w.blockers))
+                .into_iter()
+                .chain(
+                    unhealthy(&w.unhealthy)
+                        .into_iter()
+                        .map(|(resource, why)| format!("{resource} ({why})")),
+                )
+                .collect();
+            let _ = writeln!(out, "  waiting: {} on {}", w.item, on.join(", "));
         }
     }
+}
+
+/// Each resource whose probe fails, with `probe failing since <time>: <detail>`.
+fn unhealthy(list: &[bosun_api::UnhealthyResource]) -> Vec<(&str, String)> {
+    if cfg!(mutant_cli_probe_wait_unprinted) {
+        // Mutant (`mutant_cli_probe_wait_unprinted`): the failing probes are not printed.
+        return Vec::new();
+    }
+    list.iter()
+        .map(|u| {
+            let why = format!(
+                "probe failing since {}: {}",
+                time::format(u.since_ms),
+                u.detail
+            );
+            (u.resource.as_str(), why)
+        })
+        .collect()
 }
 
 /// Open blockers as `demo#1 (needs_you), demo#3`: each with its state when the store has one.
@@ -314,6 +341,9 @@ fn render_item(d: &ItemDetail, out: &mut String) {
     );
     if !d.blocked_by.is_empty() {
         let _ = writeln!(out, "waits on {}", blockers(&d.blocked_by));
+    }
+    for (resource, why) in unhealthy(&d.unhealthy) {
+        let _ = writeln!(out, "waits on {resource}: {why}");
     }
     if let Some(s) = &d.snapshot {
         let model = s
@@ -617,6 +647,73 @@ mod tests {
 waits on demo#1 (needs_you)
 "
             ),
+            "{out}"
+        );
+    }
+
+    /// #205: a card that waits on a failing resource probe says, in `bosun status` and
+    /// `bosun item`, which instance, since when and what the probe said; one that also waits
+    /// on a blocker says both.
+    #[test]
+    fn a_card_waiting_on_a_failing_probe_names_the_resource() {
+        let rig =
+            serde_json::json!({"resource": "rig", "since_ms": 0, "detail": "exit 1: no device"});
+        let overview: Overview = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "daemon_version": "0.0.0",
+            "started_ms": 0,
+            "now_ms": 0,
+            "killed": false,
+            "paused": false,
+            "events": {"epoch": "1-1", "head": 0, "subscribers": 0},
+            "repos": [{
+                "repo": "demo",
+                "path": "/repos/demo",
+                "queue": "local_file",
+                "state": "idle",
+                "waiting": [
+                    {"item": "demo#2", "blockers": [{"item": "demo#1"}], "unhealthy": [rig]},
+                    {"item": "demo#4", "blockers": [], "unhealthy": [rig]},
+                ],
+            }],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render_status(&overview, &mut out);
+        let since = time::format(0);
+        assert!(
+            out.contains(&format!(
+                "  waiting: demo#2 on demo#1, rig (probe failing since {since}: exit 1: no device)\n"
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("  waiting: demo#4 on rig (probe failing since "),
+            "{out}"
+        );
+        assert!(out.contains("exit 1: no device)\n"), "{out}");
+
+        let detail: ItemDetail = serde_json::from_value(serde_json::json!({
+            "identity": "personal",
+            "item": "demo#4",
+            "repo": { "name": "demo", "path": "/repos/demo" },
+            "state": "ready",
+            "attempt": 0,
+            "failed": 0,
+            "created_ms": 0,
+            "updated_ms": 0,
+            "unhealthy": [rig],
+            "transitions": [],
+            "attempts": [],
+            "calls": [],
+        }))
+        .unwrap();
+        let mut out = String::new();
+        render_item(&detail, &mut out);
+        assert!(
+            out.contains(&format!(
+                "\nwaits on rig: probe failing since {since}: exit 1: no device\n"
+            )),
             "{out}"
         );
     }

@@ -68,19 +68,37 @@ pub struct RepoOverview {
     /// the item updated last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_verdict: Option<LastVerdict>,
-    /// The Ready cards that wait on an open blocker (#5), in board order, as the loop's last
-    /// plan left them. Absent when none waits.
+    /// The Ready cards that wait on an open blocker (#5) or a failing resource probe (#205),
+    /// as the loop's last plan left them: the blocked ones in board order, then the ones that
+    /// wait on a probe, in board order. Absent when none waits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting: Vec<WaitingCard>,
 }
 
-/// A Ready card that is not claimed because a blocker of it is open (#5).
+/// A Ready card that is not claimed because a blocker of it is open (#5) or a resource it
+/// would lease fails its probe (#205).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WaitingCard {
     /// The waiting card's item id, `<repo>#<card>`.
     pub item: String,
-    /// Its open blockers, in its `blocked-by` order.
+    /// Its open blockers, in its `blocked-by` order; empty when it waits only on a probe.
     pub blockers: Vec<OpenBlocker>,
+    /// The resources it would lease whose probe fails, as its own identity probed them.
+    /// Absent when it waits on no probe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unhealthy: Vec<UnhealthyResource>,
+}
+
+/// A resource instance whose probe fails, as one identity probed it (#205): another
+/// identity's result is never shown (#2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UnhealthyResource {
+    /// The instance the identity leases: `<name>`, `<name>/<identity>` or `<name>/<repo>`.
+    pub resource: String,
+    /// When the first probe of its failing streak ended.
+    pub since_ms: i64,
+    /// What the last failing probe said.
+    pub detail: String,
 }
 
 /// An open `blocked-by` blocker of a waiting card.

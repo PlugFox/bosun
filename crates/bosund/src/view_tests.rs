@@ -1038,6 +1038,70 @@ async fn status_item_and_queue_show_a_waiting_card_and_its_open_blocker() {
     world.close().await;
 }
 
+/// #205: alpha#4 is stored ready and the loop's probe list of `alpha` says it waits on `rig`,
+/// whose probe (as identity `a` ran it) fails. `status.overview` and `item.get` name the
+/// instance, since when and what the probe said (`mutant_api_probe_wait_unnamed` leaves it
+/// out); identity `b` sees none of it (#2).
+#[tokio::test]
+async fn a_card_waiting_on_a_failing_probe_is_shown_to_its_own_identity() {
+    let world = World::new().await;
+    let served = &world.state.identities["a"];
+    let four = ItemId::new("alpha#4");
+    served
+        .store
+        .writer()
+        .write(vec![Write::Item(NewItem {
+            item: four.clone(),
+            name: served.repos[0].0.clone(),
+            repo: served.repos[0].1.key.clone(),
+            card_key: Some("4".to_owned()),
+            at_ms: T0,
+        })])
+        .await
+        .unwrap();
+    world.state.blockers.set_probing(
+        "alpha",
+        vec![crate::blockers::ProbeWait {
+            item: four.clone(),
+            resource: "rig".to_owned(),
+            streak: crate::health::Streak {
+                since_ms: T0,
+                failures: 1,
+                next_ms: T0 + 30_000,
+                detail: "exit 1: no device".to_owned(),
+                told: true,
+            },
+        }],
+    );
+    let unhealthy = json!([{"resource": "rig", "since_ms": T0, "detail": "exit 1: no device"}]);
+
+    let view = world.ok("status.overview", json!({"identity": "a"})).await;
+    assert_eq!(
+        view["repos"][0]["waiting"],
+        json!([{"item": "alpha#4", "blockers": [], "unhealthy": unhealthy}]),
+        "{view}"
+    );
+    let detail = world
+        .ok("item.get", json!({"identity": "a", "item": "alpha#4"}))
+        .await;
+    assert_eq!(detail["unhealthy"], unhealthy, "{detail}");
+    assert!(detail.get("blocked_by").is_none(), "{detail}");
+
+    let other = world.ok("status.overview", json!({"identity": "b"})).await;
+    assert!(
+        other["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("waiting").is_none()),
+        "{other}"
+    );
+    let text = other.to_string();
+    assert!(!text.contains("alpha#4"), "{other}");
+    assert!(!text.contains("no device"), "{other}");
+    world.close().await;
+}
+
 /// A transcript row of identity `a`'s store with `lines` parsed and the drift counters
 /// `(unknown, usage, unbilled)`, or none of them counted.
 fn counted_file(key: &str, lines: Option<u64>, drift: Option<(u64, u64, u64)>) -> Write {

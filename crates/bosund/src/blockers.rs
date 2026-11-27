@@ -7,12 +7,14 @@
 //!
 //! Beside it, per repository, the Ready cards that wait on a failing resource probe (#8): the
 //! loop sets that list after every plan that reached a claim, empty when none waits.
+//! `status.overview` and `item.get` show it (#205) to the repository's own identity only, each
+//! card with its own identity's probe result (#2).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 
 use bosun_api::rpc::ErrorObject;
-use bosun_api::{OpenBlocker, WaitingCard};
+use bosun_api::{OpenBlocker, UnhealthyResource, WaitingCard};
 use bosun_core::{Blocked, ItemId};
 use bosun_store::StoredItem;
 
@@ -50,7 +52,6 @@ impl Blockers {
     }
 
     /// The cards of `repo` that wait on a failing probe, in board order.
-    #[cfg_attr(not(test), allow(dead_code, reason = "#221 shows them in the API"))]
     pub(crate) fn probing_of(&self, repo: &str) -> Vec<ProbeWait> {
         let probing = self.probing.lock().unwrap_or_else(PoisonError::into_inner);
         probing.get(repo).cloned().unwrap_or_default()
@@ -101,7 +102,18 @@ pub(crate) fn open_blockers(open: &[ItemId], items: &[StoredItem]) -> Vec<OpenBl
         .collect()
 }
 
-/// The waiting cards of `repo`, one of `served`'s repositories, with their blockers' states.
+/// What the API shows of a card's failing probe: the instance, since when, what it said.
+fn unhealthy(wait: &ProbeWait) -> UnhealthyResource {
+    UnhealthyResource {
+        resource: wait.resource.clone(),
+        since_ms: wait.streak.since_ms,
+        detail: wait.streak.detail.clone(),
+    }
+}
+
+/// The waiting cards of `repo`, one of `served`'s repositories, with their blockers' states:
+/// the blocked cards, then the cards that wait on a failing probe (#205). A card in both lists
+/// is listed once, with both.
 pub(crate) fn waiting_in(state: &State, repo: &str, items: &[StoredItem]) -> Vec<WaitingCard> {
     let lists = if cfg!(mutant_api_waiting_across_identities) {
         // Mutant (`mutant_api_waiting_across_identities`): every repository's waiting cards,
@@ -110,12 +122,59 @@ pub(crate) fn waiting_in(state: &State, repo: &str, items: &[StoredItem]) -> Vec
     } else {
         state.blockers.of(repo)
     };
-    lists
+    let mut cards: Vec<(ItemId, WaitingCard)> = lists
         .into_iter()
-        .map(|b| WaitingCard {
-            item: b.item.to_string(),
-            blockers: open_blockers(&b.open, items),
+        .map(|b| {
+            let card = WaitingCard {
+                item: b.item.to_string(),
+                blockers: open_blockers(&b.open, items),
+                unhealthy: Vec::new(),
+            };
+            (b.item, card)
         })
+        .collect();
+    // Mutant (`mutant_api_probe_wait_unnamed`): the cards that wait on a probe are left out.
+    if !cfg!(mutant_api_probe_wait_unnamed) {
+        for wait in state.blockers.probing_of(repo) {
+            if let Some((_, card)) = cards.iter_mut().find(|(id, _)| *id == wait.item) {
+                card.unhealthy.push(unhealthy(&wait));
+            } else {
+                let card = WaitingCard {
+                    item: wait.item.to_string(),
+                    blockers: Vec::new(),
+                    unhealthy: vec![unhealthy(&wait)],
+                };
+                cards.push((wait.item, card));
+            }
+        }
+    }
+    cards.into_iter().map(|(_, card)| card).collect()
+}
+
+/// The failing probes `item`, stored in `served`'s store, waits on in Ready (#205); empty when
+/// it waits on none. Only `served`'s own repositories and probes are read (#2).
+pub(crate) fn unhealthy_of(
+    state: &State,
+    served: &Served,
+    item: &StoredItem,
+) -> Vec<UnhealthyResource> {
+    // Mutant (`mutant_api_probe_wait_unnamed`): `item.get` leaves the failing probes out.
+    if cfg!(mutant_api_probe_wait_unnamed) {
+        return Vec::new();
+    }
+    let Some((name, _)) = served
+        .repos
+        .iter()
+        .find(|(name, repo)| crate::executor::of_repo(item, name, repo))
+    else {
+        return Vec::new();
+    };
+    state
+        .blockers
+        .probing_of(name)
+        .iter()
+        .filter(|w| w.item == item.item.id)
+        .map(unhealthy)
         .collect()
 }
 

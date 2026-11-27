@@ -14,14 +14,19 @@
 //! an estimate and never part of the item's runs (#3).
 //!
 //! The definitions are those of the `bosun_api::Report` and `bosun_api::Estimates` types; this
-//! crate computes them from the rows `bosun-store` reads and holds no SQL of its own. The
-//! detectors of stage 5 come later.
+//! crate computes them from the rows `bosun-store` reads and holds no SQL of its own.
+//!
+//! [`metrics`] computes the generic metrics of heat (#11 D, `bosun_api::HeatMetrics`) per
+//! repository, provider and session kind, each labelled exact or estimate and comparable
+//! across providers or not; the detectors test them.
 
 mod curve;
 mod estimate;
 mod exact;
 mod items;
+mod metrics;
 
 pub use estimate::{BYTES_PER_TOKEN, estimates};
 pub use exact::{Scope, exact};
 pub use items::item_row;
+pub use metrics::{Exactness, Inputs, Metric, heat_metrics, metrics};

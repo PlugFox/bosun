@@ -249,6 +249,7 @@ async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObj
             })
             .await
         }
+        method::HeatMetrics::NAME => heat_metrics(state, p).await,
         method::TokensPace::NAME => crate::pace::dispatch(state, name, p).await,
         method::LeaseList::NAME => lease_list(state, p).await,
         name if name.starts_with("control.") => crate::control::dispatch(state, name, p).await,
@@ -495,6 +496,20 @@ async fn estimates(served: &Served, p: &ReportParams) -> Result<Estimates, Error
     })
     .await
     .map_err(failed)
+}
+
+/// The generic metrics of heat of one identity (#11 D). Reads only.
+async fn heat_metrics(state: &State, p: Value) -> Result<Value, ErrorObject> {
+    call::<method::HeatMetrics, _, _>(p, |p| async move {
+        let served = state.identity(&p.identity)?;
+        let (_, scope) = report_scope(served, &p)?;
+        bosun_heat::heat_metrics(served.store.reader(), &served.name, scope, |key| {
+            served.repo(key)
+        })
+        .await
+        .map_err(failed)
+    })
+    .await
 }
 
 /// The bills of one identity in the range, and their summary.

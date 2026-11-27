@@ -3848,6 +3848,32 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("work::tests::a_card_waiting_on_a_failing_probe_names_the_resource"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_metric_estimate_as_exact",
+        issue: 222,
+        breaks: "the finding tokens guessed from bytes are labelled an exact metric",
+        package: "bosun-heat",
+        check: Check::Test("metrics::tests::a_metric_derived_from_bytes_is_labelled_an_estimate"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_metrics_mix_providers",
+        issue: 222,
+        breaks: "every metric row is filed under the first provider seen, folding providers",
+        package: "bosun-heat",
+        check: Check::Test("metrics::tests::metrics_of_two_providers_are_never_summed"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_error_rate_counts_all_calls",
+        issue: 222,
+        breaks: "the tool error rate counts every call as an error",
+        package: "bosun-heat",
+        check: Check::Test(
+            "metrics::tests::every_generic_metric_is_computed_from_the_synthetic_corpus",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

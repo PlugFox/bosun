@@ -32,6 +32,7 @@
 //! | `tokens.by_model` | [`TokensParams`] | [`TokensByModel`] |
 //! | `report.exact` | [`ReportParams`] | [`Report`] |
 //! | `report.estimates` | [`ReportParams`] | [`Estimates`] |
+//! | `heat.metrics` | [`ReportParams`] | [`HeatMetrics`] |
 //! | `events.subscribe` | [`SubscribeParams`] | [`SubscribeResult`], then the notifications of [`event`] |
 //! | `agent.hello` | [`AgentHelloParams`] | [`AgentHelloResult`] |
 //! | `agent.ask_question` | [`AskQuestionParams`] | [`AgentAck`] |
@@ -69,6 +70,7 @@ pub mod control;
 pub mod doctor;
 mod estimates;
 pub mod event;
+mod heat;
 pub mod item;
 mod items;
 pub mod lease;
@@ -100,6 +102,7 @@ pub use event::{
     Event, EventBody, EventFilter, OutputStream, Resync, ResyncReason, SubscribeParams,
     SubscribeResult, Tail,
 };
+pub use heat::{HeatMetric, HeatMetrics};
 pub use item::{
     AgentCallView, AttemptView, ContextSize, ItemDetail, ItemParams, RestartParams, RestartResult,
     SessionInfo, SessionParams, SessionTail, SnapshotView, TailParams, TransitionView, VerdictView,
@@ -237,6 +240,13 @@ pub mod method {
         "The estimate sections of the report over the range: the cost of tool results by tool \
      and by file with cache carry, repeated reads of a file, and the cost of finding before a \
      session's first write. Every number is an estimate and is never part of an exact total."
+    );
+    method!(
+        HeatMetrics,
+        "heat.metrics",
+        crate::ReportParams,
+        crate::HeatMetrics,
+        "The generic metrics of each repository over the range, per provider and session kind:      eqv per commit, context at session start, repeated reads and the cost of finding per      session, the share of cache reads, the tool error rate, time parked and the flaky verdict      rate per closed item. Each says whether it is exact or an estimate and whether it compares      across providers."
     );
     method!(
         EventsSubscribe,
@@ -451,6 +461,7 @@ pub const METHODS: &[&str] = &[
     method::TokensByModel::NAME,
     method::ReportExact::NAME,
     method::ReportEstimates::NAME,
+    method::HeatMetrics::NAME,
     method::EventsSubscribe::NAME,
     method::AgentHello::NAME,
     method::AgentAskQuestion::NAME,
@@ -766,6 +777,7 @@ pub fn schema() -> Value {
     add_method::<method::TokensByModel>(&mut generator, &mut methods);
     add_method::<method::ReportExact>(&mut generator, &mut methods);
     add_method::<method::ReportEstimates>(&mut generator, &mut methods);
+    add_method::<method::HeatMetrics>(&mut generator, &mut methods);
     add_method::<method::EventsSubscribe>(&mut generator, &mut methods);
     add_method::<method::AgentHello>(&mut generator, &mut methods);
     add_method::<method::AgentAskQuestion>(&mut generator, &mut methods);

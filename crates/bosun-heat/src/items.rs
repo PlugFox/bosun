@@ -86,7 +86,7 @@ fn trailer<'a>(trailers: &'a BTreeMap<String, Vec<String>>, name: &str) -> &'a [
 
 /// The time parked by reason of one item, from its transitions: each park runs to the next
 /// transition, and one still open runs to `to_ms`.
-fn parked(history: &ItemHistory, to_ms: i64) -> BTreeMap<String, ParkedTime> {
+pub(crate) fn parked(history: &ItemHistory, to_ms: i64) -> BTreeMap<String, ParkedTime> {
     let mut out: BTreeMap<String, ParkedTime> = BTreeMap::new();
     let mut open: Option<(String, i64)> = None;
     for t in &history.transitions {

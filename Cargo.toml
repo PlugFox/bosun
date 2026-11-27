@@ -595,6 +595,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # #221: a card waiting on a failing probe is shown to its own identity and printed.
   "cfg(mutant_api_probe_wait_unnamed)",
   "cfg(mutant_cli_probe_wait_unprinted)",
+  # #222: the generic metrics of heat.
+  "cfg(mutant_heat_metric_estimate_as_exact)",
+  "cfg(mutant_heat_metrics_mix_providers)",
+  "cfg(mutant_heat_error_rate_counts_all_calls)",
 ] }
 
 [workspace.lints.clippy]

@@ -1,0 +1,264 @@
+{
+  "identity": "personal",
+  "from_ms": 1000000000000,
+  "to_ms": 1000086400000,
+  "repo": null,
+  "bytes_per_token": 4,
+  "metrics": [
+    {
+      "id": "cache_read_share",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "interactive",
+      "value": 489795,
+      "total": 2400,
+      "sample": 4900,
+      "unit": "ppm",
+      "sample_unit": "prompt_token",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": false
+    },
+    {
+      "id": "context_at_start",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "interactive",
+      "value": 2400,
+      "total": 2400,
+      "sample": 1,
+      "unit": "tokens",
+      "sample_unit": "session",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": false
+    },
+    {
+      "id": "finding_bytes_per_session",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "interactive",
+      "value": 500,
+      "total": 500,
+      "sample": 1,
+      "unit": "bytes_per_session",
+      "sample_unit": "session",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": true
+    },
+    {
+      "id": "finding_tokens_per_session",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "interactive",
+      "value": 125,
+      "total": 125,
+      "sample": 1,
+      "unit": "estimated_tokens_per_session",
+      "sample_unit": "session",
+      "estimate": true,
+      "bytes_per_token": 4,
+      "runner_comparable": false
+    },
+    {
+      "id": "rereads_per_session",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "interactive",
+      "value": 0,
+      "total": 0,
+      "sample": 1,
+      "unit": "reads_per_session",
+      "sample_unit": "session",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": true
+    },
+    {
+      "id": "tool_error_rate",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "interactive",
+      "value": 0,
+      "total": 0,
+      "sample": 2,
+      "unit": "ppm",
+      "sample_unit": "call",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": true
+    },
+    {
+      "id": "cache_read_share",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "run",
+      "value": 445544,
+      "total": 9000,
+      "sample": 20200,
+      "unit": "ppm",
+      "sample_unit": "prompt_token",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": false
+    },
+    {
+      "id": "context_at_start",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "run",
+      "value": 3000,
+      "total": 9000,
+      "sample": 2,
+      "unit": "tokens",
+      "sample_unit": "session",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": false
+    },
+    {
+      "id": "eqv_per_commit",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "run",
+      "value": 8625,
+      "total": 17250,
+      "sample": 2,
+      "unit": "eqv_tokens_per_commit",
+      "sample_unit": "commit",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": true
+    },
+    {
+      "id": "finding_bytes_per_session",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "run",
+      "value": 2103,
+      "total": 4206,
+      "sample": 2,
+      "unit": "bytes_per_session",
+      "sample_unit": "session",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": true
+    },
+    {
+      "id": "finding_tokens_per_session",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "run",
+      "value": 526,
+      "total": 1053,
+      "sample": 2,
+      "unit": "estimated_tokens_per_session",
+      "sample_unit": "session",
+      "estimate": true,
+      "bytes_per_token": 4,
+      "runner_comparable": false
+    },
+    {
+      "id": "flaky_verdict_rate",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "run",
+      "value": 500000,
+      "total": 1,
+      "sample": 2,
+      "unit": "ppm",
+      "sample_unit": "closed_item",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": true
+    },
+    {
+      "id": "parked_ms_per_item",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "run",
+      "value": 450000,
+      "total": 900000,
+      "sample": 2,
+      "unit": "ms_per_closed_item",
+      "sample_unit": "closed_item",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": true
+    },
+    {
+      "id": "rereads_per_session",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "run",
+      "value": 1,
+      "total": 2,
+      "sample": 2,
+      "unit": "reads_per_session",
+      "sample_unit": "session",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": true
+    },
+    {
+      "id": "tool_error_rate",
+      "repo": {
+        "name": "alpha",
+        "path": "/demo/alpha"
+      },
+      "provider": "claude",
+      "kind": "run",
+      "value": 100000,
+      "total": 1,
+      "sample": 10,
+      "unit": "ppm",
+      "sample_unit": "call",
+      "estimate": false,
+      "bytes_per_token": null,
+      "runner_comparable": true
+    }
+  ]
+}

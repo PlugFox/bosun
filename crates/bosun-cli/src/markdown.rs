@@ -16,6 +16,7 @@ use serde::Serialize;
 
 use crate::render::usd;
 
+pub(crate) mod heat;
 mod items;
 use crate::time;
 
@@ -902,6 +903,95 @@ mod tests {
         assert!(
             text.find("## Denied tool calls") > text.find("### Commits of the runs"),
             "after the existing sections"
+        );
+    }
+
+    /// The Markdown snapshot of the golden heat metrics of `bosun-heat` (the result of
+    /// `heat.metrics` over the synthetic corpus); `BOSUN_BLESS=1` rewrites it. Besides the
+    /// snapshot, the labels are held by hand. `mutant_heat_metrics_md_estimate_unlabelled`
+    /// prints `exact` on every row.
+    #[test]
+    fn the_golden_heat_metrics_render_as_the_snapshot() {
+        let read = std::fs::read_to_string(golden("../bosun-heat/tests/golden/heat-metrics.json"));
+        let metrics: bosun_api::HeatMetrics = serde_json::from_str(&read.unwrap()).unwrap();
+        let mut text = String::new();
+        heat::heat_metrics(&metrics, &mut text);
+
+        assert!(
+            text.starts_with("# bosun heat metrics: personal\n"),
+            "{text}"
+        );
+        let rows: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("| alpha |"))
+            .collect();
+        assert_eq!(rows.len(), 15, "one row per metric:\n{text}");
+        let findings = rows
+            .iter()
+            .filter(|r| r.contains("| finding_tokens_per_session |"))
+            .count();
+        assert_eq!(findings, 2, "{text}");
+        for row in &rows {
+            if row.contains("| finding_tokens_per_session |") {
+                assert!(
+                    row.contains("| estimate (bytes_per_token = 4) |"),
+                    "an estimate says so: {row}"
+                );
+                assert!(!row.contains("| exact |"), "{row}");
+            } else {
+                assert!(
+                    !row.contains("estimate"),
+                    "no other row is an estimate: {row}"
+                );
+                assert!(row.contains("| exact |"), "every other row is exact: {row}");
+            }
+        }
+        // `tool_error_rate` of the `run` kind: value 100000 ppm = 100000 / 1_000_000 = 0.1,
+        // which is 10.0% (1 error call over 10 calls).
+        assert!(
+            rows.contains(
+                &"| alpha | claude | run | tool_error_rate | 10.0% | ppm | 1 | 10 call | exact | \
+                  yes |"
+            ),
+            "{text}"
+        );
+
+        let snapshot = golden("tests/golden/heat-metrics.md");
+        if std::env::var_os("BOSUN_BLESS").is_some() {
+            std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+            std::fs::write(&snapshot, &text).unwrap();
+        }
+        let expected = std::fs::read_to_string(&snapshot)
+            .unwrap()
+            .replace("\r\n", "\n");
+        assert!(
+            text == expected,
+            "the Markdown differs from {}; rerun with BOSUN_BLESS=1 and review the diff:\n{text}",
+            snapshot.display()
+        );
+    }
+
+    /// A range with no metric says so in one line and prints no table.
+    #[test]
+    fn heat_metrics_of_an_empty_range_say_so() {
+        let metrics = bosun_api::HeatMetrics {
+            identity: "work".to_owned(),
+            from_ms: 1_000_000_000_000,
+            to_ms: 1_000_086_400_000,
+            repo: None,
+            bytes_per_token: 4,
+            metrics: Vec::new(),
+        };
+        let mut text = String::new();
+        heat::heat_metrics(&metrics, &mut text);
+        assert!(text.starts_with("# bosun heat metrics: work\n"), "{text}");
+        assert!(
+            text.contains("Nothing in the range: no metric has a sample.\n"),
+            "{text}"
+        );
+        assert!(
+            !text.lines().any(|l| l.starts_with('|')),
+            "no table:\n{text}"
         );
     }
 

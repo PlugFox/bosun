@@ -599,6 +599,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_heat_metric_estimate_as_exact)",
   "cfg(mutant_heat_metrics_mix_providers)",
   "cfg(mutant_heat_error_rate_counts_all_calls)",
+  # #223: `bosun heat metrics` labels each row exact or estimate.
+  "cfg(mutant_heat_metrics_md_estimate_unlabelled)",
 ] }
 
 [workspace.lints.clippy]

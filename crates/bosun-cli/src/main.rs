@@ -8,6 +8,7 @@
 //! bosun uninstall [--name <name>]
 //! bosun doctor [--identity <name>] [--name <name>]
 //! bosun report [--since <t>] [--until <t>] [--repo <name>] [--identity <name>]
+//! bosun heat metrics [--since <t>] [--until <t>] [--repo <name>] [--identity <name>]
 //! bosun pause [--repo <name>] [--identity <name>]
 //! bosun resume [--repo <name>] [--identity <name>]
 //! bosun kill [--release]
@@ -27,8 +28,8 @@
 //! bosun notify test <name> --identity <name>
 //! ```
 //!
-//! Every command also takes `--format text|json` (default `text`; `report` also takes `md`,
-//! and its text is Markdown either way), `--config <file>` (default
+//! Every command also takes `--format text|json` (default `text`; `report` and `heat` also
+//! take `md`, and their text is Markdown either way), `--config <file>` (default
 //! `bosun_config::default_path`: `BOSUN_CONFIG`, else the platform's location) and
 //! `--endpoint <socket or pipe>` (default `bosun_client::Endpoint::resolve`: `BOSUN_ENDPOINT`,
 //! else per user).
@@ -60,6 +61,11 @@
 //!   with cache carry, repeated reads, and the cost of finding. `--until` defaults to now and `--since` to seven days
 //!   before `--until`. `--repo` limits the range sections to one configured repository; without
 //!   `--identity`, only the identity that owns it is asked.
+//! - `heat metrics`: the generic metrics the heat detectors test (`heat.metrics`, #11 D), per
+//!   repository, provider and session kind, one table: each row's value, total and sample,
+//!   whether it is exact or an estimate (with its bytes per token) and whether it compares
+//!   across runners. It prints numbers and draws no conclusions. `--until` defaults to now
+//!   and `--since` to 14 days before `--until`; `--repo` as for `report` (`heat.rs`).
 //! - `install`: registers the logon process that starts `bosund` for the current user, and
 //!   starts it now (`install.rs`). `bosund` is the one next to `bosun` unless `--daemon` names
 //!   another; `--config` and `--endpoint` (or `BOSUN_CONFIG` and `BOSUN_ENDPOINT`), when set,
@@ -136,6 +142,7 @@
 //! | `tokens --by repo` | the result of `tokens.by_repo` |
 //! | `tokens --by model` | the result of `tokens.by_model` |
 //! | `report` | `{"exact": <the result of report.exact>, "estimates": <the result of report.estimates>}` |
+//! | `heat metrics` | the result of `heat.metrics` |
 //! | `status` | the result of `status.overview` |
 //! | `queue` | the result of `queue.get` |
 //! | `pause`, `resume` | the result of `control.pause`, `control.resume` |
@@ -187,6 +194,7 @@ mod admin;
 mod artefact;
 mod control;
 mod doctor;
+mod heat;
 mod install;
 mod markdown;
 mod notify;
@@ -256,7 +264,7 @@ struct Cli {
 #[derive(Debug, Args)]
 struct Global {
     /// Output format. JSON with --identity is one document; without it, an object keyed by
-    /// identity name. md is for report only, whose text is Markdown either way.
+    /// identity name. md is for report and heat only, whose text is Markdown either way.
     #[arg(long, global = true, value_enum, default_value_t = Format::Text)]
     format: Format,
     /// The identity to ask about. Without it, every identity of the configuration, each in a
@@ -275,7 +283,7 @@ struct Global {
 enum Format {
     Text,
     Json,
-    /// Markdown: `report` only, whose text is Markdown too.
+    /// Markdown: `report` and `heat` only, whose text is Markdown too.
     Md,
 }
 
@@ -295,6 +303,10 @@ enum Command {
     /// file cost.
     #[command(after_help = EXIT_CODES)]
     Report(ReportArgs),
+    /// The heat metrics of each identity: numbers per repository, provider and session kind,
+    /// each exact or an estimate, each comparable across runners or not.
+    #[command(subcommand, after_help = EXIT_CODES)]
+    Heat(heat::HeatCommand),
     /// Registers the logon process that starts bosund for you, and starts it now.
     #[command(after_help = EXIT_CODES)]
     Install(InstallArgs),
@@ -655,10 +667,14 @@ impl Section {
     }
 }
 
-/// The usage errors of `report` and of `--format md`, which only `report` takes.
+/// The usage errors of `report` and `heat`, and of `--format md`, which only they take.
 fn check_report_args(cli: &Cli, now_ms: i64) -> Result<(), Failure> {
-    if let Command::Report(args) = &cli.command {
-        let (since, until) = args.range(now_ms);
+    let range = match &cli.command {
+        Command::Report(args) => Some(args.range(now_ms)),
+        Command::Heat(command) => Some(command.range(now_ms)),
+        _ => None,
+    };
+    if let Some((since, until)) = range {
         if since >= until {
             return Err(Failure::new(
                 exit::USAGE,
@@ -668,7 +684,7 @@ fn check_report_args(cli: &Cli, now_ms: i64) -> Result<(), Failure> {
     } else if cli.global.format == Format::Md {
         return Err(Failure::new(
             exit::USAGE,
-            "--format md applies to report only; use text or json",
+            "--format md applies to report and heat only; use text or json",
         ));
     }
     Ok(())
@@ -755,13 +771,14 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
             "--since must be before --until: the range is empty",
         ));
     }
-    // Refuses `--format md` outside `report` before any command runs.
+    // Refuses `--format md` outside `report` and `heat` before any command runs.
     check_report_args(&cli, now_ms)?;
     if let Some(done) = own_terms(global, &cli.command).await {
         return done;
     }
     let repo = match &cli.command {
         Command::Report(args) => args.repo.as_deref(),
+        Command::Heat(command) => command.repo(),
         _ => None,
     };
     let names = identities(global, repo)?;
@@ -804,6 +821,11 @@ async fn run(cli: Cli, now_ms: i64) -> Result<String, Failure> {
         Command::Report(args) => {
             for name in &names {
                 sections.push(report(&mut client, name, args, now_ms).await?);
+            }
+        }
+        Command::Heat(command) => {
+            for name in &names {
+                sections.push(heat::section(&mut client, name, command, now_ms).await?);
             }
         }
         Command::Tokens(args) => {

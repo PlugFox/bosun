@@ -3874,6 +3874,14 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_metrics_md_estimate_unlabelled",
+        issue: 223,
+        breaks: "`bosun heat metrics` prints an estimated metric as exact",
+        package: "bosun-cli",
+        check: Check::Test("markdown::tests::the_golden_heat_metrics_render_as_the_snapshot"),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

@@ -463,7 +463,7 @@ pub mod method {
         "notify.channel.add",
         crate::ChannelAddParams,
         crate::ChannelAdded,
-        "Adds a notification channel to the identity: its kind, non-secret parameters, events and      minimum gap in its database, its secret in the OS credential store under      `notify/<identity>/<name>`. The secret is in no row, log, error or result. Takes the      operator token."
+        "Adds a notification channel to the identity: its kind, non-secret parameters, events and      minimum gap in its database, its secret in the OS credential store under      `notify/<identity>/<name>/<id>`, the id random per channel row. The secret is in no row, log, error or result. Takes the      operator token."
     );
     method!(
         NotifyChannelList,

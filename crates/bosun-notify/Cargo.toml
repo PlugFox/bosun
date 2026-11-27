@@ -12,6 +12,8 @@ publish.workspace = true
 # The redactor every text goes through before it is sent (#208).
 bosun-core = { path = "../bosun-core" }
 keyring-core.workspace = true
+# The random id in each channel row's credential-store entry name.
+getrandom.workspace = true
 # The Telegram Bot API over HTTPS, with the platform's trust store and the `ring` provider.
 rustls.workspace = true
 ureq.workspace = true

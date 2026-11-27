@@ -570,6 +570,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_telegram_token_in_error)",
   "cfg(mutant_telegram_ignore_retry_after)",
   "cfg(mutant_redact_skip_telegram_token)",
+  # #9, #2: the Telegram token inside a bot URL, the secret cap of Windows, an entry per row.
+  "cfg(mutant_redact_telegram_word_boundary)",
+  "cfg(mutant_notify_secret_cap_chars)",
+  "cfg(mutant_notify_entry_without_id)",
   # #203: a quiet `grep` behind a pipe under the verdict's own `pipefail` is refused at lint.
   "cfg(mutant_queue_lint_quiet_grep_unflagged)",
   "cfg(mutant_queue_lint_pipefail_always_on)",

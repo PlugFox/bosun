@@ -4,7 +4,9 @@
 //! A secret is entered once and kept by the OS: Windows Credential Manager, the macOS Keychain,
 //! or the Secret Service on Linux and the other Unixes ([`OsSecrets`]). Every entry is filed
 //! under the service [`crate::SERVICE`] with the user [`crate::entry`]
-//! (`notify/<identity>/<channel>`), and that user string is all the channel's row keeps.
+//! (`notify/<identity>/<channel>/<id>`, the id random per row), and that user string is all the
+//! channel's row keeps; a row written before the id keeps `notify/<identity>/<channel>`, read as
+//! it is.
 //! [`MemorySecrets`] stands in for the OS store in tests, so no test of the daemon or the CLI
 //! reaches it.
 //!
@@ -37,7 +39,7 @@ pub trait Secrets: Send + Sync + fmt::Debug {
     ///
     /// # Errors
     ///
-    /// The secret is longer than [`SECRET_CAP`] characters or empty, or the store refused it.
+    /// The secret is longer than [`SECRET_CAP`] UTF-16 units or empty, or the store refused it.
     fn put(&self, entry: &str, secret: &str) -> Result<(), SecretError>;
 
     /// The secret under `entry`, `None` when there is none.
@@ -60,18 +62,27 @@ fn check(entry: &str, secret: &str) -> Result<(), SecretError> {
     if secret.is_empty() {
         return Err(SecretError(format!("{entry}: the secret is empty")));
     }
-    if secret.chars().count() > SECRET_CAP {
+    if crate::secret_too_long(secret) {
         return Err(SecretError(format!(
-            "{entry}: the secret is longer than {SECRET_CAP} characters"
+            "{entry}: the secret is longer than {SECRET_CAP} UTF-16 units"
         )));
     }
     Ok(())
 }
 
-/// A credential store in memory, for tests.
-#[derive(Debug, Default)]
+/// A credential store in memory, for tests. Its `Debug` names the entries only, so a failing
+/// assertion that prints it prints no secret.
+#[derive(Default)]
 pub struct MemorySecrets {
     entries: Mutex<BTreeMap<String, String>>,
+}
+
+impl fmt::Debug for MemorySecrets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemorySecrets")
+            .field("entries", &self.entries())
+            .finish()
+    }
 }
 
 impl MemorySecrets {
@@ -236,6 +247,17 @@ mod tests {
         let refused = store.put("notify/a/ops", &long).unwrap_err();
         assert!(!refused.0.contains(&long));
         assert_eq!(store.entries(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn memory_secrets_debug_shows_names_only() {
+        let store = MemorySecrets::new();
+        store
+            .put("notify/a/ops/0f", "synthetic-secret-4f1c9a")
+            .unwrap();
+        let shown = format!("{store:?} {store:#?}");
+        assert!(shown.contains("notify/a/ops/0f"), "{shown}");
+        assert!(!shown.contains("synthetic-secret-4f1c9a"), "{shown}");
     }
 
     /// Deletes its entry when dropped, so the entry is gone also when an assertion panics.

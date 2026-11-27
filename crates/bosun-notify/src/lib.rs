@@ -42,19 +42,56 @@ pub const SERVICE: &str = "bosun";
 /// The longest text a message carries, in characters; a longer one is cut and marked.
 pub const TEXT_CAP: usize = 3_500;
 
-/// The longest secret the credential store takes, in characters (Windows' credential blob is
-/// at most 2,560 bytes).
-pub const SECRET_CAP: usize = 2_048;
+/// The longest secret the credential store takes, in UTF-16 code units: Windows Credential
+/// Manager keeps the blob as UTF-16 of at most 2,560 bytes. It holds on every platform, so a
+/// channel that works on Linux works on Windows too.
+pub const SECRET_CAP: usize = 1_280;
+
+/// Whether `secret` is longer than [`SECRET_CAP`] UTF-16 code units (a character outside the
+/// BMP counts two).
+#[must_use]
+pub fn secret_too_long(secret: &str) -> bool {
+    // Mutant (`mutant_notify_secret_cap_chars`): the cap counts characters, at 2,048.
+    if cfg!(mutant_notify_secret_cap_chars) {
+        return secret.chars().count() > 2_048;
+    }
+    secret.encode_utf16().count() > SECRET_CAP
+}
 
 /// The longest one send may take: a kind's transport gives up after it. The daemon's drainer
 /// waits that long, and a little more, for a send in flight before it stops.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The credential-store user of the secret of channel `channel` of `identity`:
-/// `notify/<identity>/<channel>`. It is what the channel's row keeps.
+/// The credential-store user of the secret of channel `channel` of `identity`, whose row has
+/// the random `id` ([`entry_id`]): `notify/<identity>/<channel>/<id>`. It is what the
+/// channel's row keeps, and what is read back is that string, whatever its form: a row written
+/// before the id (`notify/<identity>/<channel>`) keeps its name.
+///
+/// The id keeps two rows apart that would otherwise share an entry: Windows' target names are
+/// case-insensitive (`Ops` and `ops`), and a channel removed and added again could meet a
+/// stale entry.
 #[must_use]
-pub fn entry(identity: &str, channel: &str) -> String {
-    format!("notify/{identity}/{channel}")
+pub fn entry(identity: &str, channel: &str, id: &str) -> String {
+    // Mutant (`mutant_notify_entry_without_id`): the entry name has no id.
+    if cfg!(mutant_notify_entry_without_id) {
+        return format!("notify/{identity}/{channel}");
+    }
+    format!("notify/{identity}/{channel}/{id}")
+}
+
+/// A fresh random id of a channel row: 16 bytes of the OS's random source, in hex.
+///
+/// # Errors
+///
+/// The OS's random source failed.
+pub fn entry_id() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| format!("the random source: {e}"))?;
+    Ok(bytes.iter().fold(String::with_capacity(32), |mut out, b| {
+        use fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+        out
+    }))
 }
 
 /// Why a send did not go through. Neither variant ever carries the secret.
@@ -125,9 +162,11 @@ pub fn build(
     kinds: Kinds,
 ) -> Result<Box<dyn Notifier>, String> {
     if let Some(secret) = secret
-        && secret.chars().count() > SECRET_CAP
+        && secret_too_long(secret)
     {
-        return Err(format!("the secret is longer than {SECRET_CAP} characters"));
+        return Err(format!(
+            "the secret is longer than {SECRET_CAP} UTF-16 units"
+        ));
     }
     match kind {
         fake::KIND if kinds.fake => Ok(Box::new(fake::Fake::new(params)?)),
@@ -177,6 +216,7 @@ pub fn text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::secret::Secrets as _;
     use super::*;
 
     #[test]
@@ -205,6 +245,38 @@ mod tests {
 
     #[test]
     fn an_entry_names_the_identity_and_the_channel() {
-        assert_eq!(entry("a", "ops"), "notify/a/ops");
+        assert_eq!(entry("a", "ops", "0f"), "notify/a/ops/0f");
+        let id = entry_id().unwrap();
+        assert_eq!(id.len(), 32, "{id}");
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
+    }
+
+    #[test]
+    fn channels_differing_in_case_get_different_entries() {
+        let upper = entry("a", "Ops", &entry_id().unwrap());
+        let lower = entry("a", "ops", &entry_id().unwrap());
+        // Windows compares target names without case.
+        assert!(!upper.eq_ignore_ascii_case(&lower), "{upper} {lower}");
+        // A channel removed and added again gets another entry too.
+        let again = entry("a", "ops", &entry_id().unwrap());
+        assert!(!again.eq_ignore_ascii_case(&lower), "{again} {lower}");
+    }
+
+    #[test]
+    fn the_secret_cap_counts_utf16_units() {
+        let at_cap = "x".repeat(1_280);
+        assert!(!secret_too_long(&at_cap));
+        assert!(secret_too_long(&"x".repeat(1_281)));
+        // 700 characters, 1,400 units: each is outside the BMP.
+        let wide = "\u{1F600}".repeat(700);
+        assert_eq!(wide.chars().count(), 700);
+        assert!(secret_too_long(&wide));
+
+        let store = secret::MemorySecrets::new();
+        store.put("notify/a/ops/0f", &at_cap).unwrap();
+        assert!(store.put("notify/a/ops/0f", &wide).is_err());
+        let refused =
+            build("fake", &BTreeMap::new(), Some(&wide), Kinds { fake: true }).unwrap_err();
+        assert!(refused.contains("1280 UTF-16 units"), "{refused}");
     }
 }

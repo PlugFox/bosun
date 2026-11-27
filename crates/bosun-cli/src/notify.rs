@@ -33,6 +33,9 @@
 //! and in the scrollback. A hidden prompt (echo off, through a small audited crate or
 //! `bosun-proc`) is a follow-up.
 //!
+//! From a file: `bosun notify add ... < token.txt` in a POSIX shell or `cmd`; PowerShell has no
+//! `<` redirection, so there it is `Get-Content token.txt | bosun notify add ...`.
+//!
 //! # JSON
 //!
 //! With `--format json` each command prints its method's result (`notify.channel.add`,

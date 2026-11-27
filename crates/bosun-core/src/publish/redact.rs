@@ -46,8 +46,16 @@ static PATTERNS: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
     ];
     // Mutant (`mutant_redact_skip_telegram_token`): the Telegram bot-token shape is left out.
     if !cfg!(mutant_redact_skip_telegram_token) {
-        // A Telegram bot token: the bot's id, a colon, 35 characters.
-        patterns.push(whole(r"\b\d{6,12}:[A-Za-z0-9_-]{35}\b"));
+        // A Telegram bot token: the bot's id, a colon, 35 characters. Its context is explicit,
+        // not `\b`: in a Bot API URL it follows `bot` (`t` then a digit is no word boundary),
+        // and its last character may be `-` or `_` (then neither `/`, a space nor the end is
+        // one). `bot` and what follows survive: `.../bot[redacted]/sendMessage`.
+        // Mutant (`mutant_redact_telegram_word_boundary`): the `\b` form is back.
+        patterns.push(if cfg!(mutant_redact_telegram_word_boundary) {
+            whole(r"\b\d{6,12}:[A-Za-z0-9_-]{35}\b")
+        } else {
+            keep(r"(?P<keep>^|[^A-Za-z0-9]|bot)[0-9]{6,12}:[A-Za-z0-9_-]{35}(?P<tail>[^A-Za-z0-9_-]|$)")
+        });
     }
     patterns
 });
@@ -139,8 +147,38 @@ mod tests {
             redact(&format!("the bot {token} end")),
             "the bot [redacted] end"
         );
+        assert_eq!(redact(&token), "[redacted]");
+        let dashed = telegram_token("-");
+        assert_eq!(
+            redact(&format!("the bot {dashed} end")),
+            "the bot [redacted] end"
+        );
+        assert_eq!(redact(&format!("({dashed})")), "([redacted])");
         let text = "lunch at 12:30, id 123456789:short";
         assert_eq!(redact(text), text);
+        let longer = format!("123456789:{}", "A".repeat(36));
+        assert_eq!(redact(&longer), longer);
+    }
+
+    /// A synthetic bot token whose 35 characters end in `last`, joined at run time as
+    /// [`SECRETS`] are.
+    fn telegram_token(last: &str) -> String {
+        format!("{}:{}{last}", "123456789", "A".repeat(35 - last.len()))
+    }
+
+    #[test]
+    fn a_telegram_token_inside_a_bot_url_is_redacted() {
+        for last in ["A", "-", "_"] {
+            let token = telegram_token(last);
+            assert_eq!(
+                redact(&format!(
+                    "POST https://api.telegram.org/bot{token}/sendMessage failed"
+                )),
+                "POST https://api.telegram.org/bot[redacted]/sendMessage failed",
+                "{token}"
+            );
+            assert_eq!(redact(&format!("token {token}")), "token [redacted]");
+        }
     }
 
     #[test]

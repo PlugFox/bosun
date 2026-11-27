@@ -107,6 +107,25 @@ impl World {
             .unwrap()
     }
 
+    /// The credential-store entry of `identity`'s live channel `name`, as its list shows it:
+    /// `notify/<identity>/<name>/<id>`, the id random per row.
+    async fn entry(&self, identity: &str, name: &str) -> String {
+        let list = self.list(identity).await;
+        let channel = list["channels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no channel {name} of {identity}: {list}"));
+        let entry = channel["secret_entry"].as_str().unwrap().to_owned();
+        let prefix = format!("notify/{identity}/{name}/");
+        assert!(
+            entry.len() > prefix.len() && entry.starts_with(&prefix),
+            "{entry}"
+        );
+        entry
+    }
+
     /// Adds a `fake` channel `name` writing to `sink` for `identity`.
     async fn add(&self, identity: &str, name: &str, sink: &str, secret: &str) -> Value {
         self.ok(
@@ -155,15 +174,17 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
         .any(|w| w == needle.as_bytes())
 }
 
-/// #9: a channel's secret is in the identity's credential store under `notify/a/<name>` and
-/// nowhere in its database or in any result (`mutant_notify_secret_in_row` writes it into the
-/// row's parameters).
+/// #9: a channel's secret is in the identity's credential store under `notify/a/<name>/<id>`
+/// and nowhere in its database or in any result (`mutant_notify_secret_in_row` writes it into
+/// the row's parameters).
 #[tokio::test]
 async fn a_channel_secret_goes_to_the_credential_store_not_the_database() {
     let world = World::new().await;
     let added = world.add("a", "ops", "notify-tests-secret", SECRET).await;
     assert!(!added.to_string().contains(SECRET), "{added}");
-    assert_eq!(world.secret("a", "notify/a/ops").as_deref(), Some(SECRET));
+    let entry = world.entry("a", "ops").await;
+    assert_eq!(added["channel"]["secret_entry"], entry, "{added}");
+    assert_eq!(world.secret("a", &entry).as_deref(), Some(SECRET));
 
     // The row is in the file or in its WAL: both are read, and the row must be in one of them,
     // so the test reads where it was written.
@@ -175,16 +196,13 @@ async fn a_channel_secret_goes_to_the_credential_store_not_the_database() {
         assert!(!contains(&bytes, SECRET), "{file} holds the secret");
         written.extend(bytes);
     }
-    assert!(
-        contains(&written, "notify/a/ops"),
-        "the row was not written"
-    );
+    assert!(contains(&written, &entry), "the row was not written");
 
     let list = world.list("a").await;
     assert_eq!(names(&list), ["ops"]);
     let ops = &list["channels"][0];
     assert_eq!(ops["secret_present"], true, "{list}");
-    assert_eq!(ops["secret_entry"], "notify/a/ops", "{list}");
+    assert_eq!(ops["secret_entry"], entry, "{list}");
     assert_eq!(ops["kind"], "fake", "{list}");
     assert_eq!(ops["min_gap_s"], 60, "{list}");
     assert!(!list.to_string().contains(SECRET), "{list}");
@@ -195,8 +213,14 @@ async fn a_channel_secret_goes_to_the_credential_store_not_the_database() {
             json!({"operator": TOKEN, "identity": "a", "name": "ops"}),
         )
         .await;
-    assert_eq!(world.secret("a", "notify/a/ops"), None);
+    assert_eq!(world.secret("a", &entry), None);
     assert_eq!(names(&world.list("a").await), Vec::<&str>::new());
+
+    // Added again, the channel gets an entry of its own: none of the removed row's.
+    world.add("a", "ops", "notify-tests-secret", SECRET).await;
+    let again = world.entry("a", "ops").await;
+    assert_ne!(again, entry);
+    assert_eq!(world.secret("a", &again).as_deref(), Some(SECRET));
     world.close().await;
 }
 
@@ -206,6 +230,7 @@ async fn a_channel_secret_goes_to_the_credential_store_not_the_database() {
 async fn another_identitys_channels_are_never_listed_or_removed() {
     let world = World::new().await;
     world.add("a", "ops", "notify-tests-a-ops", SECRET).await;
+    let a_ops = world.entry("a", "ops").await;
 
     let list = world.list("b").await;
     assert_eq!(names(&list), Vec::<&str>::new(), "{list}");
@@ -223,7 +248,7 @@ async fn another_identitys_channels_are_never_listed_or_removed() {
         .await;
     assert_eq!(code, i64::from(code::INVALID_PARAMS));
     assert_eq!(names(&world.list("a").await), ["ops"]);
-    assert_eq!(world.secret("a", "notify/a/ops").as_deref(), Some(SECRET));
+    assert_eq!(world.secret("a", &a_ops).as_deref(), Some(SECRET));
 
     let own = world
         .add(
@@ -233,18 +258,16 @@ async fn another_identitys_channels_are_never_listed_or_removed() {
             "synthetic-secret-b-77e0b2",
         )
         .await;
-    assert_eq!(own["channel"]["secret_entry"], "notify/b/ops", "{own}");
+    let b_ops = world.entry("b", "ops").await;
+    assert_eq!(own["channel"]["secret_entry"], b_ops, "{own}");
     assert_eq!(
-        world.secret("b", "notify/b/ops").as_deref(),
+        world.secret("b", &b_ops).as_deref(),
         Some("synthetic-secret-b-77e0b2")
     );
-    assert_eq!(world.secret("a", "notify/a/ops").as_deref(), Some(SECRET));
-    assert_eq!(world.secret("a", "notify/b/ops"), None);
-    assert_eq!(world.secret("b", "notify/a/ops"), None);
-    assert_eq!(
-        world.list("a").await["channels"][0]["secret_entry"],
-        "notify/a/ops"
-    );
+    assert_eq!(world.secret("a", &a_ops).as_deref(), Some(SECRET));
+    assert_eq!(world.secret("a", &b_ops), None);
+    assert_eq!(world.secret("b", &a_ops), None);
+    assert_eq!(world.entry("a", "ops").await, a_ops);
     world.close().await;
 }
 
@@ -275,7 +298,6 @@ async fn the_channel_writes_take_the_operator_token() {
         );
     }
     assert_eq!(names(&world.list("a").await), Vec::<&str>::new());
-    assert_eq!(world.secret("a", "notify/a/ops"), None);
 
     world
         .add("a", "kept", "notify-tests-token-kept", SECRET)
@@ -294,7 +316,8 @@ async fn the_channel_writes_take_the_operator_token() {
         }
     }
     assert_eq!(names(&world.list("a").await), ["kept"]);
-    assert_eq!(world.secret("a", "notify/a/kept").as_deref(), Some(SECRET));
+    let kept = world.entry("a", "kept").await;
+    assert_eq!(world.secret("a", &kept).as_deref(), Some(SECRET));
     assert_eq!(
         bosun_notify::fake::sent("notify-tests-token-kept"),
         Vec::<String>::new()
@@ -355,7 +378,8 @@ async fn a_telegram_channel_is_added_with_its_token_in_the_credential_store() {
     params["params"] = json!({"chat": "-1001234567890"});
     let added = world.ok("notify.channel.add", params.clone()).await;
     assert!(!added.to_string().contains(&token), "{added}");
-    assert_eq!(world.secret("a", "notify/a/chat").as_deref(), Some(&*token));
+    let chat = world.entry("a", "chat").await;
+    assert_eq!(world.secret("a", &chat).as_deref(), Some(&*token));
     let list = world.list("a").await;
     assert_eq!(list["channels"][0]["kind"], "telegram", "{list}");
     assert!(!list.to_string().contains(&token), "{list}");

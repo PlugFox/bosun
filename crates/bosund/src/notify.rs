@@ -2,7 +2,8 @@
 //! channels, their rows in its own store and their secrets in the OS credential store.
 //!
 //! Every method works on the identity it names: its store's rows and the credential entries
-//! `notify/<identity>/<name>`, nothing of another identity's. `add`, `remove` and `test` take
+//! `notify/<identity>/<name>/<id>` (the id random per row; an older row's entry has none),
+//! nothing of another identity's. `add`, `remove` and `test` take
 //! the operator token.
 //!
 //! - `add` checks the channel through [`bosun_notify::build`], writes the secret to the
@@ -288,19 +289,19 @@ pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Valu
                         served.name, p.name
                     )));
                 }
-                let entry = bosun_notify::entry(&served.name, &p.name);
+                // A fresh id per row: no other row, live or removed, shares the entry.
+                let id = bosun_notify::entry_id().map_err(failed)?;
+                let entry = bosun_notify::entry(&served.name, &p.name, &id);
                 #[allow(unused_mut, reason = "the mutant below changes it")]
                 let mut params = p.params.clone();
-                match &p.secret {
-                    Some(secret) => {
-                        // Mutant (`mutant_notify_secret_in_row`): the secret goes into the row.
-                        if cfg!(mutant_notify_secret_in_row) {
-                            params.insert("secret".to_owned(), secret.clone());
-                        }
-                        served.notify.put(entry.clone(), secret.clone()).await?;
+                // A kind with no secret writes no entry; its fresh name holds none from an
+                // earlier channel.
+                if let Some(secret) = &p.secret {
+                    // Mutant (`mutant_notify_secret_in_row`): the secret goes into the row.
+                    if cfg!(mutant_notify_secret_in_row) {
+                        params.insert("secret".to_owned(), secret.clone());
                     }
-                    // A kind with no secret: no entry is left from an earlier channel.
-                    None => served.notify.delete(entry.clone()).await?,
+                    served.notify.put(entry.clone(), secret.clone()).await?;
                 }
                 let at_ms = now_ms();
                 let new = NewChannel {

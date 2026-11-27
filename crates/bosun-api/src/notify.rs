@@ -11,7 +11,8 @@
 //!
 //! A channel's secret (a bot token, a signing key) is sent once, in
 //! [`ChannelAddParams::secret`], and the daemon stores it in the OS credential store under
-//! [`ChannelView::secret_entry`] (`notify/<identity>/<name>`, service `bosun`). It is in no row,
+//! [`ChannelView::secret_entry`] (`notify/<identity>/<name>/<id>`, the id random per row; an
+//! older row's has none; service `bosun`). It is in no row,
 //! log line, error, event or result; [`ChannelView::secret_present`] says only whether the
 //! entry is there. The `Debug` form of [`ChannelAddParams`] hides it.
 //!

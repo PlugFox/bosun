@@ -15,6 +15,12 @@
 //! bosun notify test ops
 //! ```
 //!
+//! PowerShell has no `<` redirection; there the token is piped:
+//!
+//! ```text
+//! Get-Content token.txt | bosun notify add ops --kind telegram --param chat=-1001234567890
+//! ```
+//!
 //! Each message is `POST https://api.telegram.org/bot<token>/sendMessage` with the chat, the
 //! text and the link preview off, over HTTPS with the operating system's trust store (no
 //! bundled root list). Plain text only: no `parse_mode`, ever (#208: an escaping error drops a

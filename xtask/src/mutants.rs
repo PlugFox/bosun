@@ -3622,6 +3622,32 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_redact_telegram_word_boundary",
+        issue: NOTIFY_SECRETS_FIX_CARD,
+        breaks: "the Telegram token is matched between `\\b`s, so a bot URL's token and one \
+                 ending in `-` are left in",
+        package: "bosun-core",
+        check: Check::Test("publish::redact::tests::a_telegram_token_inside_a_bot_url_is_redacted"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_notify_secret_cap_chars",
+        issue: NOTIFY_SECRETS_FIX_CARD,
+        breaks: "the secret cap counts 2,048 characters, more than Windows' credential blob takes",
+        package: "bosun-notify",
+        check: Check::Test("tests::the_secret_cap_counts_utf16_units"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_notify_entry_without_id",
+        issue: NOTIFY_SECRETS_FIX_CARD,
+        breaks: "a channel's credential-store entry has no id, so `Ops` and `ops` share one on \
+                 Windows",
+        package: "bosun-notify",
+        check: Check::Test("tests::channels_differing_in_case_get_different_entries"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_queue_lint_quiet_grep_unflagged",
         issue: QUIET_GREP_CARD,
         breaks: "a verdict that sets `pipefail` and pipes into `grep -q` lints clean, and goes \
@@ -4393,6 +4419,11 @@ const NOTIFY_OUTBOX_FIX_CARD: u32 = 9;
 /// and doctor's `notify` check (its own number was not known when it was written; its parent's
 /// stands in).
 const NOTIFY_CARD: u32 = 9;
+
+/// The card of #9 and #2 that redacts the Telegram token inside a bot URL, caps a secret at
+/// what Windows' credential store takes and gives each channel row its own entry (its own
+/// number was not known when it was written; its parent's stands in).
+const NOTIFY_SECRETS_FIX_CARD: u32 = 9;
 /// The card of #7 that sets the automatic pause per repository (`repo.<name>.auto_pause`), off
 /// by default in worktree mode (its own number was not known when it was written; its parent's
 /// stands in).

@@ -489,3 +489,186 @@ fn a_check_at_the_start_of_a_read_ends_at_the_carried_timestamp() {
     assert_eq!(end(&batch), nine);
     assert_eq!(batch.last_ts_ms, nine);
 }
+
+/// An `assistant` line of message `id` at `timestamp` whose content is one `tool_use` block.
+fn call_line(
+    id: &str,
+    timestamp: &str,
+    call_id: &str,
+    name: &str,
+    input: serde_json::Value,
+) -> String {
+    let mut line = assistant_line(id, 5);
+    line["timestamp"] = timestamp.into();
+    let mut block = json!({"type": "tool_use", "id": call_id, "name": name});
+    block["input"] = input;
+    line["message"]["content"] = json!([block]);
+    line.to_string()
+}
+
+/// A `user` line with one `tool_result` of `call_id`, at `timestamp` when given.
+fn result_line(call_id: &str, timestamp: Option<&str>, content: serde_json::Value) -> String {
+    let mut block = json!({"type": "tool_result", "tool_use_id": call_id});
+    block["content"] = content;
+    let mut line = json!({
+        "type": "user",
+        "sessionId": SESSION,
+        "cwd": "/fixture/repo-a",
+        "message": {"role": "user", "content": [block]}
+    });
+    if let Some(timestamp) = timestamp {
+        line["timestamp"] = timestamp.into();
+    }
+    line.to_string()
+}
+
+fn lines(lines: &[String]) -> Vec<u8> {
+    lines
+        .iter()
+        .flat_map(|line| format!("{line}\n").into_bytes())
+        .collect()
+}
+
+fn results(batch: &Batch) -> Vec<&ToolResult> {
+    batch
+        .records()
+        .filter_map(|record| match record {
+            Record::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ms(timestamp: &str) -> i64 {
+    time::parse_ms(timestamp).unwrap()
+}
+
+#[test]
+fn a_tool_result_carries_its_own_time() {
+    let call = "toolu_000000000000000009190001";
+    let (called, answered) = ("2000-01-09T00:00:02.000Z", "2000-01-09T00:00:09.000Z");
+    let bytes = lines(&[
+        call_line(
+            "msg_000000000000000009000001",
+            called,
+            call,
+            "Bash",
+            json!({"command": "cargo test"}),
+        ),
+        result_line(call, Some(answered), json!("synthetic output")),
+    ]);
+    let batch = parse_lines(&Parser, &source(), 0, &bytes);
+    assert_eq!(batch.gaps().count(), 0);
+    let found = results(&batch);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].ts_ms, Some(ms(answered)));
+
+    let mut assembly = Assembly::default();
+    for record in batch.records() {
+        assembly.add(record.clone());
+    }
+    let messages = assembly.messages();
+    let got = &messages[0].tool_calls[call];
+    assert_eq!(got.call_ts_ms, Some(ms(called)));
+    assert_eq!(got.result_ts_ms, Some(ms(answered)));
+
+    // Without a timestamp the result is still a result, and not a gap.
+    let bytes = lines(&[result_line(call, None, json!("synthetic output"))]);
+    let batch = parse_lines(&Parser, &source(), 0, &bytes);
+    assert_eq!(batch.gaps().count(), 0);
+    let found = results(&batch);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].ts_ms, None);
+}
+
+#[test]
+fn image_bytes_are_counted_apart_from_text() {
+    let call = "toolu_000000000000000009190001";
+    let data = "A".repeat(1000);
+    let parse = |content: serde_json::Value| {
+        let bytes = lines(&[result_line(call, Some("2000-01-09T00:00:09.000Z"), content)]);
+        let batch = parse_lines(&Parser, &source(), 0, &bytes);
+        let found = results(&batch);
+        assert_eq!(found.len(), 1);
+        (found[0].result_bytes, found[0].media_bytes)
+    };
+    let mixed = json!([
+        {"type": "text", "text": "abc"},
+        {"type": "image", "source": {"type": "base64", "data": data}}
+    ]);
+    assert_eq!(parse(mixed), (1003, 1000));
+    assert_eq!(parse(json!("synthetic output")), (16, 0));
+}
+
+#[test]
+fn two_spellings_of_one_command_share_a_fingerprint() {
+    let fingerprint = |name: &str, input: serde_json::Value| {
+        let line = call_line(
+            "msg_000000000000000009000001",
+            "2000-01-09T00:00:02.000Z",
+            "toolu_000000000000000009190001",
+            name,
+            input,
+        );
+        let Outcome::Records(records) = Parser.parse_line(&source(), 0, line.as_bytes()) else {
+            panic!("not records: {line}");
+        };
+        let Record::Message(message) = &records[0] else {
+            panic!("not a message: {records:?}");
+        };
+        let call = &message.tool_calls["toolu_000000000000000009190001"];
+        (call.command_hash.clone(), call.command_text.clone())
+    };
+    let bash = |command: &str| fingerprint("Bash", json!({ "command": command }));
+    let shell = |command: &str| fingerprint("PowerShell", json!({ "command": command }));
+
+    let (hash, text) = bash("cargo test -p demo");
+    let hash = hash.expect("a shell call has a fingerprint");
+    assert_eq!(hash.len(), 64);
+    assert!(
+        hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+        "{hash}"
+    );
+    assert_eq!(text.as_deref(), Some("cargo test -p demo"));
+    for spelling in [
+        "  cargo  test\t-p demo \n",
+        concat!(r"cargo test \", "\n", " -p demo"),
+    ] {
+        assert_eq!(
+            bash(spelling),
+            (Some(hash.clone()), text.clone()),
+            "{spelling:?}"
+        );
+    }
+    let (other, _) = bash("cargo test -p alpha");
+    assert_ne!(other.as_deref(), Some(hash.as_str()));
+
+    let long = format!("echo {}", "synthetic ".repeat(50));
+    let normalised = long.trim_end().to_owned();
+    assert!(normalised.len() >= 500);
+    let (hash, text) = bash(&long);
+    assert!(hash.is_some());
+    let text = text.unwrap();
+    assert!(text.len() <= 200 && !text.is_empty(), "{}", text.len());
+    assert!(normalised.starts_with(&text));
+
+    assert_eq!(
+        fingerprint("Read", json!({"file_path": "/fixture/repo-a/src/lib.rs"})),
+        (None, None)
+    );
+
+    let one_line = shell("Get-ChildItem -Path src -Recurse");
+    assert!(one_line.0.is_some());
+    assert_eq!(shell("Get-ChildItem -Path src `\n    -Recurse"), one_line);
+    assert_eq!(shell("Get-ChildItem -Path src `\r\n    -Recurse"), one_line);
+    // In PowerShell a `\` before a newline ends a path: it stays.
+    let (_, text) = shell(concat!(
+        r"Get-ChildItem C:\fixture\",
+        "\n",
+        "Write-Output done"
+    ));
+    assert_eq!(
+        text.as_deref(),
+        Some(r"Get-ChildItem C:\fixture\ Write-Output done")
+    );
+}

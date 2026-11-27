@@ -65,7 +65,7 @@ Over the whole store, whatever the range.
 
 | parser version | files | files with a line count | lines | gaps | gaps per line |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 3 | 5 | 5 | 14 | 0 | 0.0% |
+| 4 | 5 | 5 | 14 | 0 | 0.0% |
 | total | 5 | 5 | 14 | 0 | 0.0% |
 
 ### Agreement with the provider's own totals

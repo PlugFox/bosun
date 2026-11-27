@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT tool_use_key, name, target, input_bytes, result_bytes, is_error,\n                command_hash, command_text, call_ts_ms, result_ts_ms, result_media_bytes\n         FROM tool_call WHERE message_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "tool_use_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "tool_use_key"
+          }
+        }
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "target",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "target"
+          }
+        }
+      },
+      {
+        "name": "input_bytes",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "input_bytes"
+          }
+        }
+      },
+      {
+        "name": "result_bytes",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_bytes"
+          }
+        }
+      },
+      {
+        "name": "is_error",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "is_error"
+          }
+        }
+      },
+      {
+        "name": "command_hash",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "command_hash"
+          }
+        }
+      },
+      {
+        "name": "command_text",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "command_text"
+          }
+        }
+      },
+      {
+        "name": "call_ts_ms",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "call_ts_ms"
+          }
+        }
+      },
+      {
+        "name": "result_ts_ms",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_ts_ms"
+          }
+        }
+      },
+      {
+        "name": "result_media_bytes",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_media_bytes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "41abb128b6d04308a626e57da05cc278e53b36d9a093510902690539f67dadce"
+}

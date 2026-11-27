@@ -34,7 +34,7 @@ pub use item::{
     TransitionKey, UserCommand, step,
 };
 pub use lease::{LeaseError, Leases, Resource, Scope, Step, Wait};
-pub use merge::{KeyMismatch, merge};
+pub use merge::{KeyMismatch, earliest, merge};
 pub use path::{PathStyle, canonical_path, repo_root, strip_root, style_of};
 pub use price::{
     Cost, DEFAULT_REFERENCE_MODEL, Eqv, PriceRow, PriceTable, Pricing, Rates, SYNTHETIC_MODEL,

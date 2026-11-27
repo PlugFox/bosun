@@ -1,55 +1,22 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT tool_use_key, name, target, input_bytes, result_bytes, is_error\n         FROM tool_call WHERE message_id = ?",
+  "query": "SELECT tc.id AS \"id!: i64\", tc.result_bytes, tc.is_error, tc.call_ts_ms,\n                  tc.result_ts_ms, tc.result_media_bytes\n           FROM tool_call tc JOIN message m ON m.id = tc.message_id\n           WHERE m.provider = ? AND tc.tool_use_key = ?",
   "describe": {
     "columns": [
       {
-        "name": "tool_use_key",
+        "name": "id!: i64",
         "ordinal": 0,
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "tool_call",
-            "name": "tool_use_key"
-          }
-        }
-      },
-      {
-        "name": "name",
-        "ordinal": 1,
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "tool_call",
-            "name": "name"
-          }
-        }
-      },
-      {
-        "name": "target",
-        "ordinal": 2,
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "tool_call",
-            "name": "target"
-          }
-        }
-      },
-      {
-        "name": "input_bytes",
-        "ordinal": 3,
         "type_info": "Integer",
         "origin": {
           "Table": {
             "table": "tool_call",
-            "name": "input_bytes"
+            "name": "id"
           }
         }
       },
       {
         "name": "result_bytes",
-        "ordinal": 4,
+        "ordinal": 1,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -60,7 +27,7 @@
       },
       {
         "name": "is_error",
-        "ordinal": 5,
+        "ordinal": 2,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -68,19 +35,52 @@
             "name": "is_error"
           }
         }
+      },
+      {
+        "name": "call_ts_ms",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "call_ts_ms"
+          }
+        }
+      },
+      {
+        "name": "result_ts_ms",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_ts_ms"
+          }
+        }
+      },
+      {
+        "name": "result_media_bytes",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_media_bytes"
+          }
+        }
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false,
       false,
+      false,
       true,
-      false,
-      false,
-      false
+      true,
+      true
     ]
   },
-  "hash": "ebcd0c8a6f4f87057876c1dc3708c7c984cb9c95d52cf915c768e4b04617d4ca"
+  "hash": "bb8943c3d3ddd285f24f9416c65da7b20271ebda567eb0213d1b8aefe4ac3715"
 }

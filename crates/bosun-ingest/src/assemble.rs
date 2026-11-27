@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bosun_core::{Message, merge};
+use bosun_core::{Message, earliest, merge};
 
 use crate::record::{FileTouch, Record, SessionCheck, ToolResult};
 
@@ -40,6 +40,8 @@ impl Assembly {
                     .and_modify(|known| {
                         known.result_bytes = known.result_bytes.max(result.result_bytes);
                         known.is_error |= result.is_error;
+                        known.ts_ms = earliest(known.ts_ms, result.ts_ms);
+                        known.media_bytes = known.media_bytes.max(result.media_bytes);
                     })
                     .or_insert(result);
             }
@@ -70,6 +72,14 @@ impl Assembly {
                     {
                         call.result_bytes = call.result_bytes.max(result.result_bytes);
                         call.is_error |= result.is_error;
+                        call.result_ts_ms = if cfg!(mutant_ingest_result_time_from_call) {
+                            // Mutant `mutant_ingest_result_time_from_call`: a result's time is
+                            // its call's.
+                            call.call_ts_ms
+                        } else {
+                            earliest(call.result_ts_ms, result.ts_ms)
+                        };
+                        call.result_media_bytes = call.result_media_bytes.max(result.media_bytes);
                     }
                 }
                 message

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tool_call\n                 (message_id, tool_use_key, name, target, input_bytes, result_bytes, is_error,\n                  command_hash, command_text, call_ts_ms, result_ts_ms, result_media_bytes)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT (message_id, tool_use_key) DO UPDATE SET\n                 name = excluded.name,\n                 target = excluded.target,\n                 input_bytes = excluded.input_bytes,\n                 result_bytes = excluded.result_bytes,\n                 is_error = excluded.is_error,\n                 command_hash = excluded.command_hash,\n                 command_text = excluded.command_text,\n                 call_ts_ms = excluded.call_ts_ms,\n                 result_ts_ms = excluded.result_ts_ms,\n                 result_media_bytes = excluded.result_media_bytes",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "0807f0bf31b225b659655418738eb3525143fe0c4066d91423c7bd508f50a035"
+}

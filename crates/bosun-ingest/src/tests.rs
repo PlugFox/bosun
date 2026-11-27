@@ -14,7 +14,7 @@ use sqlx::{Connection, Row};
 use tempfile::TempDir;
 
 use crate::testing::{Totals, cases, expected, files, fixtures, roots};
-use crate::{Ingest, LineParser, Options, Outcome, Provider, Source, claude, spawn, stub};
+use crate::{Ingest, LineParser, Options, Outcome, Provider, Record, Source, claude, spawn, stub};
 
 mod backfill;
 
@@ -487,9 +487,14 @@ async fn twelve_runs_of_a_script_are_execs_not_reads() {
     bench.close().await;
 }
 
-/// #2, #76: a path out of a command's text outside the message's repository, and every
-/// argument that is not a file, never reach the database. The last command of the fixture
-/// writes and reads files under `/fixture/elsewhere`, outside the repository.
+/// #2, #76: a path out of a command's text outside the message's repository never reaches the
+/// database as a file touch, and the target of a command is its head. The last command of the
+/// fixture writes and reads files under `/fixture/elsewhere`, outside the repository.
+///
+/// Every message of the fixture lies inside the repository, so since #210 the redacted text
+/// of its commands is stored; the claim that nothing of a command's text reaches the database
+/// moved to [`a_command_text_is_kept_only_redacted_capped_and_inside_a_repository`], for a
+/// message outside every repository.
 #[tokio::test]
 async fn a_command_stores_only_files_inside_the_repository() {
     let case = case("shell-touches");
@@ -518,8 +523,11 @@ async fn a_command_stores_only_files_inside_the_repository() {
         targets,
         [Some("rustfmt".to_owned()), Some("sed".to_owned())]
     );
-    // No byte of the database holds an argument of a command.
-    let db = bench.db();
+    bench.close().await;
+}
+
+/// Every byte of the database files (the database, its WAL and shared memory), as text.
+fn database_dump(db: &Path) -> String {
     let dir = db.parent().unwrap().to_owned();
     let mut dump = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
@@ -529,16 +537,87 @@ async fn a_command_stores_only_files_inside_the_repository() {
             dump.extend(std::fs::read(&path).unwrap());
         }
     }
-    let dump = String::from_utf8_lossy(&dump);
-    for argument in [
-        "1,40p",
-        "cargo test",
-        "fmt.log",
-        "notes.md",
-        "--check",
-        "check.py --",
+    String::from_utf8_lossy(&dump).into_owned()
+}
+
+/// An `assistant` line of message `n` (a digit) in `cwd` with one `Bash` call of `command`.
+fn bash_line(session: &str, n: u32, cwd: &str, command: &str) -> String {
+    serde_json::json!({
+        "type": "assistant",
+        "sessionId": session,
+        "cwd": cwd,
+        "timestamp": format!("2000-01-30T00:00:0{n}.000Z"),
+        "message": {
+            "id": format!("msg_00000000000000009910000{n}"),
+            "model": "claude-opus-5-5",
+            "content": [{
+                "type": "tool_use",
+                "id": format!("toolu_00000000000000009919000{n}"),
+                "name": "Bash",
+                "input": {"command": command, "description": "Synthetic step"}
+            }],
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }
+    })
+    .to_string()
+}
+
+/// #210: the text of a command is stored scrubbed and cut to 200 bytes, and only for a message
+/// attributed to a repository; of a message in no repository neither its text nor its hash
+/// reaches the database. Mutants `mutant_ingest_command_text_outside_repo` (kept whatever the
+/// attribution) and `mutant_ingest_command_text_unredacted` (kept unscrubbed).
+#[tokio::test]
+async fn a_command_text_is_kept_only_redacted_capped_and_inside_a_repository() {
+    // Built at run time, so that the source holds no token-shaped literal.
+    let secret = format!("{}{}", "synthetic0123", "4567abcdefXYZ");
+    let session = "00000000-0000-4000-8000-099100000000";
+    let long = format!("echo {}", "synthetic ".repeat(50));
+    let curl = format!(r#"curl -H "Authorization: Bearer {secret}" https://example.invalid/x"#);
+    let mut transcript = String::new();
+    for (n, cwd, command) in [
+        (1, "/fixture/repo-a", curl.as_str()),
+        (2, "/fixture/repo-a", long.as_str()),
+        (
+            3,
+            "/fixture/elsewhere",
+            "cat /fixture/elsewhere/notes.md --synthetic-flag",
+        ),
     ] {
-        assert!(!dump.contains(argument), "{argument}");
+        transcript.push_str(&bash_line(session, n, cwd, command));
+        transcript.push('\n');
+    }
+    let bench = Bench::new().await;
+    let dir = bench.projects().join("-fixture-repo-a");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{session}.jsonl")), transcript).unwrap();
+    // A case whose only root is `/fixture/repo-a`.
+    let roots = case("shell-touches");
+    let ingest = bench.ingest(claude::Parser, bench.projects(), &roots).await;
+    ingest.scan().await.unwrap();
+
+    let mut conn = connect(&bench.db()).await;
+    let calls: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT tool_use_key, command_hash, command_text FROM tool_call ORDER BY tool_use_key",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    let (_, hash, text) = &calls[0];
+    assert!(hash.is_some());
+    let text = text.as_deref().unwrap();
+    assert!(text.contains("[redacted]"), "{text}");
+    assert!(!text.contains(&secret), "{text}");
+    let (_, hash, text) = &calls[1];
+    assert!(hash.is_some());
+    let text = text.as_deref().unwrap();
+    assert!(text.len() <= 200 && long.starts_with(text), "{text}");
+    assert_eq!(calls[2].1, None, "a message in no repository keeps no hash");
+    assert_eq!(calls[2].2, None, "a message in no repository keeps no text");
+    let dump = database_dump(&bench.db());
+    for needle in [secret.as_str(), "--synthetic-flag", "notes.md"] {
+        assert!(!dump.contains(needle), "{needle}");
     }
     bench.close().await;
 }
@@ -616,6 +695,145 @@ impl Provider for NextVersion {
     fn locate(&self, path: &Path) -> Option<crate::Located> {
         claude::Parser.locate(path)
     }
+}
+
+/// The Claude parser as version 3 wrote its records: without a command's fingerprint, a call's
+/// time, a result's time or its media bytes.
+#[derive(Debug, Clone, Copy)]
+struct PreviousVersion;
+
+impl LineParser for PreviousVersion {
+    fn provider(&self) -> &'static str {
+        claude::PROVIDER
+    }
+
+    fn version(&self) -> u32 {
+        claude::PARSER_VERSION - 1
+    }
+
+    fn parse_line(&self, source: &Source, offset: u64, line: &[u8]) -> Outcome {
+        match claude::Parser.parse_line(source, offset, line) {
+            Outcome::Records(records) => {
+                Outcome::Records(records.into_iter().map(as_version_3).collect())
+            }
+            other => other,
+        }
+    }
+}
+
+impl Provider for PreviousVersion {
+    fn locate(&self, path: &Path) -> Option<crate::Located> {
+        claude::Parser.locate(path)
+    }
+}
+
+/// `record` without the fields of #210.
+fn as_version_3(record: Record) -> Record {
+    match record {
+        Record::Message(mut message) => {
+            for call in message.tool_calls.values_mut() {
+                call.command_hash = None;
+                call.command_text = None;
+                call.call_ts_ms = None;
+                call.result_ts_ms = None;
+                call.result_media_bytes = 0;
+            }
+            Record::Message(message)
+        }
+        Record::ToolResult(mut result) => {
+            result.ts_ms = None;
+            result.media_bytes = 0;
+            Record::ToolResult(result)
+        }
+        other => other,
+    }
+}
+
+/// The columns of #210 of one tool call, with its name and result size.
+#[derive(Debug, sqlx::FromRow)]
+struct NewColumns {
+    name: String,
+    command_hash: Option<String>,
+    command_text: Option<String>,
+    call_ts_ms: Option<i64>,
+    result_ts_ms: Option<i64>,
+    result_media_bytes: Option<i64>,
+    result_bytes: i64,
+}
+
+async fn new_columns(db: &Path) -> Vec<NewColumns> {
+    let mut conn = connect(db).await;
+    let rows = sqlx::query_as(
+        "SELECT tool_use_key, name, command_hash, command_text, call_ts_ms, result_ts_ms,
+                result_media_bytes, result_bytes
+         FROM tool_call ORDER BY tool_use_key",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+    rows
+}
+
+/// #210: rows of parser version 3 hold NULL in the new columns; a reingest with version 4
+/// fills them and moves no token. Mutant `mutant_ingest_result_time_from_call`: a result's
+/// time is its call's.
+#[tokio::test]
+async fn reingest_fills_the_new_columns_and_changes_no_token_sum() {
+    let case = case("shell-touches");
+    let bench = Bench::new().await;
+    copy_case(&case, &bench.projects());
+    let old = bench.ingest(PreviousVersion, bench.projects(), &case).await;
+    old.scan().await.unwrap();
+    let want = want(&case);
+    assert_eq!(stored_totals(&bench.db()).await, want);
+    let counts = row_counts(&bench.db()).await;
+    let before = new_columns(&bench.db()).await;
+    assert!(!before.is_empty());
+    for call in &before {
+        assert!(
+            call.command_hash.is_none()
+                && call.command_text.is_none()
+                && call.call_ts_ms.is_none()
+                && call.result_ts_ms.is_none()
+                && call.result_media_bytes.is_none(),
+            "{call:?}"
+        );
+    }
+
+    let next = bench.ingest(claude::Parser, bench.projects(), &case).await;
+    next.reingest().await.unwrap();
+    assert_eq!(stored_totals(&bench.db()).await, want);
+    assert_eq!(row_counts(&bench.db()).await, counts);
+    let versions: Vec<i64> = {
+        let mut conn = connect(&bench.db()).await;
+        let versions = sqlx::query_scalar("SELECT DISTINCT parser_version FROM message")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
+        versions
+    };
+    assert_eq!(claude::PARSER_VERSION, 4);
+    assert_eq!(versions, [4]);
+    let after = new_columns(&bench.db()).await;
+    assert_eq!(after.len(), before.len());
+    for call in &after {
+        if call.name == "Bash" {
+            assert!(call.command_hash.is_some(), "{call:?}");
+        }
+        let called = call
+            .call_ts_ms
+            .unwrap_or_else(|| panic!("no time: {call:?}"));
+        if call.result_bytes > 0 {
+            let answered = call
+                .result_ts_ms
+                .unwrap_or_else(|| panic!("no result time: {call:?}"));
+            assert!(answered > called, "{call:?}");
+            assert_eq!(call.result_media_bytes, Some(0), "{call:?}");
+        }
+    }
+    bench.close().await;
 }
 
 #[tokio::test]

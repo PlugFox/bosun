@@ -16,6 +16,7 @@ bosun-store = { path = "../bosun-store" }
 file-id.workspace = true
 notify.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
 # The commit reader's tests write synthetic session rows with sqlx directly (#23).

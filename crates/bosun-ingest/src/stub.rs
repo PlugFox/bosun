@@ -176,6 +176,9 @@ fn result(object: &Map<String, Value>) -> Option<Record> {
         tool_use_id: text(object, "id")?.to_owned(),
         result_bytes: object.get("bytes")?.as_u64()?,
         is_error: object.get("failed")?.as_bool()?,
+        // The stub knows neither: unknown.
+        ts_ms: None,
+        media_bytes: 0,
     }))
 }
 

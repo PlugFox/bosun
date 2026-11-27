@@ -354,6 +354,7 @@ dependencies = [
  "file-id",
  "notify",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "tokio",

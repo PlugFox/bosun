@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use bosun_core::{
     Commit, Effect, FileTouch, Gap, ItemId, Message, Rates, SessionCheck, Stepped, ToolResult,
-    WindowKey, WindowKind, WindowMeta, canonical_path, default_table, merge, repo_root, strip_root,
-    style_of,
+    WindowKey, WindowKind, WindowMeta, canonical_path, default_table, earliest, merge, repo_root,
+    strip_root, style_of,
 };
 use sqlx::sqlite::SqliteConnection;
 use sqlx::{Connection, Executor};
@@ -1092,9 +1092,18 @@ async fn upsert_session(
     Ok(())
 }
 
+/// The media part of a result as the store keeps it: known once a result of a parser that
+/// measures it was seen (one with a time, or with media), NULL otherwise: a call with no
+/// result yet, or a row of a parser that predates the column (Claude's version 3 or less,
+/// until `bosun reingest`).
+fn media_known(result_ts_ms: Option<i64>, media_bytes: u64) -> Option<u64> {
+    (result_ts_ms.is_some() || media_bytes > 0).then_some(media_bytes)
+}
+
 async fn apply_tool_result(conn: &mut SqliteConnection, result: &ToolResult) -> Result<(), Error> {
     let calls = sqlx::query!(
-        r#"SELECT tc.id AS "id!: i64", tc.result_bytes, tc.is_error
+        r#"SELECT tc.id AS "id!: i64", tc.result_bytes, tc.is_error, tc.call_ts_ms,
+                  tc.result_ts_ms, tc.result_media_bytes
            FROM tool_call tc JOIN message m ON m.id = tc.message_id
            WHERE m.provider = ? AND tc.tool_use_key = ?"#,
         result.provider,
@@ -1107,10 +1116,32 @@ async fn apply_tool_result(conn: &mut SqliteConnection, result: &ToolResult) -> 
         let bytes = from_db(call.result_bytes, "tool result bytes")?.max(result.result_bytes);
         let bytes = to_db(bytes, "tool result bytes")?;
         let is_error = call.is_error != 0 || result.is_error;
+        // The earliest known time of the result, and the larger media part (#210).
+        let result_ts_ms = if cfg!(mutant_ingest_result_time_from_call) {
+            // Mutant `mutant_ingest_result_time_from_call`: a result's time is its call's.
+            call.call_ts_ms
+        } else {
+            earliest(call.result_ts_ms, result.ts_ms)
+        };
+        let stored_media = match call.result_media_bytes {
+            Some(media) => Some(from_db(media, "tool result media bytes")?),
+            None => None,
+        };
+        let media = match (stored_media, media_known(result.ts_ms, result.media_bytes)) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        let media = media
+            .map(|media| to_db(media, "tool result media bytes"))
+            .transpose()?;
         sqlx::query!(
-            "UPDATE tool_call SET result_bytes = ?, is_error = ? WHERE id = ?",
+            "UPDATE tool_call SET result_bytes = ?, is_error = ?, result_ts_ms = ?,
+                 result_media_bytes = ?
+             WHERE id = ?",
             bytes,
             is_error,
+            result_ts_ms,
+            media,
             call.id,
         )
         .execute(&mut *conn)
@@ -1404,19 +1435,55 @@ async fn upsert_message(
     .fetch_one(&mut *conn)
     .await?;
 
+    upsert_tool_calls(conn, id, m, repo.is_some()).await?;
+    update_span(conn, session).await?;
+    if let Some(previous) = previous.filter(|&p| p != session) {
+        update_span(conn, previous).await?;
+    }
+    Ok(())
+}
+
+/// Writes the tool calls of message `m`, stored as row `id`. `attributed` says whether the
+/// message is attributed to a repository.
+async fn upsert_tool_calls(
+    conn: &mut SqliteConnection,
+    id: i64,
+    m: &Message,
+    attributed: bool,
+) -> Result<(), Error> {
+    // A command's text and its hash reach the database only for a message attributed to a
+    // repository: of a message in no repository nothing of the text is kept (#2, #76, #210).
+    // Every repository row comes from the configuration, so an attributed message is one of a
+    // configured repository.
+    // Mutant `mutant_ingest_command_text_outside_repo`: the text is kept whatever the attribution.
+    let keep_command = attributed || cfg!(mutant_ingest_command_text_outside_repo);
     for (key, call) in &m.tool_calls {
         let input_bytes = to_db(call.input_bytes, "tool input bytes")?;
         let result_bytes = to_db(call.result_bytes, "tool result bytes")?;
+        let (command_hash, command_text) = if keep_command {
+            (call.command_hash.as_deref(), call.command_text.as_deref())
+        } else {
+            (None, None)
+        };
+        let media = media_known(call.result_ts_ms, call.result_media_bytes)
+            .map(|media| to_db(media, "tool result media bytes"))
+            .transpose()?;
         sqlx::query!(
             "INSERT INTO tool_call
-                 (message_id, tool_use_key, name, target, input_bytes, result_bytes, is_error)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+                 (message_id, tool_use_key, name, target, input_bytes, result_bytes, is_error,
+                  command_hash, command_text, call_ts_ms, result_ts_ms, result_media_bytes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (message_id, tool_use_key) DO UPDATE SET
                  name = excluded.name,
                  target = excluded.target,
                  input_bytes = excluded.input_bytes,
                  result_bytes = excluded.result_bytes,
-                 is_error = excluded.is_error",
+                 is_error = excluded.is_error,
+                 command_hash = excluded.command_hash,
+                 command_text = excluded.command_text,
+                 call_ts_ms = excluded.call_ts_ms,
+                 result_ts_ms = excluded.result_ts_ms,
+                 result_media_bytes = excluded.result_media_bytes",
             id,
             key,
             call.name,
@@ -1424,13 +1491,14 @@ async fn upsert_message(
             input_bytes,
             result_bytes,
             call.is_error,
+            command_hash,
+            command_text,
+            call.call_ts_ms,
+            call.result_ts_ms,
+            media,
         )
         .execute(&mut *conn)
         .await?;
-    }
-    update_span(conn, session).await?;
-    if let Some(previous) = previous.filter(|&p| p != session) {
-        update_span(conn, previous).await?;
     }
     Ok(())
 }

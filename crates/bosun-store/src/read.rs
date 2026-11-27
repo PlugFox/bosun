@@ -345,7 +345,8 @@ pub(crate) async fn load_message(
     };
 
     let calls = sqlx::query!(
-        "SELECT tool_use_key, name, target, input_bytes, result_bytes, is_error
+        "SELECT tool_use_key, name, target, input_bytes, result_bytes, is_error,
+                command_hash, command_text, call_ts_ms, result_ts_ms, result_media_bytes
          FROM tool_call WHERE message_id = ?",
         row.row_id,
     )
@@ -361,6 +362,14 @@ pub(crate) async fn load_message(
                 input_bytes: from_db(call.input_bytes, "tool input bytes")?,
                 result_bytes: from_db(call.result_bytes, "tool result bytes")?,
                 is_error: call.is_error != 0,
+                command_hash: call.command_hash,
+                command_text: call.command_text,
+                call_ts_ms: call.call_ts_ms,
+                result_ts_ms: call.result_ts_ms,
+                result_media_bytes: match call.result_media_bytes {
+                    Some(media) => from_db(media, "tool result media bytes")?,
+                    None => 0,
+                },
             },
         );
     }

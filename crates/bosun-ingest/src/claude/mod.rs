@@ -30,7 +30,7 @@ pub use crate::layout::{FileKind, Located};
 
 use crate::layout::Provider;
 use crate::line::{LineParser, Outcome, gap, len64};
-use crate::normalise::{absolute, command_head, shell_absolute};
+use crate::normalise::{absolute, command_fingerprint, command_head, shell_absolute};
 use crate::record::{
     FileTouch, ModelTotals, Record, SessionCheck, Source, ToolResult, TouchKind, WindowMeta,
 };
@@ -50,7 +50,9 @@ pub const PROVIDER: &str = "claude";
 ///   (#46).
 /// - 3: a `Bash` or `PowerShell` call yields a file touch per file its command names, with
 ///   the kinds `exec` and `unknown` (#76).
-pub const PARSER_VERSION: u32 = 3;
+/// - 4: a shell call carries its command's fingerprint and redacted text; a call its time; a
+///   result its time and its media bytes (#210).
+pub const PARSER_VERSION: u32 = 4;
 
 /// The record types this parser knows. Any other type is skipped and counted.
 pub const KNOWN_TYPES: &[&str] = &[
@@ -246,7 +248,7 @@ fn parse_line(source: &Source, offset: u64, line: &[u8]) -> (Outcome, Option<i64
     };
     let parsed = match record_type {
         "assistant" => assistant(source, &object),
-        "user" => user(source, &object),
+        "user" => user(source, &object, ts_ms),
         "cost-state" => cost_state(source, offset, &object),
         known if KNOWN_TYPES.contains(&known) => Ok(Vec::new()),
         unknown => {
@@ -375,7 +377,8 @@ fn assistant(source: &Source, object: &Object) -> Result<Vec<Record>, Reason> {
         let call_id = string(block, "id", "a `tool_use` block has no `id`")?;
         let name = string(block, "name", "a `tool_use` block has no `name`")?;
         let input = block.get("input").unwrap_or(&Value::Null);
-        let (target, files) = target(name, input, cwd);
+        let (target, files, fingerprint) = target(name, input, cwd);
+        let (command_hash, command_text) = fingerprint.unzip();
         for (path, kind, confined) in files {
             touches.push(Record::FileTouch(FileTouch {
                 provider: PROVIDER.to_owned(),
@@ -394,6 +397,11 @@ fn assistant(source: &Source, object: &Object) -> Result<Vec<Record>, Reason> {
                 input_bytes: len64(input.to_string().len()),
                 result_bytes: 0,
                 is_error: false,
+                command_hash,
+                command_text,
+                call_ts_ms: Some(ts_ms),
+                result_ts_ms: None,
+                result_media_bytes: 0,
             },
         );
     }
@@ -423,19 +431,27 @@ fn assistant(source: &Source, object: &Object) -> Result<Vec<Record>, Reason> {
 /// command's text (see [`FileTouch::confined`]).
 type Touched = (String, TouchKind, bool);
 
-/// The normalised target of a tool call and the files it touches: one for a file tool, every
-/// distinct (path, kind) a shell command names.
-fn target(name: &str, input: &Value, cwd: &str) -> (Option<String>, Vec<Touched>) {
+/// A shell command's fingerprint and text, from [`command_fingerprint`].
+type Fingerprint = (String, String);
+
+/// The normalised target of a tool call, the files it touches (one for a file tool, every
+/// distinct (path, kind) a shell command names) and, for a shell command, its fingerprint and
+/// redacted text.
+fn target(
+    name: &str,
+    input: &Value,
+    cwd: &str,
+) -> (Option<String>, Vec<Touched>, Option<Fingerprint>) {
     let field = |key: &str| input.get(key).and_then(Value::as_str);
     let file = |path: Option<&str>, kind: TouchKind| {
         path.map_or_default(|path| {
             let path = absolute(path, cwd);
-            (Some(path.clone()), vec![(path, kind, false)])
+            (Some(path.clone()), vec![(path, kind, false)], None)
         })
     };
     let shell = |dialect: Dialect| {
         let Some(command) = field("command") else {
-            return (None, Vec::new());
+            return (None, Vec::new(), None);
         };
         let mut seen = BTreeSet::new();
         let touched = shell::touches(command, dialect)
@@ -444,7 +460,8 @@ fn target(name: &str, input: &Value, cwd: &str) -> (Option<String>, Vec<Touched>
             .filter(|touch| seen.insert(touch.clone()))
             .map(|(path, kind)| (path, kind, true))
             .collect();
-        (command_head(command), touched)
+        let fingerprint = command_fingerprint(command, dialect);
+        (command_head(command), touched, Some(fingerprint))
     };
     match name {
         "Read" => file(field("file_path"), TouchKind::Read),
@@ -454,11 +471,13 @@ fn target(name: &str, input: &Value, cwd: &str) -> (Option<String>, Vec<Touched>
         "Grep" | "Glob" | "LS" => file(field("path").or(Some(cwd)), TouchKind::Search),
         "Bash" => shell(Dialect::Posix),
         "PowerShell" => shell(Dialect::PowerShell),
-        _ => (None, Vec::new()),
+        _ => (None, Vec::new(), None),
     }
 }
 
-fn user(source: &Source, object: &Object) -> Result<Vec<Record>, Reason> {
+/// The tool results of a `user` record. `ts_ms` is the record's timestamp, when it has an
+/// RFC 3339 one: a result without a time is still a result, not a gap.
+fn user(source: &Source, object: &Object, ts_ms: Option<i64>) -> Result<Vec<Record>, Reason> {
     check_window(source, object)?;
     let message = object
         .get("message")
@@ -476,39 +495,58 @@ fn user(source: &Source, object: &Object) -> Result<Vec<Record>, Reason> {
             Some(Value::Bool(is_error)) => *is_error,
             Some(_) => return Err("`is_error` is not a boolean"),
         };
+        let (result_bytes, media_bytes) = result_bytes(block.get("content"));
         records.push(Record::ToolResult(ToolResult {
             provider: PROVIDER.to_owned(),
             tool_use_id: tool_use_id.to_owned(),
-            result_bytes: result_bytes(block.get("content")),
+            result_bytes,
             is_error,
+            ts_ms,
+            media_bytes,
         }));
     }
     Ok(records)
 }
 
-/// The size of a tool result: the bytes of its text, and of the base64 data of its images.
-fn result_bytes(content: Option<&Value>) -> u64 {
-    let size = |value: &Value| -> u64 {
+/// The size of a tool result and its media part: the bytes of its text and of the base64 data
+/// of its images, then the bytes of that image data alone.
+fn result_bytes(content: Option<&Value>) -> (u64, u64) {
+    let size = |value: &Value| -> (u64, u64) {
         match value {
-            Value::String(text) => len64(text.len()),
+            Value::String(text) => (len64(text.len()), 0),
             Value::Object(block) => match block.get("type").and_then(Value::as_str) {
-                Some("text") => block
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map_or(0, |text| len64(text.len())),
-                Some("image") => block
-                    .get("source")
-                    .and_then(|source| source.get("data"))
-                    .and_then(Value::as_str)
-                    .map_or(0, |data| len64(data.len())),
-                _ => len64(value.to_string().len()),
+                Some("text") => (
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map_or(0, |text| len64(text.len())),
+                    0,
+                ),
+                Some("image") => {
+                    let data = block
+                        .get("source")
+                        .and_then(|source| source.get("data"))
+                        .and_then(Value::as_str)
+                        .map_or(0, |data| len64(data.len()));
+                    // Mutant `mutant_ingest_media_as_text`: an image counts as text only.
+                    let media = if cfg!(mutant_ingest_media_as_text) {
+                        0
+                    } else {
+                        data
+                    };
+                    (data, media)
+                }
+                _ => (len64(value.to_string().len()), 0),
             },
-            _ => len64(value.to_string().len()),
+            _ => (len64(value.to_string().len()), 0),
         }
     };
     match content {
-        None | Some(Value::Null) => 0,
-        Some(Value::Array(items)) => items.iter().map(size).sum(),
+        None | Some(Value::Null) => (0, 0),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(size)
+            .fold((0, 0), |(bytes, media), (b, m)| (bytes + b, media + m)),
         Some(value) => size(value),
     }
 }

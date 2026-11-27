@@ -4222,7 +4222,56 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_ingest_result_time_from_call",
+        issue: TOOL_CALL_V4_CARD,
+        breaks: "a tool result's time is its call's time",
+        package: "bosun-ingest",
+        check: Check::Test("claude::tests::a_tool_result_carries_its_own_time"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_media_as_text",
+        issue: TOOL_CALL_V4_CARD,
+        breaks: "a result's image bytes count as text only: its media part is always zero",
+        package: "bosun-ingest",
+        check: Check::Test("claude::tests::image_bytes_are_counted_apart_from_text"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_command_hash_of_head",
+        issue: TOOL_CALL_V4_CARD,
+        breaks: "a command's fingerprint is of its first word only",
+        package: "bosun-ingest",
+        check: Check::Test("claude::tests::two_spellings_of_one_command_share_a_fingerprint"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_command_text_outside_repo",
+        issue: TOOL_CALL_V4_CARD,
+        breaks: "a command's text and hash are stored for a message in no repository",
+        package: "bosun-ingest",
+        check: Check::Test(
+            "tests::a_command_text_is_kept_only_redacted_capped_and_inside_a_repository",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_ingest_command_text_unredacted",
+        issue: TOOL_CALL_V4_CARD,
+        breaks: "a command's text is stored without being scrubbed",
+        package: "bosun-ingest",
+        check: Check::Test(
+            "tests::a_command_text_is_kept_only_redacted_capped_and_inside_a_repository",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #11 (part D) that stores a tool call's command fingerprint and text, its times
+/// and its result's media bytes for the detectors of #210 (its own number was not known when it
+/// was written; its parent's stands in).
+const TOOL_CALL_V4_CARD: u32 = 210;
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the
 /// usage-bearing lines that billed nothing, and shows them in `bosun ingest status` and

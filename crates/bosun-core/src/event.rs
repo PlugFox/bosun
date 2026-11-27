@@ -115,10 +115,32 @@ pub struct ToolCall {
     pub target: Option<String>,
     /// Size of the tool's input, in bytes.
     pub input_bytes: u64,
-    /// Size of the tool's result, in bytes; zero until the result is seen.
+    /// Size of the tool's result, in bytes; zero until the result is seen. It counts text and
+    /// media alike; [`ToolCall::result_media_bytes`] is the media part of it.
     pub result_bytes: u64,
     /// Whether the result was an error.
     pub is_error: bool,
+    /// The fingerprint of a shell command: the lowercase hex SHA-256 (64 digits) of its
+    /// whitespace-normalised, scrubbed text, so that two spellings of one command share it.
+    /// `None` for a call that is not a shell command, or whose provider does not give one.
+    pub command_hash: Option<String>,
+    /// The text of a shell command, whitespace-normalised, scrubbed
+    /// (`bosun_core::publish::scrub`) and cut to at most 200 bytes at a char boundary, after
+    /// scrubbing. Only a `Bash` or `PowerShell` call's `command` input ever gets one, and the
+    /// store keeps it (and [`ToolCall::command_hash`]) only for a message attributed to a
+    /// repository: for a message in no repository nothing of a command's text reaches the
+    /// database. The text may name a path outside the repository; that is accepted (#210).
+    /// Nothing of any other input (a description, file content, a prompt) and no byte of a
+    /// result's content is ever kept.
+    pub command_text: Option<String>,
+    /// When the call was made: the timestamp of its record, milliseconds since the Unix epoch,
+    /// UTC; `None` when unknown.
+    pub call_ts_ms: Option<i64>,
+    /// When the call's result arrived: the timestamp of the result's own record, milliseconds
+    /// since the Unix epoch, UTC; `None` until the result is seen, or when it had no time.
+    pub result_ts_ms: Option<i64>,
+    /// The part of [`ToolCall::result_bytes`] that is media (base64 image data), in bytes.
+    pub result_media_bytes: u64,
 }
 
 /// One API message, assembled from one or more transcript records (#3, "Dedup and assembly").
@@ -164,10 +186,15 @@ pub struct ToolResult {
     pub provider: String,
     /// The `tool_use` id of the call this is the result of.
     pub tool_use_id: String,
-    /// Size of the result, in bytes.
+    /// Size of the result, in bytes: text and media.
     pub result_bytes: u64,
     /// Whether the result was an error.
     pub is_error: bool,
+    /// The timestamp of the result's own record, milliseconds since the Unix epoch, UTC;
+    /// `None` when the record had none.
+    pub ts_ms: Option<i64>,
+    /// The part of `result_bytes` that is media (base64 image data), in bytes.
+    pub media_bytes: u64,
 }
 
 /// How a tool call touched a file.

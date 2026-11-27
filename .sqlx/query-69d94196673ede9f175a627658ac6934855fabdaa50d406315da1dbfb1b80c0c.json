@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tool_call SET result_bytes = ?, is_error = ?, result_ts_ms = ?,\n                 result_media_bytes = ?\n             WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "69d94196673ede9f175a627658ac6934855fabdaa50d406315da1dbfb1b80c0c"
+}

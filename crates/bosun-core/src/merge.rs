@@ -8,7 +8,8 @@
 //!   makes the choice a maximum under a total order (the cwd before the model, so that an
 //!   oracle that ignores models, `recount`, attributes the message to the same repository);
 //! - tool calls: the union over all records, keyed by `tool_use` id; a call seen twice keeps
-//!   the larger byte counts, the error flag if either has it, and the larger name and target;
+//!   the larger byte counts, the error flag if either has it, the larger name, target, command
+//!   hash and command text, and the earliest known call and result times;
 //! - origin (the owning file): the earliest by timestamp, ties broken by window (session id,
 //!   then agent id), then file key; see [`crate::event::Origin`].
 
@@ -115,6 +116,20 @@ fn merge_call(a: &ToolCall, b: &ToolCall) -> ToolCall {
         input_bytes: a.input_bytes.max(b.input_bytes),
         result_bytes: a.result_bytes.max(b.result_bytes),
         is_error: a.is_error || b.is_error,
+        command_hash: a.command_hash.clone().max(b.command_hash.clone()),
+        command_text: a.command_text.clone().max(b.command_text.clone()),
+        call_ts_ms: earliest(a.call_ts_ms, b.call_ts_ms),
+        result_ts_ms: earliest(a.result_ts_ms, b.result_ts_ms),
+        result_media_bytes: a.result_media_bytes.max(b.result_media_bytes),
+    }
+}
+
+/// The earliest of two times, either of which may be unknown; `None` only when both are.
+#[must_use]
+pub fn earliest(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 

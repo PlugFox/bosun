@@ -1,0 +1,213 @@
+//! The file detectors: D1 (a file read across many run sessions), D2 (a file re-read in one
+//! run session) and D3 (#210, the bytes read of a file nobody wrote in the window).
+//!
+//! - A read is a `(path, Read)` touch. An `Exec` (a script run by an interpreter), an `Unknown`
+//!   (a file a command names to an unknown effect), a `Search` and a `Write` are never reads
+//!   (#44 A).
+//! - A call's result bytes belong to a file only when the call names that one file, reads it
+//!   and does not write it: `cat a b` counts as a read of each, and its bytes go to neither.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use bosun_core::TouchKind;
+use bosun_store::ToolRow;
+
+use super::{
+    Context, Detector, Evidence, FILE_READ_ACROSS_RUNS, FILE_REREAD_IN_SESSION, FileEvidence,
+    Finding, MAX_SESSIONS, UNCHANGED_FILE_READ_BYTES,
+};
+
+/// The reads of one file in one session.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Reads {
+    reads: u64,
+    /// The result bytes of the single-file reads.
+    bytes: u64,
+}
+
+/// The reads of one group's run sessions, per path, then per session.
+#[derive(Debug, Default)]
+pub(crate) struct FileReads<'a> {
+    paths: BTreeMap<&'a str, BTreeMap<&'a str, Reads>>,
+}
+
+/// Whether a touch is a read.
+fn is_read(kind: TouchKind) -> bool {
+    // Mutant (`mutant_heat_exec_counts_as_read`): a script run is taken for a read.
+    kind == TouchKind::Read || (cfg!(mutant_heat_exec_counts_as_read) && kind == TouchKind::Exec)
+}
+
+/// The paths `call` wrote.
+pub(crate) fn writes(call: &ToolRow) -> impl Iterator<Item = &str> {
+    call.touches
+        .iter()
+        .filter(|(_, kind)| *kind == TouchKind::Write)
+        .map(|(path, _)| path.as_str())
+}
+
+/// The one file `call` names, if it names exactly one, reads it and does not write it.
+fn single_file(call: &ToolRow) -> Option<&str> {
+    let paths: BTreeSet<&str> = call.touches.iter().map(|(p, _)| p.as_str()).collect();
+    let [path] = paths.into_iter().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let read = call.touches.iter().any(|(_, kind)| is_read(*kind));
+    let wrote = writes(call).next().is_some();
+    (read && !wrote).then_some(path)
+}
+
+impl<'a> FileReads<'a> {
+    /// The reads of `call`, made in the run session `session`.
+    pub(crate) fn add(&mut self, session: &'a str, call: &'a ToolRow) {
+        let read: BTreeSet<&str> = call
+            .touches
+            .iter()
+            .filter(|(_, kind)| is_read(*kind))
+            .map(|(path, _)| path.as_str())
+            .collect();
+        let single = single_file(call);
+        for path in read {
+            let reads = self
+                .paths
+                .entry(path)
+                .or_default()
+                .entry(session)
+                .or_default();
+            reads.reads += 1;
+            if single == Some(path) {
+                reads.bytes += call.result_bytes;
+            }
+        }
+    }
+}
+
+/// The evidence of the sessions `sessions` (path's reads per session).
+fn evidence<'s>(sessions: impl Iterator<Item = (&'s &'s str, &'s Reads)>) -> FileEvidence {
+    let mut out = FileEvidence {
+        reads: 0,
+        result_bytes: 0,
+        sessions: Vec::new(),
+        sessions_total: 0,
+    };
+    for (session, reads) in sessions {
+        out.reads += reads.reads;
+        out.result_bytes += reads.bytes;
+        out.sessions_total += 1;
+        if out.sessions.len() < MAX_SESSIONS {
+            out.sessions.push((*session).to_owned());
+        }
+    }
+    out
+}
+
+/// The findings of `detector` in one group.
+pub(crate) fn run(detector: Detector, context: &Context<'_, '_>) -> Vec<Finding> {
+    match detector.id {
+        id if id == FILE_READ_ACROSS_RUNS.id => d1(context),
+        id if id == FILE_REREAD_IN_SESSION.id => d2(context),
+        id if id == UNCHANGED_FILE_READ_BYTES.id => d3(context),
+        _ => Vec::new(),
+    }
+}
+
+/// What a detector's findings are ranked by, larger first: the value, but D3's bytes.
+pub(crate) fn rank(finding: &Finding) -> u64 {
+    let Evidence::File(evidence) = &finding.evidence;
+    if finding.detector == UNCHANGED_FILE_READ_BYTES {
+        // Mutant (`mutant_heat_d3_rank_by_opens`): unchanged files ranked by their reads.
+        if cfg!(mutant_heat_d3_rank_by_opens) {
+            evidence.reads
+        } else {
+            finding.impact_bytes
+        }
+    } else {
+        finding.value
+    }
+}
+
+/// D1: per file, the run sessions that read it.
+fn d1(context: &Context<'_, '_>) -> Vec<Finding> {
+    // Mutant (`mutant_heat_d1_threshold_inf`): D1 never fires.
+    let threshold = if cfg!(mutant_heat_d1_threshold_inf) {
+        u64::MAX
+    } else {
+        context.thresholds.d1_sessions
+    };
+    let sample = (context.run_sessions, "session");
+    let mut out = Vec::new();
+    for (path, sessions) in &context.files.paths {
+        let value = sessions.len() as u64;
+        if value >= threshold {
+            let evidence = evidence(sessions.iter());
+            let finding = context.finding(
+                FILE_READ_ACROSS_RUNS,
+                path,
+                (value, threshold),
+                sample,
+                evidence,
+            );
+            out.push(finding);
+        }
+    }
+    out
+}
+
+/// D2: per file, its most reads in one run session.
+fn d2(context: &Context<'_, '_>) -> Vec<Finding> {
+    // Mutant (`mutant_heat_d2_threshold_inf`): D2 never fires.
+    let threshold = if cfg!(mutant_heat_d2_threshold_inf) {
+        u64::MAX
+    } else {
+        context.thresholds.d2_reads
+    };
+    let sample = (context.run_sessions, "session");
+    let mut out = Vec::new();
+    for (path, sessions) in &context.files.paths {
+        let value = sessions.values().map(|r| r.reads).max().unwrap_or(0);
+        if value >= threshold {
+            let evidence = evidence(sessions.iter().filter(|(_, r)| r.reads >= threshold));
+            let finding = context.finding(
+                FILE_REREAD_IN_SESSION,
+                path,
+                (value, threshold),
+                sample,
+                evidence,
+            );
+            out.push(finding);
+        }
+    }
+    out
+}
+
+/// D3: per file nobody wrote in the window, its single-file read bytes per closed item.
+fn d3(context: &Context<'_, '_>) -> Vec<Finding> {
+    // Mutant (`mutant_heat_d3_threshold_inf`): D3 never fires.
+    let threshold = if cfg!(mutant_heat_d3_threshold_inf) {
+        u64::MAX
+    } else {
+        context.thresholds.d3_bytes_per_item
+    };
+    let sample = (context.closed_items, "closed_item");
+    let mut out = Vec::new();
+    for (path, sessions) in &context.files.paths {
+        if context.written.contains(path) || context.closed_items == 0 {
+            continue;
+        }
+        let evidence = evidence(sessions.iter());
+        let value = evidence.result_bytes / context.closed_items;
+        if value >= threshold {
+            let finding = context.finding(
+                UNCHANGED_FILE_READ_BYTES,
+                path,
+                (value, threshold),
+                sample,
+                evidence,
+            );
+            out.push(finding);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests;

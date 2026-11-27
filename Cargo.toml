@@ -606,6 +606,13 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_proposal_allow_incomplete)",
   "cfg(mutant_proposal_no_cooldown)",
   "cfg(mutant_proposal_measured_reopens)",
+  # #225: heat's file detectors.
+  "cfg(mutant_heat_d1_threshold_inf)",
+  "cfg(mutant_heat_d2_threshold_inf)",
+  "cfg(mutant_heat_d3_threshold_inf)",
+  "cfg(mutant_heat_d3_rank_by_opens)",
+  "cfg(mutant_heat_exec_counts_as_read)",
+  "cfg(mutant_heat_no_minimum_sample)",
 ] }
 
 [workspace.lints.clippy]

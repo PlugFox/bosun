@@ -3920,6 +3920,56 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("proposal::tests::a_measured_proposal_cannot_reopen"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_d1_threshold_inf",
+        issue: 225,
+        breaks: "D1 never fires: a file read in many run sessions is not found",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::files::tests::a_file_read_in_many_run_sessions_fires_once_with_its_evidence",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_d2_threshold_inf",
+        issue: 225,
+        breaks: "D2 never fires: a file re-read in one run session is not found",
+        package: "bosun-heat",
+        check: Check::Test("detect::files::tests::twelve_runs_of_a_script_are_not_rereads"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_d3_threshold_inf",
+        issue: 225,
+        breaks: "D3 never fires: an unchanged file's read bytes are not found",
+        package: "bosun-heat",
+        check: Check::Test("detect::files::tests::unchanged_files_are_ranked_by_bytes_not_opens"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_d3_rank_by_opens",
+        issue: 225,
+        breaks: "D3 ranks unchanged files by their reads, not their bytes",
+        package: "bosun-heat",
+        check: Check::Test("detect::files::tests::unchanged_files_are_ranked_by_bytes_not_opens"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_exec_counts_as_read",
+        issue: 225,
+        breaks: "a script run by an interpreter is taken for a read of the script",
+        package: "bosun-heat",
+        check: Check::Test("detect::files::tests::twelve_runs_of_a_script_are_not_rereads"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_no_minimum_sample",
+        issue: 225,
+        breaks: "the detectors fire below the minimum sample",
+        package: "bosun-heat",
+        check: Check::Test("detect::files::tests::a_window_below_the_minimum_sample_fires_nothing"),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

@@ -19,13 +19,21 @@
 //! [`metrics`] computes the generic metrics of heat (#11 D, `bosun_api::HeatMetrics`) per
 //! repository, provider and session kind, each labelled exact or estimate and comparable
 //! across providers or not; the detectors test them.
+//!
+//! [`detect`] runs the detectors of heat (#11 D) over the same rows: deterministic rules, each
+//! with a threshold and a named remedy class, silent below a minimum sample.
 
 mod curve;
+mod detect;
 mod estimate;
 mod exact;
 mod items;
 mod metrics;
 
+pub use detect::{
+    Detection, Detector, Evidence, FILE_READ_ACROSS_RUNS, FILE_REREAD_IN_SESSION, FileEvidence,
+    Finding, Insufficient, Thresholds, UNCHANGED_FILE_READ_BYTES, detect,
+};
 pub use estimate::{BYTES_PER_TOKEN, estimates};
 pub use exact::{Scope, exact};
 pub use items::item_row;

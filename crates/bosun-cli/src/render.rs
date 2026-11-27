@@ -6,8 +6,8 @@
 use std::fmt::Write as _;
 
 use bosun_api::{
-    IngestStatus, LastPass, ModelRow, PassReport, Picodollars, ReingestResult, RepoRow, SessionRow,
-    TokenSums, TokensSummary,
+    IngestDrift, IngestStatus, LastPass, ModelRow, PassReport, Picodollars, ReingestResult,
+    RepoRow, SessionRow, TokenSums, TokensSummary,
 };
 
 use crate::time;
@@ -238,6 +238,21 @@ pub(crate) fn ingest_status(status: &IngestStatus, out: &mut String) {
         ("parsed bytes", status.parsed.to_string()),
         ("parsed since start", status.parsed_since_start.to_string()),
     ];
+    let drift = &status.drift;
+    pairs.push((
+        "unknown records",
+        share(drift.unknown, drift.lines, " lines"),
+    ));
+    pairs.push((
+        "unbilled usage records",
+        share(drift.unbilled, drift.usage, ""),
+    ));
+    if drift.uncounted_files > 0 {
+        pairs.push((
+            "uncounted files",
+            format!("{} (counted after bosun reingest)", drift.uncounted_files),
+        ));
+    }
     let mut failed = None;
     match &status.last_pass {
         LastPass::Pending => pairs.push(("last pass", "pending".to_owned())),
@@ -252,8 +267,34 @@ pub(crate) fn ingest_status(status: &IngestStatus, out: &mut String) {
         LastPass::Failed { error } => pairs.push(("last pass", format!("failed: {error}"))),
     }
     fields(pairs, out);
+    drift_lines(drift, out);
     if let Some(pass) = failed {
         failed_lines(pass, out);
+    }
+}
+
+/// `<n> of <d><unit> (<p>%)`, the share to one decimal; without the share when `d` is 0.
+pub(crate) fn share(n: u64, d: u64, unit: &str) -> String {
+    if d == 0 {
+        return format!("{n} of {d}{unit}");
+    }
+    // Tenths of a percent, rounded half up, in integers.
+    let (n, d) = (u128::from(n), u128::from(d));
+    let tenths = (n * 1000 + d / 2) / d;
+    format!("{n} of {d}{unit} ({}.{}%)", tenths / 10, tenths % 10)
+}
+
+/// One line per drifted file of `ingest status`, and how many more there are.
+fn drift_lines(drift: &IngestDrift, out: &mut String) {
+    for file in &drift.files {
+        let _ = writeln!(
+            out,
+            "drift: {}: {} unknown, {} of {} unbilled",
+            file.path, file.unknown, file.unbilled, file.usage
+        );
+    }
+    if drift.more_files > 0 {
+        let _ = writeln!(out, "drift: and {} more files", drift.more_files);
     }
 }
 
@@ -267,6 +308,59 @@ pub(crate) fn reingest(result: &ReingestResult, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status(drift: IngestDrift) -> IngestStatus {
+        IngestStatus {
+            identity: "personal".to_owned(),
+            database: "bosun.db".to_owned(),
+            transcripts: "projects".to_owned(),
+            files: 3,
+            size: bosun_api::Wide(300),
+            parsed: bosun_api::Wide(300),
+            parsed_since_start: bosun_api::Wide(0),
+            last_pass: LastPass::Pending,
+            drift,
+        }
+    }
+
+    #[test]
+    fn ingest_status_shows_unknown_and_unbilled_records() {
+        let drift = IngestDrift {
+            counted_files: 2,
+            uncounted_files: 1,
+            lines: 12,
+            unknown: 1,
+            usage: 8,
+            unbilled: 4,
+            files: vec![bosun_api::DriftedFile {
+                path: "projects/p/drifted.jsonl".to_owned(),
+                unknown: 1,
+                usage: 4,
+                unbilled: 4,
+            }],
+            more_files: 0,
+        };
+        let mut out = String::new();
+        ingest_status(&status(drift), &mut out);
+        assert!(out.contains("unbilled usage records"), "{out}");
+        assert!(out.contains("4 of 8 (50.0%)"), "{out}");
+        assert!(out.contains("unknown records"), "{out}");
+        assert!(out.contains("1 of 12 lines (8.3%)"), "{out}");
+        assert!(out.contains("uncounted files"), "{out}");
+        let drifted: Vec<&str> = out.lines().filter(|l| l.starts_with("drift: ")).collect();
+        assert_eq!(
+            drifted,
+            ["drift: projects/p/drifted.jsonl: 1 unknown, 4 of 4 unbilled"],
+            "{out}"
+        );
+
+        let mut out = String::new();
+        ingest_status(&status(IngestDrift::default()), &mut out);
+        assert!(out.contains("0 of 0"), "{out}");
+        assert!(!out.contains('%'), "{out}");
+        assert!(!out.contains("drift: "), "{out}");
+        assert!(!out.contains("uncounted files"), "{out}");
+    }
 
     #[test]
     fn usd_is_exact_and_rounded_half_up() {

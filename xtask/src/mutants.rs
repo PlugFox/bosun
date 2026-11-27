@@ -3666,7 +3666,40 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("work::tests::a_huge_refusal_reason_is_cut_in_bosun_item"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_ingest_drift_uncounted",
+        issue: DRIFT_CARD,
+        breaks: "a batch counts no drift, so a renamed usage field reports clean",
+        package: "bosun-ingest",
+        check: Check::Test(
+            "tests::unknown_records_and_unbilled_usage_records_are_counted_per_file",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_api_ingest_drift_unsummed",
+        issue: DRIFT_CARD,
+        breaks: "`ingest.status` answers no drift counts",
+        package: "bosund",
+        check: Check::Test(
+            "view_tests::ingest_status_sums_the_drift_counts_and_names_the_drifted_files",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_doctor_ingest_format_ignored",
+        issue: DRIFT_CARD,
+        breaks: "`bosun doctor` never warns of a transcript format that moved under the parser",
+        package: "bosun-cli",
+        check: Check::Test("doctor::tests::the_ingest_format_check_warns_above_the_share"),
+        platform: None,
+    },
 ];
+
+/// The card of #6 that counts, per transcript, the lines of unknown record types and the
+/// usage-bearing lines that billed nothing, and shows them in `bosun ingest status` and
+/// `bosun doctor` (its own number was not known when it was written; its parent's stands in).
+const DRIFT_CARD: u32 = 6;
 
 /// #218, the card of #7 that folds the new-ignored-files guard's list to its places and says
 /// when a build ran below the repository root.

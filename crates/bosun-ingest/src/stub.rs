@@ -63,6 +63,10 @@ impl LineParser for Parser {
         PARSER_VERSION
     }
 
+    fn usage_type(&self) -> Option<&'static str> {
+        Some("turn")
+    }
+
     fn parse_line(&self, source: &Source, offset: u64, line: &[u8]) -> Outcome {
         let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(line) else {
             return Outcome::Gap(gap(offset, line, None, Vec::new(), "not a JSON object"));

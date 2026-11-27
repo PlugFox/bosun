@@ -571,6 +571,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_git_ignored_unfolded)",
   "cfg(mutant_git_ignored_no_build_hint)",
   "cfg(mutant_cli_item_refusal_uncut)",
+  # #6: per-file drift counts of unknown and unbilled usage records.
+  "cfg(mutant_ingest_drift_uncounted)",
+  "cfg(mutant_api_ingest_drift_unsummed)",
+  "cfg(mutant_doctor_ingest_format_ignored)",
 ] }
 
 [workspace.lints.clippy]

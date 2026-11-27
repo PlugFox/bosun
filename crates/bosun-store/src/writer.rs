@@ -333,6 +333,14 @@ pub struct SourceFile {
     /// The complete lines up to `parsed_offset`; `None` when they were not counted (a file
     /// parsed before the count existed keeps `None` until it is re-read from zero).
     pub parsed_lines: Option<u64>,
+    /// The lines up to `parsed_offset` of record types the parser does not know; `None` when
+    /// not counted, as for `parsed_lines`.
+    pub unknown_lines: Option<u64>,
+    /// The lines up to `parsed_offset` of the provider's usage-bearing record type, billed or
+    /// not; `None` when not counted.
+    pub usage_lines: Option<u64>,
+    /// Those of `usage_lines` that billed nothing (a gap); `None` when not counted.
+    pub unbilled_lines: Option<u64>,
     /// The timestamp of the last timestamped line up to `parsed_offset`, carried to the next
     /// read: a read may begin right at a session check, whose window ends there (#46).
     pub last_ts_ms: Option<i64>,
@@ -1184,11 +1192,23 @@ async fn upsert_source_file(conn: &mut SqliteConnection, file: &SourceFile) -> R
         .parsed_lines
         .map(|n| to_db(n, "parsed lines"))
         .transpose()?;
+    let unknown = file
+        .unknown_lines
+        .map(|n| to_db(n, "unknown lines"))
+        .transpose()?;
+    let usage = file
+        .usage_lines
+        .map(|n| to_db(n, "usage lines"))
+        .transpose()?;
+    let unbilled = file
+        .unbilled_lines
+        .map(|n| to_db(n, "unbilled lines"))
+        .transpose()?;
     sqlx::query!(
         "INSERT INTO source_file
              (provider, file_key, path, size, parsed_offset, parser_version, last_line_hash,
-              parsed_lines, last_ts_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              parsed_lines, unknown_lines, usage_lines, unbilled_lines, last_ts_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (provider, file_key) DO UPDATE SET
              path = excluded.path,
              size = excluded.size,
@@ -1196,6 +1216,9 @@ async fn upsert_source_file(conn: &mut SqliteConnection, file: &SourceFile) -> R
              parser_version = excluded.parser_version,
              last_line_hash = excluded.last_line_hash,
              parsed_lines = excluded.parsed_lines,
+             unknown_lines = excluded.unknown_lines,
+             usage_lines = excluded.usage_lines,
+             unbilled_lines = excluded.unbilled_lines,
              last_ts_ms = excluded.last_ts_ms",
         file.provider,
         file.file_key,
@@ -1205,6 +1228,9 @@ async fn upsert_source_file(conn: &mut SqliteConnection, file: &SourceFile) -> R
         file.parser_version,
         file.last_line_hash,
         lines,
+        unknown,
+        usage,
+        unbilled,
         file.last_ts_ms,
     )
     .execute(conn)
@@ -1573,6 +1599,9 @@ pub(crate) mod tests {
             parser_version: 1,
             last_line_hash: None,
             parsed_lines: Some(4),
+            unknown_lines: Some(0),
+            usage_lines: Some(0),
+            unbilled_lines: Some(0),
             last_ts_ms: None,
         })
     }

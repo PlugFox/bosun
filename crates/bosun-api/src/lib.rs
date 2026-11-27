@@ -536,6 +536,52 @@ pub struct IngestStatus {
     pub parsed_since_start: Wide,
     /// The last timed pass.
     pub last_pass: LastPass,
+    /// What tells that the transcript format moved under the parser. Default when the daemon
+    /// is older than the field.
+    #[serde(default)]
+    pub drift: IngestDrift,
+}
+
+/// The lines of unknown record types and the usage-bearing lines that billed nothing, over an
+/// identity's source files. Lines, not API messages: a message split over several lines
+/// counts once per line.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IngestDrift {
+    /// Files whose lines and drift are all counted.
+    pub counted_files: u64,
+    /// Files parsed before the counts existed: counted after `bosun reingest`.
+    pub uncounted_files: u64,
+    /// Lines parsed, summed over the counted files.
+    pub lines: u64,
+    /// Lines of record types the parser does not know, summed over the counted files.
+    pub unknown: u64,
+    /// Lines of the usage-bearing record type, billed or not, summed over the counted files.
+    pub usage: u64,
+    /// Those of `usage` that billed nothing, summed over the counted files.
+    pub unbilled: u64,
+    /// The counted files with unknown or unbilled lines: most unbilled first, then most
+    /// unknown, then by path; at most [`IngestDrift::MAX_FILES`].
+    pub files: Vec<DriftedFile>,
+    /// The drifted files past `files`.
+    #[serde(default)]
+    pub more_files: u64,
+}
+
+impl IngestDrift {
+    /// The most drifted files `ingest.status` names.
+    pub const MAX_FILES: usize = 10;
+}
+
+/// A counted source file with unknown or unbilled lines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DriftedFile {
+    pub path: String,
+    /// Lines of record types the parser does not know.
+    pub unknown: u64,
+    /// Lines of the usage-bearing record type.
+    pub usage: u64,
+    /// Those of `usage` that billed nothing.
+    pub unbilled: u64,
 }
 
 /// The outcome of the last timed ingest pass.

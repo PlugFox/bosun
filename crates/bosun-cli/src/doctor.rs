@@ -1,7 +1,8 @@
 //! `bosun doctor` (#4, #28): checks what the daemon needs, with the daemon up or down.
 //!
 //! It reads the configuration through `bosun-config` and asks the OS; the daemon is asked
-//! `hello`, then `doctor.probe` of each identity for `daemon_gh`, then `status.overview` of
+//! `hello`, then `doctor.probe` of each identity for `daemon_gh`, then `ingest.status` of each
+//! identity for `ingest_format`, then `status.overview` of
 //! each identity for `served_config`, then `notify.channel.list` of each identity for `notify`.
 //! Each check is `ok`,
 //! `warn`, `fail` or `skip` (it could not run because an earlier check failed), and each
@@ -26,6 +27,7 @@
 //! | `endpoint_acl` | Unix: the socket's mode is not 0600 (fail). Windows: skipped, see below |
 //! | `daemon` | the daemon does not answer `hello`, or speaks another API version (fail) |
 //! | `daemon_gh` | the daemon cannot start its `gh` (`doctor.probe` of each identity, run in the daemon's own process: fail, #131); the daemon does not know `doctor.probe` (warn); skipped when the daemon did not answer |
+//! | `ingest_format` | more than 1% of an identity's usage-bearing transcript lines billed nothing, or more than 1% of its lines are of record types the parser does not know (`ingest.status`, #6): the provider's transcript format may have moved under the parser (warn); ok with the counts, or `nothing counted yet`; skipped when the daemon did not answer |
 //! | `served_config` | the configuration differs from what the daemon serves (`status.overview` of each identity) in a way that waits for the next daemon start: a repository added, removed, moved to another identity, or with another `path` or queue (its kind or `queue_source`); an identity the daemon does not serve (warn, #186); skipped when the daemon did not answer |
 //! | `notify` | per channel of the identity (`notify.channel.list`, #9): ok naming the channel, its kind and `secret present`; fail when its secret is missing from the OS credential store (fix: remove it and add it again); ok `no channels` when there is none; never a secret's value; warn when the daemon does not know the method; skipped when the daemon did not answer |
 //! | `log` | never fails: names the daemon's log file (`bosun_client::log`, #137), ok when it exists, skipped when the daemon has not written it yet |
@@ -67,7 +69,9 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use bosun_api::rpc::code;
-use bosun_api::{Channels, IdentityParams, Method, ProbeResult, RepoOverview, method};
+use bosun_api::{
+    Channels, IdentityParams, IngestStatus, Method, ProbeResult, RepoOverview, method,
+};
 use bosun_client::{Client, Endpoint, Error};
 use bosun_config::{Config, Disk, DiskProbe, Queue, SystemProbe, tools};
 use serde::Serialize;
@@ -210,6 +214,7 @@ pub(crate) async fn run(inputs: &Inputs) -> Vec<Check> {
     let mut client = daemon(&inputs.endpoint, &mut checks).await;
     if let Some(config) = &config {
         checks.extend(probes(inputs, config, &mut client).await);
+        checks.extend(formats(inputs, config, &mut client).await);
     }
     if let Some(config) = &config {
         checks.extend(if client.is_some() {
@@ -1147,6 +1152,75 @@ pub(crate) fn daemon_gh(identity: &str, answer: Result<ProbeResult, Error>) -> C
     check.of(identity)
 }
 
+/// The share of unbilled usage lines, or of lines of unknown record types, above which
+/// `ingest_format` warns, in percent.
+const DRIFT_PERCENT: u64 = 1;
+
+/// `ingest_format` of each configured identity (of `--identity` only, when given), from
+/// `ingest.status` on the client that answered `hello`; skipped when none did.
+async fn formats(inputs: &Inputs, config: &Config, client: &mut Option<Client>) -> Vec<Check> {
+    let mut checks = Vec::new();
+    for name in config.identities.keys() {
+        if inputs.identity.as_ref().is_some_and(|only| only != name) {
+            continue;
+        }
+        let params = IdentityParams {
+            identity: name.clone(),
+        };
+        checks.push(
+            match ask::<method::IngestStatus>(client, PROBE_TIMEOUT, &params).await {
+                Some(Ok(status)) => ingest_format(name, &status),
+                Some(Err(e)) => Check::warn(
+                    "ingest_format",
+                    format!("ingest.status: {e}"),
+                    "see `served_config`; run bosund in a terminal to see why it does not answer",
+                )
+                .of(name),
+                None => Check::skip("ingest_format", "the daemon did not answer").of(name),
+            },
+        );
+    }
+    checks
+}
+
+/// Whether `n` is more than [`DRIFT_PERCENT`] percent of `d`, in integers.
+fn above_share(n: u64, d: u64) -> bool {
+    u128::from(n) * 100 > u128::from(d) * u128::from(DRIFT_PERCENT)
+}
+
+/// `ingest_format` (#6) of `identity` from its `ingest.status`: a warning when more than
+/// [`DRIFT_PERCENT`] percent of its usage-bearing lines billed nothing, or of its lines are of
+/// unknown record types, as when the provider's transcript format moved under the parser.
+pub(crate) fn ingest_format(identity: &str, status: &IngestStatus) -> Check {
+    let drift = &status.drift;
+    if drift.counted_files == 0 {
+        return Check::ok(
+            "ingest_format",
+            "nothing counted yet; `bosun reingest` counts every file",
+        )
+        .of(identity);
+    }
+    let counts = format!(
+        "{} usage records unbilled, {} of unknown record types",
+        crate::render::share(drift.unbilled, drift.usage, ""),
+        crate::render::share(drift.unknown, drift.lines, " lines"),
+    );
+    // Mutant (`mutant_doctor_ingest_format_ignored`): the check is ok whatever the counts.
+    let drifted = !cfg!(mutant_doctor_ingest_format_ignored)
+        && (above_share(drift.unbilled, drift.usage) || above_share(drift.unknown, drift.lines));
+    let check = if drifted {
+        let files = drift.files.len() as u64 + drift.more_files;
+        Check::warn(
+            "ingest_format",
+            format!("{counts}, in {files} drifted files"),
+            "the transcript format may have changed: `bosun ingest status` names the files;              install the newest bosun, then run `bosun reingest`",
+        )
+    } else {
+        Check::ok("ingest_format", counts)
+    };
+    check.of(identity)
+}
+
 /// What [`served_config`] takes for an identity the daemon answers it does not serve.
 pub(crate) const NOT_SERVED: &str = "the daemon serves no such identity";
 
@@ -1565,6 +1639,56 @@ mod tests {
     /// #131: `daemon_gh` fails, with the identity, the daemon's reason and `bosun install` as
     /// the fix, when the daemon could not start its `gh`; it warns for a daemon that does not
     /// know `doctor.probe` (`mutant_doctor_daemon_gh_ignored` makes it ok whatever the answer).
+    /// `ingest_format` (#6) warns when more than 1% of the usage lines billed nothing or of
+    /// the lines are of unknown record types, and says to reingest with the newest bosun
+    /// (`mutant_doctor_ingest_format_ignored` makes it ok whatever the counts).
+    #[test]
+    fn the_ingest_format_check_warns_above_the_share() {
+        let status = |lines: u64, unknown: u64, usage: u64, unbilled: u64| IngestStatus {
+            identity: "a".to_owned(),
+            database: "bosun.db".to_owned(),
+            transcripts: "projects".to_owned(),
+            files: 1,
+            size: bosun_api::Wide(0),
+            parsed: bosun_api::Wide(0),
+            parsed_since_start: bosun_api::Wide(0),
+            last_pass: bosun_api::LastPass::Pending,
+            drift: bosun_api::IngestDrift {
+                counted_files: 1,
+                lines,
+                unknown,
+                usage,
+                unbilled,
+                ..bosun_api::IngestDrift::default()
+            },
+        };
+        let clean = ingest_format("a", &status(1000, 0, 400, 0));
+        assert_eq!(clean.status, Status::Ok, "{clean:?}");
+        assert_eq!(clean.identity.as_deref(), Some("a"));
+        let at = ingest_format("a", &status(1000, 0, 400, 4));
+        assert_eq!(at.status, Status::Ok, "exactly 1% is ok: {at:?}");
+
+        let above = ingest_format("a", &status(1000, 0, 400, 5));
+        assert_eq!(above.status, Status::Warn, "{above:?}");
+        assert!(above.detail.contains("5 of 400"), "{above:?}");
+        assert!(
+            above
+                .fix
+                .as_deref()
+                .is_some_and(|f| f.contains("bosun reingest")),
+            "{above:?}"
+        );
+        let unknown = ingest_format("a", &status(100, 2, 0, 0));
+        assert_eq!(unknown.status, Status::Warn, "{unknown:?}");
+        assert!(unknown.detail.contains("2 of 100"), "{unknown:?}");
+
+        let mut none = status(0, 0, 0, 0);
+        none.drift = bosun_api::IngestDrift::default();
+        let none = ingest_format("a", &none);
+        assert_eq!(none.status, Status::Ok, "{none:?}");
+        assert!(none.detail.contains("nothing counted yet"), "{none:?}");
+    }
+
     #[test]
     fn the_daemon_gh_check_fails_when_the_daemon_cannot_start_gh() {
         let probe = |ok: bool, detail: &str| ProbeResult {

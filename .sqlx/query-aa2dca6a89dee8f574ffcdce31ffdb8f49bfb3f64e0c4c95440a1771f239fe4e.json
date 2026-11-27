@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO source_file\n             (provider, file_key, path, size, parsed_offset, parser_version, last_line_hash,\n              parsed_lines, unknown_lines, usage_lines, unbilled_lines, last_ts_ms)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n         ON CONFLICT (provider, file_key) DO UPDATE SET\n             path = excluded.path,\n             size = excluded.size,\n             parsed_offset = excluded.parsed_offset,\n             parser_version = excluded.parser_version,\n             last_line_hash = excluded.last_line_hash,\n             parsed_lines = excluded.parsed_lines,\n             unknown_lines = excluded.unknown_lines,\n             usage_lines = excluded.usage_lines,\n             unbilled_lines = excluded.unbilled_lines,\n             last_ts_ms = excluded.last_ts_ms",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "aa2dca6a89dee8f574ffcdce31ffdb8f49bfb3f64e0c4c95440a1771f239fe4e"
+}

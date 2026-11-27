@@ -1125,3 +1125,159 @@ async fn an_ingested_session_links_a_commit_inside_its_span() {
     assert_eq!(linked("after"), Vec::<String>::new());
     bench.close().await;
 }
+
+/// The drift counters of the transcript row whose path ends with `name`: unknown lines, usage
+/// lines and unbilled lines.
+async fn drift_of(bench: &Bench, name: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let files = bench.store.reader().source_files("claude").await.unwrap();
+    let file = files
+        .iter()
+        .find(|file| file.path.ends_with(name))
+        .unwrap_or_else(|| panic!("no row for {name}: {files:?}"));
+    (file.unknown_lines, file.usage_lines, file.unbilled_lines)
+}
+
+/// The one transcript of `case`, relative to its `projects`.
+fn transcript_of(case: &Path) -> PathBuf {
+    let files = relative_files(case, "projects");
+    assert_eq!(files.len(), 1, "{files:?}");
+    files.into_iter().next().unwrap()
+}
+
+fn file_name(relative: &Path) -> String {
+    relative.file_name().unwrap().to_string_lossy().into_owned()
+}
+
+#[tokio::test]
+async fn unknown_records_and_unbilled_usage_records_are_counted_per_file() {
+    for (name, want) in [
+        ("skipped-records", (Some(1), Some(4), Some(2))),
+        ("split-message", (Some(0), Some(4), Some(0))),
+    ] {
+        let case = case(name);
+        let bench = Bench::new().await;
+        copy_case(&case, &bench.projects());
+        let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+        ingest.scan().await.unwrap();
+        let transcript = file_name(&transcript_of(&case));
+        assert_eq!(drift_of(&bench, &transcript).await, want, "{name}");
+        bench.close().await;
+    }
+
+    // The provider renamed its usage field: every assistant line still parses as a known
+    // type, and bills nothing.
+    let case = case("split-message");
+    let bench = Bench::new().await;
+    copy_case(&case, &bench.projects());
+    let relative = transcript_of(&case);
+    let path = bench.projects().join(&relative);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let renamed: String = text
+        .split_inclusive('\n')
+        .map(|line| {
+            if line.contains(r#""type":"assistant""#) {
+                line.replace(r#""usage":"#, r#""usage_v2":"#)
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    assert_ne!(renamed, text, "the case has usage fields to rename");
+    std::fs::write(&path, renamed).unwrap();
+    let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+    ingest.scan().await.unwrap();
+    let want = (Some(0), Some(4), Some(4));
+    assert_eq!(drift_of(&bench, &file_name(&relative)).await, want);
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn the_drift_counts_carry_across_reads_and_restart_with_a_reingest() {
+    let case = case("skipped-records");
+    let relative = transcript_of(&case);
+    let name = file_name(&relative);
+    let want = (Some(1), Some(4), Some(2));
+
+    // Many small reads count what one read does.
+    let bench = Bench::new().await;
+    copy_case(&case, &bench.projects());
+    let options = Options {
+        read_limit: 16,
+        ..Options::default()
+    };
+    let ingest = bench
+        .ingest_with(claude::Parser, bench.projects(), &case, options)
+        .await;
+    ingest.scan().await.unwrap();
+    assert_eq!(drift_of(&bench, &name).await, want, "read_limit 16");
+    bench.close().await;
+
+    // Half the lines, then the rest appended: a resumed read adds its counts; a reingest
+    // counts again from zero, not twice.
+    let bench = Bench::new().await;
+    let text = std::fs::read(case.join("projects").join(&relative)).unwrap();
+    let lines: Vec<&[u8]> = text.split_inclusive(|&b| b == b'\n').collect();
+    assert_eq!(lines.len(), 10);
+    let (first, rest) = lines.split_at(lines.len() / 2);
+    let path = bench.projects().join(&relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, first.concat()).unwrap();
+    let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+    ingest.scan().await.unwrap();
+    let half = drift_of(&bench, &name).await;
+    assert!(half.1.is_some() && half != want, "{half:?}");
+    let mut appended = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut appended, &rest.concat()).unwrap();
+    drop(appended);
+    ingest.scan().await.unwrap();
+    assert_eq!(drift_of(&bench, &name).await, want, "after the append");
+    ingest.reingest().await.unwrap();
+    assert_eq!(drift_of(&bench, &name).await, want, "after a reingest");
+
+    // A row of a file parsed before the counters existed: they stay unknown through a resumed
+    // read, until a reingest counts the file from zero.
+    std::fs::write(&path, first.concat()).unwrap();
+    ingest.reingest().await.unwrap();
+    let files = bench.store.reader().source_files("claude").await.unwrap();
+    let mut old = files
+        .into_iter()
+        .find(|file| file.path.ends_with(&name))
+        .unwrap();
+    old.unknown_lines = None;
+    old.usage_lines = None;
+    old.unbilled_lines = None;
+    bench
+        .store
+        .writer()
+        .write(vec![Write::SourceFile(old)])
+        .await
+        .unwrap();
+    // A new ingest reads the stored rows afresh, as after a daemon restart.
+    let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+    ingest.scan().await.unwrap();
+    assert_eq!(drift_of(&bench, &name).await, (None, None, None));
+    let mut appended = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut appended, &rest.concat()).unwrap();
+    drop(appended);
+    ingest.scan().await.unwrap();
+    let parsed = bench.store.reader().source_files("claude").await.unwrap();
+    let parsed = parsed
+        .iter()
+        .find(|file| file.path.ends_with(&name))
+        .unwrap();
+    assert_eq!(parsed.parsed_offset, text.len() as u64, "the rest was read");
+    assert_eq!(drift_of(&bench, &name).await, (None, None, None));
+    ingest.reingest().await.unwrap();
+    assert_eq!(
+        drift_of(&bench, &name).await,
+        want,
+        "counted after a reingest"
+    );
+    bench.close().await;
+}

@@ -93,6 +93,10 @@ impl LineParser for Parser {
     fn parse_timed(&self, source: &Source, offset: u64, line: &[u8]) -> (Outcome, Option<i64>) {
         parse_line(source, offset, line)
     }
+
+    fn usage_type(&self) -> Option<&'static str> {
+        Some("assistant")
+    }
 }
 
 impl Provider for Parser {

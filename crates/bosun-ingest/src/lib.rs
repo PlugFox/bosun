@@ -44,7 +44,7 @@ pub use assemble::Assembly;
 pub use identity::{Plan, plans};
 pub use ingest::{Error, Ingest, Options, Report};
 pub use layout::{FileKind, Located, Provider};
-pub use line::{Batch, LineParser, Outcome, ParsedLine, parse_lines, parse_lines_after};
+pub use line::{Batch, Drift, LineParser, Outcome, ParsedLine, parse_lines, parse_lines_after};
 pub use meter::Stats;
 pub use normalise::{absolute, command_head, style_of};
 pub use record::{

@@ -6,6 +6,11 @@
 //! - Every line has an outcome: records, a skip (an unknown record type, counted by type) or a
 //!   gap. A gap never aborts the rest of the bytes.
 //! - A gap carries metadata only: never the line, nor any value from it.
+//! - **Drift** ([`Batch::drift`]): what tells that the provider's format moved under the
+//!   parser. A batch counts its lines of unknown record types, its lines of the provider's
+//!   usage-bearing type ([`LineParser::usage_type`]) and those of them that billed nothing (a
+//!   gap). These are lines, not API messages: a message split over several records counts once
+//!   per line. A gap without a type (a line that is not JSON) is neither.
 
 use std::collections::BTreeMap;
 
@@ -30,6 +35,35 @@ pub trait LineParser {
     /// default says none: a provider without a session check needs no timestamps.
     fn parse_timed(&self, source: &Source, offset: u64, line: &[u8]) -> (Outcome, Option<i64>) {
         (self.parse_line(source, offset, line), None)
+    }
+
+    /// The record type whose every line should bill (Claude: `assistant`), for
+    /// [`Batch::drift`]. The default says none: nothing is counted as unbilled.
+    fn usage_type(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// The drift counts of a run of lines: see the module doc.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Drift {
+    /// Lines of a record type the parser does not know (skipped).
+    pub unknown: u64,
+    /// Lines of the usage-bearing type, billed or not.
+    pub usage: u64,
+    /// Those of [`Drift::usage`] that billed nothing: a gap.
+    pub unbilled: u64,
+}
+
+impl std::ops::Add for Drift {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            unknown: self.unknown + other.unknown,
+            usage: self.usage + other.usage,
+            unbilled: self.unbilled + other.unbilled,
+        }
     }
 }
 
@@ -97,6 +131,35 @@ impl Batch {
             }
         }
         out
+    }
+
+    /// The drift counts of this batch, where `usage_type` is the record type whose every line
+    /// should bill ([`LineParser::usage_type`]).
+    #[must_use]
+    pub fn drift(&self, usage_type: Option<&str>) -> Drift {
+        if cfg!(mutant_ingest_drift_uncounted) {
+            // Mutant (`mutant_ingest_drift_uncounted`): nothing is counted, so a renamed usage
+            // field reports clean.
+            return Drift::default();
+        }
+        let mut drift = Drift::default();
+        for line in &self.lines {
+            match &line.outcome {
+                Outcome::Skipped { .. } => drift.unknown += 1,
+                Outcome::Records(records) => {
+                    if records.iter().any(|r| matches!(r, Record::Message(_))) {
+                        drift.usage += 1;
+                    }
+                }
+                Outcome::Gap(gap) => {
+                    if usage_type.is_some() && gap.record_type.as_deref() == usage_type {
+                        drift.usage += 1;
+                        drift.unbilled += 1;
+                    }
+                }
+            }
+        }
+        drift
     }
 }
 

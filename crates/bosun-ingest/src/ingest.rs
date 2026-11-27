@@ -30,6 +30,7 @@ use bosun_store::{Repo, SourceFile, Store, Write, Writer};
 use tokio::sync::{OnceCell, Semaphore};
 
 use crate::layout::Provider;
+use crate::line::Drift;
 use crate::meter::{Gauge, Meters, Stats};
 use crate::record::{Record, Source};
 use crate::schedule::Core;
@@ -151,11 +152,12 @@ struct StoreHandles {
 /// Where a read of a file starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Start {
-    /// The file grew: from the stored offset, with the lines counted up to it (`None` when
-    /// they were not counted) and the last timestamp before it.
+    /// The file grew: from the stored offset, with the lines and the drift counted up to it
+    /// (`None` when they were not counted) and the last timestamp before it.
     Resume {
         offset: u64,
         lines: Option<u64>,
+        drift: Option<Drift>,
         last_ts_ms: Option<i64>,
     },
     /// New, shrunk or rewritten: from zero.
@@ -392,6 +394,7 @@ impl<P: Provider> Ingest<P> {
             blocking(move || Open::file(&path, &open)).await??
         };
         let stored_lines = known.as_ref().and_then(|known| known.parsed_lines);
+        let stored_drift = known.as_ref().and_then(stored_drift);
         let stored_ts = known.as_ref().and_then(|known| known.last_ts_ms);
         let start = match known
             .as_ref()
@@ -408,6 +411,7 @@ impl<P: Provider> Ingest<P> {
                     Start::Resume {
                         offset: stored,
                         lines: stored_lines,
+                        drift: stored_drift,
                         last_ts_ms: stored_ts,
                     }
                 } else {
@@ -432,13 +436,14 @@ impl<P: Provider> Ingest<P> {
         renamed: bool,
         session: Vec<Write>,
     ) -> Result<u64, FileError> {
-        let (mut offset, mut lines, mut last_ts) = match start {
+        let (mut offset, mut lines, mut drift, mut last_ts) = match start {
             Start::Resume {
                 offset,
                 lines,
+                drift,
                 last_ts_ms,
-            } => (offset, lines, last_ts_ms),
-            Start::Restart => (0, Some(0), None),
+            } => (offset, lines, drift, last_ts_ms),
+            Start::Restart => (0, Some(0), Some(Drift::default()), None),
         };
         let mut session = Some(session);
         let mut parsed = 0;
@@ -483,7 +488,7 @@ impl<P: Provider> Ingest<P> {
                 // Nothing complete past the offset. A restart still records that the file
                 // starts over, so the next pass does not restart again.
                 if first && (start == Start::Restart || renamed) {
-                    let row = self.source_file(file, offset, None, (lines, last_ts));
+                    let row = self.source_file(file, offset, None, (lines, drift, last_ts));
                     self.commit(Some(row.clone()), vec![Write::SourceFile(row)])
                         .await?;
                 }
@@ -491,8 +496,10 @@ impl<P: Provider> Ingest<P> {
             }
             let end = chunk.batch.end;
             lines = lines.map(|n| n + chunk.batch.lines.len() as u64);
+            drift = drift.map(|d| d + chunk.batch.drift(self.provider.usage_type()));
             last_ts = chunk.batch.last_ts_ms;
-            let row = self.source_file(file, end, chunk.last_hash.clone(), (lines, last_ts));
+            let counts = (lines, drift, last_ts);
+            let row = self.source_file(file, end, chunk.last_hash.clone(), counts);
             let batch = self.batch(file, offset, row.clone(), &chunk, session.take());
             self.commit(Some(row), batch).await?;
             parsed += end - offset;
@@ -555,7 +562,7 @@ impl<P: Provider> Ingest<P> {
         file: &Found,
         offset: u64,
         hash: Option<String>,
-        (lines, last_ts_ms): (Option<u64>, Option<i64>),
+        (lines, drift, last_ts_ms): (Option<u64>, Option<Drift>, Option<i64>),
     ) -> SourceFile {
         SourceFile {
             provider: self.provider.provider().to_owned(),
@@ -566,6 +573,9 @@ impl<P: Provider> Ingest<P> {
             parser_version: self.provider.version(),
             last_line_hash: hash,
             parsed_lines: lines,
+            unknown_lines: drift.map(|d| d.unknown),
+            usage_lines: drift.map(|d| d.usage),
+            unbilled_lines: drift.map(|d| d.unbilled),
             last_ts_ms,
         }
     }
@@ -626,6 +636,9 @@ impl<P: Provider> Ingest<P> {
                         last_line_hash: None,
                         // A meta file is one record, not lines: the gap is its one line.
                         parsed_lines: Some(1),
+                        unknown_lines: Some(0),
+                        usage_lines: Some(0),
+                        unbilled_lines: Some(0),
                         last_ts_ms: None,
                     }),
                     Write::Gap {
@@ -652,6 +665,15 @@ fn stored_offset(known: &SourceFile) -> u64 {
     } else {
         known.parsed_offset
     }
+}
+
+/// The drift counted up to a file's stored offset, or `None` when any of it was not counted.
+fn stored_drift(known: &SourceFile) -> Option<Drift> {
+    Some(Drift {
+        unknown: known.unknown_lines?,
+        usage: known.usage_lines?,
+        unbilled: known.unbilled_lines?,
+    })
 }
 
 /// A transcript held open by a tailer, counted while it is.

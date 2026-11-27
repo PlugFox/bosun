@@ -1180,6 +1180,39 @@
       ],
       "type": "object"
     },
+    "DriftedFile": {
+      "description": "A counted source file with unknown or unbilled lines.",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "unbilled": {
+          "description": "Those of `usage` that billed nothing.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unknown": {
+          "description": "Lines of record types the parser does not know.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "usage": {
+          "description": "Lines of the usage-bearing record type.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "unknown",
+        "usage",
+        "unbilled"
+      ],
+      "type": "object"
+    },
     "Estimates": {
       "description": "Result of `report.estimates`. Its params are those of `report.exact`\n([`crate::ReportParams`]).",
       "properties": {
@@ -2278,12 +2311,91 @@
       ],
       "type": "object"
     },
+    "IngestDrift": {
+      "description": "The lines of unknown record types and the usage-bearing lines that billed nothing, over an\nidentity's source files. Lines, not API messages: a message split over several lines\ncounts once per line.",
+      "properties": {
+        "counted_files": {
+          "description": "Files whose lines and drift are all counted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "description": "The counted files with unknown or unbilled lines: most unbilled first, then most\nunknown, then by path; at most [`IngestDrift::MAX_FILES`].",
+          "items": {
+            "$ref": "#/$defs/DriftedFile"
+          },
+          "type": "array"
+        },
+        "lines": {
+          "description": "Lines parsed, summed over the counted files.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "more_files": {
+          "default": 0,
+          "description": "The drifted files past `files`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unbilled": {
+          "description": "Those of `usage` that billed nothing, summed over the counted files.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uncounted_files": {
+          "description": "Files parsed before the counts existed: counted after `bosun reingest`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unknown": {
+          "description": "Lines of record types the parser does not know, summed over the counted files.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "usage": {
+          "description": "Lines of the usage-bearing record type, billed or not, summed over the counted files.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "counted_files",
+        "uncounted_files",
+        "lines",
+        "unknown",
+        "usage",
+        "unbilled",
+        "files"
+      ],
+      "type": "object"
+    },
     "IngestStatus": {
       "description": "Result of `ingest.status`.",
       "properties": {
         "database": {
           "description": "The identity's database file.",
           "type": "string"
+        },
+        "drift": {
+          "$ref": "#/$defs/IngestDrift",
+          "default": {
+            "counted_files": 0,
+            "files": [],
+            "lines": 0,
+            "more_files": 0,
+            "unbilled": 0,
+            "uncounted_files": 0,
+            "unknown": 0,
+            "usage": 0
+          },
+          "description": "What tells that the transcript format moved under the parser. Default when the daemon\nis older than the field."
         },
         "files": {
           "description": "Source files known to the store (transcripts and their meta files).",

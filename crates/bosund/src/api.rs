@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 
 use bosun_api::rpc::{self, ErrorObject, Request, Response, code};
 use bosun_api::{
-    AGENT_GROUP, API_VERSION, CommitScan, DaemonStatus, Estimates, EventBody, FailedFile,
-    HelloResult, IngestStatus, LastPass, Method, ModelRow, PassReport, Picodollars, ReingestResult,
-    RepoRef, RepoRow, Report, ReportParams, Resources, SessionRow, TokenSums, TokensByModel,
-    TokensByRepo, TokensBySession, TokensParams, TokensSummary, UnpricedModel, Wide, WorktreeView,
-    method,
+    AGENT_GROUP, API_VERSION, CommitScan, DaemonStatus, DriftedFile, Estimates, EventBody,
+    FailedFile, HelloResult, IngestDrift, IngestStatus, LastPass, Method, ModelRow, PassReport,
+    Picodollars, ReingestResult, RepoRef, RepoRow, Report, ReportParams, Resources, SessionRow,
+    TokenSums, TokensByModel, TokensByRepo, TokensBySession, TokensParams, TokensSummary,
+    UnpricedModel, Wide, WorktreeView, method,
 };
 use bosun_core::{Cost, PriceTable};
 use bosun_store::{Bill, By, Group};
@@ -349,7 +349,52 @@ async fn ingest_status(served: &Served) -> Result<IngestStatus, ErrorObject> {
             Some(Ok(report)) => LastPass::Done(pass_report(&report)),
             Some(Err(error)) => LastPass::Failed { error },
         },
+        drift: if cfg!(mutant_api_ingest_drift_unsummed) {
+            // Mutant (`mutant_api_ingest_drift_unsummed`): the drift counts are not summed.
+            IngestDrift::default()
+        } else {
+            ingest_drift(&files)
+        },
     })
+}
+
+/// The drift counts of `files`, summed over those whose lines and drift are all counted.
+fn ingest_drift(files: &[bosun_store::SourceFile]) -> IngestDrift {
+    let mut drift = IngestDrift::default();
+    let mut drifted = Vec::new();
+    for file in files {
+        let (Some(lines), Some(unknown), Some(usage), Some(unbilled)) = (
+            file.parsed_lines,
+            file.unknown_lines,
+            file.usage_lines,
+            file.unbilled_lines,
+        ) else {
+            drift.uncounted_files += 1;
+            continue;
+        };
+        drift.counted_files += 1;
+        drift.lines += lines;
+        drift.unknown += unknown;
+        drift.usage += usage;
+        drift.unbilled += unbilled;
+        if unknown > 0 || unbilled > 0 {
+            drifted.push(DriftedFile {
+                path: file.path.clone(),
+                unknown,
+                usage,
+                unbilled,
+            });
+        }
+    }
+    drifted.sort_by(|a, b| {
+        (b.unbilled, b.unknown)
+            .cmp(&(a.unbilled, a.unknown))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    drift.more_files = drifted.len().saturating_sub(IngestDrift::MAX_FILES) as u64;
+    drifted.truncate(IngestDrift::MAX_FILES);
+    drift.files = drifted;
+    drift
 }
 
 fn pass_report(report: &bosun_ingest::Report) -> PassReport {

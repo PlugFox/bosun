@@ -570,6 +570,9 @@ fn message(n: u64, session: &str, ts_ms: i64, input: u64, cached: u64) -> Vec<Wr
             parser_version: 1,
             last_line_hash: None,
             parsed_lines: Some(1),
+            unknown_lines: Some(0),
+            usage_lines: Some(0),
+            unbilled_lines: Some(0),
             last_ts_ms: None,
         }),
         Write::Message {
@@ -1032,5 +1035,60 @@ async fn status_item_and_queue_show_a_waiting_card_and_its_open_blocker() {
         "{other}"
     );
     assert!(!other.to_string().contains("alpha#2"), "{other}");
+    world.close().await;
+}
+
+/// A transcript row of identity `a`'s store with `lines` parsed and the drift counters
+/// `(unknown, usage, unbilled)`, or none of them counted.
+fn counted_file(key: &str, lines: Option<u64>, drift: Option<(u64, u64, u64)>) -> Write {
+    Write::SourceFile(bosun_store::SourceFile {
+        provider: "claude".to_owned(),
+        file_key: key.to_owned(),
+        path: format!("projects/p/{key}.jsonl"),
+        size: 100,
+        parsed_offset: 100,
+        parser_version: 1,
+        last_line_hash: None,
+        parsed_lines: lines,
+        unknown_lines: drift.map(|d| d.0),
+        usage_lines: drift.map(|d| d.1),
+        unbilled_lines: drift.map(|d| d.2),
+        last_ts_ms: None,
+    })
+}
+
+/// #6: `ingest.status` sums the lines of unknown record types and the unbilled usage lines
+/// over the counted files, counts the files parsed before the counts existed, and names the
+/// files that drifted.
+#[tokio::test]
+async fn ingest_status_sums_the_drift_counts_and_names_the_drifted_files() {
+    let world = World::new().await;
+    let served = &world.state.identities["a"];
+    served
+        .store
+        .writer()
+        .write(vec![
+            counted_file("clean", Some(10), Some((0, 4, 0))),
+            counted_file("drifted", Some(6), Some((1, 4, 4))),
+            counted_file("old", None, None),
+        ])
+        .await
+        .unwrap();
+    let status = world.ok("ingest.status", json!({"identity": "a"})).await;
+    let drift = &status["drift"];
+    assert_eq!(drift["counted_files"], 2, "{status}");
+    assert_eq!(drift["uncounted_files"], 1);
+    assert_eq!(drift["lines"], 16);
+    assert_eq!(drift["unknown"], 1);
+    assert_eq!(drift["usage"], 8);
+    assert_eq!(drift["unbilled"], 4);
+    assert_eq!(drift["more_files"], 0);
+    assert_eq!(
+        drift["files"],
+        json!([{"path": "projects/p/drifted.jsonl", "unknown": 1, "usage": 4, "unbilled": 4}])
+    );
+    // Identity b's files are b's alone.
+    let other = world.ok("ingest.status", json!({"identity": "b"})).await;
+    assert_eq!(other["drift"]["counted_files"], 0, "{other}");
     world.close().await;
 }

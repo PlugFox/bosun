@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT file_key, path, size, parsed_offset, parser_version, last_line_hash,\n                    parsed_lines, last_ts_ms\n             FROM source_file WHERE provider = ? ORDER BY file_key",
+  "query": "SELECT file_key, path, size, parsed_offset, parser_version, last_line_hash,\n                    parsed_lines, unknown_lines, usage_lines, unbilled_lines, last_ts_ms\n             FROM source_file WHERE provider = ? ORDER BY file_key",
   "describe": {
     "columns": [
       {
@@ -81,8 +81,41 @@
         }
       },
       {
-        "name": "last_ts_ms",
+        "name": "unknown_lines",
         "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "unknown_lines"
+          }
+        }
+      },
+      {
+        "name": "usage_lines",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "usage_lines"
+          }
+        }
+      },
+      {
+        "name": "unbilled_lines",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "source_file",
+            "name": "unbilled_lines"
+          }
+        }
+      },
+      {
+        "name": "last_ts_ms",
+        "ordinal": 10,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -103,8 +136,11 @@
       false,
       true,
       true,
+      true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "8e322b1d7535aecda45aa326218417cb06890260fc6e0ed8fdd3ab4e19b8f839"
+  "hash": "fbcd5e0324c69335ee03a723b857068ec8526c7146243734f5f31110259002b0"
 }

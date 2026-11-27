@@ -29,6 +29,9 @@ fn message(n: u64, session: &str, ts_ms: i64, input: u64, cwd: &Path) -> Vec<Wri
             parser_version: 1,
             last_line_hash: None,
             parsed_lines: Some(1),
+            unknown_lines: Some(0),
+            usage_lines: Some(0),
+            unbilled_lines: Some(0),
             last_ts_ms: None,
         }),
         Write::Message {

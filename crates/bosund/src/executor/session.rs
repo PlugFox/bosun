@@ -66,7 +66,7 @@ use bosun_core::{Event, Exit, ItemId, Rules, SpawnMode};
 use bosun_git::{Git, Hooks, Trailers};
 use bosun_proc::ChildSpec;
 use bosun_proc::shim::{Record, ShimSpawner, session_record};
-use bosun_runner::claude::{ClaudeRunner, mcp_config};
+use bosun_runner::claude::{ClaudeRunner, mcp_config, session_settings};
 use bosun_runner::{
     Denial, LiveEntry, McpServer, ProcessExit, Runner, SessionContext, SessionId, Tail, ToolPolicy,
     prompt,
@@ -860,10 +860,16 @@ pub(crate) async fn session(
         .work_dir
         .join("sessions")
         .join(session_id.as_str());
-    let files = (|| -> Result<(SessionDir, PathBuf, PathBuf, Hooks), String> {
+    let files = (|| -> Result<(SessionDir, PathBuf, PathBuf, PathBuf, Hooks), String> {
         let dir = SessionDir::create(dir).map_err(|e| e.to_string())?;
         let system = dir.0.join("system.md");
         std::fs::write(&system, &prompt.system).map_err(|e| e.to_string())?;
+        // The compaction instructions, printed by the PreCompact hook of the settings (#7).
+        let compact = dir.0.join("compact.md");
+        std::fs::write(&compact, &prompt.compaction).map_err(|e| e.to_string())?;
+        let settings = dir.0.join("settings.json");
+        let text = session_settings(&compact).map_err(|e| e.to_string())?;
+        std::fs::write(&settings, text).map_err(|e| format!("{}: {e}", settings.display()))?;
         let mcp = mcp_path(&dir.0, repo);
         write_private(
             &mcp,
@@ -872,9 +878,9 @@ pub(crate) async fn session(
         .map_err(|e| format!("{}: {e}", mcp.display()))?;
         let hooks = Hooks::install(dir.0.join("git-hooks"))
             .map_err(|e| format!("the trailer hooks: {e}"))?;
-        Ok((dir, system, mcp, hooks))
+        Ok((dir, system, mcp, settings, hooks))
     })();
-    let (session_dir, system_file, mcp_config_file, hooks) = match files {
+    let (session_dir, system_file, mcp_config_file, settings_file, hooks) = match files {
         Ok(files) => files,
         Err(e) => {
             shared.trouble(format!("{}: the session files: {e}", run.item));
@@ -895,6 +901,7 @@ pub(crate) async fn session(
         prompt: prompt.user,
         system_prompt_file: system_file,
         mcp_config_file,
+        settings_file,
         repo_mcp_servers: repo.mcp_servers.keys().cloned().collect(),
         policy: ToolPolicy {
             allow_push: repo.policy.push,

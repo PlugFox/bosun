@@ -9,6 +9,7 @@
 //!        --session-id <pre-assigned uuid>            (resume: --resume <uuid>)
 //!        --mcp-config <per-session file> --strict-mcp-config
 //!        --setting-sources project
+//!        --settings <per-session file>
 //!        --append-system-prompt-file <file>
 //!        --permission-mode dontAsk
 //!        --allowedTools <rule>...
@@ -24,6 +25,15 @@
 //!   repository's `repo.<name>.mcp_servers` (#4), nothing else.
 //! - `--setting-sources project` ([`SETTING_SOURCES`]): the user's own settings and hooks are
 //!   not loaded into an unattended session, only the repository's shared settings.
+//! - `--settings <file>`, for fresh, reset and resumed sessions alike: the file, from
+//!   [`session_settings`], holds one `PreCompact` hook and nothing else. A long session may
+//!   compact its context, and the task lives in the user message; the hook prints the item's
+//!   compaction instructions ([`crate::prompt::Prompt::compaction`]), which Claude Code uses
+//!   for the summary: keep the task verbatim, the verdict command, the protected paths, the
+//!   attempt and the last verdict result, and attribute no approval to the user, who has said
+//!   nothing since the run was armed. The hook never blocks (a blocked auto-compaction at the
+//!   context limit fails the request). Hook entries merge across settings levels, so the
+//!   repository's own hooks still run.
 //! - Auto memory is off ([`AUTO_MEMORY_OFF`], #135): the identity's `CLAUDE_CONFIG_DIR` is the
 //!   user's own, and its `projects/<project>/memory/` would carry one session's notes into the
 //!   prompt of every later session, unreviewed. What an agent learns goes into its summary.
@@ -106,7 +116,7 @@
 //! classification allows them. `--permission-prompt-tool` is not used in stage 1 (#7).
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Map, Value};
@@ -172,6 +182,11 @@ impl ClaudeRunner {
         #[cfg(not(mutant_runner_loose_mcp))]
         args.push("--strict-mcp-config".into());
         args.extend(["--setting-sources", SETTING_SOURCES].map(OsString::from));
+        // Mutant (`mutant_runner_settings_not_passed`): the session's settings are left out.
+        if !cfg!(mutant_runner_settings_not_passed) {
+            args.push("--settings".into());
+            args.push(ctx.settings_file.clone().into());
+        }
         args.push("--append-system-prompt-file".into());
         args.push(ctx.system_prompt_file.clone().into());
         args.extend(["--permission-mode", "dontAsk"].map(OsString::from));
@@ -340,6 +355,61 @@ pub fn mcp_config(bosun_config: &str, repo: &[McpServer]) -> Result<String, McpC
     let mut root = Map::new();
     root.insert("mcpServers".to_owned(), Value::Object(servers));
     Ok(Value::Object(root).to_string())
+}
+
+/// How long the `PreCompact` hook of [`session_settings`] may run, in seconds.
+pub const COMPACT_HOOK_TIMEOUT: u64 = 10;
+
+/// Why [`session_settings`] refused its input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsError {
+    /// The instructions file's path holds a `'`, which the hook's single quotes cannot hold.
+    Quote,
+}
+
+impl std::fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Quote => f.write_str("the compaction instructions' path holds a single quote"),
+        }
+    }
+}
+
+impl std::error::Error for SettingsError {}
+
+/// The per-session settings file's text (`--settings`): one `PreCompact` hook, for every
+/// matcher, whose command `cat '<instructions_file>'` prints the compaction instructions
+/// ([`crate::prompt::Prompt::compaction`]) for Claude Code to use in the summary. Nothing
+/// else: no `disableAllHooks`, so the repository's own hooks keep their setting.
+///
+/// The path's `\` become `/`; inside single quotes such a path works in `sh`, in Git Bash and
+/// in PowerShell (where `cat` is `Get-Content`), the shells Claude Code runs a hook with.
+///
+/// # Errors
+///
+/// [`SettingsError::Quote`] for a path holding a `'`: it is refused rather than quoted.
+pub fn session_settings(instructions_file: &Path) -> Result<String, SettingsError> {
+    let path = instructions_file.to_string_lossy().replace('\\', "/");
+    if path.contains('\'') {
+        return Err(SettingsError::Quote);
+    }
+    // Mutant (`mutant_runner_compaction_hook_dropped`): the settings hold no hook.
+    if cfg!(mutant_runner_compaction_hook_dropped) {
+        return Ok("{}".to_owned());
+    }
+    let settings = serde_json::json!({
+        "hooks": {
+            "PreCompact": [{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("cat '{path}'"),
+                    "timeout": COMPACT_HOOK_TIMEOUT,
+                }],
+            }],
+        },
+    });
+    Ok(settings.to_string())
 }
 
 impl Runner for ClaudeRunner {

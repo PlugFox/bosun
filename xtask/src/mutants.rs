@@ -3564,7 +3564,43 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("lint::tests::a_quiet_grep_without_pipefail_or_without_a_pipe_is_clean"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_runner_compaction_hook_dropped",
+        issue: COMPACTION_CARD,
+        breaks: "the session's settings hold no PreCompact hook, so a compaction's summary may \
+                 drop the task, the verdict and the protected paths",
+        package: "bosun-runner",
+        check: Check::Test(
+            "claude::tests::the_session_settings_hold_a_pre_compact_hook_that_prints_the_instructions_file",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_settings_not_passed",
+        issue: COMPACTION_CARD,
+        breaks: "a Claude session is started without `--settings`, so its PreCompact hook \
+                 never runs",
+        package: "bosun-runner",
+        check: Check::Test("claude::tests::the_command_passes_the_session_settings_file"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_runner_compaction_without_silence",
+        issue: COMPACTION_CARD,
+        breaks: "the compaction instructions do not say that nobody has written to the \
+                 session, so a summary may attribute an approval to the user",
+        package: "bosun-runner",
+        check: Check::Test(
+            "prompt::tests::the_compaction_instructions_keep_the_task_and_attribute_nothing_to_the_user",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #7 that gives every Claude session a `PreCompact` hook printing the item's
+/// compaction instructions (its own number was not known when it was written; its parent's
+/// stands in).
+const COMPACTION_CARD: u32 = 7;
 
 /// #203, the card of #5 that refuses at lint a verdict that sets `pipefail` and pipes into a
 /// quiet `grep`.

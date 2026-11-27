@@ -37,6 +37,7 @@ use crate::events::{Events, Options as EventOptions};
 mod auto_pause;
 mod blocked;
 mod census;
+mod compaction;
 mod denials;
 mod effort;
 mod fast_death;

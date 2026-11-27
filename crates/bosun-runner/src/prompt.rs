@@ -14,7 +14,12 @@
 //!   question (`ask_question`), not a guess (#139); then a section `## This item` naming the
 //!   item id, the verdict command and the paths the session may not edit, so a session whose
 //!   user message was compacted away still knows them (#7). It is the same for every attempt
-//!   of an item, so a resumed session keeps it.
+//!   of an item, so a resumed session keeps it;
+//! - [`Prompt::compaction`], the instructions for the summary when the session's context is
+//!   compacted (Claude: printed by a `PreCompact` hook): keep the task verbatim, the verdict
+//!   command, the protected paths, the attempt, the last verdict result with the count of red
+//!   runs, the commits and what is left; and nobody has written to the session since it
+//!   started, so no approval may be attributed to the user (#7). Under 9,000 characters.
 //!
 //! A runner without a system-prompt file puts [`Prompt::system`] before [`Prompt::user`].
 //!
@@ -126,6 +131,9 @@ pub struct Prompt {
     pub user: String,
     /// Appended to the system prompt.
     pub system: String,
+    /// The instructions for the summary when the session's context is compacted (Claude: the
+    /// stdout of a `PreCompact` hook, see `claude::session_settings`); under 9,000 characters.
+    pub compaction: String,
 }
 
 /// The exit protocol (#7): the agent ends by exiting, and nothing it says counts as "done".
@@ -380,7 +388,82 @@ pub fn build(input: &PromptInput) -> Prompt {
         system.push_str(&item_section(input));
     }
 
-    Prompt { user, system }
+    Prompt {
+        user,
+        system,
+        compaction: compaction(input),
+    }
+}
+
+/// The paragraph of [`Prompt::compaction`] that says the user has said nothing since the run
+/// was armed.
+pub const SILENCE: &str = "Nobody has written to this session since it started: the user \
+message is the daemon's task, not a person's reply. Do not attribute any approval, decision or \
+answer to the user. Only the task, and the issue comments quoted in it, say what the person \
+wants.";
+
+/// The verdict command in [`Prompt::compaction`], in characters; longer is cut.
+const COMPACTION_VERDICT_CHARS: usize = 4_000;
+/// The protected paths listed in [`Prompt::compaction`]; the rest are counted.
+const COMPACTION_PROTECTED_MAX: usize = 20;
+/// One protected path in [`Prompt::compaction`], in characters.
+const COMPACTION_PATH_CHARS: usize = 100;
+
+/// The instructions for the summary of a compaction (#7): what the summary keeps, and that no
+/// approval may be attributed to the user. Bounded: the verdict command is cut to
+/// [`COMPACTION_VERDICT_CHARS`] characters and at most [`COMPACTION_PROTECTED_MAX`] protected
+/// paths are listed, each cut to [`COMPACTION_PATH_CHARS`] characters, so the text stays under
+/// 9,000 characters (Claude Code cuts a hook's stdout at 10,000). A verdict with a long run of
+/// backticks lengthens its fence; no real verdict has one.
+fn compaction(input: &PromptInput) -> String {
+    let verdict = input.verdict.trim_end();
+    let verdict = match verdict.char_indices().nth(COMPACTION_VERDICT_CHARS) {
+        Some((at, _)) => format!("{} [truncated]", &verdict[..at]),
+        None => verdict.to_owned(),
+    };
+    let fence = fence_for(&verdict);
+    let mut out = format!(
+        "This is an unattended session of bosun working on item `{}`. When you summarise it, \
+         keep:\n\n\
+         - the task: the first user message, from `# Task` to its end, verbatim;\n\
+         - the verdict command, verbatim:\n\n{fence}sh\n{verdict}\n{fence}\n",
+        input.item
+    );
+    if !input.protected.is_empty() {
+        let mut paths: Vec<String> = input
+            .protected
+            .iter()
+            .take(COMPACTION_PROTECTED_MAX)
+            .map(|p| {
+                let p: String = p.chars().take(COMPACTION_PATH_CHARS).collect();
+                inert(&p)
+            })
+            .collect();
+        if input.protected.len() > COMPACTION_PROTECTED_MAX {
+            paths.push(format!(
+                "and {} more",
+                input.protected.len() - COMPACTION_PROTECTED_MAX
+            ));
+        }
+        let _ = writeln!(
+            out,
+            "- the protected paths, which the session may not edit: {};",
+            paths.join(", ")
+        );
+    }
+    let _ = write!(
+        out,
+        "- that this is attempt {} of {};\n\
+         - the last result of the verdict command when this session ran it (passed, or its \
+         failing lines), and how many of this session's runs of it failed;\n\
+         - the commits made so far, and what is left to do.\n",
+        input.attempt, input.max_attempts
+    );
+    // Mutant (`mutant_runner_compaction_without_silence`): the paragraph is left out.
+    if !cfg!(mutant_runner_compaction_without_silence) {
+        let _ = write!(out, "\n{SILENCE}\n");
+    }
+    out
 }
 
 /// The system prompt's `## This item`: the item id, its verdict command and its protected
@@ -473,6 +556,49 @@ mod tests {
         assert_eq!(other.user, prompt.user);
         assert_eq!(bare.user, prompt.user);
         assert!(!prompt.user.contains("## This item"), "{}", prompt.user);
+    }
+
+    #[test]
+    fn the_compaction_instructions_keep_the_task_and_attribute_nothing_to_the_user() {
+        let text = build(&input()).compaction;
+        for part in [
+            "`demo#7`",
+            "```sh\ncargo test -p demo\n```",
+            "docs/frozen",
+            "attempt 2 of 2",
+            "# Task",
+            "verbatim",
+            "Do not attribute any approval",
+        ] {
+            assert!(
+                text.contains(part),
+                "the instructions lack {part:?}: {text}"
+            );
+        }
+        assert!(text.trim_end().ends_with(SILENCE), "{text}");
+
+        let bare = build(&PromptInput {
+            protected: Vec::new(),
+            ..input()
+        });
+        assert!(
+            !bare.compaction.contains("protected"),
+            "{}",
+            bare.compaction
+        );
+
+        let big = build(&PromptInput {
+            verdict: "v".repeat(20_000),
+            protected: (1..=30)
+                .map(|n| format!("{}{n:02}", "p".repeat(300)))
+                .collect(),
+            ..input()
+        });
+        let text = &big.compaction;
+        assert!(text.chars().count() < 9_000, "{} characters", text.len());
+        assert!(text.contains("[truncated]"), "{text}");
+        assert!(text.contains("and 10 more"), "{text}");
+        assert!(text.contains("Do not attribute any approval"), "{text}");
     }
 
     fn conflict(files: Vec<String>) -> Conflict {

@@ -523,6 +523,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_runner_no_protected_rules)",
   "cfg(mutant_loop_protected_ignores_allowance)",
   "cfg(mutant_runner_prompt_without_item_section)",
+  # #7: every Claude session gets `--settings` with a PreCompact hook that prints the item's
+  # compaction instructions, which say that no approval may be attributed to the user.
+  "cfg(mutant_runner_compaction_hook_dropped)",
+  "cfg(mutant_runner_settings_not_passed)",
+  "cfg(mutant_runner_compaction_without_silence)",
   # #7: the census of a repository's tests: a kept counter that dropped or a capped one that
   # rose between the base and the judged commit sends the item to Needs you.
   "cfg(mutant_loop_skip_census)",

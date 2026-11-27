@@ -34,6 +34,7 @@ fn ctx() -> SessionContext {
         prompt: "the task".to_owned(),
         system_prompt_file: PathBuf::from("/fixture/run/system.md"),
         mcp_config_file: PathBuf::from("/fixture/run/mcp.json"),
+        settings_file: PathBuf::from("/fixture/run/settings.json"),
         repo_mcp_servers: vec!["docs".to_owned()],
         policy: ToolPolicy::default(),
         model: None,
@@ -187,6 +188,61 @@ fn the_command_uses_the_pre_assigned_session_id_and_resume_names_it() {
 }
 
 #[test]
+fn the_command_passes_the_session_settings_file() {
+    let ctx = ctx();
+    let runner = ClaudeRunner::new("claude");
+    for spawn in [
+        runner.command(&ctx),
+        runner.resume_command(&ctx.session_id, &ctx),
+    ] {
+        let argv = args(&spawn);
+        assert_eq!(
+            argv.iter().filter(|a| *a == "--settings").count(),
+            1,
+            "one `--settings`: {argv:?}"
+        );
+        assert_eq!(
+            values(&argv, "--settings"),
+            ["/fixture/run/settings.json"],
+            "{argv:?}"
+        );
+        let sources = argv.iter().position(|a| a == "--setting-sources").unwrap();
+        let settings = argv.iter().position(|a| a == "--settings").unwrap();
+        assert!(sources < settings, "after `--setting-sources`: {argv:?}");
+    }
+}
+
+#[test]
+fn the_session_settings_hold_a_pre_compact_hook_that_prints_the_instructions_file() {
+    let text = session_settings(Path::new("C:\\fixture\\run\\compact.md")).unwrap();
+    let value: Value = serde_json::from_str(&text).unwrap();
+    let root = value.as_object().unwrap();
+    assert_eq!(
+        root.keys().collect::<Vec<_>>(),
+        ["hooks"],
+        "only `hooks`: {text}"
+    );
+    let hooks = root["hooks"].as_object().unwrap();
+    assert_eq!(hooks.keys().collect::<Vec<_>>(), ["PreCompact"], "{text}");
+    let entries = hooks["PreCompact"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{text}");
+    assert_eq!(entries[0]["matcher"], "", "{text}");
+    let commands = entries[0]["hooks"].as_array().unwrap();
+    assert_eq!(commands.len(), 1, "{text}");
+    assert_eq!(commands[0]["type"], "command", "{text}");
+    assert_eq!(
+        commands[0]["command"], "cat 'C:/fixture/run/compact.md'",
+        "{text}"
+    );
+    assert_eq!(commands[0]["timeout"], COMPACT_HOOK_TIMEOUT, "{text}");
+
+    assert_eq!(
+        session_settings(Path::new("/fixture/o'run/compact.md")),
+        Err(SettingsError::Quote)
+    );
+}
+
+#[test]
 fn the_command_loads_only_the_session_mcp_servers() {
     let ctx = ctx();
     for spawn in [
@@ -209,11 +265,13 @@ fn the_command_loads_only_the_session_mcp_servers() {
             ["project"],
             "no user settings or hooks: {argv:?}"
         );
-        assert!(
-            !argv
-                .iter()
-                .any(|a| a.contains("--settings") || a == "--dangerously-skip-permissions")
+        // The only settings passed are the session's own file (its PreCompact hook).
+        assert_eq!(
+            values(&argv, "--settings"),
+            ["/fixture/run/settings.json"],
+            "{argv:?}"
         );
+        assert!(!argv.iter().any(|a| a == "--dangerously-skip-permissions"));
     }
 
     // The file holds bosun and the repository's servers, nothing else.

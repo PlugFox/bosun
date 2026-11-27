@@ -193,6 +193,9 @@ pub struct SessionContext {
     /// The per-session MCP configuration file, which the daemon writes before spawn (for
     /// Claude, from [`claude::mcp_config`]).
     pub mcp_config_file: PathBuf,
+    /// The per-session settings file the daemon writes before spawn (for Claude, from
+    /// [`claude::session_settings`]).
+    pub settings_file: PathBuf,
     /// The names of the servers in that file other than `bosun`: the repository's
     /// `repo.<name>.mcp_servers` (#4). Their tools are pre-allowed.
     pub repo_mcp_servers: Vec<String>,

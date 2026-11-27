@@ -10,6 +10,7 @@
 //!             |          |           +-> running        (verdict failed, attempts left)
 //!             |          |           +-> needs_you      (attempts exhausted, guard, census)
 //!             |          +-> parked -> running          (limit, pause, kill, daily cap)
+//!             |          |           +-> parked -> verifying  (verdict not ready, #204)
 //!             |          +-> needs_you                  (question, auth, budget,
 //!             |                                          uncounted-park cap, config changed)
 //!             +-> ready                                 (user won the claim race)
@@ -31,7 +32,11 @@
 //! and passes; two failed attempts are Needs you. A limit, a pause, the kill switch, the daily
 //! cap, a crash retry and a lost daemon do not count. The uncounted parks and resumes that the
 //! agent can provoke (a limit, a crash, a failed resume, a lost session) are capped per item;
-//! the cap is Needs you, so a printed fake limit cannot park an item forever.
+//! the cap is Needs you, so a printed fake limit cannot park an item forever. A not-ready
+//! verdict run (the repository's `unready_exit`, #204) counts nothing either: the item parks to
+//! verify for [`Rules::unready_backoff_ms`] and wakes into another verdict run, with no session
+//! and no new attempt; past [`Rules::unready_cap`] it is Needs you ([`Reason::ResourceUnready`]).
+//! It cannot lead toward Done: only a run that passes does.
 //!
 //! Landing (#8, E20) is one keyed [`EffectKind::Land`] and has no state of its own besides
 //! [`State::Landing`]: the executor rebases the item branch onto the target's head and reports
@@ -104,6 +109,12 @@ pub enum ParkReason {
     Killed,
     /// The daily cap.
     DailyCap,
+    /// A verdict run exited with the repository's not-ready code (#204); wakes into the
+    /// verdict again after [`Rules::unready_backoff_ms`]. Like every park it waits through any
+    /// active hold ([`Hold::Pause`] and [`Hold::DailyCap`] included, which a verifying item
+    /// otherwise passes): a verdict that waits for a resource has no reason to run while the
+    /// repository is paused.
+    Unready,
 }
 
 impl From<Hold> for ParkReason {
@@ -202,6 +213,9 @@ pub enum Reason {
     /// The verdict passed, but the census of the repository's tests (#7) found a kept counter
     /// that dropped or a capped one that rose between the item's base and the judged commit.
     CensusDrop,
+    /// The verdict's not-ready runs (#204) reached [`Rules::unready_cap`]: a resource the
+    /// verdict needs was not ready. The cause is in the item's note, not in the reason.
+    ResourceUnready,
 }
 
 /// The state of an item.
@@ -539,6 +553,10 @@ pub struct Rules {
     pub crash_retries: u32,
     /// How long a limit parks when no reset time was parsed, in ms.
     pub default_backoff_ms: i64,
+    /// Not-ready verdict runs allowed per item (#204); one more is Needs you.
+    pub unready_cap: u32,
+    /// How long a not-ready verdict run parks the item before the verdict runs again, in ms.
+    pub unready_backoff_ms: i64,
 }
 
 impl Default for Rules {
@@ -548,6 +566,8 @@ impl Default for Rules {
             park_cap: 6,
             crash_retries: 1,
             default_backoff_ms: 15 * 60 * 1000,
+            unready_cap: 6,
+            unready_backoff_ms: 5 * 60 * 1000,
         }
     }
 }
@@ -598,6 +618,8 @@ pub struct Item {
     pub uncounted: u32,
     /// Conflict sessions since the counters were last reset.
     pub conflicts: u32,
+    /// Not-ready verdict runs (#204) since the counters were last reset.
+    pub unready: u32,
     /// The last daemon boot whose recovery this item went through.
     pub boot: u32,
 }
@@ -617,6 +639,7 @@ impl Item {
             failed: 0,
             uncounted: 0,
             conflicts: 0,
+            unready: 0,
             boot: 0,
         }
     }
@@ -956,6 +979,12 @@ impl Draft {
                 }
                 let landing = self.item.state == State::Landing;
                 self.attempt_step(AttemptEvent::VerdictFinished(*result))?;
+                if *result == RunResult::Unready {
+                    // Before `verdict_finished`, whose fallback would run the verdict again at
+                    // once, with no backoff.
+                    self.not_ready();
+                    return Some(());
+                }
                 let failed = self.item.attempt.as_ref().is_some_and(|a| a.state.failed());
                 if landing && failed && cfg!(mutant_core_landing_failure_uncounted) {
                     // Mutant (`mutant_core_landing_failure_uncounted`): the failed re-verdict
@@ -1193,6 +1222,28 @@ impl Draft {
             return true;
         }
         false
+    }
+
+    /// A not-ready verdict run (#204): counted on its own, nothing else is. Over the cap the
+    /// item needs the user; else it parks and wakes into the verdict again.
+    fn not_ready(&mut self) {
+        self.item.unready += 1;
+        // Mutant (`mutant_core_unready_uncapped`): the cap is not applied.
+        if self.item.unready > self.ctx.rules.unready_cap && !cfg!(mutant_core_unready_uncapped) {
+            self.needs_you(Reason::ResourceUnready);
+            return;
+        }
+        // Mutant (`mutant_core_unready_respawns`): the park wakes into a fresh session.
+        let next = if cfg!(mutant_core_unready_respawns) {
+            Next::Reset
+        } else {
+            Next::Verify
+        };
+        self.item.state = State::Parked(Park {
+            reason: ParkReason::Unready,
+            until_ms: Some(self.ctx.now_ms + self.ctx.rules.unready_backoff_ms),
+            next,
+        });
     }
 
     /// The current attempt has failed (its state is already `fail` or `timeout`).
@@ -1439,6 +1490,7 @@ impl Draft {
         self.item.failed = 0;
         self.item.uncounted = 0;
         self.item.conflicts = 0;
+        self.item.unready = 0;
         self.item.attempt = None;
     }
 
@@ -1693,6 +1745,86 @@ mod tests {
         let kinds: Vec<_> = first.transition.effects.iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&EffectKind::RunVerdict { attempt: 1, run: 2 }));
         assert!(!kinds.iter().any(|k| matches!(k, EffectKind::Spawn { .. })));
+    }
+
+    /// #204: a not-ready run parks the item to verify for the backoff, counting nothing but
+    /// itself; waking runs the verdict again with no session and no new attempt; past the cap it
+    /// is Needs you.
+    #[test]
+    fn a_not_ready_run_parks_to_verify_uncounted_until_its_cap() {
+        let rules = Rules {
+            unready_cap: 2,
+            unready_backoff_ms: 300_000,
+            ..Rules::default()
+        };
+        let at = |now_ms, hold| Ctx {
+            now_ms,
+            hold,
+            rules,
+        };
+        let parked = Park {
+            reason: ParkReason::Unready,
+            until_ms: Some(T0 + 300_000),
+            next: Next::Verify,
+        };
+        let item = attempt(running(), &[]);
+        let before = (item.failed, item.uncounted, item.attempts);
+        let first = go(&item, &verdict(&item, RunResult::Unready), &at(T0, None));
+        assert_eq!(first.item.state, State::Parked(parked));
+        assert_eq!(
+            (first.item.failed, first.item.uncounted, first.item.attempts),
+            before
+        );
+        assert_eq!(first.item.unready, 1);
+        assert!(!kinds(&first).iter().any(is_run_verdict));
+        let item = first.item;
+        // Not before its time, and not while a hold is active.
+        assert_eq!(step(&item, &Event::Tick, &at(T0 + 299_999, None)), None);
+        assert_eq!(
+            step(&item, &Event::Tick, &at(T0 + 300_000, Some(Hold::Pause))),
+            None
+        );
+        let woken = go(&item, &Event::Tick, &at(T0 + 300_000, None));
+        assert_eq!(woken.item.state, State::Verifying);
+        let effects = kinds(&woken);
+        assert!(effects.contains(&EffectKind::RunVerdict { attempt: 1, run: 2 }));
+        assert!(
+            !effects
+                .iter()
+                .any(|k| matches!(k, EffectKind::Spawn { .. }))
+        );
+        assert_eq!(woken.item.attempts, 1);
+
+        // Fail, not ready, pass is still flaky.
+        let item = attempt(running(), &[RunResult::Fail]);
+        let item = go(&item, &verdict(&item, RunResult::Unready), &at(T0, None)).item;
+        assert_eq!(item.state, State::Parked(parked));
+        let item = go(&item, &Event::Tick, &at(T0 + 300_000, None)).item;
+        let item = go(&item, &verdict(&item, RunResult::Pass), &at(T0, None)).item;
+        assert_eq!(item.state, State::Landing);
+        let item = go(&item, &Event::Landed, &ctx()).item;
+        assert_eq!(item.state, State::Done(Outcome::Flaky));
+
+        // Three not-ready runs in a row: over the cap of 2.
+        let mut item = attempt(running(), &[]);
+        let mut now = T0;
+        for _ in 0..2 {
+            item = go(&item, &verdict(&item, RunResult::Unready), &at(now, None)).item;
+            now += 300_000;
+            item = go(&item, &Event::Tick, &at(now, None)).item;
+        }
+        let capped = go(&item, &verdict(&item, RunResult::Unready), &at(now, None));
+        assert_eq!(capped.item.state, State::NeedsYou(Reason::ResourceUnready));
+        assert!(kinds(&capped).contains(&EffectKind::Comment(Reason::ResourceUnready)));
+        assert_eq!(capped.item.failed, 0);
+
+        // A requeue clears the count.
+        let requeued = go(
+            &capped.item,
+            &Event::User(UserCommand::Requeue),
+            &at(now, None),
+        );
+        assert_eq!(requeued.item.unready, 0);
     }
 
     #[test]
@@ -2516,6 +2648,11 @@ mod tests {
                     run,
                     result: RunResult::Timeout,
                 },
+                Event::Verdict {
+                    attempt,
+                    run,
+                    result: RunResult::Unready,
+                },
                 Event::CensusDropped { attempt, run },
             ]),
             State::Landing => events.extend([
@@ -2533,6 +2670,11 @@ mod tests {
                     attempt,
                     run,
                     result: RunResult::Fail,
+                },
+                Event::Verdict {
+                    attempt,
+                    run,
+                    result: RunResult::Unready,
                 },
             ]),
             State::Done(_) => events.extend([Event::PullRequestClosed, Event::PullRequestClosed]),

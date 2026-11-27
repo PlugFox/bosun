@@ -1373,3 +1373,57 @@ fn a_repositorys_auto_pause_defaults_to_the_global_value_without_a_worktree_and_
         }
     }
 }
+
+/// #204: the not-ready keys of a verdict are off by default, a code that means something else
+/// is refused, and the repository hash covers them only when one is not at its default.
+#[test]
+fn the_verdict_unready_keys_are_read_checked_and_hashed_only_when_set() {
+    let set = "verdict = { unready_exit = 75, unready_backoff = \"10m\", unready_cap = 3 }\n";
+    let config = parse(&with_repo(set), &Local).unwrap();
+    let verdict = &config.repos["bosun"].verdict;
+    assert_eq!(verdict.unready_exit, Some(75));
+    assert_eq!(verdict.unready_backoff, Duration::from_mins(10));
+    assert_eq!(verdict.unready_cap, 3);
+
+    let bare = parse(&with_repo(""), &Local).unwrap();
+    let verdict = &bare.repos["bosun"].verdict;
+    assert_eq!(verdict.unready_exit, None);
+    assert_eq!(verdict.unready_backoff, Duration::from_mins(5));
+    assert_eq!(verdict.unready_cap, 6);
+
+    for code in ["0", "1", "126", "127", "128", "300", "-75", "'75'"] {
+        let found = problems(&with_repo(&format!(
+            "verdict = {{ unready_exit = {code} }}\n"
+        )));
+        assert!(
+            found
+                .iter()
+                .any(|p| p.contains("repo.bosun.verdict.unready_exit")),
+            "{code}: {found:?}"
+        );
+    }
+    for code in [2, 75, 125] {
+        let text = with_repo(&format!("verdict = {{ unready_exit = {code} }}\n"));
+        let config = parse(&text, &Local).unwrap();
+        assert_eq!(config.repos["bosun"].verdict.unready_exit, Some(code));
+    }
+    let found = problems(&with_repo("verdict = { unready_cap = 0 }\n"));
+    assert!(
+        found
+            .iter()
+            .any(|p| p.contains("repo.bosun.verdict.unready_cap")),
+        "{found:?}"
+    );
+
+    let hash = |text: &str| parse(text, &Local).unwrap().repo_hash("bosun").unwrap();
+    let plain = hash(&with_repo(""));
+    assert_eq!(
+        hash(&with_repo("verdict = { unready_backoff = \"5m\" }\n")),
+        plain
+    );
+    assert_eq!(hash(&with_repo("verdict = { unready_cap = 6 }\n")), plain);
+    let on = hash(&with_repo("verdict = { unready_exit = 75 }\n"));
+    assert_ne!(on, plain);
+    assert_ne!(hash(&with_repo("verdict = { unready_exit = 76 }\n")), on);
+    assert_ne!(hash(&with_repo("verdict = { unready_cap = 3 }\n")), plain);
+}

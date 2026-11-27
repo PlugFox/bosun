@@ -56,7 +56,8 @@
 //! queue = { kind = "projects", owner = "me", number = 7 }  # or kind = "local_file", file = '...'
 //! model = "opus"                # the sessions' default model; required with a queue (#133)
 //! effort = "high"               # the sessions' default effort level; default: none passed
-//! verdict = { timeout = "30m" } # and `shell`, default `sh` (from Git on Windows)
+//! verdict = { timeout = "30m", unready_exit = 75 } # and `shell`, default `sh` (from Git on
+//!                               # Windows); `unready_exit` is off by default
 //! landing = { mode = "merge", target = "main", merge = { method = "squash", push = false } }
 //! auto_pause = false           # default: `daemon.auto_pause`; false with a `worktree`
 //! worktree = { root ='C:\wt\bosun', setup = "cargo fetch", disk_floor = "20GB", shared_build = { dir = 'C:\wt\bosun-target', resource = "target", env = "CARGO_TARGET_DIR" } }
@@ -101,6 +102,19 @@
 //!   rose sends the item to Needs you, unless the card's `allow-census` names it. An unknown key,
 //!   an empty or absolute `glob`, a census without counters and a name in both tables are
 //!   refused. The policy hash covers the census only when it is set.
+//! - `repo.<name>.verdict.unready_exit` (#204): the exit code by which a verdict says that a
+//!   resource it needs (a lock, a device, a service) was not ready, which is not a failure: the
+//!   verdict runs again after `unready_backoff` (default `5m`), with no session in between and
+//!   nothing counted, up to `unready_cap` not-ready runs per item (a positive count, default 6);
+//!   one more is Needs you with `resource_unready`. Off by default: no exit code is reserved
+//!   across tools, and bosun cannot know which code a repository's tools use. A whole number from
+//!   2 to 125, anything else is refused (0 is a pass, 1 is what most failing commands exit with,
+//!   126 and 127 are the shell's own cannot-execute and not-found, 128 and above report a
+//!   signal). The suggestion is 75, `EX_TEMPFAIL` of `sysexits.h`. `bosun with --wait` exits 75
+//!   when its wait runs out, so with `unready_exit = 75` a verdict that waits too long on a lease
+//!   is not ready, which is what it is; `bosun with --timeout` exits 124, a failure. A not-ready
+//!   run cannot lead toward Done. The repository hash covers the three keys only when one is not
+//!   at its default.
 //! - An unknown key of a `policy` is refused, so that a misspelt `protected` cannot leave paths
 //!   unprotected; so is an unknown key of a `resource`, a `worktree`, a
 //!   `worktree.shared_build`, a `landing.merge`, a `landing.pr` or a `sweep`.
@@ -419,13 +433,31 @@ pub struct Verdict {
     /// `shell`: the program that runs a verdict as `<shell> -c <verdict>`. Default `None`:
     /// `sh`, on Windows resolved from the Git installation (#7, D4).
     pub shell: Option<String>,
+    /// `unready_exit` (#204): the exit code by which the verdict says a resource it needs was
+    /// not ready, from 2 to 125. Default `None`: off, every non-zero code is a failure.
+    pub unready_exit: Option<u8>,
+    /// `unready_backoff`: how long a not-ready run parks the item before the verdict runs
+    /// again. Default 5 minutes.
+    pub unready_backoff: Duration,
+    /// `unready_cap`: the not-ready runs allowed per item; one more is Needs you with
+    /// `resource_unready`. Default 6.
+    pub unready_cap: u32,
 }
+
+/// The default of [`Verdict::unready_backoff`].
+pub const DEFAULT_UNREADY_BACKOFF: Duration = Duration::from_mins(5);
+
+/// The default of [`Verdict::unready_cap`].
+pub const DEFAULT_UNREADY_CAP: u32 = 6;
 
 impl Default for Verdict {
     fn default() -> Self {
         Self {
             timeout: Duration::from_mins(30),
             shell: None,
+            unready_exit: None,
+            unready_backoff: DEFAULT_UNREADY_BACKOFF,
+            unready_cap: DEFAULT_UNREADY_CAP,
         }
     }
 }

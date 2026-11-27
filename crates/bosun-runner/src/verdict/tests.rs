@@ -52,6 +52,7 @@ fn spec(command: &str, timeout: Duration) -> VerdictSpec {
         cwd: std::env::temp_dir(),
         timeout,
         limits: Limits::default(),
+        unready_exit: None,
     }
 }
 
@@ -283,4 +284,22 @@ fn helper() {
         .expect("running");
     println!("{PREFIX} {pid} {}", start.raw());
     std::thread::sleep(Duration::from_secs(60));
+}
+
+/// #204: the repository's not-ready code is its own outcome; any other non-zero code fails, and
+/// without the key the same code fails too.
+#[test]
+fn the_unready_exit_code_is_its_own_outcome_and_other_codes_fail() {
+    let with = |command: &str, unready_exit| {
+        let mut spec = spec(command, BOUND);
+        spec.unready_exit = unready_exit;
+        run_within(&spec, BOUND)
+    };
+    let run = with("exit 75", Some(75));
+    assert_eq!(run.outcome, Outcome::Unready);
+    assert_eq!(run.exit, ProcessExit { code: Some(75) });
+    assert_eq!(run.outcome.as_str(), "unready");
+    assert_eq!(with("exit 3", Some(75)).outcome, Outcome::Fail);
+    assert_eq!(with("exit 0", Some(75)).outcome, Outcome::Pass);
+    assert_eq!(with("exit 75", None).outcome, Outcome::Fail);
 }

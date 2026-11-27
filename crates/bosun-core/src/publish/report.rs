@@ -789,6 +789,7 @@ fn reason_text(reason: Reason) -> &'static str {
         Reason::Identity => "the identity checks refused the session",
         Reason::Stale => "the daemon's view of the item was older than its stored history",
         Reason::CensusDrop => "the verdict passed, but the census of the tests moved the wrong way",
+        Reason::ResourceUnready => "a resource the verdict needs was not ready",
     }
 }
 
@@ -798,6 +799,7 @@ fn park_text(reason: ParkReason) -> &'static str {
         ParkReason::Paused => "paused",
         ParkReason::Killed => "kill switch",
         ParkReason::DailyCap => "daily cap",
+        ParkReason::Unready => "verdict not ready",
     }
 }
 
@@ -806,6 +808,7 @@ fn run_text(run: RunResult) -> &'static str {
         RunResult::Pass => "pass",
         RunResult::Fail => "fail",
         RunResult::Timeout => "timeout",
+        RunResult::Unready => "not ready",
     }
 }
 

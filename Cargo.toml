@@ -575,6 +575,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_ingest_drift_uncounted)",
   "cfg(mutant_api_ingest_drift_unsummed)",
   "cfg(mutant_doctor_ingest_format_ignored)",
+  # #204: a verdict exit code that means "not ready", not "red".
+  "cfg(mutant_core_unready_respawns)",
+  "cfg(mutant_core_unready_uncapped)",
+  "cfg(mutant_config_unready_exit_any_code)",
 ] }
 
 [workspace.lints.clippy]

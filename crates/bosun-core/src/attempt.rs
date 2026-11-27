@@ -7,7 +7,8 @@
 //! item machine ([`crate::step`]) drives the attempt and owns the counting; this module owns
 //! only the arrows and the verdict rule: a failing run is re-run once with no session in
 //! between, fail then pass is `flaky` (treated as pass), and two failing runs are one failed
-//! attempt.
+//! attempt. A not-ready run ([`RunResult::Unready`], #204) is neither: it changes nothing, and
+//! the item machine runs the verdict again after a backoff.
 
 /// The state of one attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,6 +75,9 @@ pub enum RunResult {
     Fail,
     /// The run exceeded the verdict timeout and was killed.
     Timeout,
+    /// The run exited with the repository's not-ready code (#204): a resource the verdict needs
+    /// was not ready. Not a run of the re-run rule: the attempt stays where it was.
+    Unready,
 }
 
 /// What happened to an attempt.
@@ -176,6 +180,9 @@ impl Attempt {
     fn finish_run(&self, result: RunResult) -> Self {
         let mut next = self.clone();
         match (self.first_run, result) {
+            // Not ready: nothing was judged. The attempt stays `VerdictRunning` and keeps its
+            // first run, so fail, not ready, pass is still flaky.
+            (_, RunResult::Unready) => {}
             (None, RunResult::Pass) => next.state = AttemptState::Pass,
             (None, first) => next.first_run = Some(first),
             (Some(_), RunResult::Pass) => {

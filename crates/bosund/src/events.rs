@@ -424,6 +424,7 @@ pub(crate) fn reason_of(state: State) -> Option<String> {
             ParkReason::Paused => "paused",
             ParkReason::Killed => "killed",
             ParkReason::DailyCap => "daily_cap",
+            ParkReason::Unready => "unready",
         },
         State::Done(outcome) => match outcome {
             Outcome::Pass => "pass",
@@ -446,6 +447,7 @@ pub(crate) fn reason_of(state: State) -> Option<String> {
             Reason::Identity => "identity",
             Reason::Stale => "stale",
             Reason::CensusDrop => "census_drop",
+            Reason::ResourceUnready => "resource_unready",
         },
         _ => return None,
     };
@@ -470,6 +472,7 @@ pub(crate) fn run_result_name(result: RunResult) -> &'static str {
         RunResult::Pass => "pass",
         RunResult::Fail => "fail",
         RunResult::Timeout => "timeout",
+        RunResult::Unready => "unready",
     }
 }
 

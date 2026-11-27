@@ -293,7 +293,7 @@ async fn update_item(
         "UPDATE item SET
              state = ?, park_reason = ?, park_until_ms = ?, park_next = ?, outcome = ?,
              reason = ?, attempt_number = ?, seq = ?, attempts = ?, spawns = ?, runs = ?,
-             failed = ?, uncounted = ?, conflicts = ?, boot = ?, updated_ms = ?
+             failed = ?, uncounted = ?, conflicts = ?, unready = ?, boot = ?, updated_ms = ?
          WHERE id = ?",
         c.state,
         c.park_reason,
@@ -309,6 +309,7 @@ async fn update_item(
         item.failed,
         item.uncounted,
         item.conflicts,
+        item.unready,
         item.boot,
         at_ms,
         item_row,

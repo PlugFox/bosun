@@ -86,6 +86,7 @@ pub(crate) fn run_result(outcome: Outcome) -> RunResult {
         Outcome::Pass => RunResult::Pass,
         Outcome::Fail => RunResult::Fail,
         Outcome::Timeout => RunResult::Timeout,
+        Outcome::Unready => RunResult::Unready,
     }
 }
 
@@ -353,6 +354,8 @@ async fn run_in(
             .verdict_timeout
             .unwrap_or(repo.verdict.timeout),
         limits: Limits::default(),
+        // The repository's `verdict.unready_exit` reaches the loop in the next card (#204).
+        unready_exit: None,
     };
 
     let (key_tx, key_rx) = oneshot::channel();

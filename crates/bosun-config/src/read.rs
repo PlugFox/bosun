@@ -555,6 +555,13 @@ impl Reader<'_> {
                         .map(|(value, _)| value.to_owned())
                         .filter(|shell| !shell.is_empty());
                 }
+                "unready_exit" => {
+                    if let Some(code) = self.unready_exit(item, &path) {
+                        verdict.unready_exit = Some(code);
+                    }
+                }
+                "unready_backoff" => set(&mut verdict.unready_backoff, self.duration(item, &path)),
+                "unready_cap" => set(&mut verdict.unready_cap, self.count(item, &path)),
                 _ => self.ignored(key_at, &path),
             }
         }
@@ -1220,6 +1227,32 @@ impl Reader<'_> {
             self.problem(at, format!("`{what}` is too large"));
         }
         count
+    }
+
+    /// `verdict.unready_exit` (#204): an exit code from 2 to 125. 0 is a pass, 1 is what most
+    /// failing commands exit with, 126 and 127 are the shell's own cannot-execute and not-found,
+    /// and 128 and above report a signal.
+    fn unready_exit(&mut self, item: &Item, what: &str) -> Option<u8> {
+        let at = self.at(item.span());
+        // Mutant (`mutant_config_unready_exit_any_code`): any integer is accepted.
+        let range = if cfg!(mutant_config_unready_exit_any_code) {
+            i64::MIN..=i64::MAX
+        } else {
+            2..=125
+        };
+        let code = item
+            .as_integer()
+            .filter(|n| range.contains(n))
+            .map(|n| u8::try_from(n).unwrap_or(u8::MAX));
+        if code.is_none() {
+            self.problem(
+                at,
+                format!(
+                    "`{what}` must be a whole number from 2 to 125: 0 is a pass, 1 is any                      failure, 126 and 127 are the shell's own, 128 and above are signals;                      75 (`EX_TEMPFAIL`) is the suggestion"
+                ),
+            );
+        }
+        code
     }
 
     fn duration(&mut self, item: &Item, what: &str) -> Option<Duration> {

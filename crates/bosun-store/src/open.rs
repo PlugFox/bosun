@@ -867,7 +867,9 @@ mod tests {
         conn.close().await.unwrap();
 
         for pass in 0..2 {
-            let store = Store::open(&path, Options::default()).await.unwrap();
+            // Up to 17: its record can only be lost right after it ran, before any later
+            // migration (a re-run under migration 24 would drop the `unready` column it added).
+            let store = open(&path, &Options::default(), &up_to(17)).await.unwrap();
             let mut conn = store.reader().pool.acquire().await.unwrap();
             assert_eq!(items(&mut conn, item_columns).await, items_before, "{pass}");
             assert_eq!(
@@ -1000,6 +1002,160 @@ mod tests {
             stored.item.state,
             bosun_core::State::NeedsYou(bosun_core::Reason::CensusDrop)
         );
+        store.close().await.unwrap();
+    }
+
+    /// #204: migration 24 rebuilds `item` and `verdict_run` to allow the park reason `unready`,
+    /// the reason `resource_unready` and the run result `unready`, and adds `item.unready`. Items
+    /// in several states and the verdict runs of a database of version 23 read back the same,
+    /// also when the migration runs again after its record was lost; the new names are accepted,
+    /// and no other.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn the_not_ready_migration_keeps_every_item_and_verdict_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(&dir);
+        let store = open(&path, &Options::default(), &up_to(23)).await.unwrap();
+        store.close().await.unwrap();
+        let mut conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO repo (id, path, name) VALUES (1, '/fixture/demo', 'demo');
+             INSERT INTO item (id, item_key, repo_id, card_key, state, reason, attempt_number,
+                               seq, attempts, spawns, runs, failed, uncounted, boot, created_ms,
+                               updated_ms, conflicts)
+             VALUES (3, 'demo#1', 1, 'card-1', 'needs_you', 'census_drop', 1, 4, 1, 2, 2, 0, 1,
+                     2, 10, 20, 1);
+             INSERT INTO item (id, item_key, repo_id, state, park_reason, park_until_ms,
+                               park_next, attempt_number, seq, attempts, spawns, runs, failed,
+                               uncounted, created_ms, updated_ms)
+             VALUES (5, 'demo#2', 1, 'parked', 'limit', 99, 'resume', 1, 3, 1, 1, 0, 0, 1, 11,
+                     21);
+             INSERT INTO item (id, item_key, repo_id, state, outcome, seq, created_ms,
+                               updated_ms)
+             VALUES (6, 'demo#3', 1, 'done', 'flaky', 7, 12, 22);
+             INSERT INTO item (id, item_key, repo_id, state, created_ms, updated_ms)
+             VALUES (8, 'demo#4', 1, 'ready', 13, 23);
+             INSERT INTO attempt (id, item_id, number, state, spawn, started_ms)
+             VALUES (1, 3, 1, 'pass', 1, 10);
+             INSERT INTO attempt (id, item_id, number, state, spawn, started_ms)
+             VALUES (2, 5, 1, 'limited', 1, 11);
+             INSERT INTO verdict_run (id, attempt_id, run, command, started_ms, ended_ms,
+                                      result, exit_code, duration_ms, verdict_line, tail)
+             VALUES (4, 1, 1, 'cargo test', 30, 40, 'fail', 101, 10, 'FAILED', 'tail one');
+             INSERT INTO verdict_run (id, attempt_id, run, command, pid, pid_started_ms,
+                                      started_ms)
+             VALUES (7, 1, 2, 'cargo test', 4242, 50, 50);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        let item_columns = "SELECT id, item_key, repo_id, card_key, state, park_reason,
+                                   park_until_ms, park_next, outcome, reason, attempt_number,
+                                   snapshot_id, seq, attempts, spawns, runs, failed, uncounted,
+                                   boot, created_ms, updated_ms, conflicts
+                            FROM item ORDER BY id";
+        let run_columns = "SELECT id, attempt_id, run, command, pid, pid_started_ms, started_ms,
+                                  ended_ms, result, exit_code, duration_ms, verdict_line, tail
+                           FROM verdict_run ORDER BY id";
+        let items_before = items(&mut conn, item_columns).await;
+        let runs_before = items(&mut conn, run_columns).await;
+        assert_eq!(items_before.len(), 4);
+        assert_eq!(runs_before.len(), 2);
+        conn.close().await.unwrap();
+
+        for pass in 0..2 {
+            let store = Store::open(&path, Options::default()).await.unwrap();
+            let mut conn = store.reader().pool.acquire().await.unwrap();
+            assert_eq!(items(&mut conn, item_columns).await, items_before, "{pass}");
+            assert_eq!(items(&mut conn, run_columns).await, runs_before, "{pass}");
+            let unready: Vec<i64> = sqlx::query_scalar("SELECT unready FROM item ORDER BY id")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+            assert_eq!(unready, [0, 0, 0, 0], "{pass}");
+            let broken: Vec<(String, i64)> =
+                sqlx::query_as("SELECT \"table\", rowid FROM pragma_foreign_key_check")
+                    .fetch_all(&mut *conn)
+                    .await
+                    .unwrap();
+            assert!(broken.is_empty(), "{broken:?}");
+            let indexes: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index'
+                   AND name IN ('item_repo', 'item_state')",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+            assert_eq!(indexes, 2);
+            drop(conn);
+            store.close().await.unwrap();
+            if pass == 0 {
+                // As a crash between the migration's `COMMIT` and sqlx's insert leaves it.
+                let mut conn =
+                    SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+                        .await
+                        .unwrap();
+                sqlx::raw_sql("DELETE FROM _sqlx_migrations WHERE version = 24")
+                    .execute(&mut conn)
+                    .await
+                    .unwrap();
+                conn.close().await.unwrap();
+            }
+        }
+
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for accepted in [
+            "UPDATE item SET reason = 'resource_unready' WHERE id = 3",
+            "UPDATE item SET park_reason = 'unready', unready = 2 WHERE id = 5",
+            "UPDATE verdict_run SET result = 'unready', exit_code = 75 WHERE id = 7",
+        ] {
+            sqlx::query(accepted).execute(&mut conn).await.unwrap();
+        }
+        for refused in [
+            "UPDATE item SET reason = 'stale_resource' WHERE id = 3",
+            "UPDATE item SET reason = 'unknown' WHERE id = 3",
+            "UPDATE item SET park_reason = 'unknown' WHERE id = 5",
+            "UPDATE item SET unready = -1 WHERE id = 5",
+            "UPDATE verdict_run SET result = 'unknown' WHERE id = 7",
+            "UPDATE attempt SET first_run = 'unready' WHERE id = 1",
+        ] {
+            let result = sqlx::query(refused).execute(&mut conn).await;
+            assert!(result.is_err(), "{refused}");
+        }
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let reader = store.reader();
+        let one = reader
+            .item(&bosun_core::ItemId::new("demo#1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            one.item.state,
+            bosun_core::State::NeedsYou(bosun_core::Reason::ResourceUnready)
+        );
+        let two = reader
+            .item(&bosun_core::ItemId::new("demo#2"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            two.item.state,
+            bosun_core::State::Parked(bosun_core::Park {
+                reason: bosun_core::ParkReason::Unready,
+                ..
+            })
+        ));
+        assert_eq!(two.item.unready, 2);
         store.close().await.unwrap();
     }
 

@@ -507,6 +507,8 @@ async fn base_verdict(
             .verdict_timeout
             .unwrap_or(repo.verdict.timeout),
         limits: Limits::default(),
+        // D7: only "does it pass" matters on the base; a not-ready run is simply not a pass.
+        unready_exit: None,
     };
     tokio::select! {
         run = bosun_runner::verdict::run(shared.deps.spawner.as_ref(), &spec) => {

@@ -19,7 +19,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     Budget, Config, Daemon, Identity, Landing, LandingMode, MergeMethod, Policy, Queue, Repo,
-    Worktree,
+    Verdict, Worktree,
 };
 
 /// The canonical encoding being built.
@@ -228,6 +228,21 @@ fn extensions(canon: &mut Canon, repo: &Repo) {
     // the hash it had before the key existed.
     if always || repo.effort.is_some() {
         canon.str("effort/2").opt_str(repo.effort.as_deref());
+    }
+    // The verdict's not-ready keys (#204), only when one is not at its default: a repository
+    // that does not use them keeps the hash it had before they existed.
+    let verdict = &repo.verdict;
+    let unready = Verdict::default();
+    if always
+        || verdict.unready_exit != unready.unready_exit
+        || verdict.unready_backoff != unready.unready_backoff
+        || verdict.unready_cap != unready.unready_cap
+    {
+        canon
+            .str("verdict/2")
+            .opt_u64(verdict.unready_exit.map(u64::from))
+            .duration(verdict.unready_backoff)
+            .u64(u64::from(verdict.unready_cap));
     }
     // `auto_pause` is deliberately absent (#7): it decides when the loop claims, not how an
     // item runs, so changing it while an item is in flight must not send it to Needs you.

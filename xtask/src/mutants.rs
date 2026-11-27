@@ -3694,6 +3694,33 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("doctor::tests::the_ingest_format_check_warns_above_the_share"),
         platform: None,
     },
+    // A verdict exit code that means "not ready", not "red" (#204).
+    Mutant {
+        name: "mutant_core_unready_respawns",
+        issue: 204,
+        breaks: "a not-ready verdict run parks the item to wake into a fresh session, not the verdict",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_not_ready_run_parks_to_verify_uncounted_until_its_cap"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_core_unready_uncapped",
+        issue: 204,
+        breaks: "not-ready verdict runs have no per-item cap and park an item for ever",
+        package: "bosun-core",
+        check: Check::Test("item::tests::a_not_ready_run_parks_to_verify_uncounted_until_its_cap"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_config_unready_exit_any_code",
+        issue: 204,
+        breaks: "any integer is accepted as `verdict.unready_exit`, 0 and the shell's own codes too",
+        package: "bosun-config",
+        check: Check::Test(
+            "tests::the_verdict_unready_keys_are_read_checked_and_hashed_only_when_set",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

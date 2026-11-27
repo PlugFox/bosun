@@ -691,6 +691,7 @@ fn reason_text(reason: Reason) -> &'static str {
             "The verdict passed, but the census of the repository's tests moved the wrong way \
              between the item's base and the judged commit"
         }
+        Reason::ResourceUnready => "A resource the verdict needs was not ready",
     }
 }
 

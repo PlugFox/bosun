@@ -86,6 +86,7 @@ fn park_reason(reason: ParkReason) -> &'static str {
         ParkReason::Paused => "paused",
         ParkReason::Killed => "killed",
         ParkReason::DailyCap => "daily_cap",
+        ParkReason::Unready => "unready",
     }
 }
 
@@ -95,6 +96,7 @@ fn parse_park_reason(name: &str) -> Result<ParkReason, Error> {
         "paused" => ParkReason::Paused,
         "killed" => ParkReason::Killed,
         "daily_cap" => ParkReason::DailyCap,
+        "unready" => ParkReason::Unready,
         other => return Err(corrupt("park reason", other)),
     })
 }
@@ -155,6 +157,7 @@ pub(crate) fn reason(reason: Reason) -> &'static str {
         Reason::Identity => "identity",
         Reason::Stale => "stale",
         Reason::CensusDrop => "census_drop",
+        Reason::ResourceUnready => "resource_unready",
     }
 }
 
@@ -178,6 +181,7 @@ pub(crate) fn parse_reason(name: &str) -> Result<Reason, Error> {
         "identity" => Reason::Identity,
         "stale" => Reason::Stale,
         "census_drop" => Reason::CensusDrop,
+        "resource_unready" => Reason::ResourceUnready,
         other => return Err(corrupt("reason", other)),
     })
 }
@@ -206,6 +210,7 @@ pub(crate) fn run_result(result: RunResult) -> &'static str {
         RunResult::Pass => "pass",
         RunResult::Fail => "fail",
         RunResult::Timeout => "timeout",
+        RunResult::Unready => "unready",
     }
 }
 
@@ -214,6 +219,7 @@ pub(crate) fn parse_run_result(name: &str) -> Result<RunResult, Error> {
         "pass" => RunResult::Pass,
         "fail" => RunResult::Fail,
         "timeout" => RunResult::Timeout,
+        "unready" => RunResult::Unready,
         other => return Err(corrupt("verdict result", other)),
     })
 }
@@ -364,6 +370,7 @@ mod tests {
             ParkReason::Paused,
             ParkReason::Killed,
             ParkReason::DailyCap,
+            ParkReason::Unready,
         ]
         .into_iter()
         .flat_map(|reason| {
@@ -398,6 +405,7 @@ mod tests {
             Reason::Identity,
             Reason::Stale,
             Reason::CensusDrop,
+            Reason::ResourceUnready,
         ]
         .map(State::NeedsYou);
         let states = [
@@ -442,7 +450,12 @@ mod tests {
         for mode in [SpawnMode::Fresh, SpawnMode::Resume, SpawnMode::Reset] {
             assert_eq!(parse_spawn_mode(spawn_mode(mode)).unwrap(), mode);
         }
-        for result in [RunResult::Pass, RunResult::Fail, RunResult::Timeout] {
+        for result in [
+            RunResult::Pass,
+            RunResult::Fail,
+            RunResult::Timeout,
+            RunResult::Unready,
+        ] {
             assert_eq!(parse_run_result(run_result(result)).unwrap(), result);
         }
         for e in [

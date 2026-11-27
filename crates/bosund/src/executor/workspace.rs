@@ -1273,6 +1273,8 @@ impl Workspace {
             cwd: dir.to_owned(),
             timeout: self.timeout,
             limits: Limits::default(),
+            // A setup command has no not-ready outcome: anything but a pass fails it.
+            unready_exit: None,
         };
         // The child is recorded on the worktree's row while it runs (E3): a daemon that dies
         // meanwhile leaves it to the next one's sweep.
@@ -1317,7 +1319,8 @@ impl Workspace {
             .map_err(|e| failed(format!("cannot run: {e}"), String::new()))?;
         match ran.outcome {
             Outcome::Pass => Ok(()),
-            Outcome::Fail => Err(failed(
+            // `Unready` cannot happen without `unready_exit`; it would be a failure.
+            Outcome::Fail | Outcome::Unready => Err(failed(
                 ran.exit.code.map_or_else(
                     || "was ended by a signal".to_owned(),
                     |c| format!("exited {c}"),

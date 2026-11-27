@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE item SET\n             state = ?, park_reason = ?, park_until_ms = ?, park_next = ?, outcome = ?,\n             reason = ?, attempt_number = ?, seq = ?, attempts = ?, spawns = ?, runs = ?,\n             failed = ?, uncounted = ?, conflicts = ?, unready = ?, boot = ?, updated_ms = ?\n         WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 18
+    },
+    "nullable": []
+  },
+  "hash": "80f5f41f02249e76128b58bd58fe286fde507f32912f40f7f81df28edf1187d6"
+}

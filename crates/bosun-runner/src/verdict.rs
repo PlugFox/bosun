@@ -78,6 +78,10 @@ pub struct VerdictSpec {
     pub timeout: Duration,
     /// The bounds of the captured output.
     pub limits: Limits,
+    /// The repository's not-ready exit code (`repo.<name>.verdict.unready_exit`, #204): a shell
+    /// that exits by itself with exactly this code is [`Outcome::Unready`], not a failure.
+    /// `None` (the default) makes every non-zero code a failure.
+    pub unready_exit: Option<u8>,
 }
 
 /// The outcome of one verdict run.
@@ -85,10 +89,15 @@ pub struct VerdictSpec {
 pub enum Outcome {
     /// The command exited 0.
     Pass,
-    /// The command exited non-zero, or was ended by a signal.
+    /// The command exited non-zero (other than [`VerdictSpec::unready_exit`]), or was ended by
+    /// a signal.
     Fail,
-    /// The timeout passed; the tree was killed.
+    /// The timeout passed; the tree was killed. Whatever code the tree would have exited with.
     Timeout,
+    /// The command exited by itself with [`VerdictSpec::unready_exit`]: a resource it needs
+    /// was not ready (#204). Neither a pass nor a failure: the attempt machine runs the verdict
+    /// again after a backoff, uncounted, up to a cap.
+    Unready,
 }
 
 impl Outcome {
@@ -99,6 +108,7 @@ impl Outcome {
             Self::Pass => "pass",
             Self::Fail => "fail",
             Self::Timeout => "timeout",
+            Self::Unready => "unready",
         }
     }
 }
@@ -158,7 +168,7 @@ impl StreamTail {
 /// The report of one verdict run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerdictRun {
-    /// Pass, fail or timeout.
+    /// Pass, fail, timeout or not ready.
     pub outcome: Outcome,
     /// How the shell exited; no code after a timeout or a signal.
     pub exit: ProcessExit,
@@ -371,7 +381,8 @@ async fn read(pipe: Option<&mut Output>, buf: &mut [u8]) -> io::Result<usize> {
 ///
 /// When the timeout passes, the whole tree is killed and the run is [`Outcome::Timeout`]. When
 /// the shell exits by itself, whatever it left running in its container is killed too, and the
-/// pipes are drained to their end: the verdict is the shell's exit status.
+/// pipes are drained to their end: the verdict is the shell's exit status ([`Outcome::Unready`]
+/// for [`VerdictSpec::unready_exit`], checked first).
 ///
 /// # Errors
 ///
@@ -420,7 +431,12 @@ pub async fn run(spawner: &dyn Spawner, spec: &VerdictSpec) -> io::Result<Verdic
     let (outcome, exit) = match ended {
         Pumped::Exited(status) => {
             let code = status?.code();
-            let outcome = if code == Some(0) {
+            let outcome = if spec
+                .unready_exit
+                .is_some_and(|u| code == Some(i32::from(u)))
+            {
+                Outcome::Unready
+            } else if code == Some(0) {
                 Outcome::Pass
             } else {
                 Outcome::Fail

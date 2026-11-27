@@ -762,6 +762,77 @@ fn a_resource_artifact_needs_a_local_path_a_device_path_and_a_digest_command() {
 }
 
 #[test]
+fn a_resource_probe_has_a_command_and_a_timeout() {
+    let config = parse(
+        "[resource.rig]\n\
+         kind = 'device'\n\
+         probe = 'adb get-state'\n\
+         probe_timeout = '5s'\n\
+         [resource.slow]\n\
+         kind = 'device'\n\
+         probe = 'true'\n\
+         probe_timeout = '60s'\n\
+         [resource.plain]\n\
+         kind = 'device'\n\
+         probe = 'true'\n\
+         [resource.none]\n\
+         kind = 'gpu'\n",
+        &Local,
+    )
+    .unwrap();
+    assert_eq!(config.notices, []);
+    let rig = &config.resources["rig"];
+    assert_eq!(rig.probe.as_deref(), Some("adb get-state"));
+    assert_eq!(rig.probe_timeout, Duration::from_secs(5));
+    assert_eq!(
+        config.resources["slow"].probe_timeout,
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        config.resources["plain"].probe_timeout,
+        Duration::from_secs(10)
+    );
+    assert_eq!(config.resources["none"].probe, None);
+
+    let both = parse(
+        "[resource.rig]\n\
+         kind = 'device'\n\
+         probe = 'adb get-state'\n\
+         [resource.rig.artifact.app]\n\
+         local = 'out/app'\n\
+         device = '/tmp/app'\n\
+         digest = 'true'\n",
+        &Local,
+    )
+    .unwrap();
+    let rig = &both.resources["rig"];
+    assert_eq!(rig.probe.as_deref(), Some("adb get-state"));
+    assert_eq!(rig.artifacts["app"].device, "/tmp/app");
+
+    let found = problems(
+        "[resource.a]\n\
+         kind = 'device'\n\
+         probe_timeout = '5s'\n\
+         [resource.b]\n\
+         kind = 'device'\n\
+         probe = ''\n\
+         [resource.c]\n\
+         kind = 'device'\n\
+         probe = 'true'\n\
+         probe_timeout = '2m'\n",
+    );
+    let expected = [
+        "line 3, column 1: `resource.a.probe_timeout` without `probe`",
+        "line 6, column 1: `resource.b.probe` is empty",
+        "line 10, column 1: `resource.c.probe_timeout` is 120s",
+    ];
+    assert_eq!(found.len(), expected.len(), "{found:#?}");
+    for (found, expected) in found.iter().zip(expected) {
+        assert!(found.starts_with(expected), "{found:?} is not {expected:?}");
+    }
+}
+
+#[test]
 fn a_worktree_root_inside_the_repository_is_refused() {
     // The repository is `git/bosun`; on Windows the root is matched whatever its case.
     let inside = if cfg!(windows) {

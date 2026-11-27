@@ -36,11 +36,16 @@
 //!   `lease.release` under the operator token): it polls its request
 //!   ([`Leases::acquire_command`]) instead of awaiting it, its wait goes to the store of the
 //!   identity it names with no item, and its lease and request end with its process.
+//! - A resource with a `probe` is probed before each claim of a card that needs it (#8): the
+//!   manager keeps the health of each instance as each identity probed it
+//!   ([`crate::health`]), in memory, under its lock. It is not journalled: a restarted daemon
+//!   probes again before its first claim.
 
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use bosun_api::rpc::{ErrorObject, code};
 use bosun_api::{AcquireResult, Method, ReleaseResult, WaitingFor, method};
@@ -54,6 +59,7 @@ use tokio::sync::oneshot;
 
 use crate::api::{call, failed};
 use crate::executor::now_ms;
+use crate::health::{Check, Health, Key, Recorded, Streak};
 use crate::state::{Served, State};
 
 /// The lease journal of the daemon whose operator token is `operator_file` (E25): the token's
@@ -150,6 +156,8 @@ struct Inner {
     model: bosun_core::Leases<Holder>,
     granted: Vec<Entry>,
     waiting: Vec<Waiter>,
+    /// The probed instances' health, by instance and identity (#2: each identity its own).
+    health: Health,
 }
 
 /// The lease manager of one daemon.
@@ -177,6 +185,19 @@ struct Instance {
     capacity: usize,
     /// The identity or repository it is of; `None` for the machine scope.
     of: Option<String>,
+    /// `[resource.<name>] probe` and `probe_timeout`.
+    probe: Option<(String, Duration)>,
+}
+
+/// A probed resource instance a card would lease ([`Leases::probed`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Probed {
+    /// The instance: `<name>`, `<name>/<identity>` or `<name>/<repo>`.
+    pub(crate) instance: String,
+    /// Its probe command.
+    pub(crate) command: String,
+    /// How long the probe may run.
+    pub(crate) timeout: Duration,
 }
 
 /// The resource instances one identity can lease and who holds them, as it may see them
@@ -283,6 +304,10 @@ impl Leases {
                     kind: resource.kind.clone(),
                     capacity,
                     of: suffix.cloned(),
+                    probe: resource
+                        .probe
+                        .clone()
+                        .map(|command| (command, resource.probe_timeout)),
                 });
                 instances.push(bosun_core::Resource::new(
                     instance,
@@ -298,6 +323,7 @@ impl Leases {
                 model,
                 granted: Vec::new(),
                 waiting: Vec::new(),
+                health: Health::default(),
             }),
             scopes,
             instances: table,
@@ -316,6 +342,7 @@ impl Leases {
                 model: bosun_core::Leases::new(Vec::new()).expect("an empty table is valid"),
                 granted: Vec::new(),
                 waiting: Vec::new(),
+                health: Health::default(),
             }),
             scopes: std::collections::BTreeMap::new(),
             instances: Vec::new(),
@@ -441,19 +468,87 @@ impl Leases {
 
     /// The instances `request` names, in the global order.
     fn instances(&self, request: &Request) -> Result<Vec<String>, String> {
+        self.instances_of(&request.names, &request.repo, &request.identity)
+    }
+
+    /// The instances the plain `names` resolve to for `repo` and `identity`, in the global
+    /// order.
+    fn instances_of(
+        &self,
+        names: &[String],
+        repo: &str,
+        identity: &str,
+    ) -> Result<Vec<String>, String> {
         let mut out = BTreeSet::new();
-        for name in &request.names {
+        for name in names {
             let scope = self
                 .scopes
                 .get(name)
                 .ok_or_else(|| format!("unknown resource `{name}`"))?;
             out.insert(match scope {
                 Scope::Machine => name.clone(),
-                Scope::Identity => format!("{name}/{}", request.identity),
-                Scope::Repository => format!("{name}/{}", request.repo),
+                Scope::Identity => format!("{name}/{identity}"),
+                Scope::Repository => format!("{name}/{repo}"),
             });
         }
         Ok(out.into_iter().collect())
+    }
+
+    /// Of the instances the plain `names` resolve to for `repo` and `identity`, those with a
+    /// probe, in the global order. A name no `[resource.<name>]` configures is left out: lint
+    /// refuses it, and the claim's request says so.
+    pub(crate) fn probed(&self, names: &[String], repo: &str, identity: &str) -> Vec<Probed> {
+        let known: Vec<String> = names
+            .iter()
+            .filter(|n| self.scopes.contains_key(*n))
+            .cloned()
+            .collect();
+        self.instances_of(&known, repo, identity)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| {
+                let instance = self.instances.iter().find(|i| i.name == name)?;
+                let (command, timeout) = instance.probe.clone()?;
+                Some(Probed {
+                    instance: name,
+                    command,
+                    timeout,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether `identity`'s probe of `instance` is to run at `now_ms` ([`Health::begin`]),
+    /// under the lock: a due probe of a failing streak has its next time moved first, so two
+    /// loops of one identity never run it at once.
+    pub(crate) fn probe_begin(&self, instance: &str, identity: &str, now_ms: i64) -> Check {
+        self.lock()
+            .health
+            .begin(&Key::new(instance, identity), now_ms)
+    }
+
+    /// Records the result of `identity`'s probe of `instance` ([`Health::record`]).
+    pub(crate) fn probe_record(
+        &self,
+        instance: &str,
+        identity: &str,
+        now_ms: i64,
+        result: Result<(), String>,
+    ) -> Recorded {
+        self.lock()
+            .health
+            .record(&Key::new(instance, identity), now_ms, result)
+    }
+
+    /// Whether `identity`'s failing streak of `instance` is to be told now: once per streak.
+    pub(crate) fn probe_tell(&self, instance: &str, identity: &str) -> bool {
+        self.lock().health.tell(&Key::new(instance, identity))
+    }
+
+    /// The failing streaks of `identity`'s probes, by instance; never another identity's.
+    #[allow(dead_code, reason = "#221 shows them in the API")]
+    pub(crate) fn failing_of(&self, identity: &str) -> Vec<(String, Streak)> {
+        self.lock().health.failing_of(identity)
     }
 
     /// Files `request` and resolves when it is granted. Dropping the future withdraws it.

@@ -35,7 +35,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The events a channel can get.
-pub const EVENTS: &[&str] = &["needs_you", "repo_paused", "ready_drained"];
+pub const EVENTS: &[&str] = &[
+    "needs_you",
+    "repo_paused",
+    "ready_drained",
+    "resource_unhealthy",
+];
 
 /// Params of `notify.channel.add`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

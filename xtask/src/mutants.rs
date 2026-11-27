@@ -3790,6 +3790,46 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_skip_probe",
+        issue: 205,
+        breaks: "the loop claims a card without probing what it needs",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::probes::a_failing_probe_keeps_its_card_ready_and_lets_the_next_card_run",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_probe_holds_the_repository",
+        issue: 205,
+        breaks: "a failing probe ends the poll, so no other card is claimed",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::probes::a_failing_probe_keeps_its_card_ready_and_lets_the_next_card_run",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_leases_probe_no_backoff",
+        issue: 205,
+        breaks: "a failing resource is probed again at every poll",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::probes::a_failing_probe_keeps_its_card_ready_and_lets_the_next_card_run",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_probe_told_every_time",
+        issue: 205,
+        breaks: "a failing probe is told at every check, not once per streak",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::probes::a_failing_probe_keeps_its_card_ready_and_lets_the_next_card_run",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

@@ -248,6 +248,23 @@ pub enum EventBody {
         /// The window after a spawn within which a crash counts, in ms.
         within_ms: u64,
     },
+    /// A resource's probe (#8), run before the claim of `item`, which needs it: a failing
+    /// streak's start (`healthy: false`, once per streak; the card waits in Ready, no session
+    /// spent), or its end (`healthy: true`). Only the identity that ran the probe gets it (#2).
+    ResourceProbe {
+        /// The repository whose loop ran the probe.
+        repo: String,
+        /// The resource instance: `<name>`, `<name>/<identity>` or `<name>/<repo>`.
+        resource: String,
+        /// The card the probe ran for.
+        item: String,
+        /// Whether the probe passed.
+        healthy: bool,
+        /// Of a failure: `exit <code>`, `timeout after <n>s` or `cannot start: <error>`, then
+        /// the probe's last line, redacted and at most 200 characters.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     /// A budget cap was reached (#7, #67): an item's eqv or wall-clock cap (the item is killed
     /// and goes to Needs you), or the identity's daily eqv cap (the queue parks until
     /// `until_ms`, local midnight).
@@ -294,6 +311,7 @@ impl EventBody {
         "board_sync_error",
         "control_changed",
         "fast_deaths",
+        "resource_probe",
         "budget_exceeded",
         "ingest_progress",
         "ingest_pass",
@@ -318,6 +336,7 @@ impl EventBody {
             Self::BoardSyncError { .. } => "board_sync_error",
             Self::ControlChanged { .. } => "control_changed",
             Self::FastDeaths { .. } => "fast_deaths",
+            Self::ResourceProbe { .. } => "resource_probe",
             Self::BudgetExceeded { .. } => "budget_exceeded",
             Self::IngestProgress { .. } => "ingest_progress",
             Self::IngestPass { .. } => "ingest_pass",

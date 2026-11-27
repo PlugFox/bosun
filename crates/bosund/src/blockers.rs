@@ -4,6 +4,9 @@
 //! list stands until the next plan, also while an item is in flight. `status.overview`,
 //! `item.get`, `queue.get` and the blocker's Needs-you comment read it. A repository whose
 //! loop never planned has no entry.
+//!
+//! Beside it, per repository, the Ready cards that wait on a failing resource probe (#8): the
+//! loop sets that list after every plan that reached a claim, empty when none waits.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
@@ -19,6 +22,18 @@ use crate::state::{Served, State};
 #[derive(Debug, Default)]
 pub(crate) struct Blockers {
     inner: Mutex<BTreeMap<String, Vec<Blocked>>>,
+    /// The cards that wait on a failing probe, by repository.
+    probing: Mutex<BTreeMap<String, Vec<ProbeWait>>>,
+}
+
+/// A Ready card that waits on a failing resource probe (#8): not claimed, no session spent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeWait {
+    pub(crate) item: ItemId,
+    /// The first failing instance of those it would lease.
+    pub(crate) resource: String,
+    /// That instance's failing streak, as the card's identity probed it.
+    pub(crate) streak: crate::health::Streak,
 }
 
 impl Blockers {
@@ -26,6 +41,19 @@ impl Blockers {
     pub(crate) fn set(&self, repo: &str, list: Vec<Blocked>) {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         inner.insert(repo.to_owned(), list);
+    }
+
+    /// Replaces the list of `repo`'s cards that wait on a failing probe.
+    pub(crate) fn set_probing(&self, repo: &str, list: Vec<ProbeWait>) {
+        let mut probing = self.probing.lock().unwrap_or_else(PoisonError::into_inner);
+        probing.insert(repo.to_owned(), list);
+    }
+
+    /// The cards of `repo` that wait on a failing probe, in board order.
+    #[cfg_attr(not(test), allow(dead_code, reason = "#221 shows them in the API"))]
+    pub(crate) fn probing_of(&self, repo: &str) -> Vec<ProbeWait> {
+        let probing = self.probing.lock().unwrap_or_else(PoisonError::into_inner);
+        probing.get(repo).cloned().unwrap_or_default()
     }
 
     /// The waiting cards of `repo`, in board order.

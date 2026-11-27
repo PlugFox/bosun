@@ -48,6 +48,7 @@ mod leases;
 mod lfs;
 mod moved;
 mod notify;
+mod probes;
 mod recovery;
 mod refusals;
 mod removal;

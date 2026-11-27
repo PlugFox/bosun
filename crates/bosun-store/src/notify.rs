@@ -30,7 +30,7 @@ use crate::read::Reader;
 pub struct NewNotice {
     /// The event's dedup key: a second notice with it queues nothing.
     pub key: String,
-    /// `needs_you`, `repo_paused` or `ready_drained`.
+    /// `needs_you`, `repo_paused`, `ready_drained` or `resource_unhealthy`.
     pub event: String,
     /// The repository's configuration name.
     pub repo: String,

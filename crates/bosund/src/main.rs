@@ -58,6 +58,7 @@ mod control;
 mod doctor;
 mod events;
 mod executor;
+mod health;
 mod item;
 mod leases;
 mod listen;

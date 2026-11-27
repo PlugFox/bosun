@@ -140,6 +140,7 @@ mod claim;
 mod commands;
 mod forge;
 mod git;
+mod health;
 mod hold;
 mod identity;
 mod landing;
@@ -599,6 +600,8 @@ struct Linted {
     claimable: bool,
     findings: Vec<String>,
     blockers: Vec<bosun_queue::ItemId>,
+    /// The contract's `needs`: what the probes before a claim are of (#8).
+    needs: Vec<String>,
 }
 
 /// The loop of one repository.
@@ -2150,6 +2153,10 @@ impl Loop {
             self.bounce(&item, &Event::Cycle).await;
         }
         let Some(next) = plan.claim.first() else {
+            self.shared
+                .deps
+                .blockers
+                .set_probing(&repo_name, Vec::new());
             if self.gates(now).hold(&repo_name, now).is_none() {
                 self.ready_drained().await;
             }
@@ -2175,6 +2182,59 @@ impl Loop {
             Ok(()) if cfg!(mutant_loop_refusal_kept_after_a_pass) => {}
             Ok(()) => self.refused.clear(),
         }
+        // The probes of what the card would lease (#8): a failing one keeps it in Ready, and
+        // the next claimable card of a new plan is tried the same way.
+        let (mut next, mut card) = (next.clone(), card);
+        let mut probing = Vec::new();
+        // Mutant (`mutant_loop_skip_probe`): the loop claims without probing.
+        while !cfg!(mutant_loop_skip_probe) {
+            let needs = self
+                .lints
+                .get(&card.id.0)
+                .map_or_else(Vec::new, |l| l.needs.clone());
+            let names = probe_names(&needs, repo);
+            let Some(failing) = health::check(&self.shared, repo, identity, &names, &next).await
+            else {
+                break;
+            };
+            health::tell(&self.shared, repo, &next, &failing).await;
+            probing.push(crate::blockers::ProbeWait {
+                item: next.clone(),
+                resource: failing.resource,
+                streak: failing.streak,
+            });
+            if let Some(waits) = cards.iter_mut().find(|c| c.item == next) {
+                waits.ready = false;
+            }
+            // Mutant (`mutant_loop_probe_holds_the_repository`): the poll ends at the first
+            // failing probe, so no other card is claimed while it fails.
+            let again = if cfg!(mutant_loop_probe_holds_the_repository) {
+                None
+            } else {
+                let plan = bosun_core::plan(&cards, &satisfied, &self.gates(now), now);
+                plan.claim.first().and_then(|n| {
+                    changes
+                        .cards
+                        .iter()
+                        .find(|c| item_id(&repo_name, c.id) == *n)
+                        .map(|c| (n.clone(), c))
+                })
+            };
+            let Some((n, c)) = again else {
+                // Not drained: the cards that wait on a probe are still Ready.
+                self.wait_on_probes(repo, &changes.cards, &stored, probing)
+                    .await;
+                return;
+            };
+            (next, card) = (n, c);
+        }
+        if !self
+            .wait_on_probes(repo, &changes.cards, &stored, probing)
+            .await
+        {
+            return;
+        }
+        let next = &next;
         if !self.register(repo, card, next).await {
             return;
         }
@@ -2230,6 +2290,33 @@ impl Loop {
         }
     }
 
+    /// Publishes `probing`, the cards of the repository that wait on a failing probe, and
+    /// gives each one not stored yet its row, so `item.get` answers for it; `false` when the
+    /// store refused (the loop halts).
+    async fn wait_on_probes(
+        &mut self,
+        repo: &Repo,
+        on_board: &[Card],
+        stored: &BTreeMap<ItemId, StoredItem>,
+        probing: Vec<crate::blockers::ProbeWait>,
+    ) -> bool {
+        let name = self.shared.options.repo.clone();
+        let items: Vec<ItemId> = probing.iter().map(|w| w.item.clone()).collect();
+        self.shared.deps.blockers.set_probing(&name, probing);
+        for id in &items {
+            if stored.contains_key(id) {
+                continue;
+            }
+            let Some(card) = on_board.iter().find(|c| item_id(&name, c.id) == *id) else {
+                continue;
+            };
+            if !self.register(repo, card, id).await {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Records the item of `card`; `false` when the store refused (the loop halts).
     async fn register(&mut self, repo: &Repo, card: &Card, id: &ItemId) -> bool {
         let write = Write::Item(NewItem {
@@ -2267,6 +2354,10 @@ impl Loop {
                 .contract
                 .as_ref()
                 .map_or_else(|| card.blocked_by.clone(), |c| card.blockers(c)),
+            needs: lint
+                .contract
+                .as_ref()
+                .map_or_else(Vec::new, |c| c.needs.clone()),
         };
         self.lints.insert(card.id.0, linted.clone());
         linted
@@ -2335,13 +2426,29 @@ pub(crate) fn lease_names(claimed: &Claimed, repo: &Repo) -> Vec<String> {
 /// What an item with `snapshot` leases in worktree mode (#8): its `needs`, plus the shared
 /// build's resource when `repo` has `worktree.shared_build` (E1); sorted, without duplicates.
 pub(crate) fn lease_names_of(snapshot: &bosun_queue::Snapshot, repo: &Repo) -> Vec<String> {
-    let mut names = snapshot.contract.needs.clone();
+    lease_names_for(&snapshot.contract.needs, repo)
+}
+
+/// What an item whose contract `needs` these leases in worktree mode (#8): `needs`, plus the
+/// shared build's resource when `repo` has `worktree.shared_build` (E1); sorted, without
+/// duplicates.
+pub(crate) fn lease_names_for(needs: &[String], repo: &Repo) -> Vec<String> {
+    let mut names = needs.to_vec();
     if let Some(build) = repo.worktree.as_ref().and_then(|w| w.shared_build.as_ref()) {
         names.push(build.resource.clone());
     }
     names.sort();
     names.dedup();
     names
+}
+
+/// What the probes before the claim of a card whose contract `needs` these are of (#8): what it
+/// would lease ([`lease_names_for`]); nothing outside worktree mode (E19).
+pub(crate) fn probe_names(needs: &[String], repo: &Repo) -> Vec<String> {
+    if repo.worktree.is_none() {
+        return Vec::new();
+    }
+    lease_names_for(needs, repo)
 }
 
 /// Holds the leases of `item` (#8) before one of its processes starts: resolves at once when

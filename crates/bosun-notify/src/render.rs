@@ -13,14 +13,16 @@ use std::fmt::Write as _;
 /// One queued notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
-    /// `needs_you`, `repo_paused` or `ready_drained`.
+    /// `needs_you`, `repo_paused`, `ready_drained` or `resource_unhealthy`.
     pub event: String,
     /// The repository's configuration name.
     pub repo: String,
     /// The item id (`demo#4`), for an event of an item.
     pub item: Option<String>,
     /// The event's numbers and words, as the daemon wrote them: `reason` and `attempt` of
-    /// `needs_you`; `sessions`, `within_s` and `item` of `repo_paused`.
+    /// `needs_you`; `sessions`, `within_s` and `item` of `repo_paused`; `resource` (the
+    /// instance) and `failure` (`exit <code>`, `timeout` or `cannot start`, never the probe's
+    /// output) of `resource_unhealthy`.
     pub facts: BTreeMap<String, String>,
 }
 
@@ -50,6 +52,11 @@ impl Notice {
                 self.facts.get("item").map_or(item, String::as_str),
             ),
             "ready_drained" => format!("repository {}: Ready drained after {item}", self.repo),
+            "resource_unhealthy" => format!(
+                "resource {} fails its probe ({}); {item} waits",
+                self.fact("resource"),
+                self.fact("failure"),
+            ),
             other => match &self.item {
                 Some(item) => format!("repository {}: {other} ({item})", self.repo),
                 None => format!("repository {}: {other}", self.repo),
@@ -167,6 +174,19 @@ mod tests {
         assert_eq!(
             render("a", &[drained], 3_500),
             "bosun a: repository demo: Ready drained after demo#7"
+        );
+        let unhealthy = Notice {
+            event: "resource_unhealthy".to_owned(),
+            repo: "demo".to_owned(),
+            item: Some("demo#4".to_owned()),
+            facts: BTreeMap::from([
+                ("resource".to_owned(), "rig".to_owned()),
+                ("failure".to_owned(), "exit 1".to_owned()),
+            ]),
+        };
+        assert_eq!(
+            render("a", &[unhealthy], 3_500),
+            "bosun a: resource rig fails its probe (exit 1); demo#4 waits"
         );
 
         let token = format!("ghp_{}", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");

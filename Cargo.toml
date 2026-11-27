@@ -587,6 +587,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_loop_failed_run_against_stale_copy_uncounted)",
   "cfg(mutant_core_stale_artifact_counts)",
   "cfg(mutant_config_artifact_digest_optional)",
+  # #205: a resource's probe before a claim.
+  "cfg(mutant_loop_skip_probe)",
+  "cfg(mutant_loop_probe_holds_the_repository)",
+  "cfg(mutant_leases_probe_no_backoff)",
+  "cfg(mutant_loop_probe_told_every_time)",
 ] }
 
 [workspace.lints.clippy]

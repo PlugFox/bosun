@@ -10,9 +10,10 @@
 //! ```
 //!
 //! - `add` adds a channel to the identity: its kind, the kind's non-secret parameters, the
-//!   events it gets (default all of `needs_you`, `repo_paused`, `ready_drained`) and the least
-//!   time between two of its messages (default 60 s). The daemon keeps the secret in the OS
-//!   credential store and the rest in the identity's database.
+//!   events it gets (default all of `needs_you`, `repo_paused`, `ready_drained`,
+//!   `resource_unhealthy`) and the least time between two of its messages (default 60 s). The
+//!   daemon keeps the secret in the OS credential store and the rest in the identity's
+//!   database.
 //! - `list` shows each live channel, its kind, parameters, events, gap, credential-store entry
 //!   and whether the entry is present; never a secret. Without `--identity`, every identity of
 //!   the configuration, each in a section of its own.

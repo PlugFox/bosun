@@ -12,8 +12,8 @@ use toml_edit::{Document, Item, TableLike};
 use crate::error::{Location, Notice, Problem};
 use crate::policy::{Census, Policy, relative_entry};
 use crate::{
-    ARTIFACT_TIMEOUT, Artifact, Budget, Daemon, Landing, LandingMode, McpServer, PullRequest,
-    Queue, Resource, Sweep, Verdict,
+    ARTIFACT_TIMEOUT, Artifact, Budget, Daemon, Landing, LandingMode, McpServer, PROBE_TIMEOUT,
+    PROBE_TIMEOUT_MAX, PullRequest, Queue, Resource, Sweep, Verdict,
 };
 
 /// Sections of #4 that this version accepts and does not read.
@@ -959,7 +959,10 @@ impl Reader<'_> {
             capacity: 1,
             scope: Scope::Machine,
             artifacts: BTreeMap::new(),
+            probe: None,
+            probe_timeout: PROBE_TIMEOUT,
         };
+        let mut probe_timeout_at = None;
         for (key, item) in table.iter() {
             let key_at = self.key_at(table, key, item);
             let what = format!("{path}.{key}");
@@ -977,6 +980,29 @@ impl Reader<'_> {
                     set(&mut resource.capacity, capacity);
                 }
                 "scope" => set(&mut resource.scope, self.scope(item, &what)),
+                "probe" => {
+                    resource.probe = self.command(item, &what);
+                    if resource.probe.is_none() && item.is_str() {
+                        self.problem(key_at, format!("`{what}` is empty"));
+                    }
+                }
+                "probe_timeout" => {
+                    probe_timeout_at = Some(key_at);
+                    if let Some(timeout) = self.duration(item, &what) {
+                        if timeout > PROBE_TIMEOUT_MAX {
+                            self.problem(
+                                key_at,
+                                format!(
+                                    "`{what}` is {}s; a probe runs inside the loop's poll, so it                                      is at most {}s",
+                                    timeout.as_secs(),
+                                    PROBE_TIMEOUT_MAX.as_secs()
+                                ),
+                            );
+                        } else {
+                            resource.probe_timeout = timeout;
+                        }
+                    }
+                }
                 "artifact" => {
                     for (name, item, at) in self.named_tables(item, &what, key_at) {
                         if let Some(artifact) = self.artifact(&format!("{what}.{name}"), item, at) {
@@ -988,10 +1014,15 @@ impl Reader<'_> {
                     key_at,
                     format!(
                         "unknown key `{path}.{other}`; a resource has `kind`, `capacity`, \
-                         `scope` and `artifact`"
+                         `scope`, `probe`, `probe_timeout` and `artifact`"
                     ),
                 ),
             }
+        }
+        if let Some(at) = probe_timeout_at
+            && table.get("probe").is_none()
+        {
+            self.problem(at, format!("`{path}.probe_timeout` without `probe`"));
         }
         if kind.is_none() && table.get("kind").is_none() {
             self.problem(at, format!("`{path}` has no `kind`"));

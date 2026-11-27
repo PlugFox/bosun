@@ -92,6 +92,8 @@
 //!
 //! [resource.phone]              # a synthetic device
 //! kind = "device"
+//! probe = "adb get-state"       # run before each claim of a card that needs it; 0 is healthy
+//! probe_timeout = "10s"         # the probe's; default 10s, at most 60s
 //!
 //! [resource.phone.artifact.app] # a file the verdict builds and pushes to the device (#44 C)
 //! local = "out/app"             # absolute, or relative to the verdict's working directory
@@ -199,6 +201,20 @@
 //!     copy is Needs you with `resource_unready`, a fail against one is a counted failure with
 //!     the mismatch noted, and a device that does not answer is not ready (#204). Any other key
 //!     (`push` among them) is refused.
+//!   - `probe` (#8): a shell command that says whether the resource answers (a device attached,
+//!     a service up, a network reachable), not only who holds it. It runs before each claim of a
+//!     card that needs the resource, through the verdict's shell, in the identity's agent
+//!     environment and in the identity's work directory, never the checkout. Exit 0 is healthy;
+//!     any other exit, a timeout or a failure to start is unhealthy: the card stays in Ready with
+//!     nothing written to it and no session spent, the next card that does not need the
+//!     resource is claimed meanwhile, the failure is told once (an event and a
+//!     `resource_unhealthy` notice), and the probe runs again after a backoff doubling from 30 s
+//!     to 10 min. Each identity probes for itself and sees only its own probe's result, even of a
+//!     machine-scope resource. Two loops may run a probe at the same moment, so it must be
+//!     harmless to run twice at once. The health is kept in memory: a daemon restarted during an
+//!     outage probes again before its first claim and tells the outage once more. `probe_timeout`
+//!     (default `10s`, at most `60s`: a probe runs inside the loop's poll) bounds it; it is
+//!     refused without `probe`, and an empty `probe` is refused.
 //! - `notify`, and every other key of #4 that a later stage reads (`repo.<name>.report`,
 //!   `daemon.http_port`, ...), is accepted and ignored with a [`Notice`]. Any other section is
 //!   an error.
@@ -430,7 +446,19 @@ pub struct Resource {
     /// device), by artifact name. After each verdict run that leases the resource, the daemon
     /// checks that the device's copy is the build the run made. Default: none.
     pub artifacts: BTreeMap<String, Artifact>,
+    /// `probe` (#8): the shell command run before each claim of a card that needs the resource;
+    /// exit 0 is healthy. Default: none, the resource is never probed.
+    pub probe: Option<String>,
+    /// `probe_timeout`: how long the probe may run. Default [`PROBE_TIMEOUT`], at most
+    /// [`PROBE_TIMEOUT_MAX`].
+    pub probe_timeout: Duration,
 }
+
+/// `[resource.<name>] probe_timeout`'s default.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The longest `[resource.<name>] probe_timeout`: a probe runs inside a repository's poll.
+pub const PROBE_TIMEOUT_MAX: Duration = Duration::from_secs(60);
 
 /// `[resource.<name>.artifact.<artifact>]` (#44 C): a file the verdict builds and pushes to a
 /// device. The daemon never pushes it; it asks the device for its copy's digest after the run.

@@ -492,7 +492,10 @@ async fn annotations_are_stored_per_repository_and_read_back_by_time() {
             note(T0 + 3, "c:\\demo\\nowhere", "unknown"),
         ])
         .await;
-    assert!(refused(&unknown).contains("unknown repository"), "{unknown:?}");
+    assert!(
+        refused(&unknown).contains("unknown repository"),
+        "{unknown:?}"
+    );
 
     let read = store.reader().annotations(T0, T0 + 9).await.unwrap();
     let got: Vec<(i64, Option<&str>, &str)> = read

@@ -630,6 +630,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_heat_followup_unscaled)",
   "cfg(mutant_heat_flag_never)",
   "cfg(mutant_heat_list_drops_outcome)",
+  # #11 D (+ #44 D, #210): heat's loop detectors.
+  "cfg(mutant_heat_f1_threshold_inf)",
+  "cfg(mutant_heat_f2_threshold_inf)",
+  "cfg(mutant_heat_r1_threshold_inf)",
+  "cfg(mutant_heat_v1_threshold_inf)",
+  "cfg(mutant_heat_denial_target_unredacted)",
 ] }
 
 [workspace.lints.clippy]

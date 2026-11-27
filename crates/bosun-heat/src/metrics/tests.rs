@@ -96,7 +96,7 @@ pub(crate) fn call(
     }
 }
 
-fn transition(
+pub(crate) fn transition(
     id: &str,
     seq: u32,
     from: &str,
@@ -186,6 +186,7 @@ pub(crate) fn closed(
         flaky_tests: Vec::new(),
         agent_calls: Vec::new(),
         denials: Vec::new(),
+        verdicts: Vec::new(),
     }
 }
 

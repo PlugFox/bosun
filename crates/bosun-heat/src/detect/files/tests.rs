@@ -320,8 +320,10 @@ fn a_window_below_the_minimum_sample_fires_nothing() {
         closed_items: 4,
         run_sessions: 9,
     };
+    // The file detectors first; the loop detectors (`detect::loops`) are silent too.
+    assert_eq!(detection.insufficient.len(), 8, "{detection:#?}");
     assert_eq!(
-        detection.insufficient,
+        detection.insufficient[..3],
         [
             insufficient(FILE_READ_ACROSS_RUNS.id),
             insufficient(FILE_REREAD_IN_SESSION.id),
@@ -341,7 +343,7 @@ fn a_window_below_the_minimum_sample_fires_nothing() {
             .iter()
             .all(|i| i.detector != FILE_REREAD_IN_SESSION.id)
     );
-    assert_eq!(detection.insufficient.len(), 2);
+    assert_eq!(detection.insufficient.len(), 7);
 
     // One more run session reaches the minimum.
     rows.run("s10");

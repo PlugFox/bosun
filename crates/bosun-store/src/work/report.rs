@@ -4,7 +4,9 @@
 
 use bosun_core::{Commit, ItemId};
 
-use super::read::{AgentCallRow, AttemptRow, DenialRow, RunRow, StoredItem, TransitionRow};
+use super::read::{
+    AgentCallRow, AttemptRow, DenialRow, RunRow, StoredItem, TransitionRow, VerdictRow,
+};
 use crate::error::{Error, from_db};
 use crate::read::Reader;
 
@@ -27,6 +29,8 @@ pub struct ItemHistory {
     pub agent_calls: Vec<AgentCallRow>,
     /// The tool calls refused during its attempts, by attempt, session and position.
     pub denials: Vec<DenialRow>,
+    /// Its verdict runs, by attempt and run.
+    pub verdicts: Vec<VerdictRow>,
 }
 
 /// A stored commit that a session's commit range lists ([`crate::Write::RunCommits`]): the
@@ -83,6 +87,7 @@ impl Reader {
                 flaky_tests: self.flaky_tests(&id).await?,
                 agent_calls: self.agent_calls(&id).await?,
                 denials: self.denials(&id).await?,
+                verdicts: self.verdict_runs(&id).await?,
             });
         }
         Ok(out)

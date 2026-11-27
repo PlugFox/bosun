@@ -10,7 +10,8 @@
 //! - The trigger, the target and the evidence are exact (counts and bytes);
 //!   [`Finding::impact_eqv_estimate`] is an estimate, for ranking and display only.
 //!
-//! The file detectors (D1, D2, D3) are in [`files`].
+//! The file detectors (D1, D2, D3) are in [`files`]; the loop detectors (F1, F2, R1, V1, B1:
+//! flaky tests, refused calls, slow verdicts, budget stops) in [`loops`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,6 +22,7 @@ use crate::exact::Scope;
 use crate::metrics::{Inputs, closed_items, join};
 
 mod files;
+mod loops;
 
 /// What a detector is, apart from its numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,11 +67,63 @@ pub const UNCHANGED_FILE_READ_BYTES: Detector = Detector {
     unit: "bytes_per_closed_item",
 };
 
-/// Every detector, in the order of their findings.
-const DETECTORS: [Detector; 3] = [
+/// F1 (#44 D): one test flaky in several attempts: the tests share state.
+pub const FLAKY_TEST_ACROSS_ATTEMPTS: Detector = Detector {
+    id: "flaky_test_across_attempts",
+    version: 1,
+    remedy: "shared_test_state",
+    metric: "flaky_attempts",
+    unit: "attempts",
+};
+
+/// F2 (#44 D): several flaky tests under one module prefix in one attempt (an approximation of
+/// one crate): the tests share state.
+pub const FLAKY_TESTS_IN_ONE_MODULE: Detector = Detector {
+    id: "flaky_tests_in_one_module",
+    version: 1,
+    remedy: "shared_test_state",
+    metric: "flaky_tests_in_one_attempt",
+    unit: "tests",
+};
+
+/// R1 (#210): one tool and target refused by the permission lists across items: allow it or
+/// give it a script.
+pub const DENIED_TARGET_ACROSS_ITEMS: Detector = Detector {
+    id: "denied_target_across_items",
+    version: 1,
+    remedy: "allow_or_script",
+    metric: "denials",
+    unit: "denials",
+};
+
+/// V1 (#210): verdict runs of one command slower than a threshold or timed out.
+pub const SLOW_VERDICT: Detector = Detector {
+    id: "slow_verdict",
+    version: 1,
+    remedy: "faster_verdict",
+    metric: "slow_verdict_runs",
+    unit: "runs",
+};
+
+/// B1 (#210): items stopped by their budget cap (a detector of its own, for its own metric).
+pub const BUDGET_STOPS: Detector = Detector {
+    id: "budget_stops",
+    version: 1,
+    remedy: "faster_verdict",
+    metric: "budget_stops",
+    unit: "items",
+};
+
+/// Every detector, in the order of their findings: the byte detectors first.
+const DETECTORS: [Detector; 8] = [
     FILE_READ_ACROSS_RUNS,
     FILE_REREAD_IN_SESSION,
     UNCHANGED_FILE_READ_BYTES,
+    FLAKY_TEST_ACROSS_ATTEMPTS,
+    FLAKY_TESTS_IN_ONE_MODULE,
+    DENIED_TARGET_ACROSS_ITEMS,
+    SLOW_VERDICT,
+    BUDGET_STOPS,
 ];
 
 /// The thresholds of the detectors and the minimum sample. Thresholds from the configuration
@@ -82,6 +136,20 @@ pub struct Thresholds {
     pub d2_reads: u64,
     /// D3: the bytes of an unchanged file's single-file reads per closed item.
     pub d3_bytes_per_item: u64,
+    /// F1: the distinct (item, attempt) pairs one test was flaky in.
+    pub f1_attempts: u64,
+    /// F2: the flaky tests of one attempt under one module prefix.
+    pub f2_tests: u64,
+    /// R1: the permission denials of one tool and target, ...
+    pub r1_denials: u64,
+    /// ... on at least this many items.
+    pub r1_items: u64,
+    /// V1: a verdict run longer than this is slow.
+    pub v1_slow_ms: u64,
+    /// V1: the slow or timed-out runs of one verdict command.
+    pub v1_runs: u64,
+    /// B1: the items stopped by their budget cap.
+    pub b1_items: u64,
     /// The minimum sample: a group with fewer closed items than this and fewer run sessions
     /// than [`Self::min_run_sessions`] is insufficient.
     pub min_closed_items: u64,
@@ -96,6 +164,13 @@ impl Default for Thresholds {
             d1_sessions: 5,
             d2_reads: 4,
             d3_bytes_per_item: 32 * 1024,
+            f1_attempts: 2,
+            f2_tests: 3,
+            r1_denials: 5,
+            r1_items: 2,
+            v1_slow_ms: 600_000,
+            v1_runs: 2,
+            b1_items: 2,
             min_closed_items: 5,
             min_run_sessions: 10,
             disabled: Vec::new(),
@@ -107,6 +182,82 @@ impl Default for Thresholds {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Evidence {
     File(FileEvidence),
+    /// F1 and F2: the flaky tests per attempt.
+    Tests(TestEvidence),
+    /// R1: the permission denials per item.
+    Denials(DenialEvidence),
+    /// V1: the slow verdict runs.
+    Verdicts(VerdictEvidence),
+    /// B1: the items stopped by their budget.
+    Budget(BudgetEvidence),
+}
+
+/// The flaky tests a finding counted, per attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestEvidence {
+    /// How the tests were grouped: `Some("module_prefix")` for F2 (an approximation of a
+    /// crate), `None` for one test.
+    pub grouping: Option<&'static str>,
+    /// The attempts, by item and number, at most [`MAX_SESSIONS`].
+    pub attempts: Vec<TestAttempt>,
+    /// Every attempt, listed or not.
+    pub attempts_total: u64,
+}
+
+/// The flaky tests of one attempt a finding is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestAttempt {
+    pub item: String,
+    pub attempt: u32,
+    /// Sorted.
+    pub tests: Vec<String>,
+}
+
+/// The permission denials of one tool and target, per item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenialEvidence {
+    pub denials: u64,
+    /// Each item and its denials, by item, at most [`MAX_SESSIONS`].
+    pub items: Vec<(String, u64)>,
+    /// Every item, listed or not.
+    pub items_total: u64,
+}
+
+/// The slow or timed-out runs of one verdict command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerdictEvidence {
+    /// By item, attempt and run, at most [`MAX_SESSIONS`].
+    pub runs: Vec<SlowRun>,
+    /// Every run, listed or not.
+    pub runs_total: u64,
+}
+
+/// One slow or timed-out verdict run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlowRun {
+    pub item: String,
+    pub attempt: u32,
+    pub run: u32,
+    pub duration_ms: Option<u64>,
+    /// `pass`, `fail`, `timeout` or `unready`; `None` while it runs.
+    pub result: Option<&'static str>,
+}
+
+/// The items stopped by their budget cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetEvidence {
+    /// Sorted, at most [`MAX_SESSIONS`].
+    pub items: Vec<String>,
+    /// Every item, listed or not.
+    pub items_total: u64,
+}
+
+/// Adds `and N more <what>` to `lines` when `listed` is short of `total`.
+fn more(lines: &mut Vec<String>, total: u64, listed: usize, what: &str) {
+    let more = total.saturating_sub(listed as u64);
+    if more > 0 {
+        lines.push(format!("and {more} more {what}"));
+    }
 }
 
 /// The reads of one file a finding counted.
@@ -136,12 +287,78 @@ impl Evidence {
                     file.reads, file.result_bytes, file.sessions_total
                 )];
                 lines.extend(file.sessions.iter().map(|s| format!("session {s}")));
-                let more = file
-                    .sessions_total
-                    .saturating_sub(file.sessions.len() as u64);
-                if more > 0 {
-                    lines.push(format!("and {more} more sessions"));
+                more(
+                    &mut lines,
+                    file.sessions_total,
+                    file.sessions.len(),
+                    "sessions",
+                );
+                lines
+            }
+            Self::Tests(tests) => {
+                let mut lines = Vec::new();
+                if let Some(grouping) = tests.grouping {
+                    lines.push(format!(
+                        "grouping: {grouping} (an approximation of a crate)"
+                    ));
                 }
+                lines.push(format!("flaky in {} attempts", tests.attempts_total));
+                lines.extend(
+                    tests.attempts.iter().map(|a| {
+                        format!("{} attempt {}: {}", a.item, a.attempt, a.tests.join(", "))
+                    }),
+                );
+                more(
+                    &mut lines,
+                    tests.attempts_total,
+                    tests.attempts.len(),
+                    "attempts",
+                );
+                lines
+            }
+            Self::Denials(denials) => {
+                let mut lines = vec![format!(
+                    "{} permission denials on {} items",
+                    denials.denials, denials.items_total
+                )];
+                lines.extend(
+                    denials
+                        .items
+                        .iter()
+                        .map(|(item, n)| format!("{item}: {n} denials")),
+                );
+                more(
+                    &mut lines,
+                    denials.items_total,
+                    denials.items.len(),
+                    "items",
+                );
+                lines
+            }
+            Self::Verdicts(verdicts) => {
+                let mut lines = vec![format!("{} slow verdict runs", verdicts.runs_total)];
+                lines.extend(verdicts.runs.iter().map(|r| {
+                    let duration = r
+                        .duration_ms
+                        .map_or_else(|| "no duration".to_owned(), |ms| format!("{ms} ms"));
+                    format!(
+                        "{} attempt {} run {}: {duration}, {}",
+                        r.item,
+                        r.attempt,
+                        r.run,
+                        r.result.unwrap_or("no result")
+                    )
+                }));
+                more(&mut lines, verdicts.runs_total, verdicts.runs.len(), "runs");
+                lines
+            }
+            Self::Budget(budget) => {
+                let mut lines = vec![format!(
+                    "{} items stopped by their budget",
+                    budget.items_total
+                )];
+                lines.extend(budget.items.iter().map(|i| format!("item {i}")));
+                more(&mut lines, budget.items_total, budget.items.len(), "items");
                 lines
             }
         }
@@ -155,16 +372,18 @@ pub struct Finding {
     /// The repository's path key.
     pub repo: String,
     pub provider: String,
-    /// What the finding is about: `file` for the file detectors.
+    /// What the finding is about: `file` for the file detectors; `test`, `tool_target`,
+    /// `command` or `repo` for the loop detectors.
     pub subject_kind: &'static str,
-    /// A repository-relative path for a file.
+    /// A repository-relative path for a file; for a loop detector a test name or a
+    /// `<module>::` prefix, `<tool> <target>` or a verdict command (redacted), or `.`.
     pub subject: String,
     /// The metric, in the detector's unit: exact.
     pub value: u64,
     /// The threshold `value` reached.
     pub threshold: u64,
-    /// The value the remedy should bring the metric to or below: half the threshold, at
-    /// least 1.
+    /// The value the remedy should bring the metric to or below: for a file detector half the
+    /// threshold, at least 1; each loop detector's own.
     pub target: u64,
     /// The group's sample the value is over, in `sample_unit`.
     pub sample: u64,
@@ -203,6 +422,7 @@ struct Group<'a> {
     run_sessions: BTreeSet<&'a str>,
     closed_items: u64,
     files: files::FileReads<'a>,
+    loops: loops::LoopRows<'a>,
 }
 
 /// What a detector sees of one group.
@@ -212,6 +432,7 @@ pub(crate) struct Context<'a, 'b> {
     pub(crate) run_sessions: u64,
     pub(crate) closed_items: u64,
     pub(crate) files: &'b files::FileReads<'a>,
+    pub(crate) loops: &'b loops::LoopRows<'a>,
     /// The paths of the repository any call wrote in the window.
     pub(crate) written: &'b BTreeSet<&'a str>,
     pub(crate) scope: Scope<'b>,
@@ -296,6 +517,21 @@ fn gather<'a>(inputs: &Inputs<'a>, scope: Scope<'_>) -> Gathered<'a> {
             .or_default()
             .closed_items += 1;
     }
+    for history in inputs.histories {
+        let mut rows = loops::LoopRows::default();
+        let Some((repo, provider)) = rows.add(history, scope) else {
+            continue;
+        };
+        // A group only for an item with something to count: an item none of the loop
+        // detectors counts leaves the groups as the file detectors see them.
+        if !rows.is_empty() {
+            groups
+                .entry((repo, provider))
+                .or_default()
+                .loops
+                .merge(rows);
+        }
+    }
 
     (groups, written)
 }
@@ -340,13 +576,25 @@ pub(crate) fn value_of(
         run_sessions: group.run_sessions.len() as u64,
         closed_items: group.closed_items,
         files: &group.files,
+        loops: &group.loops,
         written: written.get(repo).unwrap_or(&none),
         scope,
         thresholds: &thresholds,
     };
+    let (value, sample) = if loops::is_loop(detector) {
+        (
+            loops::value(detector, &context, subject),
+            loops::sample(&context).0,
+        )
+    } else {
+        (
+            files::value(detector, &context, subject).unwrap_or(0),
+            files::sample(detector, &context).0,
+        )
+    };
     Some(Measure {
-        value: files::value(detector, &context, subject).unwrap_or(0),
-        sample: files::sample(detector, &context).0,
+        value,
+        sample,
         closed_items: context.closed_items,
         run_sessions: context.run_sessions,
     })
@@ -374,8 +622,8 @@ pub(crate) fn read_bytes(
 
 /// The findings of every enabled detector over `inputs` in `scope`, per repository and
 /// provider, and the detectors that stay silent below the minimum sample. Findings come in
-/// detector order (D1, D2, D3), each detector's ranked (see [`files`]); deterministic for
-/// equal input.
+/// detector order (D1, D2, D3, then the loop detectors, which have no bytes), each detector's
+/// ranked (see [`files`]; a loop finding by its value); deterministic for equal input.
 #[must_use]
 pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) -> Detection {
     let (groups, written) = gather(inputs, scope);
@@ -388,6 +636,7 @@ pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) ->
             run_sessions: group.run_sessions.len() as u64,
             closed_items: group.closed_items,
             files: &group.files,
+            loops: &group.loops,
             written: written.get(repo).unwrap_or(&none),
             scope,
             thresholds,
@@ -411,7 +660,11 @@ pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) ->
                 });
                 continue;
             }
-            detection.findings.extend(files::run(detector, &context));
+            if loops::is_loop(detector) {
+                detection.findings.extend(loops::run(detector, &context));
+            } else {
+                detection.findings.extend(files::run(detector, &context));
+            }
         }
     }
     let order = |f: &Finding| DETECTORS.iter().position(|d| *d == f.detector);

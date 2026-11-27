@@ -343,6 +343,7 @@ pub async fn item_row(
         flaky_tests: reader.flaky_tests(id).await?,
         agent_calls: reader.agent_calls(id).await?,
         denials: reader.denials(id).await?,
+        verdicts: reader.verdict_runs(id).await?,
     };
     let sessions: BTreeSet<SessionKey> = history
         .runs

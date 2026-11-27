@@ -110,9 +110,12 @@ pub(crate) fn run(detector: Detector, context: &Context<'_, '_>) -> Vec<Finding>
     }
 }
 
-/// What a detector's findings are ranked by, larger first: the value, but D3's bytes.
+/// What a detector's findings are ranked by, larger first: the value, but D3's bytes (a loop
+/// finding, which has no file evidence, by its value).
 pub(crate) fn rank(finding: &Finding) -> u64 {
-    let Evidence::File(evidence) = &finding.evidence;
+    let Evidence::File(evidence) = &finding.evidence else {
+        return finding.value;
+    };
     if finding.detector == UNCHANGED_FILE_READ_BYTES {
         // Mutant (`mutant_heat_d3_rank_by_opens`): unchanged files ranked by their reads.
         if cfg!(mutant_heat_d3_rank_by_opens) {

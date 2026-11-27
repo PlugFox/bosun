@@ -4126,6 +4126,54 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_f1_threshold_inf",
+        issue: 230,
+        breaks: "F1 never fires: a test flaky in two attempts is not named",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::loops::tests::the_same_test_flaky_in_two_attempts_names_the_test",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_f2_threshold_inf",
+        issue: 230,
+        breaks: "F2 never fires: flaky tests under one module prefix are not found",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::loops::tests::three_flaky_tests_under_one_module_in_one_attempt_fire_once",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_r1_threshold_inf",
+        issue: 230,
+        breaks: "R1 never fires: a target refused across items is not found",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::loops::tests::a_target_denied_across_items_fires_with_its_redacted_target",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_v1_threshold_inf",
+        issue: 230,
+        breaks: "V1 and B1 never fire: slow verdicts and budget stops are not found",
+        package: "bosun-heat",
+        check: Check::Test("detect::loops::tests::a_verdict_slower_than_the_threshold_fires"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_denial_target_unredacted",
+        issue: 230,
+        breaks: "R1 groups and names refused calls by their raw target: a token reaches a finding",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::loops::tests::a_target_denied_across_items_fires_with_its_redacted_target",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

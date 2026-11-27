@@ -1,0 +1,182 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id AS \"id!: i64\", m.provider, m.message_key, t.tool_use_key, t.name,\n                      t.result_bytes, t.is_error, t.target, t.command_hash, t.command_text,\n                      t.call_ts_ms, t.result_ts_ms, t.result_media_bytes, m.parser_version\n               FROM tool_call t JOIN message m ON m.id = t.message_id\n               WHERE m.ts_ms >= ? AND m.ts_ms < ?\n               ORDER BY m.ts_ms, m.provider, m.message_key, t.tool_use_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "provider",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "name": "message_key",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "message_key"
+          }
+        }
+      },
+      {
+        "name": "tool_use_key",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "tool_use_key"
+          }
+        }
+      },
+      {
+        "name": "name",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "result_bytes",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_bytes"
+          }
+        }
+      },
+      {
+        "name": "is_error",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "is_error"
+          }
+        }
+      },
+      {
+        "name": "target",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "target"
+          }
+        }
+      },
+      {
+        "name": "command_hash",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "command_hash"
+          }
+        }
+      },
+      {
+        "name": "command_text",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "command_text"
+          }
+        }
+      },
+      {
+        "name": "call_ts_ms",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "call_ts_ms"
+          }
+        }
+      },
+      {
+        "name": "result_ts_ms",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_ts_ms"
+          }
+        }
+      },
+      {
+        "name": "result_media_bytes",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tool_call",
+            "name": "result_media_bytes"
+          }
+        }
+      },
+      {
+        "name": "parser_version",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "message",
+            "name": "parser_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "c743f2456a04a08f13f2db325803ff006bc2861578288ce4e764295227fecdd3"
+}

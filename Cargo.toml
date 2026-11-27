@@ -646,6 +646,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_ingest_command_hash_of_head)",
   "cfg(mutant_ingest_command_text_outside_repo)",
   "cfg(mutant_ingest_command_text_unredacted)",
+  "cfg(mutant_heat_x1_threshold_inf)",
+  "cfg(mutant_heat_t1_threshold_inf)",
+  "cfg(mutant_heat_m1_threshold_inf)",
+  "cfg(mutant_heat_ignore_parser_version)",
 ] }
 
 [workspace.lints.clippy]

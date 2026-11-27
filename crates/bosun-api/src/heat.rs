@@ -141,6 +141,10 @@ pub struct HeatInsufficient {
     pub provider: String,
     pub closed_items: u64,
     pub run_sessions: u64,
+    /// Why it is silent when not for the minimum sample: a tool detector over rows of a parser
+    /// older than the one that stores its columns says `bosun reingest` is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Params of `heat.list`.

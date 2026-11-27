@@ -2353,6 +2353,13 @@
         "provider": {
           "type": "string"
         },
+        "reason": {
+          "description": "Why it is silent when not for the minimum sample: a tool detector over rows of a parser\nolder than the one that stores its columns says `bosun reingest` is needed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "run_sessions": {
           "format": "uint64",
           "minimum": 0,

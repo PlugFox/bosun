@@ -475,6 +475,7 @@ pub(crate) fn u1(
                 provider: ANY_PROVIDER.to_owned(),
                 closed_items: figures.closed_items,
                 run_sessions,
+                reason: None,
             });
             continue;
         };

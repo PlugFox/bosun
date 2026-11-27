@@ -319,10 +319,11 @@ fn a_window_below_the_minimum_sample_fires_nothing() {
         provider: "claude".to_owned(),
         closed_items: 4,
         run_sessions: 9,
+        reason: None,
     };
-    // The file detectors first; the loop detectors (`detect::loops`) and the context ones
-    // (`detect::context`) are silent too.
-    assert_eq!(detection.insufficient.len(), 11, "{detection:#?}");
+    // The file detectors first; the loop detectors (`detect::loops`), the context ones
+    // (`detect::context`) and the tool ones (`detect::tools`) are silent too.
+    assert_eq!(detection.insufficient.len(), 14, "{detection:#?}");
     assert_eq!(
         detection.insufficient[..3],
         [
@@ -344,7 +345,7 @@ fn a_window_below_the_minimum_sample_fires_nothing() {
             .iter()
             .all(|i| i.detector != FILE_REREAD_IN_SESSION.id)
     );
-    assert_eq!(detection.insufficient.len(), 10);
+    assert_eq!(detection.insufficient.len(), 13);
 
     // One more run session reaches the minimum.
     rows.run("s10");

@@ -89,6 +89,21 @@ pub struct ToolRow {
     /// The files the call touched, sorted: repository-relative paths (absolute outside a
     /// repository) and the kind of each touch.
     pub touches: Vec<(String, TouchKind)>,
+    /// The call's target: the command head for `Bash` and `PowerShell`, a path for a file tool.
+    pub target: Option<String>,
+    /// A shell command's fingerprint: the SHA-256 (64 hex digits) of its normalised, scrubbed
+    /// text (#232). `None` before parser version 4 and for a message in no repository.
+    pub command_hash: Option<String>,
+    /// That text, at most 200 bytes, already scrubbed (#232).
+    pub command_text: Option<String>,
+    /// The time of the calling record, ms since the epoch (parser version 4).
+    pub call_ts_ms: Option<i64>,
+    /// The time of the result's own record; `None` until the result is seen.
+    pub result_ts_ms: Option<i64>,
+    /// The base64 image part of `result_bytes`; `None` until the result is seen.
+    pub result_media_bytes: Option<u64>,
+    /// The parser version of the message that made the call.
+    pub parser_version: u32,
 }
 
 /// The five stored counts, in the order of the `message` columns (the 5-minute cache write
@@ -356,7 +371,8 @@ impl Reader {
         let mut tx = sqlx::Connection::begin(&mut *conn).await?;
         let calls = sqlx::query!(
             r#"SELECT t.id AS "id!: i64", m.provider, m.message_key, t.tool_use_key, t.name,
-                      t.result_bytes, t.is_error
+                      t.result_bytes, t.is_error, t.target, t.command_hash, t.command_text,
+                      t.call_ts_ms, t.result_ts_ms, t.result_media_bytes, m.parser_version
                FROM tool_call t JOIN message m ON m.id = t.message_id
                WHERE m.ts_ms >= ? AND m.ts_ms < ?
                ORDER BY m.ts_ms, m.provider, m.message_key, t.tool_use_key"#,
@@ -404,6 +420,18 @@ impl Reader {
                     result_bytes: from_db(row.result_bytes, "result bytes")?,
                     is_error: row.is_error != 0,
                     touches: by_call.remove(&row.id).unwrap_or_default(),
+                    target: row.target,
+                    command_hash: row.command_hash,
+                    command_text: row.command_text,
+                    call_ts_ms: row.call_ts_ms,
+                    result_ts_ms: row.result_ts_ms,
+                    result_media_bytes: row
+                        .result_media_bytes
+                        .map(|b| from_db(b, "result media bytes"))
+                        .transpose()?,
+                    parser_version: u32::try_from(row.parser_version).map_err(|_| {
+                        Error::Corrupt(format!("parser version {}", row.parser_version))
+                    })?,
                 })
             })
             .collect()

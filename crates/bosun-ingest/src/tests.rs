@@ -526,6 +526,61 @@ async fn a_command_stores_only_files_inside_the_repository() {
     bench.close().await;
 }
 
+/// #210: the store's reader of tool calls carries the columns of parser version 4 that the
+/// heat detectors X1, T1 and M1 read: every call of the `shell-touches` fixture has its times
+/// and no media, and each of its thirteen commands (each a different `sed` range) its own
+/// fingerprint, its redacted text and its head as the target.
+#[tokio::test]
+async fn tool_rows_carry_the_fields_of_parser_4() {
+    let case = case("shell-touches");
+    let bench = Bench::new().await;
+    copy_case(&case, &bench.projects());
+    let ingest = bench.ingest(claude::Parser, bench.projects(), &case).await;
+    ingest.scan().await.unwrap();
+
+    let rows = bench
+        .store
+        .reader()
+        .tool_calls(i64::MIN, i64::MAX)
+        .await
+        .unwrap();
+    assert_ne!(rows, []);
+    for row in &rows {
+        assert_eq!(row.parser_version, 4, "{row:?}");
+        let called = row
+            .call_ts_ms
+            .unwrap_or_else(|| panic!("no call time: {row:?}"));
+        let answered = row
+            .result_ts_ms
+            .unwrap_or_else(|| panic!("no result time: {row:?}"));
+        assert!(answered > called, "{row:?}");
+        assert_eq!(row.result_media_bytes, Some(0), "{row:?}");
+    }
+    let bash: Vec<_> = rows.iter().filter(|r| r.name == "Bash").collect();
+    assert_eq!(bash.len(), 13);
+    let hashes: std::collections::BTreeSet<&str> = bash
+        .iter()
+        .map(|r| {
+            let hash = r
+                .command_hash
+                .as_deref()
+                .unwrap_or_else(|| panic!("no hash: {r:?}"));
+            assert_eq!(hash.len(), 64, "{r:?}");
+            hash
+        })
+        .collect();
+    assert_eq!(hashes.len(), 13, "{hashes:?}");
+    for row in &bash {
+        let target = row.target.as_deref();
+        assert!(matches!(target, Some("sed" | "rustfmt")), "{row:?}");
+    }
+    assert_eq!(
+        bash[0].command_text.as_deref(),
+        Some("sed -n '1,40p' src/lib.rs && python tool/check.py -- cargo test")
+    );
+    bench.close().await;
+}
+
 /// Every byte of the database files (the database, its WAL and shared memory), as text.
 fn database_dump(db: &Path) -> String {
     let dir = db.parent().unwrap().to_owned();

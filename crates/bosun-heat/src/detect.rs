@@ -13,7 +13,8 @@
 //! The file detectors (D1, D2, D3) are in [`files`]; the loop detectors (F1, F2, R1, V1, B1:
 //! flaky tests, refused calls, slow verdicts, budget stops) in [`loops`]; the context detectors
 //! (C1 the start context, N1 the cost of finding by directory, U1 the documents nobody opened)
-//! in [`context`].
+//! in [`context`]; the tool detectors (X1 a command run verbatim again and again, T1 the wall
+//! time per tool, M1 the media share), over the columns of parser version 4, in [`tools`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,8 +27,13 @@ use crate::metrics::{Inputs, closed_items, join};
 pub(crate) mod context;
 mod files;
 mod loops;
+mod tools;
 
 pub use context::{ANY_PROVIDER, INSTRUCTION_FILES};
+pub(crate) use tools::is_tool;
+pub use tools::{
+    CommandEvidence, MIN_PARSER_VERSION, MediaEvidence, REINGEST_NEEDED, WallEvidence,
+};
 
 /// What a detector is, apart from its numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,8 +153,37 @@ pub const UNOPENED_DOCUMENTS: Detector = Detector {
     unit: "documents",
 };
 
+/// X1 (#210): one shell command run verbatim again and again in one run session: it lacks a
+/// script.
+pub const REPEATED_COMMAND: Detector = Detector {
+    id: "repeated_command",
+    version: 1,
+    remedy: "missing_script",
+    metric: "command_calls_in_one_session",
+    unit: "calls",
+};
+
+/// T1 (#210): the wall time of a tool (a shell by its command head), from its call to its
+/// result: speed it up.
+pub const TOOL_WALL_TIME: Detector = Detector {
+    id: "tool_wall_time",
+    version: 1,
+    remedy: "speed_up_tool",
+    metric: "tool_wall_time_p90",
+    unit: "ms",
+};
+
+/// M1 (#210): the share of media (base64 images) in the result bytes: limit them.
+pub const MEDIA_SHARE: Detector = Detector {
+    id: "media_share",
+    version: 1,
+    remedy: "limit_media",
+    metric: "media_share_of_result_bytes",
+    unit: "ppm",
+};
+
 /// Every detector, in the order of their findings: the byte detectors first.
-const DETECTORS: [Detector; 11] = [
+const DETECTORS: [Detector; 14] = [
     FILE_READ_ACROSS_RUNS,
     FILE_REREAD_IN_SESSION,
     UNCHANGED_FILE_READ_BYTES,
@@ -160,6 +195,9 @@ const DETECTORS: [Detector; 11] = [
     FINDING_BY_DIRECTORY,
     START_CONTEXT,
     UNOPENED_DOCUMENTS,
+    REPEATED_COMMAND,
+    TOOL_WALL_TIME,
+    MEDIA_SHARE,
 ];
 
 /// The thresholds of the detectors and the minimum sample. Thresholds from the configuration
@@ -200,6 +238,22 @@ pub struct Thresholds {
     pub u1_target: u64,
     /// U1: the globs of the documents, each `*.<suffix>` (see [`Thresholds::check`]).
     pub documents: Vec<String>,
+    /// X1: the calls of one command in one run session, ...
+    pub x1_calls: u64,
+    /// ... and its target.
+    pub x1_target: u64,
+    /// T1: the p90 of a tool's wall times, in ms, ...
+    pub t1_ms: u64,
+    /// ... its target, ...
+    pub t1_target_ms: u64,
+    /// ... and the timed calls it needs at least.
+    pub t1_min_calls: u64,
+    /// M1: the media share of the result bytes, in ppm, ...
+    pub m1_share_ppm: u64,
+    /// ... its target, ...
+    pub m1_target_ppm: u64,
+    /// ... and the media bytes of the window it needs at least.
+    pub m1_media_bytes: u64,
     /// The minimum sample: a group with fewer closed items than this and fewer run sessions
     /// than [`Self::min_run_sessions`] is insufficient.
     pub min_closed_items: u64,
@@ -228,6 +282,14 @@ impl Default for Thresholds {
             u1_documents: 10,
             u1_target: 5,
             documents: vec!["*.md".to_owned()],
+            x1_calls: 3,
+            x1_target: 1,
+            t1_ms: 60_000,
+            t1_target_ms: 30_000,
+            t1_min_calls: 10,
+            m1_share_ppm: 300_000,
+            m1_target_ppm: 100_000,
+            m1_media_bytes: 1_000_000,
             min_closed_items: 5,
             min_run_sessions: 10,
             disabled: Vec::new(),
@@ -274,6 +336,12 @@ pub enum Evidence {
     Directory(DirectoryEvidence),
     /// U1: the unopened documents.
     Documents(DocumentEvidence),
+    /// X1: the command's text and the sessions it repeated in.
+    Commands(CommandEvidence),
+    /// T1: the wall times of the tool.
+    Wall(WallEvidence),
+    /// M1: the media bytes and the tools that returned the most.
+    Media(MediaEvidence),
 }
 
 /// The start contexts of a group's run sessions, in tokens.
@@ -520,6 +588,9 @@ impl Evidence {
                 );
                 lines
             }
+            Self::Commands(command) => tools::command_lines(command),
+            Self::Wall(wall) => tools::wall_lines(wall),
+            Self::Media(media) => tools::media_lines(media),
         }
     }
 }
@@ -566,6 +637,9 @@ pub struct Insufficient {
     pub provider: String,
     pub closed_items: u64,
     pub run_sessions: u64,
+    /// Why it is silent when not for the minimum sample: [`REINGEST_NEEDED`] for a tool
+    /// detector over rows of an older parser.
+    pub reason: Option<&'static str>,
 }
 
 /// The findings and the silent detectors of one evaluation.
@@ -582,6 +656,7 @@ struct Group<'a> {
     closed_items: u64,
     files: files::FileReads<'a>,
     loops: loops::LoopRows<'a>,
+    tools: tools::ToolCalls<'a>,
 }
 
 /// What a detector sees of one group.
@@ -592,6 +667,7 @@ pub(crate) struct Context<'a, 'b> {
     pub(crate) closed_items: u64,
     pub(crate) files: &'b files::FileReads<'a>,
     pub(crate) loops: &'b loops::LoopRows<'a>,
+    pub(crate) tools: &'b tools::ToolCalls<'a>,
     /// The paths of the repository any call wrote in the window.
     pub(crate) written: &'b BTreeSet<&'a str>,
     pub(crate) scope: Scope<'b>,
@@ -665,8 +741,10 @@ fn gather<'a>(inputs: &Inputs<'a>, scope: Scope<'_>) -> Gathered<'a> {
             .entry(repo)
             .or_default()
             .extend(files::writes(joined.call));
-        if joined.message.kind == "run" {
-            let group = groups.entry((repo, &joined.message.provider)).or_default();
+        let run = joined.message.kind == "run";
+        let group = groups.entry((repo, &joined.message.provider)).or_default();
+        group.tools.add(&joined.message.session, run, joined.call);
+        if run {
             group.files.add(&joined.message.session, joined.call);
         }
     }
@@ -736,6 +814,7 @@ pub(crate) fn value_of(
         closed_items: group.closed_items,
         files: &group.files,
         loops: &group.loops,
+        tools: &group.tools,
         written: written.get(repo).unwrap_or(&none),
         scope,
         thresholds: &thresholds,
@@ -747,6 +826,17 @@ pub(crate) fn value_of(
             sample,
             closed_items: groups.values().map(|g| g.closed_items).sum(),
             run_sessions: sample,
+        });
+    }
+    if tools::is_tool(detector) {
+        // A group of an older parser counts as one without a sample: its follow-up waits, then
+        // records `insufficient`. Closed items do not make a tool detector's sample.
+        let current = context.tools.current();
+        return Some(Measure {
+            value: tools::value(detector, &context, subject),
+            sample: tools::sample(&context).0,
+            closed_items: 0,
+            run_sessions: if current { context.run_sessions } else { 0 },
         });
     }
     let (value, sample) = if context::is_context(detector) {
@@ -800,6 +890,11 @@ pub(crate) fn read_bytes(
         })
 }
 
+/// What a finding ranks by among its detector's, larger first.
+fn rank(finding: &Finding) -> u64 {
+    tools::rank(finding).unwrap_or_else(|| files::rank(finding))
+}
+
 /// The findings of every enabled detector over `inputs` in `scope`, per repository and
 /// provider, and the detectors that stay silent below the minimum sample. Findings come in
 /// detector order (D1, D2, D3, then the loop detectors, which have no bytes), each detector's
@@ -819,6 +914,7 @@ pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) ->
             closed_items: group.closed_items,
             files: &group.files,
             loops: &group.loops,
+            tools: &group.tools,
             written: written.get(repo).unwrap_or(&none),
             scope,
             thresholds,
@@ -839,10 +935,14 @@ pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) ->
             let start = starts.get(&key);
             let per_item = detector == UNCHANGED_FILE_READ_BYTES;
             // C1 and N1 are over sessions only: closed items do not make their sample.
-            let sufficient = if context::is_context(detector) {
-                context::sample(detector, &context, start).0 >= thresholds.min_run_sessions
+            // The tool detectors are over sessions only, and silent over an older parser.
+            let (sufficient, reason) = if tools::is_tool(detector) {
+                tools::sufficient(&context).map_or_else(|reason| (false, reason), |()| (true, None))
+            } else if context::is_context(detector) {
+                let sessions = context::sample(detector, &context, start).0;
+                (sessions >= thresholds.min_run_sessions, None)
             } else {
-                sufficient
+                (sufficient, None)
             };
             if !sufficient || (per_item && context.closed_items == 0) {
                 detection.insufficient.push(Insufficient {
@@ -851,10 +951,13 @@ pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) ->
                     provider: (*provider).to_owned(),
                     closed_items: context.closed_items,
                     run_sessions: context.run_sessions,
+                    reason,
                 });
                 continue;
             }
-            if detector == START_CONTEXT {
+            if tools::is_tool(detector) {
+                detection.findings.extend(tools::run(detector, &context));
+            } else if detector == START_CONTEXT {
                 detection
                     .findings
                     .extend(start.and_then(|start| context::c1(&context, start)));
@@ -878,7 +981,7 @@ pub fn detect(inputs: &Inputs<'_>, scope: Scope<'_>, thresholds: &Thresholds) ->
     detection.findings.sort_by(|a, b| {
         order(a)
             .cmp(&order(b))
-            .then_with(|| files::rank(b).cmp(&files::rank(a)))
+            .then_with(|| rank(b).cmp(&rank(a)))
             .then_with(|| {
                 (&a.subject, &a.repo, &a.provider).cmp(&(&b.subject, &b.repo, &b.provider))
             })

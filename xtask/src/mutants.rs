@@ -4266,7 +4266,48 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_x1_threshold_inf",
+        issue: TOOL_DETECTORS_CARD,
+        breaks: "X1 never fires: a command run verbatim again and again is not found",
+        package: "bosun-heat",
+        check: Check::Test("detect::tools::tests::a_command_run_three_times_verbatim_fires"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_t1_threshold_inf",
+        issue: TOOL_DETECTORS_CARD,
+        breaks: "T1 never fires: no tool is slow",
+        package: "bosun-heat",
+        check: Check::Test("detect::tools::tests::wall_time_is_ranked_per_tool"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_m1_threshold_inf",
+        issue: TOOL_DETECTORS_CARD,
+        breaks: "M1 never fires: no media share is too high",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::tools::tests::a_session_heavy_with_images_fires_the_media_share",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_ignore_parser_version",
+        issue: TOOL_DETECTORS_CARD,
+        breaks: "the tool detectors fire over rows of a parser that stores none of their columns",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::tools::tests::a_window_with_rows_of_an_older_parser_fires_nothing",
+        ),
+        platform: None,
+    },
 ];
+
+/// The card of #11 (part D) that adds the tool detectors X1, T1 and M1 of #210 over the columns
+/// of parser version 4 (its own number was not known when it was written; its parent's stands
+/// in).
+const TOOL_DETECTORS_CARD: u32 = 210;
 
 /// The card of #11 (part D) that stores a tool call's command fingerprint and text, its times
 /// and its result's media bytes for the detectors of #210 (its own number was not known when it

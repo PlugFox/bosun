@@ -28,7 +28,7 @@ use bosun_core::publish::redact;
 use bosun_core::style_of;
 use bosun_store::{NewProposal, ProposalRow, ProposalStep, Write};
 
-use crate::detect::Finding;
+use crate::detect::{Finding, MIN_PARSER_VERSION, is_tool};
 use crate::estimate::BYTES_PER_TOKEN;
 
 /// The proposals one evaluation of a repository promotes at most.
@@ -237,13 +237,19 @@ fn signed(value: u64) -> i64 {
 
 /// The sighting `finding` opens under `dedup`.
 fn opened(finding: &Finding, kind: SubjectKind, dedup: &str, now_ms: i64) -> NewProposal {
-    let params_json = match finding.impact_eqv_estimate {
-        Some(_) => serde_json::json!({
+    // A tool detector's figures exist from one parser version on: part of the snapshot.
+    let params_json = match (finding.impact_eqv_estimate, is_tool(finding.detector)) {
+        (Some(_), _) => serde_json::json!({
             "bytes_per_token": BYTES_PER_TOKEN,
             "impact_bytes": finding.impact_bytes,
         })
         .to_string(),
-        None => "{}".to_owned(),
+        (None, true) => serde_json::json!({
+            "min_parser_version": MIN_PARSER_VERSION,
+            "impact_bytes": finding.impact_bytes,
+        })
+        .to_string(),
+        (None, false) => "{}".to_owned(),
     };
     NewProposal {
         key: proposal_key(dedup, now_ms),

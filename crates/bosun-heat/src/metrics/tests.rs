@@ -93,7 +93,40 @@ pub(crate) fn call(
             .iter()
             .map(|(path, kind)| ((*path).to_owned(), *kind))
             .collect(),
+        target: None,
+        command_hash: None,
+        command_text: None,
+        call_ts_ms: None,
+        result_ts_ms: None,
+        result_media_bytes: None,
+        parser_version: 4,
     }
+}
+
+/// What parser version 4 stores of a call beyond [`call`]'s fields (#232).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Stored<'a> {
+    /// The command head of a shell call, a path for a file tool.
+    pub(crate) target: Option<&'a str>,
+    /// A shell command's `(command_hash, command_text)`.
+    pub(crate) command: Option<(&'a str, &'a str)>,
+    /// `(call_ts_ms, result_ts_ms)`.
+    pub(crate) times: (Option<i64>, Option<i64>),
+    pub(crate) media_bytes: Option<u64>,
+    /// `None` for 4.
+    pub(crate) parser_version: Option<u32>,
+}
+
+/// `call` with the columns of parser version 4 set from `stored`, and the call id `tool_use`.
+pub(crate) fn stored(mut call: ToolRow, tool_use: &str, stored: Stored<'_>) -> ToolRow {
+    call.tool_use = tool_use.to_owned();
+    call.target = stored.target.map(str::to_owned);
+    call.command_hash = stored.command.map(|(hash, _)| hash.to_owned());
+    call.command_text = stored.command.map(|(_, text)| text.to_owned());
+    (call.call_ts_ms, call.result_ts_ms) = stored.times;
+    call.result_media_bytes = stored.media_bytes;
+    call.parser_version = stored.parser_version.unwrap_or(4);
+    call
 }
 
 pub(crate) fn transition(

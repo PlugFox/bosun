@@ -219,6 +219,7 @@ fn summary(key: &str, evaluation: &bosun_heat::Evaluation) -> HeatRepoEvaluation
                 provider: i.provider.clone(),
                 closed_items: i.closed_items,
                 run_sessions: i.run_sessions,
+                reason: i.reason.map(str::to_owned),
             })
             .collect(),
         error: None,

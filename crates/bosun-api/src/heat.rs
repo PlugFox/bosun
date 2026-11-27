@@ -195,6 +195,24 @@ pub struct ProposalView {
     pub last_seen_ms: i64,
     /// The evaluations that found it.
     pub seen_count: u64,
+    /// Why the user dismissed it; `null` unless it is `dismissed`.
+    #[serde(default)]
+    pub dismiss_reason: Option<String>,
     /// The evidence, redacted lines.
     pub evidence: Vec<String>,
+}
+
+/// Params of `heat.dismiss`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HeatDismissParams {
+    /// The operator token the daemon wrote at start (see [`crate::control`]). Missing, it is
+    /// refused like a wrong one.
+    #[serde(default)]
+    pub operator: String,
+    pub identity: String,
+    /// The proposal's key (16 hex digits), as `heat.list` shows it.
+    pub key: String,
+    /// Why it is dismissed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }

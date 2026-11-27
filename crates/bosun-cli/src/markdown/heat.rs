@@ -1,14 +1,20 @@
-//! `bosun heat metrics` as Markdown (#11, part D): one document per identity, the metrics of
-//! `heat.metrics` in one table, in the order the daemon gives them. Each row says whether it
-//! is exact or an estimate (with the ratio of bytes to tokens it was made with) and whether it
-//! compares across runners. It prints numbers and draws no conclusions.
+//! `bosun heat metrics` and `bosun heat` as Markdown (#11, part D).
 //!
-//! A share in parts per million prints as a percent with one decimal; every other value is
-//! printed in full in its own unit.
+//! `heat metrics`: one document per identity, the metrics of `heat.metrics` in one table, in
+//! the order the daemon gives them. Each row says whether it is exact or an estimate (with the
+//! ratio of bytes to tokens it was made with) and whether it compares across runners. It prints
+//! numbers and draws no conclusions. A share in parts per million prints as a percent with one
+//! decimal; every other value is printed in full in its own unit.
+//!
+//! `heat`: one document per identity, its proposals of `heat.list` in one table, one row each:
+//! its metric and unit, current value, threshold, target, window (dates, UTC) and sample, all
+//! exact, and apart, in a column whose header says so, the estimated impact in eqv tokens
+//! (empty when there is none). Below the table, the first [`EVIDENCE_LINES`] evidence lines of
+//! each proposal, as stored (redacted).
 
 use std::fmt::Write as _;
 
-use bosun_api::{HeatMetric, HeatMetrics};
+use bosun_api::{HeatMetric, HeatMetrics, HeatProposals};
 
 use super::{Table, repo};
 use crate::time;
@@ -89,4 +95,84 @@ pub(crate) fn heat_metrics(metrics: &HeatMetrics, out: &mut String) {
         ]);
     }
     table.render(out);
+}
+
+/// The evidence lines printed per proposal.
+const EVIDENCE_LINES: usize = 3;
+
+/// A time as its date, UTC.
+fn date(ms: i64) -> String {
+    time::format(ms).chars().take(10).collect()
+}
+
+/// One identity's heat proposals.
+pub(crate) fn heat_proposals(list: &HeatProposals, out: &mut String) {
+    let _ = writeln!(out, "# bosun heat: {}\n", list.identity);
+    if list.proposals.is_empty() {
+        out.push_str("No proposal.\n");
+        return;
+    }
+    // Mutant (`mutant_heat_list_drops_target`): the target column is left out.
+    let target = !cfg!(mutant_heat_list_drops_target);
+    let mut columns = vec![
+        ("key", false),
+        ("repository", false),
+        ("provider", false),
+        ("detector", false),
+        ("subject", false),
+        ("metric", false),
+        ("unit", false),
+        ("value", true),
+        ("threshold", true),
+    ];
+    if target {
+        columns.push(("target", true));
+    }
+    columns.extend([
+        ("window from", false),
+        ("window to", false),
+        ("sample", true),
+        ("state", false),
+        ("impact, eqv tokens (estimate)", true),
+    ]);
+    let mut table = Table::new(&columns);
+    for p in &list.proposals {
+        let mut cells = vec![
+            p.key.clone(),
+            repo(Some(&p.repo)),
+            p.provider.clone(),
+            p.detector.clone(),
+            p.subject.clone(),
+            p.metric.clone(),
+            p.unit.clone(),
+            p.baseline_value.to_string(),
+            p.threshold.to_string(),
+        ];
+        if target {
+            cells.push(p.target_value.to_string());
+        }
+        cells.extend([
+            date(p.window_from_ms),
+            date(p.window_to_ms),
+            p.sample.to_string(),
+            p.state.clone(),
+            p.impact_eqv_estimate
+                .map_or_else(String::new, |i| i.to_string()),
+        ]);
+        table.row(cells);
+    }
+    table.render(out);
+    for p in &list.proposals {
+        if p.evidence.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "Evidence of {}:\n", p.key);
+        for line in p.evidence.iter().take(EVIDENCE_LINES) {
+            let _ = writeln!(out, "- {}", super::escape(line));
+        }
+        if p.evidence.len() > EVIDENCE_LINES {
+            let _ = writeln!(out, "- ({} more)", p.evidence.len() - EVIDENCE_LINES);
+        }
+        out.push('\n');
+    }
 }

@@ -8,6 +8,8 @@
 //! bosun uninstall [--name <name>]
 //! bosun doctor [--identity <name>] [--name <name>]
 //! bosun report [--since <t>] [--until <t>] [--repo <name>] [--identity <name>]
+//! bosun heat [--repo <name>] [--all] [--identity <name>]
+//! bosun heat dismiss <key> --identity <name> [--reason <text>]
 //! bosun heat metrics [--since <t>] [--until <t>] [--repo <name>] [--identity <name>]
 //! bosun pause [--repo <name>] [--identity <name>]
 //! bosun resume [--repo <name>] [--identity <name>]
@@ -61,6 +63,14 @@
 //!   with cache carry, repeated reads, and the cost of finding. `--until` defaults to now and `--since` to seven days
 //!   before `--until`. `--repo` limits the range sections to one configured repository; without
 //!   `--identity`, only the identity that owns it is asked.
+//! - `heat`: heat's proposals of each identity (`heat.list`, #11 D), active ones (open,
+//!   published, landed) or every state with `--all`, one Markdown table per identity: each
+//!   proposal's key, repository, provider, detector, subject, metric and unit, current value,
+//!   threshold, target, window and sample, state, and its impact in a column labelled an
+//!   estimate; below it the first three evidence lines of each. `--repo` as for `report`.
+//!   `heat dismiss <key>`: dismisses an open or published proposal of `--identity` (required)
+//!   by its key (`heat.dismiss`), with the operator token; its subject is not proposed again
+//!   for 90 days.
 //! - `heat metrics`: the generic metrics the heat detectors test (`heat.metrics`, #11 D), per
 //!   repository, provider and session kind, one table: each row's value, total and sample,
 //!   whether it is exact or an estimate (with its bytes per token) and whether it compares
@@ -142,6 +152,7 @@
 //! | `tokens --by repo` | the result of `tokens.by_repo` |
 //! | `tokens --by model` | the result of `tokens.by_model` |
 //! | `report` | `{"exact": <the result of report.exact>, "estimates": <the result of report.estimates>}` |
+//! | `heat` | the result of `heat.list` |
 //! | `heat metrics` | the result of `heat.metrics` |
 //! | `status` | the result of `status.overview` |
 //! | `queue` | the result of `queue.get` |
@@ -158,6 +169,7 @@
 //! | `item` | the result of `item.get` |
 //! | `lint` | the result of `queue.lint` |
 //! | `restart-item` | the result of `item.restart` |
+//! | `heat dismiss` | the result of `heat.dismiss` |
 //! | `kill` | the result of `control.kill` |
 //! | `session tail` | one `Event` (the params of `events.event`) per line, as they come |
 //!
@@ -303,10 +315,10 @@ enum Command {
     /// file cost.
     #[command(after_help = EXIT_CODES)]
     Report(ReportArgs),
-    /// The heat metrics of each identity: numbers per repository, provider and session kind,
-    /// each exact or an estimate, each comparable across runners or not.
-    #[command(subcommand, after_help = EXIT_CODES)]
-    Heat(heat::HeatCommand),
+    /// Heat's proposals of each identity, each with its metric, value, threshold, target and
+    /// window; `heat dismiss` dismisses one; `heat metrics` prints the generic metrics.
+    #[command(after_help = EXIT_CODES)]
+    Heat(heat::HeatArgs),
     /// Registers the logon process that starts bosund for you, and starts it now.
     #[command(after_help = EXIT_CODES)]
     Install(InstallArgs),
@@ -671,17 +683,20 @@ impl Section {
 fn check_report_args(cli: &Cli, now_ms: i64) -> Result<(), Failure> {
     let range = match &cli.command {
         Command::Report(args) => Some(args.range(now_ms)),
-        Command::Heat(command) => Some(command.range(now_ms)),
+        Command::Heat(command) => command.range(now_ms),
         _ => None,
     };
-    if let Some((since, until)) = range {
-        if since >= until {
-            return Err(Failure::new(
-                exit::USAGE,
-                "--since must be before --until: the range is empty",
-            ));
-        }
-    } else if cli.global.format == Format::Md {
+    if let Some((since, until)) = range
+        && since >= until
+    {
+        return Err(Failure::new(
+            exit::USAGE,
+            "--since must be before --until: the range is empty",
+        ));
+    }
+    if cli.global.format == Format::Md
+        && !matches!(cli.command, Command::Report(_) | Command::Heat(_))
+    {
         return Err(Failure::new(
             exit::USAGE,
             "--format md applies to report and heat only; use text or json",
@@ -732,6 +747,10 @@ async fn own_terms(global: &Global, command: &Command) -> Option<Result<String, 
         Command::Session(work::SessionCommand::Tail(args)) => work::tail(global, args).await,
         Command::Tui => tui(global).await,
         Command::Notify(command) => notify::run(global, command).await,
+        Command::Heat(heat::HeatArgs {
+            command: Some(heat::HeatCommand::Dismiss(args)),
+            ..
+        }) => heat::dismiss(global, args).await,
         _ => return None,
     })
 }

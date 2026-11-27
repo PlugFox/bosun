@@ -995,6 +995,130 @@ mod tests {
         );
     }
 
+    /// A synthetic proposal of `heat.list`.
+    fn proposal(key: &str, detector: &str, subject: &str) -> bosun_api::ProposalView {
+        bosun_api::ProposalView {
+            key: key.to_owned(),
+            repo: RepoRef {
+                name: Some("alpha".to_owned()),
+                path: "/synthetic/alpha".to_owned(),
+            },
+            provider: "claude".to_owned(),
+            detector: detector.to_owned(),
+            detector_version: 1,
+            remedy: "index_or_split".to_owned(),
+            subject_kind: "file".to_owned(),
+            subject: subject.to_owned(),
+            metric: "file_read_sessions".to_owned(),
+            unit: "sessions".to_owned(),
+            estimate: false,
+            baseline_value: 91,
+            threshold: 53,
+            target_value: 27,
+            // 2026-11-01 and 2026-11-15, UTC.
+            window_from_ms: 1_793_491_200_000,
+            window_to_ms: 1_793_491_200_000 + 14 * 86_400_000,
+            sample: 112,
+            impact_eqv_estimate: Some(1_300_000),
+            state: "open".to_owned(),
+            created_ms: 1_793_491_200_000,
+            last_seen_ms: 1_793_491_200_000,
+            seen_count: 2,
+            dismiss_reason: None,
+            evidence: Vec::new(),
+        }
+    }
+
+    /// The cells of the Markdown table in `text`: its header, then its body rows.
+    fn table_of(text: &str) -> (Vec<String>, Vec<Vec<String>>) {
+        let mut lines = text.lines().filter(|l| l.starts_with('|'));
+        let cells = |line: &str| -> Vec<String> {
+            let inner = line.trim().trim_start_matches('|').trim_end_matches('|');
+            inner.split('|').map(|c| c.trim().to_owned()).collect()
+        };
+        let header = cells(lines.next().expect("a table"));
+        let _alignment = lines.next();
+        (header, lines.map(cells).collect())
+    }
+
+    /// #11 D: each proposal's row holds its metric and unit, its current value, threshold,
+    /// target, window and sample, and the impact under a header saying it is an estimate,
+    /// empty when there is none; three evidence lines follow. No proposal is one line and no
+    /// table (`mutant_heat_list_drops_target` leaves the target out).
+    #[test]
+    fn bosun_heat_lists_metric_value_target_and_window() {
+        let mut d1 = proposal("0123456789abcdef", "file_read_across_runs", "src/big.rs");
+        d1.evidence = (1..=5).map(|n| format!("synthetic evidence {n}")).collect();
+        let mut d3 = proposal(
+            "fedcba9876543210",
+            "unchanged_file_read_bytes",
+            "src/other.rs",
+        );
+        d3.metric = "unchanged_file_read_bytes_per_item".to_owned();
+        d3.unit = "bytes_per_closed_item".to_owned();
+        d3.baseline_value = 48_000;
+        d3.threshold = 16_000;
+        d3.target_value = 8_000;
+        d3.sample = 6;
+        d3.impact_eqv_estimate = None;
+        let list = bosun_api::HeatProposals {
+            identity: "work".to_owned(),
+            proposals: vec![d1, d3],
+        };
+        let mut text = String::new();
+        heat::heat_proposals(&list, &mut text);
+        assert!(text.starts_with("# bosun heat: work\n"), "{text}");
+        let (header, rows) = table_of(&text);
+        assert_eq!(rows.len(), 2, "{text}");
+        let column = |name: &str| {
+            header
+                .iter()
+                .position(|h| h == name)
+                .unwrap_or_else(|| panic!("no column {name:?}:\n{text}"))
+        };
+        let d1 = &rows[0];
+        assert_eq!(d1[column("key")], "0123456789abcdef", "{text}");
+        assert_eq!(d1[column("subject")], "src/big.rs", "{text}");
+        assert_eq!(d1[column("metric")], "file_read_sessions", "{text}");
+        assert_eq!(d1[column("unit")], "sessions", "{text}");
+        assert_eq!(d1[column("value")], "91", "{text}");
+        assert_eq!(d1[column("threshold")], "53", "{text}");
+        assert_eq!(d1[column("target")], "27", "{text}");
+        assert_eq!(d1[column("sample")], "112", "{text}");
+        assert_eq!(d1[column("window from")], "2026-11-01", "{text}");
+        assert_eq!(d1[column("window to")], "2026-11-15", "{text}");
+        assert_eq!(d1[column("state")], "open", "{text}");
+        let impact = header
+            .iter()
+            .position(|h| h.contains("impact") && h.contains("estimate"))
+            .unwrap_or_else(|| panic!("no impact estimate column:\n{text}"));
+        assert_eq!(d1[impact], "1300000", "{text}");
+        let d3 = &rows[1];
+        assert_eq!(d3[column("target")], "8000", "{text}");
+        assert_eq!(d3[impact], "", "{text}");
+        for n in 1..=3 {
+            assert!(
+                text.contains(&format!("synthetic evidence {n}\n")),
+                "{text}"
+            );
+        }
+        for n in 4..=5 {
+            assert!(!text.contains(&format!("synthetic evidence {n}")), "{text}");
+        }
+
+        let empty = bosun_api::HeatProposals {
+            identity: "work".to_owned(),
+            proposals: Vec::new(),
+        };
+        let mut text = String::new();
+        heat::heat_proposals(&empty, &mut text);
+        assert!(text.contains("No proposal.\n"), "{text}");
+        assert!(
+            !text.lines().any(|l| l.starts_with('|')),
+            "no table:\n{text}"
+        );
+    }
+
     #[test]
     fn cells_escape_the_column_separator_and_tags() {
         let mut table = Table::new(&[("a", false)]);

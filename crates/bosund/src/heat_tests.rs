@@ -274,3 +274,73 @@ async fn an_evaluation_stores_proposals_only_in_the_identity_that_owns_the_repos
     assert!(!text.contains("beta") && !text.contains("big.rs"), "{text}");
     world.close().await;
 }
+
+/// `b`'s state of its one proposal, from `heat.list` with `all`.
+async fn only(world: &World) -> Value {
+    let listed = proposals(world, "b").await;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    listed[0].clone()
+}
+
+/// #11 D: `heat.dismiss` takes the operator token; a dismissed proposal leaves the active list,
+/// stays under `all` with its reason, and its subject is in cooldown at the next evaluation.
+/// Another identity cannot dismiss it, and it cannot be dismissed twice
+/// (`mutant_heat_dismiss_without_token` skips the token).
+#[tokio::test]
+async fn a_dismissed_proposal_leaves_the_list_and_needs_the_operator_token() {
+    use bosun_api::rpc::code;
+
+    let world = World::new().await;
+    seed_b(&world).await;
+    evaluate(&world, "b").await;
+    let second = evaluate(&world, "b").await;
+    assert_eq!(second["promoted"], 1, "{second}");
+    let proposal = only(&world).await;
+    assert_eq!(proposal["state"], "open", "{proposal}");
+    let key = proposal["key"].as_str().unwrap().to_owned();
+    assert_eq!(key.len(), 16, "{key}");
+
+    let wrong = json!({"operator": "not-the-token", "identity": "b", "key": key,
+                       "reason": "synthetic"});
+    assert_eq!(
+        world.refused("heat.dismiss", wrong).await,
+        i64::from(code::UNAUTHORIZED)
+    );
+    assert_eq!(only(&world).await["state"], "open");
+
+    let params = json!({"operator": crate::notify_tests::TOKEN, "identity": "b", "key": key,
+                        "reason": "not worth it"});
+    let dismissed = world.ok("heat.dismiss", params.clone()).await;
+    assert_eq!(dismissed["key"], key.as_str(), "{dismissed}");
+    assert_eq!(dismissed["state"], "dismissed", "{dismissed}");
+    assert_eq!(dismissed["dismiss_reason"], "not worth it", "{dismissed}");
+
+    let active = world.ok("heat.list", json!({"identity": "b"})).await;
+    assert_eq!(active["proposals"], json!([]), "{active}");
+    let all = only(&world).await;
+    assert_eq!(all["state"], "dismissed", "{all}");
+    assert_eq!(all["dismiss_reason"], "not worth it", "{all}");
+
+    let third = evaluate(&world, "b").await;
+    assert_eq!(third["findings"], 1, "{third}");
+    assert_eq!(third["cooled_down"], 1, "{third}");
+    assert_eq!(third["sightings"], 0, "{third}");
+    assert_eq!(only(&world).await["state"], "dismissed");
+
+    let mut for_a = params.clone();
+    for_a["identity"] = json!("a");
+    assert_eq!(
+        world.refused("heat.dismiss", for_a).await,
+        i64::from(code::INVALID_PARAMS)
+    );
+    assert_eq!(only(&world).await, all);
+
+    let again = world.call("heat.dismiss", params).await.unwrap_err();
+    assert_eq!(again["code"], code::INVALID_PARAMS, "{again}");
+    assert!(
+        again["message"].as_str().unwrap().contains("dismissed"),
+        "{again}"
+    );
+    assert_eq!(only(&world).await, all);
+    world.close().await;
+}

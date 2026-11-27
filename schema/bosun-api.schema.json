@@ -2224,6 +2224,35 @@
       ],
       "type": "object"
     },
+    "HeatDismissParams": {
+      "description": "Params of `heat.dismiss`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "key": {
+          "description": "The proposal's key (16 hex digits), as `heat.list` shows it.",
+          "type": "string"
+        },
+        "operator": {
+          "default": "",
+          "description": "The operator token the daemon wrote at start (see [`crate::control`]). Missing, it is\nrefused like a wrong one.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why it is dismissed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "key"
+      ],
+      "type": "object"
+    },
     "HeatEvaluateParams": {
       "description": "Params of `heat.evaluate`: an identity and, optionally, one of its repositories by name.",
       "properties": {
@@ -3832,6 +3861,14 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "dismiss_reason": {
+          "default": null,
+          "description": "Why the user dismissed it; `null` unless it is `dismissed`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "estimate": {
           "description": "`true` for a metric guessed from bytes; a trigger is always exact.",
@@ -6116,6 +6153,15 @@
       },
       "result": {
         "$ref": "#/$defs/SubscribeResult"
+      }
+    },
+    "heat.dismiss": {
+      "description": "Dismisses an open or published heat proposal of the identity, by its key: its subject      is then not proposed again for 90 days. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/HeatDismissParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProposalView"
       }
     },
     "heat.evaluate": {

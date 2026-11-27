@@ -73,7 +73,7 @@ impl World {
         self.state.identities = Self::open(&self.dir.path().join("config.toml")).await;
     }
 
-    async fn call(&self, method: &str, params: Value) -> Result<Value, Value> {
+    pub(crate) async fn call(&self, method: &str, params: Value) -> Result<Value, Value> {
         let line = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
         match handle_line(&self.state, &mut Connection::default(), &line.to_string()).await {
             Answer::Reply(Some(response)) => {

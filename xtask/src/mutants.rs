@@ -4024,6 +4024,32 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_dismiss_without_token",
+        issue: 227,
+        breaks: "heat.dismiss dismisses a proposal without the operator token",
+        package: "bosund",
+        check: Check::Test(
+            "heat_tests::a_dismissed_proposal_leaves_the_list_and_needs_the_operator_token",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_list_drops_target",
+        issue: 227,
+        breaks: "`bosun heat` prints a proposal without its target",
+        package: "bosun-cli",
+        check: Check::Test("markdown::tests::bosun_heat_lists_metric_value_target_and_window"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_timer_at_start",
+        issue: 227,
+        breaks: "the daemon's heat timer evaluates at its start, not an hour after",
+        package: "bosund",
+        check: Check::Test("heat::tests::the_first_evaluation_waits_an_hour_and_then_runs_daily"),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

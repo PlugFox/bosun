@@ -1,34 +1,63 @@
 //! Heat's proposals in the daemon (#11, part D): `heat.evaluate` runs the detectors over a
-//! repository's window and writes the reconciliation's batch, `heat.list` reads the proposals.
+//! repository's window and writes the reconciliation's batch, `heat.list` reads the proposals,
+//! `heat.dismiss` dismisses one (with the operator token).
 //!
 //! Each identity has its own [`Heat`] handle over its own store and repositories, so an
 //! evaluation asked for one identity reads and writes that identity's rows only. One evaluation
-//! runs at a time per identity: two calls never interleave their reads and writes. Nothing
-//! evaluates on its own yet: only `heat.evaluate` does.
+//! runs at a time per identity: two calls never interleave their reads and writes.
+//!
+//! Besides `heat.evaluate`, a daily timer per identity ([`Heat::spawn`]) evaluates each of its
+//! repositories through the same handle and mutex: the first time [`FIRST_DELAY_MS`] after the
+//! daemon's start (a daemon restarted often must not evaluate at every start), then every
+//! [`DAY_MS`] ([`due`]). The time of the last evaluation is not stored: a restarted daemon waits
+//! its first delay again.
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use bosun_api::rpc::{ErrorObject, code};
 use bosun_api::{
-    HeatEvaluateParams, HeatEvaluation, HeatInsufficient, HeatListParams, HeatProposals,
-    HeatRepoEvaluation, Method, ProposalView, method,
+    HeatDismissParams, HeatEvaluateParams, HeatEvaluation, HeatInsufficient, HeatListParams,
+    HeatProposals, HeatRepoEvaluation, Method, ProposalView, method,
 };
 use bosun_config::Repo;
-use bosun_core::proposal::is_active;
-use bosun_store::{ProposalRow, Reader, Writer};
+use bosun_core::proposal::{ProposalState, is_active};
+use bosun_store::{ProposalRow, ProposalStep, Reader, Write, Writer};
 use serde_json::Value;
+use tokio::task::JoinHandle;
 
 use crate::api::{call, failed};
 use crate::overview::now_ms;
 use crate::state::{Served, State};
 
+/// The wait after the daemon's start before the timer's first evaluation.
+pub(crate) const FIRST_DELAY_MS: i64 = 60 * 60 * 1000;
+/// The time between two evaluations of the timer.
+pub(crate) const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// How often the timer asks [`due`].
+const TICK: Duration = Duration::from_secs(600);
+
+/// Whether the timer evaluates at `now_ms`, for a daemon started at `started_ms` whose timer
+/// last evaluated at `last_ms` (`None` before its first evaluation in this process). Never when
+/// the clock went back behind the last evaluation or the start.
+pub(crate) fn due(started_ms: i64, last_ms: Option<i64>, now_ms: i64) -> bool {
+    match last_ms {
+        Some(last) => now_ms >= last && now_ms - last >= DAY_MS,
+        // Mutant (`mutant_heat_timer_at_start`): the first evaluation runs at the start.
+        None if cfg!(mutant_heat_timer_at_start) => now_ms >= started_ms,
+        None => now_ms >= started_ms && now_ms - started_ms >= FIRST_DELAY_MS,
+    }
+}
+
 /// The evaluations of one identity: its reader, its writer (the daemon is the store's single
-/// writer) and its repositories, by name.
-#[derive(Debug)]
+/// writer) and its repositories, by name. Clones share one mutex.
+#[derive(Debug, Clone)]
 pub(crate) struct Heat {
     reader: Reader,
     writer: Writer,
-    repos: Vec<(String, Repo)>,
-    /// Held for the whole of an evaluation.
-    running: tokio::sync::Mutex<()>,
+    repos: Arc<Vec<(String, Repo)>>,
+    /// Held for the whole of an evaluation, the timer's and `heat.evaluate`'s alike.
+    running: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Heat {
@@ -37,9 +66,31 @@ impl Heat {
         Self {
             reader: store.reader().clone(),
             writer: store.writer().clone(),
-            repos,
-            running: tokio::sync::Mutex::new(()),
+            repos: Arc::new(repos),
+            running: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// The daily timer of the identity `identity`, for a daemon started at `started_ms`: every
+    /// [`TICK`] it asks [`due`] and, when due, evaluates every repository through
+    /// [`Heat::evaluate`] (which logs a repository that fails and goes on with the others),
+    /// until the task is aborted.
+    pub(crate) fn spawn(&self, identity: String, started_ms: i64) -> JoinHandle<()> {
+        let heat = self.clone();
+        tokio::spawn(async move {
+            let mut last_ms = None;
+            loop {
+                tokio::time::sleep(TICK).await;
+                let now = now_ms();
+                if !due(started_ms, last_ms, now) {
+                    continue;
+                }
+                if let Err(e) = heat.evaluate(&identity, None, now).await {
+                    crate::log::log!("bosund: identity {identity}: heat: {e}");
+                }
+                last_ms = Some(now);
+            }
+        })
     }
 
     /// Evaluates the repository named `repo`, or each one, at `now_ms`, and writes each
@@ -124,7 +175,7 @@ fn summary(key: &str, evaluation: &bosun_heat::Evaluation) -> HeatRepoEvaluation
     }
 }
 
-/// `heat.metrics`, `heat.evaluate` and `heat.list`.
+/// `heat.metrics`, `heat.evaluate`, `heat.list` and `heat.dismiss`.
 pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObject> {
     match name {
         method::HeatMetrics::NAME => crate::api::heat_metrics(state, p).await,
@@ -135,6 +186,16 @@ pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Valu
         method::HeatList::NAME => {
             call::<method::HeatList, _, _>(p, |p| async move {
                 list(state.identity(&p.identity)?, &p).await
+            })
+            .await
+        }
+        method::HeatDismiss::NAME => {
+            call::<method::HeatDismiss, _, _>(p, |p| async move {
+                // Mutant (`mutant_heat_dismiss_without_token`): any caller may dismiss.
+                if !cfg!(mutant_heat_dismiss_without_token) {
+                    state.control.authorize(&p.operator)?;
+                }
+                dismiss(state.identity(&p.identity)?, &p).await
             })
             .await
         }
@@ -212,6 +273,51 @@ async fn list(served: &Served, p: &HeatListParams) -> Result<HeatProposals, Erro
     })
 }
 
+/// Dismisses the identity's proposal `p.key` when it is open or published. A key of no row of
+/// the identity's store and a sighting (seen once, not a proposal yet) are refused alike.
+async fn dismiss(served: &Served, p: &HeatDismissParams) -> Result<ProposalView, ErrorObject> {
+    let reader = served.store.reader();
+    let row = reader
+        .proposal(&p.key)
+        .await
+        .map_err(failed)?
+        .filter(|row| row.seen_count >= 2)
+        .ok_or_else(|| {
+            ErrorObject::new(
+                code::INVALID_PARAMS,
+                format!("identity {} has no proposal {:?}", served.name, p.key),
+            )
+        })?;
+    if !matches!(row.state, ProposalState::Open | ProposalState::Published) {
+        return Err(ErrorObject::new(
+            code::INVALID_PARAMS,
+            format!(
+                "proposal {} is {}: only an open or published proposal can be dismissed",
+                row.key,
+                row.state.as_str()
+            ),
+        ));
+    }
+    served
+        .store
+        .writer()
+        .write(vec![Write::ProposalStep {
+            key: row.key.clone(),
+            step: ProposalStep::Dismissed {
+                reason: p.reason.clone().unwrap_or_default(),
+            },
+            at_ms: now_ms(),
+        }])
+        .await
+        .map_err(|e| ErrorObject::new(code::INVALID_PARAMS, e.to_string()))?;
+    let row = reader
+        .proposal(&row.key)
+        .await
+        .map_err(failed)?
+        .ok_or_else(|| ErrorObject::new(code::INTERNAL_ERROR, "the dismissed proposal vanished"))?;
+    Ok(view(served, row))
+}
+
 fn view(served: &Served, row: ProposalRow) -> ProposalView {
     let evidence = serde_json::from_str(&row.evidence_json).unwrap_or_default();
     ProposalView {
@@ -237,6 +343,32 @@ fn view(served: &Served, row: ProposalRow) -> ProposalView {
         created_ms: row.created_ms,
         last_seen_ms: row.last_seen_ms,
         seen_count: row.seen_count,
+        dismiss_reason: row.dismiss_reason.filter(|r| !r.is_empty()),
         evidence,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DAY_MS, due};
+
+    const MINUTE: i64 = 60 * 1000;
+
+    /// The timer's first evaluation waits an hour after the start; after it, one a day; never
+    /// when the clock went back (`mutant_heat_timer_at_start` evaluates at the start).
+    #[test]
+    fn the_first_evaluation_waits_an_hour_and_then_runs_daily() {
+        assert!(!due(0, None, 0));
+        assert!(!due(0, None, 59 * MINUTE));
+        assert!(due(0, None, 60 * MINUTE));
+        assert!(!due(10 * DAY_MS, None, 10 * DAY_MS - 1), "clock back");
+
+        let t = 5 * DAY_MS + 17;
+        for started in [0, t - MINUTE, t + 3 * DAY_MS] {
+            assert!(!due(started, Some(t), t + DAY_MS - 1), "{started}");
+            assert!(due(started, Some(t), t + DAY_MS), "{started}");
+            assert!(!due(started, Some(t), t - 1), "{started}: clock back");
+            assert!(!due(started, Some(t), t), "{started}");
+        }
     }
 }

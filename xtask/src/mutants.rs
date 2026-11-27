@@ -3721,6 +3721,16 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    Mutant {
+        name: "mutant_loop_unready_counts",
+        issue: 219,
+        breaks: "the loop maps the not-ready exit code to a failed run: the attempt counter moves",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::unready::a_not_ready_verdict_waits_and_runs_again_without_a_session_or_a_counted_attempt",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

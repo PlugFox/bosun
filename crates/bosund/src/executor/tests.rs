@@ -56,6 +56,7 @@ mod stale;
 mod sticky;
 mod sweep;
 mod timing;
+mod unready;
 mod worktrees;
 
 /// Removes from `command` every variable it would inherit from a bosun session (#134): each

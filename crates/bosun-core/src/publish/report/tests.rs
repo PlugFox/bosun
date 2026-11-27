@@ -20,6 +20,7 @@ fn attempt(number: u32, state: AttemptState, tail: &str) -> AttemptFacts {
             line: "test result: FAILED. 1 failed".into(),
             tail: tail.into(),
         }),
+        unready: 0,
         refusal: Vec::new(),
         denials: Vec::new(),
     }
@@ -358,6 +359,7 @@ fn maximal_facts_stay_under_the_cap() {
                 effort: Some(big.clone()),
                 sessions: many(&big),
                 crash_retries: 3,
+                unready: u32::MAX,
                 verdict: Some(VerdictFacts {
                     first: RunResult::Timeout,
                     rerun: Some(RunResult::Fail),
@@ -533,4 +535,47 @@ fn numbers_and_durations_read_well() {
     assert_eq!(duration(12_345), "12.3 s");
     assert_eq!(duration(65_000), "1m 05s");
     assert_eq!(eqv(f64::NAN), "n/a");
+}
+
+#[test]
+fn not_ready_runs_are_counted_apart_from_the_verdict() {
+    let passed = |unready| AttemptFacts {
+        verdict: Some(VerdictFacts {
+            first: RunResult::Pass,
+            rerun: None,
+            duration_ms: 1_000,
+            line: String::new(),
+            tail: String::new(),
+        }),
+        unready,
+        ..attempt(1, AttemptState::Pass, "")
+    };
+    let mut facts = facts();
+    facts.attempts = vec![passed(2)];
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(
+        body.contains(", verdict pass (after 2 not-ready runs) in 1.0 s"),
+        "{body}"
+    );
+    facts.attempts = vec![passed(1)];
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(body.contains("pass (after 1 not-ready run) in"), "{body}");
+    facts.attempts = vec![passed(0)];
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(body.contains(", verdict pass in 1.0 s"), "{body}");
+    assert!(!body.contains("not ready"), "{body}");
+
+    // Every run so far was not ready: no verdict judged.
+    facts.attempts = vec![AttemptFacts {
+        verdict: None,
+        unready: 3,
+        ..attempt(1, AttemptState::VerdictRunning, "")
+    }];
+    facts.parked = vec![ParkedFacts {
+        reason: ParkReason::Unready,
+        ms: 300_000,
+    }];
+    let body = render_report(&facts, ReportOptions::for_repository(false));
+    assert!(body.contains(", verdict not ready (3 runs)"), "{body}");
+    assert!(body.contains("verdict not ready 5m 00s"), "{body}");
 }

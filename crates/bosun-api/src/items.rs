@@ -202,7 +202,7 @@ pub struct RefusedEdit {
 /// Time parked for one reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ParkedTime {
-    /// `limit`, `paused`, `killed` or `daily_cap`.
+    /// `limit`, `paused`, `killed`, `daily_cap` or `unready`.
     pub reason: String,
     /// Times parked.
     pub parks: u64,

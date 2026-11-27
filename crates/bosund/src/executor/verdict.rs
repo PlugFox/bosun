@@ -17,7 +17,7 @@ use bosun_store::{VerdictEnd, VerdictStart, Write};
 use tokio::sync::{oneshot, watch};
 
 use super::workspace::Unopened;
-use super::{Claimed, Shared, Signal, blocking, git, identity, lookup, now_ms, workspace};
+use super::{Claimed, Shared, Signal, blocking, git, identity, lookup, now_ms, outbox, workspace};
 use crate::events;
 
 /// Resolves when `kill` is raised; never when its sender is gone without raising it.
@@ -36,6 +36,8 @@ pub(crate) struct Run {
     /// For a re-run after a non-passing first run: that run's failing tests. A pass now makes
     /// the attempt flaky, and they are its flaky tests (#44 D).
     pub(crate) first_failing: Option<Vec<String>>,
+    /// The item's not-ready verdict runs before this one (#204), for its `unready` note.
+    pub(crate) unready: u32,
 }
 
 /// A spawner that reports the key of the child it starts.
@@ -86,6 +88,8 @@ pub(crate) fn run_result(outcome: Outcome) -> RunResult {
         Outcome::Pass => RunResult::Pass,
         Outcome::Fail => RunResult::Fail,
         Outcome::Timeout => RunResult::Timeout,
+        // Mutant (`mutant_loop_unready_counts`): the not-ready code counts as a failure.
+        Outcome::Unready if cfg!(mutant_loop_unready_counts) => RunResult::Fail,
         Outcome::Unready => RunResult::Unready,
     }
 }
@@ -354,8 +358,8 @@ async fn run_in(
             .verdict_timeout
             .unwrap_or(repo.verdict.timeout),
         limits: Limits::default(),
-        // The repository's `verdict.unready_exit` reaches the loop in the next card (#204).
-        unready_exit: None,
+        // The repository's code for "a resource the verdict needs is not ready" (#204).
+        unready_exit: repo.verdict.unready_exit,
     };
 
     let (key_tx, key_rx) = oneshot::channel();
@@ -414,7 +418,23 @@ async fn run_in(
     };
     let result = run_result(verdict.outcome);
     record_end(shared, run, &verdict, result).await;
-    let failing = if result == RunResult::Pass {
+    if result == RunResult::Unready
+        && let Some(code) = repo.verdict.unready_exit
+    {
+        // Stored before the event is applied: the Needs-you comment at the cap quotes it.
+        // Daemon facts only, never the run's output.
+        let text = format!(
+            "run {} of the verdict exited {code} (repo.{}.verdict.unready_exit): not ready, \
+             {} of unready_cap {}",
+            run.number,
+            shared.options.repo,
+            run.unready.saturating_add(1),
+            repo.verdict.unready_cap,
+        );
+        outbox::note_unready(shared, &run.item, &text).await;
+    }
+    // A not-ready run judged nothing: it has no failing tests.
+    let failing = if matches!(result, RunResult::Pass | RunResult::Unready) {
         Vec::new()
     } else {
         verdict.failing_tests(&Libtest)

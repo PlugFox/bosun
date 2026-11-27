@@ -102,8 +102,12 @@ pub struct AttemptFacts {
     pub sessions: Vec<String>,
     /// Crash retries used.
     pub crash_retries: u32,
-    /// Its verdict, once one ran.
+    /// Its verdict, once a run judged: built from its runs that were not
+    /// [`RunResult::Unready`].
     pub verdict: Option<VerdictFacts>,
+    /// Its verdict runs that exited with the repository's `unready_exit` (#204): counted here,
+    /// apart from the verdict's first run and re-run.
+    pub unready: u32,
     /// Why the daemon refused it before its verdict (#137): its failed preconditions or guard
     /// refusals, in the daemon's words; empty when nothing refused it. A reason may quote the
     /// repository (a path, a commit message), so the renderer cleans it.
@@ -361,6 +365,15 @@ fn facts_list(body: &mut String, facts: &ReportFacts) {
     }
 }
 
+/// `1 not-ready run`, `2 not-ready runs`.
+fn unready_runs(n: u32) -> String {
+    if n == 1 {
+        "1 not-ready run".to_owned()
+    } else {
+        format!("{n} not-ready runs")
+    }
+}
+
 /// The attempts, the latest [`ATTEMPTS_MAX`] of them; the reasons of a refusal only when
 /// `refusals`, else only that there was one.
 fn attempts(body: &mut String, attempts: &[AttemptFacts], refusals: bool) {
@@ -384,15 +397,23 @@ fn attempts(body: &mut String, attempts: &[AttemptFacts], refusals: bool) {
                 Some(rerun) => format!("{}, then {}", run_text(verdict.first), run_text(rerun)),
                 None => run_text(verdict.first).to_owned(),
             };
-            let _ = write!(
-                body,
-                ", verdict {runs} in {}",
-                duration(verdict.duration_ms)
-            );
+            let _ = write!(body, ", verdict {runs}");
+            if attempt.unready > 0 {
+                let _ = write!(body, " (after {})", unready_runs(attempt.unready));
+            }
+            let _ = write!(body, " in {}", duration(verdict.duration_ms));
             let line = sanitise_inline(&redact_head(&verdict.line, LINE_CAP), LINE_CAP);
             if !line.is_empty() {
                 let _ = write!(body, ": {line}");
             }
+        } else if attempt.unready > 0 {
+            // Every run so far was not ready: none judged.
+            let n = attempt.unready;
+            let _ = write!(
+                body,
+                ", verdict not ready ({n} {})",
+                if n == 1 { "run" } else { "runs" }
+            );
         }
         if !attempt.refusal.is_empty() && !refusals {
             body.push_str(", refused before its verdict (the reasons are in `bosun item`)");

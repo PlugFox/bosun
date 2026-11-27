@@ -807,13 +807,20 @@ impl Loop {
             config.daemon.park_cap
         };
         let now_ms = self.shared.deps.clock.wall_ms();
+        let mut rules = Rules {
+            park_cap,
+            ..Rules::default()
+        };
+        // The repository's own not-ready cap and backoff (#204), from the live configuration.
+        if let Some((repo, _)) = lookup(&config, &self.shared.options.repo) {
+            rules.unready_cap = repo.verdict.unready_cap;
+            rules.unready_backoff_ms =
+                i64::try_from(repo.verdict.unready_backoff.as_millis()).unwrap_or(i64::MAX);
+        }
         Ctx {
             now_ms,
             hold: self.hold(now_ms),
-            rules: Rules {
-                park_cap,
-                ..Rules::default()
-            },
+            rules,
         }
     }
 
@@ -1341,6 +1348,7 @@ impl Loop {
             .as_ref()
             .is_some_and(|a| a.first_run.is_some());
         let first_failing = rerun.then(|| cur.failing.clone());
+        let unready = cur.item.unready;
         let (kill, kill_rx) = watch::channel(Signal::Run);
         let shared = self.shared.clone();
         let config = self.config();
@@ -1371,6 +1379,7 @@ impl Loop {
                 attempt,
                 number: run,
                 first_failing,
+                unready,
             };
             let (mut event, failing) =
                 verdict::verdict(&shared, &config, &claimed, &spec, kill_rx).await;
@@ -1865,7 +1874,9 @@ impl Loop {
                 self.apply(event).await;
             }
             Done::Event { event, failing, .. } => {
-                if matches!(event, Event::Verdict { .. })
+                // A not-ready run judged nothing: the failing tests of the first run that did
+                // stay (#204).
+                if matches!(event, Event::Verdict { result, .. } if result != bosun_core::RunResult::Unready)
                     && cur
                         .item
                         .attempt

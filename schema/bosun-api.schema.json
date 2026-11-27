@@ -3291,7 +3291,7 @@
           "type": "integer"
         },
         "reason": {
-          "description": "`limit`, `paused`, `killed` or `daily_cap`.",
+          "description": "`limit`, `paused`, `killed`, `daily_cap` or `unready`.",
           "type": "string"
         }
       },

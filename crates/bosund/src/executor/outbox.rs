@@ -40,7 +40,7 @@ use bosun_core::publish::{
     self, AgentSummary, AttemptFacts, DeniedCall, DiffStat, Landing, LandingMode, ParkedFacts,
     ReportFacts, ReportOptions, VerdictFacts,
 };
-use bosun_core::{Column, ItemId, Outcome, ParkReason, Reason, State};
+use bosun_core::{Column, ItemId, Outcome, ParkReason, Reason, RunResult, State};
 use bosun_queue::{Owned, QueueError};
 use bosun_store::{AgentCallKind, OutboxOp, OutboxRow, Reader, Write};
 use tokio::sync::{Notify, watch};
@@ -76,8 +76,29 @@ pub(crate) const NOTE_SETUP: &str = "setup";
 /// computed from a stale view of the item (#132). Its Needs-you comment (`stale`) quotes it.
 pub(crate) const NOTE_STALE: &str = "stale";
 
+/// The kind of an item's note that says why its last verdict run was not ready (#204): the run,
+/// its exit code, the key that names it (`repo.<name>.verdict.unready_exit`) and the count
+/// against the cap. Daemon facts only, never the run's output. Its Needs-you comment
+/// (`resource_unready`) quotes it.
+pub(crate) const NOTE_UNREADY: &str = "unready";
+
 /// The longest note of kind [`NOTE_SETUP`], in characters.
 const SETUP_NOTE_CAP: usize = 500;
+
+/// Stores `text`, the daemon's account of a not-ready verdict run, as `item`'s
+/// [`NOTE_UNREADY`] note: plain, since it holds daemon facts only; the comment that quotes it
+/// sanitises it. A note that cannot be written is reported.
+pub(crate) async fn note_unready(shared: &super::Shared, item: &ItemId, text: &str) {
+    let note = Write::ItemNote {
+        item: item.clone(),
+        kind: NOTE_UNREADY.to_owned(),
+        body: text.to_owned(),
+        at_ms: super::now_ms(),
+    };
+    if let Err(e) = shared.deps.writer.write(vec![note]).await {
+        shared.trouble(format!("the not-ready run of {item} cannot be stored: {e}"));
+    }
+}
 
 /// Stores why `item`'s worktree could not be made or set up, as its [`NOTE_SETUP`] note:
 /// `cause` (the command and how it ended, or the error), and the output's `tail` only when the
@@ -602,19 +623,20 @@ impl Drainer {
                 {
                     let _ = write!(body, ": {}", figure.text());
                 }
-                // What failed (#8): the command and how it ended, or the error.
-                if other == Reason::Setup
-                    && let Some(cause) = self.note(item, NOTE_SETUP).await?
+                // The note the reason quotes: what failed (#8: the command and how it ended,
+                // or the error), what the store refused (#132), why the verdict was not ready
+                // (#204: the exit code and its key).
+                let quoted = match other {
+                    Reason::Setup => Some(NOTE_SETUP),
+                    Reason::Stale => Some(NOTE_STALE),
+                    Reason::ResourceUnready => Some(NOTE_UNREADY),
+                    _ => None,
+                };
+                if let Some(kind) = quoted
+                    && let Some(cause) = self.note(item, kind).await?
                     && !cause.trim().is_empty()
                 {
                     let _ = write!(body, ": {}", publish::sanitise_inline(&cause, 500));
-                }
-                // What the store refused (#132).
-                if other == Reason::Stale
-                    && let Some(refusal) = self.note(item, NOTE_STALE).await?
-                    && !refusal.trim().is_empty()
-                {
-                    let _ = write!(body, ": {}", publish::sanitise_inline(&refusal, 500));
                 }
                 if other == Reason::LandingRefused
                     && let Some(error) = self.landing_error(row).await?
@@ -712,6 +734,7 @@ fn park_reason(name: &str) -> Option<ParkReason> {
         "paused" => ParkReason::Paused,
         "killed" => ParkReason::Killed,
         "daily_cap" => ParkReason::DailyCap,
+        "unready" => ParkReason::Unready,
         _ => return None,
     })
 }
@@ -791,9 +814,18 @@ pub(crate) async fn report_facts(
                     sessions.push(run.session_key.clone());
                 }
             }
-            let done: Vec<_> = verdicts
-                .iter()
-                .filter(|v| v.attempt == number && v.result.is_some())
+            let finished = || {
+                verdicts
+                    .iter()
+                    .filter(|v| v.attempt == number && v.result.is_some())
+            };
+            // The not-ready runs (#204) are counted apart: `first` and `rerun` are the runs
+            // that judged.
+            let unready = finished()
+                .filter(|v| v.result == Some(RunResult::Unready))
+                .count();
+            let done: Vec<_> = finished()
+                .filter(|v| v.result != Some(RunResult::Unready))
                 .collect();
             let verdict = done.first().and_then(|first| {
                 let last = done.last()?;
@@ -813,6 +845,7 @@ pub(crate) async fn report_facts(
                 sessions,
                 crash_retries: row.attempt.crash_retries,
                 verdict,
+                unready: u32::try_from(unready).unwrap_or(u32::MAX),
                 refusal: row.refusal.clone(),
                 denials: denials
                     .iter()

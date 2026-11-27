@@ -17,7 +17,8 @@
 //! - Stage 3's notification channels (#9): one row per channel of the identity, with the name
 //!   of the credential-store entry of its secret and never the secret ([`NewChannel`]).
 //! - Heat's proposals (#11 D): one row per detector finding, deduplicated per repository and
-//!   subject, its lifecycle the machine of [`bosun_core::proposal`] ([`NewProposal`]).
+//!   subject, its lifecycle the machine of [`bosun_core::proposal`] ([`NewProposal`]); the
+//!   landing of one is an annotation of its repository ([`AnnotationRow`]).
 //! - Readers use a read-only pool ([`Reader`]). Every derived number (cost, eqv) is computed at
 //!   query time from raw token counts and the price rows.
 //!
@@ -41,6 +42,7 @@
 )]
 
 mod activity;
+mod annotation;
 mod error;
 mod link;
 mod notify;
@@ -52,6 +54,7 @@ mod work;
 mod writer;
 
 pub use activity::RecentSession;
+pub use annotation::AnnotationRow;
 pub use error::Error;
 pub use link::{CommitLink, Link, LinkedSession};
 pub use notify::{ChannelRow, NewChannel, NewNotice, NoticeRow, valid_name as valid_channel_name};

@@ -25,8 +25,10 @@
 //!
 //! [`reconcile`] turns one evaluation's findings into the writes of heat's proposals: a
 //! finding is a proposal at the second evaluation in a row, deduplicated, cooled down and
-//! rate-limited. [`evaluate`] reads one repository's window and returns that batch; the daemon
-//! writes it.
+//! rate-limited. [`link`] links a proposal to the item that landed its remedy (its card's item,
+//! or a `Proposal: <key>` line in the card) and records the landing with an annotation
+//! ([`landed`]); an evaluation links the landings before it reconciles ([`plan`]). [`evaluate`]
+//! reads one repository's window and returns that batch; the daemon writes it.
 
 mod curve;
 mod detect;
@@ -34,6 +36,7 @@ mod estimate;
 mod evaluate;
 mod exact;
 mod items;
+mod landing;
 mod metrics;
 mod reconcile;
 
@@ -45,5 +48,6 @@ pub use estimate::{BYTES_PER_TOKEN, estimates};
 pub use evaluate::{Evaluation, WINDOW_MS, evaluate};
 pub use exact::{Scope, exact};
 pub use items::item_row;
+pub use landing::{LinkItem, landed, link, plan};
 pub use metrics::{Exactness, Inputs, Metric, heat_metrics, metrics};
 pub use reconcile::{EVIDENCE_CAP, MAX_ACTIVE, MAX_NEW, Reconciled, Summary, reconcile};

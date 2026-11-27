@@ -1,10 +1,12 @@
 //! `bosun heat` (#11, part D): heat's proposals of each identity (`heat.list`), active ones by
 //! default and every state with `--all`; `bosun heat dismiss <key>` dismisses one of them
-//! (`heat.dismiss`, with the operator token); `bosun heat metrics` the generic metrics the heat
+//! (`heat.dismiss`, with the operator token) and `bosun heat land <key>` records by hand that
+//! one's remedy landed (`heat.land`, with the operator token); `bosun heat metrics` the generic
+//! metrics the heat
 //! detectors test, as the daemon serves them (`heat.metrics`). It prints numbers and draws no
 //! conclusions.
 
-use bosun_api::{HeatDismissParams, HeatListParams, ReportParams, method};
+use bosun_api::{HeatDismissParams, HeatLandParams, HeatListParams, ReportParams, method};
 use bosun_client::Client;
 use clap::{Args, Subcommand};
 
@@ -37,6 +39,11 @@ pub(crate) enum HeatCommand {
     /// subject is not proposed again for 90 days. Sends the operator token.
     #[command(after_help = EXIT_CODES)]
     Dismiss(DismissArgs),
+    /// Records that the remedy of an open or published proposal of one identity (--identity)
+    /// landed now, optionally as a commit (--sha): its follow-up is due one window later.
+    /// Sends the operator token.
+    #[command(after_help = EXIT_CODES)]
+    Land(LandArgs),
 }
 
 impl HeatArgs {
@@ -44,7 +51,7 @@ impl HeatArgs {
     pub(crate) fn repo(&self) -> Option<&str> {
         match &self.command {
             Some(HeatCommand::Metrics(args)) => args.repo.as_deref(),
-            Some(HeatCommand::Dismiss(_)) => None,
+            Some(HeatCommand::Dismiss(_) | HeatCommand::Land(_)) => None,
             None => self.repo.as_deref(),
         }
     }
@@ -70,6 +77,16 @@ pub(crate) struct MetricsArgs {
     /// Only this repository (its name in the configuration).
     #[arg(long, value_name = "NAME")]
     pub(crate) repo: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LandArgs {
+    /// The proposal's key, the first column of `bosun heat`.
+    #[arg(value_name = "KEY")]
+    pub(crate) key: String,
+    /// The commit that landed the remedy, 7 to 40 hex digits.
+    #[arg(long, value_name = "SHA")]
+    pub(crate) sha: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -137,6 +154,10 @@ pub(crate) async fn section(
             exit::FAILED,
             "heat dismiss names one identity",
         )),
+        // Answered by `land`, likewise.
+        Some(HeatCommand::Land(_)) => {
+            Err(Failure::new(exit::FAILED, "heat land names one identity"))
+        }
     }
 }
 
@@ -166,6 +187,39 @@ pub(crate) async fn dismiss(global: &Global, args: &DismissArgs) -> Result<Strin
         _ => format!(
             "{identity}: proposal {} ({} on {}) dismissed\n",
             dismissed.key, dismissed.detector, dismissed.subject
+        ),
+    })
+}
+
+/// `heat land`: one identity, named by `--identity`, and the operator token.
+pub(crate) async fn land(global: &Global, args: &LandArgs) -> Result<String, Failure> {
+    let identity = global.identity.clone().ok_or_else(|| {
+        Failure::new(
+            exit::USAGE,
+            "heat land changes one identity's proposal: pass --identity",
+        )
+    })?;
+    let (mut client, operator) = connect_operator(global).await?;
+    let landed = client
+        .call::<method::HeatLand>(&HeatLandParams {
+            operator,
+            identity: identity.clone(),
+            key: args.key.clone(),
+            sha: args.sha.clone(),
+        })
+        .await?;
+    Ok(match global.format {
+        Format::Json => {
+            let mut text = serde_json::to_string_pretty(&landed).unwrap_or_default();
+            text.push('\n');
+            text
+        }
+        _ => format!(
+            "{identity}: proposal {} ({} on {}) landed at {}\n",
+            landed.key,
+            landed.detector,
+            landed.subject,
+            landed.landed_sha.as_deref().unwrap_or("no commit")
         ),
     })
 }
@@ -217,6 +271,28 @@ mod tests {
         };
         assert_eq!(dismiss.key, "0123456789abcdef");
         assert_eq!(dismiss.reason.as_deref(), Some("not worth it"));
+        assert_eq!(cli.global.identity.as_deref(), Some("work"));
+
+        let cli = Cli::try_parse_from([
+            "bosun",
+            "heat",
+            "land",
+            "0123456789abcdef",
+            "--identity",
+            "work",
+            "--sha",
+            "0123abc",
+        ])
+        .unwrap();
+        let Command::Heat(args) = &cli.command else {
+            panic!("{cli:?}");
+        };
+        let Some(HeatCommand::Land(land)) = &args.command else {
+            panic!("{args:?}");
+        };
+        assert_eq!(land.key, "0123456789abcdef");
+        assert_eq!(land.sha.as_deref(), Some("0123abc"));
+        assert_eq!(args.repo(), None);
         assert_eq!(cli.global.identity.as_deref(), Some("work"));
     }
 }

@@ -2326,6 +2326,35 @@
       ],
       "type": "object"
     },
+    "HeatLandParams": {
+      "description": "Params of `heat.land`.",
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "key": {
+          "description": "The proposal's key (16 hex digits), as `heat.list` shows it.",
+          "type": "string"
+        },
+        "operator": {
+          "default": "",
+          "description": "The operator token the daemon wrote at start (see [`crate::control`]). Missing, it is\nrefused like a wrong one.",
+          "type": "string"
+        },
+        "sha": {
+          "description": "The commit that landed the remedy, 7 to 40 hex digits.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "key"
+      ],
+      "type": "object"
+    },
     "HeatListParams": {
       "description": "Params of `heat.list`.",
       "properties": {
@@ -2540,6 +2569,13 @@
             "$ref": "#/$defs/HeatInsufficient"
           },
           "type": "array"
+        },
+        "landed": {
+          "default": 0,
+          "description": "Proposals whose remedy landed: an item of their card, or one whose card names them in\na `Proposal: <key>` line, done with a pass.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "promoted": {
           "description": "Sightings found again and promoted to proposals.",
@@ -3881,6 +3917,14 @@
           },
           "type": "array"
         },
+        "followup_due_ms": {
+          "description": "When the follow-up measures it: one baseline window after `landed_ms`.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "impact_eqv_estimate": {
           "description": "An ESTIMATE of the tokens at stake, for ranking and display only: never added to an\nexact figure.",
           "format": "uint64",
@@ -3890,9 +3934,37 @@
             "null"
           ]
         },
+        "item": {
+          "description": "The item that landed it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "key": {
           "description": "The proposal's key: what a user names it by.",
           "type": "string"
+        },
+        "landed_how": {
+          "description": "How its remedy landed, `item`, `marker` or `manual`; set for a landed or measured\nproposal.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "landed_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "landed_sha": {
+          "description": "The commit it landed as, when one is known.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "last_seen_ms": {
           "format": "int64",
@@ -6171,6 +6243,15 @@
       },
       "result": {
         "$ref": "#/$defs/HeatEvaluation"
+      }
+    },
+    "heat.land": {
+      "description": "Records by hand that the remedy of an open or published heat proposal of the identity landed now, optionally as commit `sha`: its follow-up is due one baseline window later, and the landing is annotated on its repository. Takes the operator token.",
+      "params": {
+        "$ref": "#/$defs/HeatLandParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProposalView"
       }
     },
     "heat.list": {

@@ -1025,6 +1025,11 @@ mod tests {
             last_seen_ms: 1_793_491_200_000,
             seen_count: 2,
             dismiss_reason: None,
+            landed_how: None,
+            landed_sha: None,
+            landed_ms: None,
+            followup_due_ms: None,
+            item: None,
             evidence: Vec::new(),
         }
     }

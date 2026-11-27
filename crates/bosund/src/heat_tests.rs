@@ -344,3 +344,104 @@ async fn a_dismissed_proposal_leaves_the_list_and_needs_the_operator_token() {
     assert_eq!(only(&world).await, all);
     world.close().await;
 }
+
+/// #11 D: `heat.land` takes the operator token and a commit id of 7 to 40 hex digits; the
+/// landed proposal lists as `landed` by hand with its commit and its follow-up due one window
+/// later, and one annotation names it in the store of the identity that owns it, none in the
+/// other's. A further evaluation leaves it alone; it cannot land twice, nor for another
+/// identity (`mutant_heat_land_no_annotation` writes no annotation).
+#[tokio::test]
+async fn a_manual_landing_is_recorded_with_an_annotation() {
+    use bosun_api::rpc::code;
+
+    let world = World::new().await;
+    seed_b(&world).await;
+    evaluate(&world, "b").await;
+    let second = evaluate(&world, "b").await;
+    assert_eq!(second["promoted"], 1, "{second}");
+    let proposal = only(&world).await;
+    assert_eq!(proposal["state"], "open", "{proposal}");
+    let key = proposal["key"].as_str().unwrap().to_owned();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+
+    let wrong = json!({"operator": "not-the-token", "identity": "b", "key": key, "sha": sha});
+    assert_eq!(
+        world.refused("heat.land", wrong).await,
+        i64::from(code::UNAUTHORIZED)
+    );
+    assert_eq!(only(&world).await, proposal);
+    let bad_sha =
+        json!({"operator": crate::notify_tests::TOKEN, "identity": "b", "key": key, "sha": "xyz"});
+    assert_eq!(
+        world.refused("heat.land", bad_sha).await,
+        i64::from(code::INVALID_PARAMS)
+    );
+    assert_eq!(only(&world).await, proposal);
+
+    let params =
+        json!({"operator": crate::notify_tests::TOKEN, "identity": "b", "key": key, "sha": sha});
+    let before = crate::overview::now_ms();
+    let landed = world.ok("heat.land", params.clone()).await;
+    let after = crate::overview::now_ms();
+    assert_eq!(landed["key"], key.as_str(), "{landed}");
+    assert_eq!(landed["state"], "landed", "{landed}");
+
+    let listed = only(&world).await;
+    assert_eq!(listed, landed);
+    assert_eq!(listed["state"], "landed", "{listed}");
+    assert_eq!(listed["landed_how"], "manual", "{listed}");
+    assert_eq!(listed["landed_sha"], sha, "{listed}");
+    assert_eq!(listed["item"], Value::Null, "{listed}");
+    let landed_ms = listed["landed_ms"].as_i64().unwrap();
+    assert!((before..=after).contains(&landed_ms), "{listed}");
+    let window =
+        listed["window_to_ms"].as_i64().unwrap() - listed["window_from_ms"].as_i64().unwrap();
+    assert_eq!(
+        listed["followup_due_ms"].as_i64().unwrap(),
+        landed_ms + window,
+        "{listed}"
+    );
+    let active = world.ok("heat.list", json!({"identity": "b"})).await;
+    assert_eq!(active["proposals"], json!([listed]), "{active}");
+
+    let annotations = |identity: &'static str| {
+        let reader = world.state.identities[identity].store.reader().clone();
+        async move { reader.annotations(0, i64::MAX).await.unwrap() }
+    };
+    let b = annotations("b").await;
+    assert_eq!(b.len(), 1, "{b:?}");
+    assert_eq!(b[0].ts_ms, landed_ms, "{b:?}");
+    assert!(b[0].text.contains(&key) && b[0].text.contains(sha), "{b:?}");
+    assert_eq!(
+        b[0].repo.as_deref(),
+        Some(world.state.identities["b"].repos[0].1.key.as_str()),
+        "{b:?}"
+    );
+    assert_eq!(annotations("a").await, []);
+
+    let mut for_a = params.clone();
+    for_a["identity"] = json!("a");
+    assert_eq!(
+        world.refused("heat.land", for_a).await,
+        i64::from(code::INVALID_PARAMS)
+    );
+    assert_eq!(annotations("a").await, []);
+
+    let third = evaluate(&world, "b").await;
+    assert_eq!(third["findings"], 1, "{third}");
+    assert_eq!(third["seen"], 0, "{third}");
+    assert_eq!(third["sightings"], 0, "{third}");
+    assert_eq!(third["expired"], 0, "{third}");
+    assert_eq!(third["landed"], 0, "{third}");
+    assert_eq!(only(&world).await, listed);
+
+    let again = world.call("heat.land", params).await.unwrap_err();
+    assert_eq!(again["code"], code::INVALID_PARAMS, "{again}");
+    assert!(
+        again["message"].as_str().unwrap().contains("landed"),
+        "{again}"
+    );
+    assert_eq!(only(&world).await, listed);
+    assert_eq!(annotations("b").await.len(), 1);
+    world.close().await;
+}

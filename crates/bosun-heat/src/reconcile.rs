@@ -60,6 +60,8 @@ pub struct Summary {
     pub cooled_down: u64,
     /// Findings of a subject kind no proposal has, or a second finding of one key.
     pub skipped: u64,
+    /// Proposals whose remedy landed ([`crate::link`]).
+    pub landed: u64,
 }
 
 /// The writes of one reconciliation and its summary.
@@ -294,4 +296,4 @@ fn evidence_json(lines: &[String]) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

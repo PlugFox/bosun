@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO annotation (ts_ms, repo_id, text) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "361a1086bdee10fee1d82a3c959bd16dfececd05afff9d88b7b19c136a7ea680"
+}

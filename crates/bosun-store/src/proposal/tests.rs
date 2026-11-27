@@ -463,3 +463,49 @@ async fn a_dismissed_proposal_suppresses_its_key_for_the_cooldown() {
     refused(&seen);
     store.close().await.unwrap();
 }
+
+/// #11 D: an annotation is stored on its repository and read back by time, then by write
+/// order, within `[from, to)`; one of an unknown repository is refused and fails its batch.
+#[tokio::test]
+async fn annotations_are_stored_per_repository_and_read_back_by_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(&dir).await;
+    let note = |ts_ms: i64, repo: &str, text: &str| Write::Annotation {
+        ts_ms,
+        repo: repo.to_owned(),
+        text: text.to_owned(),
+    };
+    store
+        .writer()
+        .write(vec![
+            note(T0 + 2, BETA, "second"),
+            note(T0 + 1, ALPHA, "first"),
+            note(T0 + 2, ALPHA, "third"),
+            note(T0 + 9, ALPHA, "outside"),
+        ])
+        .await
+        .unwrap();
+    let unknown = store
+        .writer()
+        .write(vec![
+            note(T0 + 3, ALPHA, "rolled back"),
+            note(T0 + 3, "c:\\demo\\nowhere", "unknown"),
+        ])
+        .await;
+    assert!(refused(&unknown).contains("unknown repository"), "{unknown:?}");
+
+    let read = store.reader().annotations(T0, T0 + 9).await.unwrap();
+    let got: Vec<(i64, Option<&str>, &str)> = read
+        .iter()
+        .map(|a| (a.ts_ms, a.repo.as_deref(), a.text.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (T0 + 1, Some(ALPHA), "first"),
+            (T0 + 2, Some(BETA), "second"),
+            (T0 + 2, Some(ALPHA), "third"),
+        ]
+    );
+    store.close().await.unwrap();
+}

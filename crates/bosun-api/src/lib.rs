@@ -36,6 +36,7 @@
 //! | `heat.evaluate` | [`HeatEvaluateParams`] | [`HeatEvaluation`] |
 //! | `heat.list` | [`HeatListParams`] | [`HeatProposals`] |
 //! | `heat.dismiss` | [`HeatDismissParams`] | [`ProposalView`] |
+//! | `heat.land` | [`HeatLandParams`] | [`ProposalView`] |
 //! | `events.subscribe` | [`SubscribeParams`] | [`SubscribeResult`], then the notifications of [`event`] |
 //! | `agent.hello` | [`AgentHelloParams`] | [`AgentHelloResult`] |
 //! | `agent.ask_question` | [`AskQuestionParams`] | [`AgentAck`] |
@@ -64,7 +65,7 @@
 //!
 //! The `agent.*` methods name no identity: their credential does ([`agent`]). `control.kill`
 //! names none either: the kill switch is daemon-wide. The `control.*` methods that change
-//! anything take the operator token ([`control`]), and so do `item.restart`, `heat.dismiss`, the `lease.*`
+//! anything take the operator token ([`control`]), and so do `item.restart`, `heat.dismiss`, `heat.land`, the `lease.*`
 //! methods ([`lease`]) and the `notify.channel.*` methods that change or send anything
 //! ([`notify`]); `lease.release` names no identity: its holder is a process.
 
@@ -106,8 +107,8 @@ pub use event::{
     SubscribeResult, Tail,
 };
 pub use heat::{
-    HeatDismissParams, HeatEvaluateParams, HeatEvaluation, HeatInsufficient, HeatListParams,
-    HeatMetric, HeatMetrics, HeatProposals, HeatRepoEvaluation, ProposalView,
+    HeatDismissParams, HeatEvaluateParams, HeatEvaluation, HeatInsufficient, HeatLandParams,
+    HeatListParams, HeatMetric, HeatMetrics, HeatProposals, HeatRepoEvaluation, ProposalView,
 };
 pub use item::{
     AgentCallView, AttemptView, ContextSize, ItemDetail, ItemParams, RestartParams, RestartResult,
@@ -274,6 +275,15 @@ pub mod method {
         crate::HeatDismissParams,
         crate::ProposalView,
         "Dismisses an open or published heat proposal of the identity, by its key: its subject      is then not proposed again for 90 days. Takes the operator token."
+    );
+    method!(
+        HeatLand,
+        "heat.land",
+        crate::HeatLandParams,
+        crate::ProposalView,
+        "Records by hand that the remedy of an open or published heat proposal of the identity \
+     landed now, optionally as commit `sha`: its follow-up is due one baseline window later, \
+     and the landing is annotated on its repository. Takes the operator token."
     );
     method!(
         EventsSubscribe,
@@ -492,6 +502,7 @@ pub const METHODS: &[&str] = &[
     method::HeatEvaluate::NAME,
     method::HeatList::NAME,
     method::HeatDismiss::NAME,
+    method::HeatLand::NAME,
     method::EventsSubscribe::NAME,
     method::AgentHello::NAME,
     method::AgentAskQuestion::NAME,
@@ -811,6 +822,7 @@ pub fn schema() -> Value {
     add_method::<method::HeatEvaluate>(&mut generator, &mut methods);
     add_method::<method::HeatList>(&mut generator, &mut methods);
     add_method::<method::HeatDismiss>(&mut generator, &mut methods);
+    add_method::<method::HeatLand>(&mut generator, &mut methods);
     add_method::<method::EventsSubscribe>(&mut generator, &mut methods);
     add_method::<method::AgentHello>(&mut generator, &mut methods);
     add_method::<method::AgentAskQuestion>(&mut generator, &mut methods);

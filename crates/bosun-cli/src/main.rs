@@ -10,6 +10,7 @@
 //! bosun report [--since <t>] [--until <t>] [--repo <name>] [--identity <name>]
 //! bosun heat [--repo <name>] [--all] [--identity <name>]
 //! bosun heat dismiss <key> --identity <name> [--reason <text>]
+//! bosun heat land <key> --identity <name> [--sha <sha>]
 //! bosun heat metrics [--since <t>] [--until <t>] [--repo <name>] [--identity <name>]
 //! bosun pause [--repo <name>] [--identity <name>]
 //! bosun resume [--repo <name>] [--identity <name>]
@@ -70,7 +71,9 @@
 //!   estimate; below it the first three evidence lines of each. `--repo` as for `report`.
 //!   `heat dismiss <key>`: dismisses an open or published proposal of `--identity` (required)
 //!   by its key (`heat.dismiss`), with the operator token; its subject is not proposed again
-//!   for 90 days.
+//!   for 90 days. `heat land <key>`: records that the remedy of an open or published proposal
+//!   of `--identity` (required) landed now (`heat.land`), optionally as commit `--sha`, with the
+//!   operator token; its follow-up is due one window later.
 //! - `heat metrics`: the generic metrics the heat detectors test (`heat.metrics`, #11 D), per
 //!   repository, provider and session kind, one table: each row's value, total and sample,
 //!   whether it is exact or an estimate (with its bytes per token) and whether it compares
@@ -170,6 +173,7 @@
 //! | `lint` | the result of `queue.lint` |
 //! | `restart-item` | the result of `item.restart` |
 //! | `heat dismiss` | the result of `heat.dismiss` |
+//! | `heat land` | the result of `heat.land` |
 //! | `kill` | the result of `control.kill` |
 //! | `session tail` | one `Event` (the params of `events.event`) per line, as they come |
 //!
@@ -316,7 +320,8 @@ enum Command {
     #[command(after_help = EXIT_CODES)]
     Report(ReportArgs),
     /// Heat's proposals of each identity, each with its metric, value, threshold, target and
-    /// window; `heat dismiss` dismisses one; `heat metrics` prints the generic metrics.
+    /// window; `heat dismiss` dismisses one; `heat land` records that one landed; `heat
+    /// metrics` prints the generic metrics.
     #[command(after_help = EXIT_CODES)]
     Heat(heat::HeatArgs),
     /// Registers the logon process that starts bosund for you, and starts it now.
@@ -751,6 +756,10 @@ async fn own_terms(global: &Global, command: &Command) -> Option<Result<String, 
             command: Some(heat::HeatCommand::Dismiss(args)),
             ..
         }) => heat::dismiss(global, args).await,
+        Command::Heat(heat::HeatArgs {
+            command: Some(heat::HeatCommand::Land(args)),
+            ..
+        }) => heat::land(global, args).await,
         _ => return None,
     })
 }

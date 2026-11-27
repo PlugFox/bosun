@@ -1,6 +1,8 @@
 //! Heat's proposals in the daemon (#11, part D): `heat.evaluate` runs the detectors over a
-//! repository's window and writes the reconciliation's batch, `heat.list` reads the proposals,
-//! `heat.dismiss` dismisses one (with the operator token).
+//! repository's window and writes the reconciliation's batch (the landings the repository's done
+//! items made first, [`bosun_heat::link`]), `heat.list` reads the proposals, `heat.dismiss`
+//! dismisses one and `heat.land` records by hand that one's remedy landed (both with the
+//! operator token).
 //!
 //! Each identity has its own [`Heat`] handle over its own store and repositories, so an
 //! evaluation asked for one identity reads and writes that identity's rows only. One evaluation
@@ -17,11 +19,11 @@ use std::time::Duration;
 
 use bosun_api::rpc::{ErrorObject, code};
 use bosun_api::{
-    HeatDismissParams, HeatEvaluateParams, HeatEvaluation, HeatInsufficient, HeatListParams,
-    HeatProposals, HeatRepoEvaluation, Method, ProposalView, method,
+    HeatDismissParams, HeatEvaluateParams, HeatEvaluation, HeatInsufficient, HeatLandParams,
+    HeatListParams, HeatProposals, HeatRepoEvaluation, Method, ProposalView, method,
 };
 use bosun_config::Repo;
-use bosun_core::proposal::{ProposalState, is_active};
+use bosun_core::proposal::{LandedHow, ProposalState, is_active};
 use bosun_store::{ProposalRow, ProposalStep, Reader, Write, Writer};
 use serde_json::Value;
 use tokio::task::JoinHandle;
@@ -161,6 +163,7 @@ fn summary(key: &str, evaluation: &bosun_heat::Evaluation) -> HeatRepoEvaluation
         expired: s.expired,
         cooled_down: s.cooled_down,
         skipped: s.skipped,
+        landed: s.landed,
         insufficient: evaluation
             .insufficient
             .iter()
@@ -175,7 +178,7 @@ fn summary(key: &str, evaluation: &bosun_heat::Evaluation) -> HeatRepoEvaluation
     }
 }
 
-/// `heat.metrics`, `heat.evaluate`, `heat.list` and `heat.dismiss`.
+/// `heat.metrics`, `heat.evaluate`, `heat.list`, `heat.dismiss` and `heat.land`.
 pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Value, ErrorObject> {
     match name {
         method::HeatMetrics::NAME => crate::api::heat_metrics(state, p).await,
@@ -196,6 +199,13 @@ pub(crate) async fn dispatch(state: &State, name: &str, p: Value) -> Result<Valu
                     state.control.authorize(&p.operator)?;
                 }
                 dismiss(state.identity(&p.identity)?, &p).await
+            })
+            .await
+        }
+        method::HeatLand::NAME => {
+            call::<method::HeatLand, _, _>(p, |p| async move {
+                state.control.authorize(&p.operator)?;
+                land(state.identity(&p.identity)?, &p).await
             })
             .await
         }
@@ -318,6 +328,64 @@ async fn dismiss(served: &Served, p: &HeatDismissParams) -> Result<ProposalView,
     Ok(view(served, row))
 }
 
+/// Whether `sha` is a commit id: 7 to 40 hex digits.
+fn is_sha(sha: &str) -> bool {
+    (7..=40).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Records that the remedy of the identity's proposal `p.key` landed now, by hand, when it is
+/// open or published: its `Landed` step and its repository's annotation, in one batch. A key
+/// of no row of the identity's store and a sighting are refused alike.
+async fn land(served: &Served, p: &HeatLandParams) -> Result<ProposalView, ErrorObject> {
+    if let Some(sha) = p.sha.as_deref().filter(|sha| !is_sha(sha)) {
+        return Err(ErrorObject::new(
+            code::INVALID_PARAMS,
+            format!("{sha:?} is not a commit id: 7 to 40 hex digits"),
+        ));
+    }
+    let reader = served.store.reader();
+    let row = reader
+        .proposal(&p.key)
+        .await
+        .map_err(failed)?
+        .filter(|row| row.seen_count >= 2)
+        .ok_or_else(|| {
+            ErrorObject::new(
+                code::INVALID_PARAMS,
+                format!("identity {} has no proposal {:?}", served.name, p.key),
+            )
+        })?;
+    if !matches!(row.state, ProposalState::Open | ProposalState::Published) {
+        return Err(ErrorObject::new(
+            code::INVALID_PARAMS,
+            format!(
+                "proposal {} is {}: only an open or published proposal can land",
+                row.key,
+                row.state.as_str()
+            ),
+        ));
+    }
+    let writes = bosun_heat::landed(
+        &row,
+        None,
+        p.sha.as_deref().map(str::to_ascii_lowercase),
+        LandedHow::Manual,
+        now_ms(),
+    );
+    served
+        .store
+        .writer()
+        .write(writes)
+        .await
+        .map_err(|e| ErrorObject::new(code::INVALID_PARAMS, e.to_string()))?;
+    let row = reader
+        .proposal(&row.key)
+        .await
+        .map_err(failed)?
+        .ok_or_else(|| ErrorObject::new(code::INTERNAL_ERROR, "the landed proposal vanished"))?;
+    Ok(view(served, row))
+}
+
 fn view(served: &Served, row: ProposalRow) -> ProposalView {
     let evidence = serde_json::from_str(&row.evidence_json).unwrap_or_default();
     ProposalView {
@@ -344,6 +412,11 @@ fn view(served: &Served, row: ProposalRow) -> ProposalView {
         last_seen_ms: row.last_seen_ms,
         seen_count: row.seen_count,
         dismiss_reason: row.dismiss_reason.filter(|r| !r.is_empty()),
+        landed_how: row.landed_how.map(|how| how.as_str().to_owned()),
+        landed_sha: row.landed_sha,
+        landed_ms: row.landed_ms,
+        followup_due_ms: row.followup_due_ms,
+        item: row.item.map(|item| item.0),
         evidence,
     }
 }

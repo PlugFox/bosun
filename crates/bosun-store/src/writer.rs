@@ -18,6 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::annotation;
 use crate::error::{Error, from_db, to_db};
 use crate::notify::{self, NewChannel, NewNotice};
 use crate::proposal::{self, NewProposal, ProposalStep};
@@ -301,6 +302,13 @@ pub enum Write {
         key: String,
         step: ProposalStep,
         at_ms: i64,
+    },
+    /// An annotation of the repository at path key `repo` at `ts_ms` (#11 D: a landed heat
+    /// proposal). Refused when no repository has that path.
+    Annotation {
+        ts_ms: i64,
+        repo: String,
+        text: String,
     },
     /// Mutant `mutant_ingest_reingest_truncates` (#21): deletes every ingested row, as a
     /// reingest that truncates before it rebuilds would.
@@ -642,6 +650,7 @@ async fn apply(conn: &mut SqliteConnection, write: Write) -> Result<(), Error> {
         Write::ProposalOpened(new) => proposal::open(conn, &new).await,
         Write::ProposalSeen { key, at_ms } => proposal::seen(conn, &key, at_ms).await,
         Write::ProposalStep { key, step, at_ms } => proposal::step(conn, &key, &step, at_ms).await,
+        Write::Annotation { ts_ms, repo, text } => annotation::add(conn, ts_ms, &repo, &text).await,
         #[cfg(mutant_ingest_reingest_truncates)]
         Write::Truncate => {
             conn.execute(

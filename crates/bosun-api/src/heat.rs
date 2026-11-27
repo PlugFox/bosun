@@ -120,6 +120,10 @@ pub struct HeatRepoEvaluation {
     pub cooled_down: u64,
     /// Findings of no known subject kind, or repeated.
     pub skipped: u64,
+    /// Proposals whose remedy landed: an item of their card, or one whose card names them in
+    /// a `Proposal: <key>` line, done with a pass.
+    #[serde(default)]
+    pub landed: u64,
     /// The detectors silent below the minimum sample.
     pub insufficient: Vec<HeatInsufficient>,
     /// Why this repository's evaluation failed; its counts are then zero and nothing was
@@ -198,6 +202,21 @@ pub struct ProposalView {
     /// Why the user dismissed it; `null` unless it is `dismissed`.
     #[serde(default)]
     pub dismiss_reason: Option<String>,
+    /// How its remedy landed, `item`, `marker` or `manual`; set for a landed or measured
+    /// proposal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed_how: Option<String>,
+    /// The commit it landed as, when one is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landed_ms: Option<i64>,
+    /// When the follow-up measures it: one baseline window after `landed_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followup_due_ms: Option<i64>,
+    /// The item that landed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
     /// The evidence, redacted lines.
     pub evidence: Vec<String>,
 }
@@ -215,4 +234,19 @@ pub struct HeatDismissParams {
     /// Why it is dismissed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Params of `heat.land`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HeatLandParams {
+    /// The operator token the daemon wrote at start (see [`crate::control`]). Missing, it is
+    /// refused like a wrong one.
+    #[serde(default)]
+    pub operator: String,
+    pub identity: String,
+    /// The proposal's key (16 hex digits), as `heat.list` shows it.
+    pub key: String,
+    /// The commit that landed the remedy, 7 to 40 hex digits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
 }

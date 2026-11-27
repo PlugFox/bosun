@@ -4050,6 +4050,34 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("heat::tests::the_first_evaluation_waits_an_hour_and_then_runs_daily"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_heat_land_without_item_done",
+        issue: 228,
+        breaks: "a proposal lands by an item that is not done with a pass",
+        package: "bosun-heat",
+        check: Check::Test(
+            "landing::tests::a_proposal_lands_only_when_its_item_is_done_with_a_pass",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_land_no_annotation",
+        issue: 228,
+        breaks: "a proposal's landing writes no annotation",
+        package: "bosund",
+        check: Check::Test("heat_tests::a_manual_landing_is_recorded_with_an_annotation"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_seen_after_landing",
+        issue: 228,
+        breaks: "a proposal that lands in an evaluation is also seen again in it",
+        package: "bosun-heat",
+        check: Check::Test(
+            "landing::tests::a_proposal_seen_again_in_the_evaluation_that_lands_it_is_only_landed",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the

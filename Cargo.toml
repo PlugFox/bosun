@@ -622,6 +622,9 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_heat_dismiss_without_token)",
   "cfg(mutant_heat_list_drops_target)",
   "cfg(mutant_heat_timer_at_start)",
+  "cfg(mutant_heat_land_without_item_done)",
+  "cfg(mutant_heat_land_no_annotation)",
+  "cfg(mutant_heat_seen_after_landing)",
 ] }
 
 [workspace.lints.clippy]

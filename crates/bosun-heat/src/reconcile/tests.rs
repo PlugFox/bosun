@@ -10,15 +10,15 @@ use crate::detect::{
     Evidence, FILE_READ_ACROSS_RUNS, FileEvidence, Finding, UNCHANGED_FILE_READ_BYTES,
 };
 
-const REPO: &str = "/fixture/demo";
+pub(crate) const REPO: &str = "/fixture/demo";
 const PROVIDER: &str = "claude";
 const DAY: i64 = 24 * 60 * 60 * 1000;
 /// 2000-03-01T00:00:00Z.
-const NOW: i64 = 951_868_800_000;
-const WINDOW: i64 = 14 * DAY;
+pub(crate) const NOW: i64 = 951_868_800_000;
+pub(crate) const WINDOW: i64 = 14 * DAY;
 
 /// A D1 finding for `subject` over the 14 days before `NOW`.
-fn finding(subject: &str, impact: Option<u64>) -> Finding {
+pub(crate) fn finding(subject: &str, impact: Option<u64>) -> Finding {
     Finding {
         detector: FILE_READ_ACROSS_RUNS,
         repo: REPO.to_owned(),
@@ -54,7 +54,12 @@ fn key_of(f: &Finding) -> String {
 }
 
 /// The row a finding's sighting stored at `created_ms`, then in `state` with `seen_count`.
-fn row(f: &Finding, created_ms: i64, state: ProposalState, seen_count: u64) -> ProposalRow {
+pub(crate) fn row(
+    f: &Finding,
+    created_ms: i64,
+    state: ProposalState,
+    seen_count: u64,
+) -> ProposalRow {
     let dedup = key_of(f);
     ProposalRow {
         id: 1,

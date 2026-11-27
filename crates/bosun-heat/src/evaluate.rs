@@ -1,15 +1,19 @@
 //! One evaluation of heat (#11, part D) for one repository: the window's rows of every
 //! provider, the detectors run once over them ([`detect`], which groups by provider itself),
+//! the landings of the stored proposals by the repository's done items ([`crate::link`]),
 //! and the reconciliation of their findings with the stored proposals ([`reconcile`]). The
 //! only part of heat's proposals that reads the store; it writes nothing: the daemon, the
 //! store's single writer, writes the returned batch in one transaction.
 
+use bosun_core::proposal::ProposalState;
+use bosun_core::{State, canonical_path, style_of};
 use bosun_store::{Reader, Write};
 
 use crate::detect::{Insufficient, Thresholds, detect};
 use crate::exact::Scope;
+use crate::landing::{LinkItem, plan};
 use crate::metrics::Inputs;
-use crate::reconcile::{Summary, reconcile};
+use crate::reconcile::Summary;
 
 /// The window an evaluation looks at: the 14 days before it.
 pub const WINDOW_MS: i64 = 14 * 24 * 60 * 60 * 1000;
@@ -54,7 +58,42 @@ pub async fn evaluate(
     };
     let detection = detect(&inputs, scope, &Thresholds::default());
     let existing = reader.proposals(Some(repo)).await?;
-    let reconciled = reconcile(&detection.findings, &existing, now_ms);
+
+    // The done items of the repository, read only when a proposal could land.
+    let mut done = Vec::new();
+    if existing.iter().any(|row| {
+        row.seen_count >= 2 && matches!(row.state, ProposalState::Open | ProposalState::Published)
+    }) {
+        let style = style_of(repo);
+        let key = canonical_path(repo, style);
+        for stored in reader.items(false).await? {
+            if !matches!(stored.item.state, State::Done(_))
+                || canonical_path(&stored.repo, style) != key
+            {
+                continue;
+            }
+            let done_ms = reader
+                .transitions(&stored.item.id)
+                .await?
+                .iter()
+                .rev()
+                .find(|t| t.to == "done")
+                .map(|t| t.ts_ms);
+            let body = reader.snapshot(&stored.item.id).await?.map(|s| s.body);
+            let landing = reader.landing(&stored.item.id).await?;
+            done.push((stored, done_ms, body, landing));
+        }
+    }
+    let items: Vec<LinkItem<'_>> = done
+        .iter()
+        .map(|(item, done_ms, body, landing)| LinkItem {
+            item,
+            done_ms: *done_ms,
+            body: body.as_deref(),
+            landing: landing.as_ref(),
+        })
+        .collect();
+    let reconciled = plan(&detection.findings, &existing, &items, now_ms);
     Ok(Evaluation {
         writes: reconciled.writes,
         summary: reconciled.summary,

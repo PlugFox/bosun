@@ -76,9 +76,71 @@ async fn a_needs_you_card_and_a_drained_ready_column_queue_one_notification_each
     let drained = of(&rows, "ready_drained");
     assert_eq!(drained.len(), 1, "{rows:#?}");
     assert_eq!(drained[0].item.as_deref(), Some("demo#2"));
-    assert_eq!(drained[0].key, "ready_drained:demo/demo#2");
+    assert!(
+        drained[0].key.starts_with("ready_drained:demo/demo#2/"),
+        "{rows:#?}"
+    );
     assert_eq!(drained[0].repo, "demo");
     assert_eq!(rows.len(), 2, "{rows:#?}");
+}
+
+/// Card 1 passes on its base (Needs you, lint, at its claim) and the column is drained; the
+/// user puts it back in Ready, it is claimed again and lands (Done), and the column is drained
+/// again: two `ready_drained` notices of the same last item, one per claim, the text the same
+/// (`mutant_loop_drained_key_per_item`: the second has the first's key and is dropped).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_drain_after_a_reclaim_queues_a_second_notice() {
+    let scene = Scene::new().await;
+    channel(&scene, &["ready_drained"]).await;
+    scene.write_board(&[card(1, "Passes on base", "true", "Item one.")]);
+    scene.script(1, &["commit one.txt one".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    assert_eq!(ended(&scene, 1, LIMIT).await, State::NeedsYou(Reason::Lint));
+    wait_for("the first ready_drained notice", LIMIT, async || {
+        !of(&pending(&scene).await, "ready_drained").is_empty()
+    })
+    .await;
+    let seq = scene.item(1).await.unwrap().seq;
+    // The board's own outbox has moved card 1 to Needs you: no later write of it undoes the
+    // move back below.
+    drained(&scene).await;
+
+    // Back in Ready, with a verdict the agent's commit meets.
+    let mut cards = scene.cards();
+    let one = cards.iter_mut().find(|c| c.id.0 == 1).unwrap();
+    *one = card(1, "Needs work now", "test -f one.txt", "Item one, edited.");
+    scene.write_board(&cards);
+    wait_for("item 1 to end again", LIMIT, async || {
+        scene
+            .item(1)
+            .await
+            .is_some_and(|i| i.seq > seq && terminal(Some(i.state)))
+    })
+    .await;
+    assert_eq!(scene.state(1).await, Some(State::Done(Outcome::Pass)));
+    wait_for("the second ready_drained notice", LIMIT, async || {
+        of(&pending(&scene).await, "ready_drained").len() >= 2
+    })
+    .await;
+    // Several more polls of an idle board.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    task.abort();
+    watcher.abort();
+    let _ = task.await;
+    let _ = watcher.await;
+
+    let rows = pending(&scene).await;
+    let drained = of(&rows, "ready_drained");
+    assert_eq!(drained.len(), 2, "{rows:#?}");
+    assert_ne!(drained[0].key, drained[1].key, "{rows:#?}");
+    for row in &drained {
+        assert!(
+            row.key.starts_with("ready_drained:demo/demo#1/"),
+            "{rows:#?}"
+        );
+        assert_eq!(row.item.as_deref(), Some("demo#1"));
+        assert_eq!(row.facts, drained[0].facts, "the same text: {rows:#?}");
+    }
 }
 
 /// An agent that dies at once in every session trips the breaker (as in `fast_death`): one

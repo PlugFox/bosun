@@ -180,7 +180,7 @@ impl Telegram {
         let agent = ureq::Agent::config_builder()
             .tls_config(tls)
             .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(30)))
+            .timeout_global(Some(crate::SEND_TIMEOUT))
             .build()
             .into();
         Ok(Self {

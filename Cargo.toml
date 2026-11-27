@@ -558,6 +558,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_notify_shared_channel)",
   "cfg(mutant_loop_no_drained_notice)",
   "cfg(mutant_loop_no_breaker_notice)",
+  # #9: the outbox drainer's duplicates and losses, and no path in a notice.
+  "cfg(mutant_outbox_send_before_mark_lands)",
+  "cfg(mutant_outbox_hold_only_failed_rows)",
+  "cfg(mutant_outbox_stop_aborts)",
+  "cfg(mutant_loop_drained_key_per_item)",
+  "cfg(mutant_store_notice_repo_path)",
   # #9: the Telegram channel kind.
   "cfg(mutant_telegram_parse_mode)",
   "cfg(mutant_telegram_no_cap)",

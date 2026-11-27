@@ -46,6 +46,10 @@ pub const TEXT_CAP: usize = 3_500;
 /// at most 2,560 bytes).
 pub const SECRET_CAP: usize = 2_048;
 
+/// The longest one send may take: a kind's transport gives up after it. The daemon's drainer
+/// waits that long, and a little more, for a send in flight before it stops.
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The credential-store user of the secret of channel `channel` of `identity`:
 /// `notify/<identity>/<channel>`. It is what the channel's row keeps.
 #[must_use]

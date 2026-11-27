@@ -12,7 +12,9 @@
 //! - `test` sends one message now, outside any outbox.
 //!
 //! The [`Handle`] also holds the identity's notification drainer
-//! ([`crate::notify_outbox`]), which delivers the notices its outbox queues.
+//! ([`crate::notify_outbox`]), which delivers the notices its outbox queues. Its stop lets the
+//! pass in flight land its send and its mark, at most [`STOP_DEADLINE`], so a message handed to
+//! the service is not sent again at the next start for want of its mark.
 //!
 //! Adds and removes of one identity run one at a time ([`Handle`]), so a refused add never
 //! deletes the entry of a channel another add just wrote. The secret is in no log line, error,
@@ -35,7 +37,7 @@ use tokio::task::JoinHandle;
 use crate::api::{call, failed};
 use crate::control::Control;
 use crate::executor::{blocking, now_ms};
-use crate::notify_outbox::{Drainer, Everyone};
+use crate::notify_outbox::{Drainer, Everyone, STOP_DEADLINE, Stop};
 use crate::state::{Served, State};
 
 /// The notification side of one identity: its credential store and the drainer of its
@@ -47,8 +49,11 @@ pub(crate) struct Handle {
     writes: tokio::sync::Mutex<()>,
     /// The daemon's control, for the kill switch: attached once the daemon has it.
     control: Arc<OnceLock<Control>>,
-    /// The drainer's task; aborted at shutdown.
-    drainer: StdMutex<Option<JoinHandle<()>>>,
+    /// The drainer's task and its stop; stopped at shutdown.
+    drainer: StdMutex<Option<(JoinHandle<()>, Stop)>>,
+    /// The faults the tests throw into the drainer.
+    #[cfg(test)]
+    faults: Arc<crate::notify_outbox::Faults>,
 }
 
 impl Handle {
@@ -63,6 +68,8 @@ impl Handle {
             writes: tokio::sync::Mutex::new(()),
             control: Arc::default(),
             drainer: StdMutex::new(None),
+            #[cfg(test)]
+            faults: Arc::default(),
         }
     }
 
@@ -87,6 +94,8 @@ impl Handle {
             secrets: self.secrets.clone(),
             control: self.control.clone(),
             everyone,
+            #[cfg(test)]
+            faults: self.faults.clone(),
         }
         .spawn();
         if let Some(old) = self
@@ -95,7 +104,8 @@ impl Handle {
             .unwrap_or_else(PoisonError::into_inner)
             .replace(task)
         {
-            old.abort();
+            // Before any send of this handle: nothing is in flight to wait for.
+            old.0.abort();
         }
     }
 
@@ -104,17 +114,37 @@ impl Handle {
         let _ = self.control.set(control);
     }
 
-    /// Stops the drainer, before the store closes.
+    /// Stops the drainer, before the store closes: the pass in flight ends, its send and its
+    /// mark, and the loop with it; aborted only when that takes longer than [`STOP_DEADLINE`].
     pub(crate) async fn stop(&self) {
-        let task = self
+        let running = self
             .drainer
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(task) = task {
-            task.abort();
-            let _ = task.await;
+        let Some((mut task, stop)) = running else {
+            return;
+        };
+        // Mutant (`mutant_outbox_stop_aborts`): the stop aborts at once, a send in flight
+        // delivered without its mark.
+        if !cfg!(mutant_outbox_stop_aborts) {
+            let _ = stop.send(true);
+            if tokio::time::timeout(STOP_DEADLINE, &mut task).await.is_ok() {
+                return;
+            }
+            crate::log::log!(
+                "bosund: the notification drainer did not stop within {} s: aborted",
+                STOP_DEADLINE.as_secs()
+            );
         }
+        task.abort();
+        let _ = task.await;
+    }
+
+    /// The faults the tests throw into the drainer.
+    #[cfg(test)]
+    pub(crate) fn faults(&self) -> &Arc<crate::notify_outbox::Faults> {
+        &self.faults
     }
 
     /// The identity's credential store.

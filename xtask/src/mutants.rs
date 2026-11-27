@@ -3534,6 +3534,48 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_outbox_send_before_mark_lands",
+        issue: NOTIFY_OUTBOX_FIX_CARD,
+        breaks: "a delivered notice whose mark the store refused is sent again at the next pass",
+        package: "bosund",
+        check: Check::Test("notify_outbox_tests::a_failed_mark_is_retried_and_never_resent"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_outbox_hold_only_failed_rows",
+        issue: NOTIFY_OUTBOX_FIX_CARD,
+        breaks: "a service's `retry_after` holds only the refused rows, not the channel",
+        package: "bosund",
+        check: Check::Test("notify_outbox_tests::a_retry_after_holds_every_row_of_the_channel"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_outbox_stop_aborts",
+        issue: NOTIFY_OUTBOX_FIX_CARD,
+        breaks: "the drainer's stop aborts a send in flight before its mark",
+        package: "bosund",
+        check: Check::Test("notify_outbox_tests::stop_lets_the_send_in_flight_land_its_mark"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_drained_key_per_item",
+        issue: NOTIFY_OUTBOX_FIX_CARD,
+        breaks: "the `ready_drained` key names the item, not its claim",
+        package: "bosund",
+        check: Check::Test(
+            "executor::tests::notify::a_second_drain_after_a_reclaim_queues_a_second_notice",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_store_notice_repo_path",
+        issue: NOTIFY_OUTBOX_FIX_CARD,
+        breaks: "a notice names a repository without a name by its path",
+        package: "bosun-store",
+        check: Check::Test("notify::tests::a_notice_never_names_a_repository_by_its_path"),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_telegram_parse_mode",
         issue: TELEGRAM_CARD,
         breaks: "the Telegram request asks for a markup mode (`parse_mode`)",
@@ -4340,6 +4382,11 @@ const TELEGRAM_CARD: u32 = 9;
 /// delivery policy, the rendering, the outbox rows queued with their events, and the drainer
 /// (its own number was not known when it was written; its parent's stands in).
 const NOTIFY_OUTBOX_CARD: u32 = 9;
+
+/// The card of #9 that fixes the outbox drainer's duplicates and losses (a refused mark, a
+/// service's wait, a stop mid-send, a second drain of one item) and the path in a notice (its
+/// own number was not known when it was written; its parent's stands in).
+const NOTIFY_OUTBOX_FIX_CARD: u32 = 9;
 
 /// The card of #9 that builds what every notification channel stands on: `bosun-notify` with
 /// the credential store, the channel rows of each identity, `notify.channel.*`, `bosun notify`

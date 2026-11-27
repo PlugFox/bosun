@@ -649,9 +649,9 @@ pub(crate) struct Loop {
     pulls: pulls::Watch,
     /// The fast-death breaker's streak, across items ([`breaker`]).
     streak: breaker::Streak,
-    /// The item the loop last claimed, when it has claimed one since it last queued the
-    /// `ready_drained` notice (#9): the next poll with nothing claimable queues it.
-    claimed_since_drained: Option<ItemId>,
+    /// The item the loop last claimed, and when (ms), when it has claimed one since it last
+    /// queued the `ready_drained` notice (#9): the next poll with nothing claimable queues it.
+    claimed_since_drained: Option<(ItemId, i64)>,
 }
 
 /// Aborts its task when dropped: the drainer ends with its loop.
@@ -2253,24 +2253,32 @@ impl Loop {
             rebased: Arc::default(),
             census_logged: false,
         });
-        self.claimed_since_drained = Some(next.clone());
+        self.claimed_since_drained = Some((next.clone(), now_ms()));
         self.apply(Event::Claim).await;
     }
 
     /// Nothing is claimable: queues the `ready_drained` notice (#9) if the loop claimed an item
-    /// since it last queued one, keyed by the last item it claimed. A loop that never claimed,
-    /// and every idle poll after the first, queues nothing.
+    /// since it last queued one, keyed by the last item it claimed and the time of that claim:
+    /// the same item claimed again (back in Ready) drains the column again, and that is a new
+    /// notice. A loop that never claimed, and every idle poll after the first, queues nothing.
     async fn ready_drained(&mut self) {
         // Mutant (`mutant_loop_no_drained_notice`): a drained Ready column queues nothing.
         if cfg!(mutant_loop_no_drained_notice) {
             return;
         }
-        let Some(last) = self.claimed_since_drained.take() else {
+        let Some((last, claimed_ms)) = self.claimed_since_drained.take() else {
             return;
         };
         let repo = self.shared.options.repo.clone();
+        // Mutant (`mutant_loop_drained_key_per_item`): the key names the item only, so a second
+        // drain after the same item's claim is deduplicated away.
+        let key = if cfg!(mutant_loop_drained_key_per_item) {
+            format!("ready_drained:{repo}/{last}")
+        } else {
+            format!("ready_drained:{repo}/{last}/{claimed_ms}")
+        };
         let notice = bosun_store::NewNotice {
-            key: format!("ready_drained:{repo}/{last}"),
+            key,
             event: "ready_drained".to_owned(),
             repo,
             item: Some(last.to_string()),

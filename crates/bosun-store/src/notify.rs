@@ -32,7 +32,8 @@ pub struct NewNotice {
     pub key: String,
     /// `needs_you`, `repo_paused`, `ready_drained` or `resource_unhealthy`.
     pub event: String,
-    /// The repository's configuration name.
+    /// The repository's configuration name; never its path, which names a local layout and a
+    /// user in an external message.
     pub repo: String,
     pub item: Option<String>,
     /// The numbers and words its text needs, built by the daemon, never agent text.
@@ -220,9 +221,24 @@ pub(crate) async fn queue(conn: &mut SqliteConnection, notice: &NewNotice) -> Re
     Ok(())
 }
 
+/// What a notice calls a repository: its configuration name, or for a root registered by path
+/// only the path's last segment, never the path itself.
+fn repo_label(name: Option<String>, path: &str) -> String {
+    // Mutant (`mutant_store_notice_repo_path`): an unnamed repository is named by its path.
+    if cfg!(mutant_store_notice_repo_path) {
+        return name.unwrap_or_else(|| path.to_owned());
+    }
+    name.unwrap_or_else(|| {
+        path.split(['/', '\\'])
+            .rfind(|s| !s.is_empty())
+            .unwrap_or("repository")
+            .to_owned()
+    })
+}
+
 /// Queues the notice of a transition into Needs you: key `needs_you:<transition key>`, facts
 /// the reason (the item machine's word) and the attempt. `work::record_transition` calls it in
-/// the transition's transaction.
+/// the transition's transaction. The repository is named as [`repo_label`] says.
 pub(crate) async fn queue_needs_you(
     conn: &mut SqliteConnection,
     item_row: i64,
@@ -230,9 +246,8 @@ pub(crate) async fn queue_needs_you(
     reason: &str,
     at_ms: i64,
 ) -> Result<(), Error> {
-    let repo = sqlx::query_scalar!(
-        r#"SELECT coalesce(r.name, r.path) AS "repo!: String"
-           FROM item i JOIN repo r ON r.id = i.repo_id WHERE i.id = ?"#,
+    let row = sqlx::query!(
+        "SELECT r.name, r.path FROM item i JOIN repo r ON r.id = i.repo_id WHERE i.id = ?",
         item_row,
     )
     .fetch_one(&mut *conn)
@@ -240,7 +255,7 @@ pub(crate) async fn queue_needs_you(
     let notice = NewNotice {
         key: format!("needs_you:{}", transition.key),
         event: "needs_you".to_owned(),
-        repo,
+        repo: repo_label(row.name, &row.path),
         item: Some(transition.key.item.to_string()),
         facts: BTreeMap::from([
             ("reason".to_owned(), reason.to_owned()),
@@ -514,6 +529,73 @@ mod tests {
         let ops_row = live.iter().find(|c| c.name == "ops").unwrap();
         assert_eq!(ops_row.last_sent_ms, Some(30));
         store.close().await.unwrap();
+    }
+
+    /// #9: a notice names a repository registered without a name by its path's last segment,
+    /// never by the path, which would carry a local layout into an external message
+    /// (`mutant_store_notice_repo_path`: the path).
+    #[tokio::test]
+    async fn a_notice_never_names_a_repository_by_its_path() {
+        use bosun_core::{Ctx, Event, Item, ItemId, step};
+        use sqlx::Connection as _;
+        use sqlx::sqlite::SqliteConnectOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bosun.db");
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let id = ItemId::new("demo#1");
+        store
+            .writer()
+            .write(vec![
+                Write::ChannelAdded(subscribed("ops", &["needs_you"], 1)),
+                Write::Item(crate::NewItem {
+                    item: id.clone(),
+                    name: "demo".to_owned(),
+                    repo: "/home/someone/work/demo".to_owned(),
+                    card_key: Some("card-1".to_owned()),
+                    at_ms: 2,
+                }),
+            ])
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        // A root nothing configured by name, as one registered by path only is.
+        let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::raw_sql("UPDATE repo SET name = NULL")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
+
+        let store = Store::open(&path, Options::default()).await.unwrap();
+        let ctx = Ctx::at(10);
+        let claimed = step(&Item::new(id.clone()), &Event::Claim, &ctx).unwrap();
+        let linted = step(&claimed.item, &Event::LintFailed, &ctx).unwrap();
+        store
+            .writer()
+            .write(
+                [&claimed, &linted]
+                    .map(|s| Write::Transition {
+                        stepped: s.clone(),
+                        at_ms: 10,
+                    })
+                    .to_vec(),
+            )
+            .await
+            .unwrap();
+        let ops = store.reader().pending_notices("ops").await.unwrap();
+        assert_eq!(ops.len(), 1, "{ops:#?}");
+        assert!(
+            !ops[0].repo.contains(['/', '\\']),
+            "a path in the notice: {ops:#?}"
+        );
+        assert_eq!(ops[0].repo, "demo");
+        store.close().await.unwrap();
+
+        assert_eq!(repo_label(None, r"C:\Users\someone\demo\"), "demo");
+        assert_eq!(repo_label(Some("named".to_owned()), "/x/demo"), "named");
     }
 
     #[tokio::test]

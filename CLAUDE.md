@@ -24,3 +24,17 @@ Ready (only the user moves cards here), In progress, Verify, Done, Needs you.
   item has a mutant (see the issues).
 - Consult Fable for architecture and plan decisions; verify what it claims.
 - Windows is the development machine and the first platform a feature must work on.
+- Finished work lands on master after the local checks pass; GitHub CI runs after the fact and is
+  not waited for. Its result (the only Linux coverage) is read before the next run.
+
+## Tests
+The runner is cargo-nextest, configured in `.config/nextest.toml`: the bosund scenario tests
+(`executor::tests::*`) share the bounded group `scenes`, and the helper binaries are built once
+per run.
+- Iterate on the touched module's tests only. The fast layer is
+  `cargo nextest run -p bosund -E 'not test(/^executor::tests::/)'` (or
+  `cargo test -p bosund -- --skip executor::tests`).
+- The full bosund suite runs once, at the end: `cargo nextest run -p bosund`.
+- A scenario test that fails on a timed-out wait is rerun alone first, not the whole suite.
+- Never run `crates/bosun-cli/tests/install.rs`: it registers a real scheduled task (#117).
+  nextest's default filter leaves it out of `cargo nextest run --workspace`.

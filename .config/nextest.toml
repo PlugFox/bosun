@@ -1,0 +1,65 @@
+# cargo-nextest (#12): `cargo nextest run -p bosund` is the full bosund suite, and
+# `cargo nextest run --workspace` is safe on a developer machine.
+
+experimental = ["setup-scripts"]
+
+[test-groups]
+# The scenario tests: each spawns `fake-agent` (through a `.cmd` wrapper on Windows),
+# `bosun-mcp`, git, a daemon or the verdict shell, and waits on them under a deadline. At the
+# default parallelism (one test per logical CPU) their waits time out on a loaded machine.
+# Measured on the 24-thread Windows development machine: 8 at once made each scene 3-4 times
+# slower than alone (CPU stayed below 20 %) and 10 failed on their waits; 4 at once took about
+# as long in total (21 min against 18.5) with 3 failures.
+scenes = { max-threads = 4 }
+
+[scripts.setup.build-helpers]
+# Builds `fake-agent`, `bosun-mcp` and `bosun-shim` once per run and exports their paths in
+# `BOSUN_TEST_FAKE_AGENT`, `BOSUN_TEST_BOSUN_MCP` and `BOSUN_TEST_BOSUN_SHIM`, which `built()`
+# in `crates/bosund/src/executor/tests.rs` takes instead of running `cargo build` in every
+# test process. A debug build: a `--cargo-profile release` run builds its own per process.
+command = "sh .config/build-helpers.sh"
+slow-timeout = "10m"
+
+[profile.default]
+# `bosun-cli`'s `tests/install.rs` registers a real scheduled task (#117): never by default.
+# `cargo nextest run --ignore-default-filter -p bosun-cli --test install` runs it.
+default-filter = "not (package(bosun-cli) & binary(install))"
+# No retries: a flaky test must show.
+retries = 0
+fail-fast = false
+# Report a test slower than 60 s; terminate one after 4 periods (240 s), past the longest
+# scene deadline of `executor/tests.rs` (180 s). Under `BOSUN_TEST_SLOWDOWN=N` the deadlines
+# are N times longer: run the profile `slowdown`.
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = "package(bosund) & test(/^executor::tests::/)"
+test-group = "scenes"
+
+[[profile.default.overrides]]
+# The daemon tests of bosund and the loop commands of bosun-cli run a real daemon and
+# `fake-agent` as well.
+filter = "(package(bosund) & binary(daemon)) | (package(bosun-cli) & binary(loop_commands))"
+test-group = "scenes"
+
+[[profile.default.scripts]]
+filter = "package(bosund) & test(/^executor::tests::/)"
+setup = "build-helpers"
+
+# For `BOSUN_TEST_SLOWDOWN` up to 3 (a loaded machine, a CI shard): terminate after 600 s,
+# past 3 x 180 s.
+[profile.slowdown]
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The profile of an unattended agent session: the scenes may be retried once. A test that
+# passes on its retry is reported FLAKY, so it stays visible.
+[profile.agent]
+
+[[profile.agent.overrides]]
+# The tests of the group `scenes`; the default profile's overrides still apply after this one.
+filter = """
+(package(bosund) & test(/^executor::tests::/))
+| (package(bosund) & binary(daemon))
+| (package(bosun-cli) & binary(loop_commands))
+"""
+retries = 1

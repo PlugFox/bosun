@@ -10,7 +10,8 @@
 //! routed through it by `.gitattributes`, and `lfs.url` at an empty local directory, so a
 //! smudge that misses an object fails at once instead of asking the synthetic GitHub origin.
 
-use super::worktrees::{closed, item};
+use super::landing::{pr_scene, pushed};
+use super::worktrees::{closed, git_in, item};
 use super::*;
 
 /// How long one item of these scenes may take.
@@ -151,4 +152,69 @@ async fn a_worktree_and_its_verdict_checkout_have_the_lfs_content_of_the_base() 
 
     assert!(matches!(state, State::Done(_)), "{state:?}");
     assert!(scene.repo.join("one.txt").is_file());
+}
+
+/// #213, `landing = { mode = "pr" }`: the user's repository's `lfs.url` is the bare
+/// `remote.git` the push goes to (git-lfs's standalone file transfer then writes the objects
+/// into `remote.git/lfs/objects`), and the user's `main` with its `.gitattributes` is pushed
+/// there again as the forge's target. The session commits `asset.bin` (`pr-content`). The item
+/// ends Done with one open pull request, `remote.git` has `bosun/demo-1`, its `asset.bin` is a
+/// pointer, and the pointer's object is in `remote.git`'s Git LFS store
+/// (`mutant_loop_lfs_not_pushed`: it is not).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_request_push_carries_the_lfs_objects() {
+    if !git_lfs() {
+        return;
+    }
+    let (scene, fake, remote) = pr_scene("").await;
+    lfs_repo(&scene);
+    scene.git(&["config", "lfs.url", &file_url(&remote)]);
+    scene.git(&[
+        "push",
+        "-q",
+        &remote.to_string_lossy(),
+        "main:refs/heads/main",
+    ]);
+    scene.write_board(&[card(
+        1,
+        "An LFS file in a pull request",
+        "grep -q pr-content asset.bin",
+        "Item one.",
+    )]);
+    scene.script(1, &["commit asset.bin pr-content".to_owned()]);
+    let (task, watcher) = scene.start(None);
+    let state = ended(&scene, 1, LIMIT).await;
+    closed(&scene, 1).await;
+    task.abort();
+    watcher.abort();
+
+    let note = scene
+        .store
+        .reader()
+        .item_note(&item(1), crate::executor::landing::NOTE_LANDING)
+        .await
+        .ok();
+    assert!(matches!(state, State::Done(_)), "{state:?} {note:?}");
+    assert_eq!(fake.prs().len(), 1, "{:#?}", fake.prs());
+    let branches = pushed(&scene, &remote);
+    assert!(
+        branches
+            .iter()
+            .any(|b| b.starts_with("refs/heads/bosun/demo-1 ")),
+        "{branches:?}"
+    );
+    let pointer = git_in(
+        &scene,
+        &remote,
+        &["cat-file", "-p", "bosun/demo-1:asset.bin"],
+    );
+    let oid = oid_of(&format!("{pointer}\n"));
+    let object = remote
+        .join("lfs/objects")
+        .join(&oid[..2])
+        .join(&oid[2..4])
+        .join(&oid);
+    let content = std::fs::read_to_string(&object)
+        .unwrap_or_else(|e| panic!("{} is missing: {e}", object.display()));
+    assert!(content.contains("pr-content"), "{content:?}");
 }

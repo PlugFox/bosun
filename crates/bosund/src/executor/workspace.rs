@@ -181,7 +181,7 @@ const LFS_PIN: [(&str, &str); 5] = [
 ];
 
 /// Whether `git lfs version` succeeds on this machine; asked once.
-fn git_lfs_installed(git: &Git) -> bool {
+pub(super) fn git_lfs_installed(git: &Git) -> bool {
     static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *INSTALLED.get_or_init(|| git.run(&["lfs", "version"], None).is_ok())
 }

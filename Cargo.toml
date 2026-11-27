@@ -163,6 +163,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_git_repo_hooks)",
   "cfg(mutant_git_lfs_carry_unchecked)",
   "cfg(mutant_loop_lfs_not_carried_to_user)",
+  "cfg(mutant_loop_lfs_not_pushed)",
+  "cfg(mutant_loop_lfs_pushed_without_git_lfs)",
   "cfg(mutant_loop_clone_without_lfs_filter)",
   "cfg(mutant_proc_kill_parent_only)",
   "cfg(mutant_proc_skip_start_time)",

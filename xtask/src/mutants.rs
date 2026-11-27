@@ -3276,6 +3276,26 @@ const MUTANTS: &[Mutant] = &[
         platform: None,
     },
     Mutant {
+        name: "mutant_loop_lfs_not_pushed",
+        issue: LFS_PUSH_CARD,
+        breaks: "a pull request's branch reaches the forge without its Git LFS objects (on a \
+                 machine without git-lfs the scene is skipped and the mutant survives)",
+        package: "bosund",
+        check: Check::Test("executor::tests::lfs::a_pull_request_push_carries_the_lfs_objects"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_lfs_pushed_without_git_lfs",
+        issue: LFS_PUSH_CARD,
+        breaks: "on a machine without git-lfs a pull request's branch is pushed with bare Git \
+                 LFS pointers whose objects the forge never gets",
+        package: "bosund",
+        check: Check::Test(
+            "executor::landing::tests::lfs_pointers_without_git_lfs_refuse_the_push",
+        ),
+        platform: None,
+    },
+    Mutant {
         name: "mutant_runner_no_protected_rules",
         issue: PROTECTED_RULES_CARD,
         breaks: "a session's `--disallowedTools` carries no `Edit(...)` rules for its protected \
@@ -3569,6 +3589,10 @@ const PROTECTED_RULES_CARD: u32 = 7;
 /// into the user's repository at landing, and pins Git LFS's filter in the clone (its own
 /// number was not known when it was written; its parent's stands in).
 const LFS_CARD: u32 = 8;
+
+/// #213, the card of #8 that pushes the Git LFS objects of a `pr` landing's commits to the
+/// forge before the branch, and refuses such a landing on a machine without git-lfs.
+const LFS_PUSH_CARD: u32 = 213;
 
 /// #200, the card of #7 that passes the agent CLI's effort level (`--effort`) from the card's
 /// `effort`, else from `repo.<name>.effort`, and records it on the attempt: the plumbing of the

@@ -59,10 +59,14 @@
 //!
 //! 5. The verified head `H` is offered and fetched into the user's repository as in step 6 (the
 //!    offer is dropped again on every path; the Git LFS objects of `<forge target>..<H>` are
-//!    carried there too, and none is pushed to the forge), and pushed from there by name,
+//!    carried there too), and pushed from there by name,
 //!    `git push origin <H>:refs/heads/bosun/<slug>` ([`git::pr_branch`]), under the repository
 //!    identity's tool environment (#2) with the repository's hooks disabled: a replay is a
-//!    no-op. The `bosun/` branches are the daemon's: a head rebased since an earlier push (a
+//!    no-op. Git LFS's `pre-push` hook is one of those hooks, so the Git LFS objects of the
+//!    pointers of `<forge target>..<H>` are pushed to the forge first, by
+//!    `git lfs push --object-id origin`, also on a replay ([`push_lfs`]); a range with pointers
+//!    on a machine without git-lfs is refused and its branch never pushed ([`lfs_to_push`]).
+//!    The `bosun/` branches are the daemon's: a head rebased since an earlier push (a
 //!    crash with a moved target, a card reworked after its pull request closed) is pushed over
 //!    it, with a lease (`--force-with-lease=refs/heads/<branch>:<expected>`) on the commit the
 //!    daemon last pushed there (the item's [`NOTE_PR_PUSH`] note), else on what the remote has
@@ -484,14 +488,16 @@ impl Task<'_> {
     /// `user` fetches it, objects only (E14); then the Git LFS objects of the pointers of
     /// `base..commit` (`base` a commit or ref of the clone the user's repository has the
     /// objects of) are carried from the clone's store into the user's ([`carry_lfs`]), so the
-    /// fast-forward's smudge needs no remote. The offer stays: the caller drops it.
+    /// fast-forward's smudge needs no remote. The oids of those pointers, read in the clone
+    /// whether or not it has a Git LFS store (what a `pr` push sends to the forge). The offer
+    /// stays: the caller drops it.
     async fn offer(
         &self,
         wt: &ItemWorktree,
         user: &std::path::Path,
         base: &str,
         commit: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<String>, String> {
         let (clone, user, offered, commit) = (
             wt.workspace.clone_path(),
             user.to_owned(),
@@ -499,16 +505,16 @@ impl Task<'_> {
             commit.to_owned(),
         );
         let base = base.to_owned();
-        blocking(move || -> Result<(), String> {
+        blocking(move || -> Result<Vec<String>, String> {
             fetch_offer(&clone, &user, &offered, &commit).map_err(|e| e.to_string())?;
             // Mutant (`mutant_loop_lfs_not_carried_to_user`): the user's repository gets the
             // commit without its Git LFS objects.
-            if !cfg!(mutant_loop_lfs_not_carried_to_user) {
-                carry_lfs(&clone, &user, &base, &commit).map_err(|e| {
-                    format!("its Git LFS objects cannot be carried into the user's repository: {e}")
-                })?;
+            if cfg!(mutant_loop_lfs_not_carried_to_user) {
+                return Ok(Vec::new());
             }
-            Ok(())
+            carry_lfs(&clone, &user, &base, &commit).map_err(|e| {
+                format!("its Git LFS objects cannot be carried into the user's repository: {e}")
+            })
         })
         .await
     }
@@ -661,7 +667,7 @@ impl Task<'_> {
             .offer(wt, &repo.path, &forge_target_ref(&new.base), h)
             .await;
         self.drop_offer(wt).await;
-        offered.map_err(|e| {
+        let lfs = offered.map_err(|e| {
             ForgeError::Refused(format!(
                 "the verified commit cannot be fetched into the user's repository: {e}"
             ))
@@ -673,7 +679,11 @@ impl Task<'_> {
             new.head.clone(),
             h.to_owned(),
         );
-        blocking(move || push(&user, &env, &branch, &head, recorded.as_deref())).await?;
+        blocking(move || {
+            let lfs = lfs_to_push(lfs, super::workspace::git_lfs_installed(&Git::new(&user)))?;
+            push(&user, &env, &branch, &head, recorded.as_deref(), &lfs)
+        })
+        .await?;
         self.note_push(&new.head, h).await;
 
         let facts: Vec<(&str, &str)> = facts
@@ -1085,16 +1095,27 @@ fn mode(repo: &Repo) -> Result<Mode, String> {
 /// `head` is not pushed to again: a replay is a no-op, even one whose push was not recorded. A
 /// rejection (another push since: the lease does not hold) is [`ForgeError::Refused`], a
 /// remote that does not answer [`ForgeError::Unreachable`].
+///
+/// First the Git LFS objects `lfs` of the item's commits ([`lfs_to_push`]) go to the forge's
+/// Git LFS store ([`push_lfs`]), also when the remote's branch is already at `head` (they may
+/// be what an earlier attempt failed to push): the repository's hooks are disabled, so Git
+/// LFS's own `pre-push` hook never sends them. A failure is classified as the push's is, and
+/// the branch is not pushed then.
 fn push(
     user: &std::path::Path,
     env: &Env,
     branch: &str,
     head: &str,
     recorded: Option<&str>,
+    lfs: &[String],
 ) -> Result<(), ForgeError> {
     let git = Git::new(user);
     let remote_ref = format!("refs/heads/{branch}");
     let url = push_url(&git, env)?;
+    // Mutant (`mutant_loop_lfs_not_pushed`): the branch goes without its Git LFS objects.
+    if !lfs.is_empty() && !cfg!(mutant_loop_lfs_not_pushed) {
+        push_lfs(&git, env, lfs)?;
+    }
     let now = remote_head(&git, env, &url, &remote_ref)?;
     if now.as_deref() == Some(head) {
         return Ok(());
@@ -1312,25 +1333,74 @@ fn fast_forward(
 }
 
 /// The Git LFS objects of the pointers of `base..commit` in the clone at `clone`, carried from
-/// its store into the store of the user's repository at `user`. Nothing is carried when the
-/// clone has no Git LFS store.
+/// its store into the store of the user's repository at `user`; the oids of those pointers,
+/// read in the clone whether or not it has a Git LFS store. Nothing is carried when the clone
+/// has no Git LFS store.
 fn carry_lfs(
     clone: &std::path::Path,
     user: &std::path::Path,
     base: &str,
     commit: &str,
-) -> Result<(), bosun_git::lfs::Error> {
+) -> Result<Vec<String>, bosun_git::lfs::Error> {
     let clone = Git::new(clone);
+    let pointers = bosun_git::lfs::pointers_between(&clone, base, commit)?;
+    let oids: Vec<String> = pointers.into_iter().map(|p| p.oid).collect();
+    if oids.is_empty() {
+        return Ok(oids);
+    }
     let from = bosun_git::lfs::storage(&clone)?;
     if !from.is_dir() {
-        return Ok(());
-    }
-    let pointers = bosun_git::lfs::pointers_between(&clone, base, commit)?;
-    if pointers.is_empty() {
-        return Ok(());
+        return Ok(oids);
     }
     let to = bosun_git::lfs::storage(&Git::new(user))?;
-    bosun_git::lfs::carry(&from, &to, pointers.iter().map(|p| p.oid.as_str()))?;
+    bosun_git::lfs::carry(&from, &to, oids.iter().map(String::as_str))?;
+    Ok(oids)
+}
+
+/// What a `pr` push sends to the forge's Git LFS store before the branch: nothing when the
+/// item's commits hold no pointer (`oids` empty); their oids when git-lfs is `installed`. A
+/// range with pointers on a machine without git-lfs is [`ForgeError::Refused`]: its branch
+/// would reach the forge with pointers whose objects the forge never gets.
+fn lfs_to_push(oids: Vec<String>, installed: bool) -> Result<Vec<String>, ForgeError> {
+    // Mutant (`mutant_loop_lfs_pushed_without_git_lfs`): without git-lfs nothing is pushed
+    // and the branch goes with bare pointers.
+    if oids.is_empty() || (cfg!(mutant_loop_lfs_pushed_without_git_lfs) && !installed) {
+        return Ok(Vec::new());
+    }
+    if !installed {
+        return Err(ForgeError::Refused(
+            "the item's commits hold Git LFS objects and git-lfs is not installed".to_owned(),
+        ));
+    }
+    Ok(oids)
+}
+
+/// How long one `git lfs push` may take: [`forge::TOOL_TIMEOUT`] is too short for a large
+/// object.
+const LFS_PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(30);
+
+/// At most this many oids go on one `git lfs push` command line (a Windows command line holds
+/// about 32 K characters; an oid is 64).
+const LFS_PUSH_BATCH: usize = 100;
+
+/// Pushes the Git LFS objects `oids` from the store of the user's repository (`git`) to the
+/// Git LFS server git-lfs derives for [`REMOTE`] (`git lfs push --object-id`), under `env` and
+/// the [`CREDENTIALS`] (git hands its `-c` options to git-lfs), [`LFS_PUSH_BATCH`] at a time,
+/// each within [`LFS_PUSH_TIMEOUT`]. git-lfs skips what the server has.
+fn push_lfs(git: &Git, env: &Env, oids: &[String]) -> Result<(), ForgeError> {
+    for batch in oids.chunks(LFS_PUSH_BATCH) {
+        let mut command = remote_command(git, env);
+        command.args(["lfs", "push", "--object-id", REMOTE]);
+        command.args(batch);
+        let out = forge::output_within(&mut command, LFS_PUSH_TIMEOUT, "git lfs push")?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            return Err(forge::classify(format!(
+                "git lfs push {REMOTE} ({} objects): {stderr}",
+                batch.len()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1462,5 +1532,24 @@ mod tests {
         assert!(already_landed(&clone, Some(&landed), &past).unwrap());
         assert!(!already_landed(&clone, Some(&elsewhere), &past).unwrap());
         assert!(!already_landed(&clone, None, &past).unwrap());
+    }
+
+    /// #213: a `pr` push sends nothing to the forge's Git LFS store when the item's commits hold
+    /// no pointer, their oids when git-lfs is installed, and is refused, saying why, when they
+    /// hold pointers and git-lfs is not installed (`mutant_loop_lfs_pushed_without_git_lfs`).
+    #[test]
+    fn lfs_pointers_without_git_lfs_refuse_the_push() {
+        assert_eq!(
+            lfs_to_push(Vec::new(), false).unwrap(),
+            Vec::<String>::new()
+        );
+        let oids = vec!["a".repeat(64), "b".repeat(64)];
+        assert_eq!(lfs_to_push(oids.clone(), true).unwrap(), oids);
+        match lfs_to_push(oids, false) {
+            Err(ForgeError::Refused(why)) => {
+                assert!(why.contains("git-lfs is not installed"), "{why}");
+            }
+            other => panic!("not refused: {other:?}"),
+        }
     }
 }

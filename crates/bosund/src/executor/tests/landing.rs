@@ -695,7 +695,7 @@ pub(super) struct FakeForge {
 }
 
 impl FakeForge {
-    fn prs(&self) -> Vec<FakePr> {
+    pub(super) fn prs(&self) -> Vec<FakePr> {
         self.prs.lock().unwrap().clone()
     }
 
@@ -824,7 +824,7 @@ const ORIGIN: &str = "https://github.com/synthetic-owner/demo.git";
 /// [`FakeForge`], and a bare repository in the scene's directory that pushes to `origin` go to
 /// instead (`pushInsteadOf` in the identity's git configuration file: `git remote get-url`
 /// still prints the synthetic URL). Nothing is pushed anywhere else.
-async fn pr_scene(more: &str) -> (Scene, Arc<FakeForge>, PathBuf) {
+pub(super) async fn pr_scene(more: &str) -> (Scene, Arc<FakeForge>, PathBuf) {
     let mut scene = Scene::with_worktrees(None).await;
     scene.config_more = format!("[repo.demo.landing]\nmode = \"pr\"\n{more}");
     configure(&scene);
@@ -859,7 +859,7 @@ async fn pr_scene(more: &str) -> (Scene, Arc<FakeForge>, PathBuf) {
 }
 
 /// The branches under `refs/heads/bosun/` of the bare remote, with their commits.
-fn pushed(scene: &Scene, remote: &Path) -> Vec<String> {
+pub(super) fn pushed(scene: &Scene, remote: &Path) -> Vec<String> {
     git_in(
         scene,
         remote,

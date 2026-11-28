@@ -1490,7 +1490,7 @@ fn a_census_policy_reads_its_glob_and_counters() {
 }
 
 #[test]
-fn a_repositorys_auto_pause_defaults_to_the_global_value_without_a_worktree_and_off_with_one() {
+fn a_repository_auto_pause_defaults_to_the_global_value_without_a_worktree_and_off_with_one() {
     let worktree = format!("worktree = {{ root = '{}' }}\n", abs("wt/bosun"));
     let resolved = |daemon: &str, rest: &str| {
         let config = parse(&format!("{daemon}{}", with_repo(rest)), &Local).unwrap();

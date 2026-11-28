@@ -4598,7 +4598,7 @@ const NOTIFY_SECRETS_FIX_CARD: u32 = 237;
 const AUTO_PAUSE_CARD: u32 = 214;
 
 /// The configuration test of that card, which hosts two mutants.
-const AUTO_PAUSE_CONFIG_TEST: &str = "tests::a_repositorys_auto_pause_defaults_to_the_global_value_without_a_worktree_and_off_with_one";
+const AUTO_PAUSE_CONFIG_TEST: &str = "tests::a_repository_auto_pause_defaults_to_the_global_value_without_a_worktree_and_off_with_one";
 
 /// #197, the card of #7 that counts a repository's tests, assertions and switched-off tests at
 /// an item's base and at the commit its verdict judged (`repo.<name>.policy.census`) and sends a

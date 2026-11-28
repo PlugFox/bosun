@@ -669,6 +669,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # scrubbed, not only redacted.
   "cfg(mutant_redact_telegram_single_pass)",
   "cfg(mutant_heat_loop_subject_redact_only)",
+  # #244: a shim the daemon cannot install is not a fast death; a stop writes the refused
+  # marks once more.
+  "cfg(mutant_breaker_counts_shim_install)",
+  "cfg(mutant_outbox_stop_drops_pending_marks)",
 ] }
 
 [workspace.lints.clippy]

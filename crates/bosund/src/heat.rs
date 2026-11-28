@@ -132,7 +132,8 @@ impl Heat {
                 Ok(documents) => Ok(Some(documents)),
                 Err(e) => {
                     crate::log::log!(
-                        "bosund: identity {identity}: heat of {name}: the documents are not                          listed, U1 is insufficient: {e}"
+                        "bosund: identity {identity}: heat of {name}: the documents are not \
+                         listed, U1 is insufficient: {e}"
                     );
                     // Mutant (`mutant_heat_listing_failure_fails_evaluation`): a failed listing
                     // is the repository's error.

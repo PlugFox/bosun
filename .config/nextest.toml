@@ -16,7 +16,8 @@ scenes = { max-threads = 4 }
 # Builds `fake-agent`, `bosun-mcp` and `bosun-shim` once per run and exports their paths in
 # `BOSUN_TEST_FAKE_AGENT`, `BOSUN_TEST_BOSUN_MCP` and `BOSUN_TEST_BOSUN_SHIM`, which `built()`
 # in `crates/bosund/src/executor/tests.rs` takes instead of running `cargo build` in every
-# test process. A debug build: a `--cargo-profile release` run builds its own per process.
+# test process. Always a debug build, and `built()` takes the exported paths first: a
+# `--cargo-profile release` run uses these debug helpers too.
 command = "sh .config/build-helpers.sh"
 slow-timeout = "10m"
 

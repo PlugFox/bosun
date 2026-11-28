@@ -269,11 +269,14 @@ pub(crate) fn notify(identity: &str, answer: Option<Result<Channels, Error>>) ->
                     Check::fail(
                         "notify",
                         format!(
-                            "channel {} ({}): its secret is missing from the credential store                              (entry {})",
+                            "channel {} ({}): its secret is missing from the credential store \
+                             (entry {})",
                             c.name, c.kind, c.secret_entry
                         ),
                         format!(
-                            "remove it and add it again: `bosun notify remove {0} --identity                              {identity}`, then `bosun notify add {0} --kind {1} ... --identity                              {identity}` with the secret on standard input",
+                            "remove it and add it again: `bosun notify remove {0} --identity \
+                             {identity}`, then `bosun notify add {0} --kind {1} ... --identity \
+                             {identity}` with the secret on standard input",
                             c.name, c.kind
                         ),
                     )
@@ -282,7 +285,10 @@ pub(crate) fn notify(identity: &str, answer: Option<Result<Channels, Error>>) ->
             .collect(),
         Some(Err(Error::Rpc(e))) if e.code == code::METHOD_NOT_FOUND => vec![Check::warn(
             "notify",
-            format!("this bosund does not know notify.channel.list: {}", e.message),
+            format!(
+                "this bosund does not know notify.channel.list: {}",
+                e.message
+            ),
             "install bosun and bosund of one release",
         )],
         Some(Err(e)) => vec![Check::fail(
@@ -1213,7 +1219,8 @@ pub(crate) fn ingest_format(identity: &str, status: &IngestStatus) -> Check {
         Check::warn(
             "ingest_format",
             format!("{counts}, in {files} drifted files"),
-            "the transcript format may have changed: `bosun ingest status` names the files;              install the newest bosun, then run `bosun reingest`",
+            "the transcript format may have changed: `bosun ingest status` names the files; \
+             install the newest bosun, then run `bosun reingest`",
         )
     } else {
         Check::ok("ingest_format", counts)

@@ -254,28 +254,37 @@ pub mod method {
         "heat.metrics",
         crate::ReportParams,
         crate::HeatMetrics,
-        "The generic metrics of each repository over the range, per provider and session kind:      eqv per commit, context at session start, repeated reads and the cost of finding per      session, the share of cache reads, the tool error rate, time parked and the flaky verdict      rate per closed item. Each says whether it is exact or an estimate and whether it compares      across providers."
+        "The generic metrics of each repository over the range, per provider and session kind: \
+         eqv per commit, context at session start, repeated reads and the cost of finding per \
+         session, the share of cache reads, the tool error rate, time parked and the flaky verdict \
+         rate per closed item. Each says whether it is exact or an estimate and whether it compares \
+         across providers."
     );
     method!(
         HeatEvaluate,
         "heat.evaluate",
         crate::HeatEvaluateParams,
         crate::HeatEvaluation,
-        "Runs heat's detectors now over the 14 days before, for one repository of the identity      or each of them, and reconciles their findings with the stored proposals: a finding seen      in two evaluations in a row becomes a proposal, within 3 new per evaluation and 10 active      per repository. Returns what it did, per repository."
+        "Runs heat's detectors now over the 14 days before, for one repository of the identity \
+         or each of them, and reconciles their findings with the stored proposals: a finding seen \
+         in two evaluations in a row becomes a proposal, within 3 new per evaluation and 10 active \
+         per repository. Returns what it did, per repository."
     );
     method!(
         HeatList,
         "heat.list",
         crate::HeatListParams,
         crate::HeatProposals,
-        "The identity's heat proposals: active ones (open, published, landed), or every state      with `all`. Each holds its metric, value, threshold, target and window in exact units."
+        "The identity's heat proposals: active ones (open, published, landed), or every state \
+         with `all`. Each holds its metric, value, threshold, target and window in exact units."
     );
     method!(
         HeatDismiss,
         "heat.dismiss",
         crate::HeatDismissParams,
         crate::ProposalView,
-        "Dismisses an open or published heat proposal of the identity, by its key: its subject      is then not proposed again for 90 days. Takes the operator token."
+        "Dismisses an open or published heat proposal of the identity, by its key: its subject \
+         is then not proposed again for 90 days. Takes the operator token."
     );
     method!(
         HeatLand,
@@ -463,28 +472,34 @@ pub mod method {
         "notify.channel.add",
         crate::ChannelAddParams,
         crate::ChannelAdded,
-        "Adds a notification channel to the identity: its kind, non-secret parameters, events and      minimum gap in its database, its secret in the OS credential store under      `notify/<identity>/<name>/<id>`, the id random per channel row. The secret is in no row, log, error or result. Takes the      operator token."
+        "Adds a notification channel to the identity: its kind, non-secret parameters, events and \
+         minimum gap in its database, its secret in the OS credential store under \
+         `notify/<identity>/<name>/<id>`, the id random per channel row. The secret is in no \
+         row, log, error or result. Takes the operator token."
     );
     method!(
         NotifyChannelList,
         "notify.channel.list",
         crate::IdentityParams,
         crate::Channels,
-        "The identity's live notification channels, each with its credential-store entry and      whether the entry is present, never the secret. Needs no operator token."
+        "The identity's live notification channels, each with its credential-store entry and \
+         whether the entry is present, never the secret. Needs no operator token."
     );
     method!(
         NotifyChannelRemove,
         "notify.channel.remove",
         crate::ChannelParams,
         crate::ChannelRemoved,
-        "Removes a notification channel of the identity: deletes its credential-store entry, then      marks its row removed. Takes the operator token."
+        "Removes a notification channel of the identity: deletes its credential-store entry, then \
+         marks its row removed. Takes the operator token."
     );
     method!(
         NotifyChannelTest,
         "notify.channel.test",
         crate::ChannelParams,
         crate::ChannelTested,
-        "Sends a test message on a notification channel of the identity now, outside any outbox,      and says whether its service accepted it. Takes the operator token."
+        "Sends a test message on a notification channel of the identity now, outside any outbox, \
+         and says whether its service accepted it. Takes the operator token."
     );
 }
 

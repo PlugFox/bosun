@@ -993,7 +993,8 @@ impl Reader<'_> {
                             self.problem(
                                 key_at,
                                 format!(
-                                    "`{what}` is {}s; a probe runs inside the loop's poll, so it                                      is at most {}s",
+                                    "`{what}` is {}s; a probe runs inside the loop's poll, so it \
+                                     is at most {}s",
                                     timeout.as_secs(),
                                     PROBE_TIMEOUT_MAX.as_secs()
                                 ),
@@ -1357,7 +1358,9 @@ impl Reader<'_> {
             self.problem(
                 at,
                 format!(
-                    "`{what}` must be a whole number from 2 to 125: 0 is a pass, 1 is any                      failure, 126 and 127 are the shell's own, 128 and above are signals;                      75 (`EX_TEMPFAIL`) is the suggestion"
+                    "`{what}` must be a whole number from 2 to 125: 0 is a pass, 1 is any \
+                     failure, 126 and 127 are the shell's own, 128 and above are signals; \
+                     75 (`EX_TEMPFAIL`) is the suggestion"
                 ),
             );
         }

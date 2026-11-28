@@ -4428,6 +4428,28 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #244: a shim the daemon cannot install is not a fast death; a stop writes the refused
+    // marks once more.
+    Mutant {
+        name: "mutant_breaker_counts_shim_install",
+        issue: 244,
+        breaks: "a session shim the daemon cannot install counts as the agent's fast death and \
+                 pauses the repository",
+        package: "bosund",
+        check: Check::Test(
+            "executor::session::tests::a_shim_the_daemon_cannot_install_is_not_a_fast_death",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_outbox_stop_drops_pending_marks",
+        issue: 244,
+        breaks: "a stop drops the marks the store refused, and their notices are sent again at \
+                 the next start",
+        package: "bosund",
+        check: Check::Test("notify_outbox_tests::stop_tries_the_pending_marks_once_more"),
+        platform: None,
+    },
 ];
 
 /// The card of #11 (part D) that adds the tool detectors X1, T1 and M1 of #210 over the columns
@@ -4467,10 +4489,9 @@ const TELEGRAM_CARD: u32 = 9;
 /// (its own number was not known when it was written; its parent's stands in).
 const NOTIFY_OUTBOX_CARD: u32 = 9;
 
-/// The card of #9 that fixes the outbox drainer's duplicates and losses (a refused mark, a
-/// service's wait, a stop mid-send, a second drain of one item) and the path in a notice (its
-/// own number was not known when it was written; its parent's stands in).
-const NOTIFY_OUTBOX_FIX_CARD: u32 = 9;
+/// #236, the card of #9 that fixes the outbox drainer's duplicates and losses (a refused mark,
+/// a service's wait, a stop mid-send, a second drain of one item) and the path in a notice.
+const NOTIFY_OUTBOX_FIX_CARD: u32 = 236;
 
 /// The card of #9 that builds what every notification channel stands on: `bosun-notify` with
 /// the credential store, the channel rows of each identity, `notify.channel.*`, `bosun notify`
@@ -4478,10 +4499,9 @@ const NOTIFY_OUTBOX_FIX_CARD: u32 = 9;
 /// stands in).
 const NOTIFY_CARD: u32 = 9;
 
-/// The card of #9 and #2 that redacts the Telegram token inside a bot URL, caps a secret at
-/// what Windows' credential store takes and gives each channel row its own entry (its own
-/// number was not known when it was written; its parent's stands in).
-const NOTIFY_SECRETS_FIX_CARD: u32 = 9;
+/// #237, the card of #9 and #2 that redacts the Telegram token inside a bot URL, caps a secret
+/// at what Windows' credential store takes and gives each channel row its own entry.
+const NOTIFY_SECRETS_FIX_CARD: u32 = 237;
 
 /// #214, the card of #7 that sets the automatic pause per repository
 /// (`repo.<name>.auto_pause`), off by default in worktree mode.
@@ -4538,10 +4558,10 @@ const BUFFERED_CALLS_CARD: u32 = 193;
 /// fast-death breaker).
 const FAST_DEATH_CARD: u32 = 196;
 
-/// The card of #12 found in the review of run 6: mutant children without the developer's git
-/// configuration, a platform-independent fast-death hash check, a census that greps without
-/// colour (its own number was not known when it was written; its parent's stands in).
-const TOOLCHAIN_FIX_CARD: u32 = 12;
+/// #239, the card of #12 found in the review of run 6: mutant children without the developer's
+/// git configuration, a platform-independent fast-death hash check, a census that greps without
+/// colour.
+const TOOLCHAIN_FIX_CARD: u32 = 239;
 
 /// #191, the card of #186 (its finding 4) that lets `bosun with` survive a daemon restart.
 const WITH_RECONNECT_CARD: u32 = 191;

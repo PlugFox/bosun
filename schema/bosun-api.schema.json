@@ -6366,7 +6366,7 @@
       }
     },
     "heat.dismiss": {
-      "description": "Dismisses an open or published heat proposal of the identity, by its key: its subject      is then not proposed again for 90 days. Takes the operator token.",
+      "description": "Dismisses an open or published heat proposal of the identity, by its key: its subject is then not proposed again for 90 days. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/HeatDismissParams"
       },
@@ -6375,7 +6375,7 @@
       }
     },
     "heat.evaluate": {
-      "description": "Runs heat's detectors now over the 14 days before, for one repository of the identity      or each of them, and reconciles their findings with the stored proposals: a finding seen      in two evaluations in a row becomes a proposal, within 3 new per evaluation and 10 active      per repository. Returns what it did, per repository.",
+      "description": "Runs heat's detectors now over the 14 days before, for one repository of the identity or each of them, and reconciles their findings with the stored proposals: a finding seen in two evaluations in a row becomes a proposal, within 3 new per evaluation and 10 active per repository. Returns what it did, per repository.",
       "params": {
         "$ref": "#/$defs/HeatEvaluateParams"
       },
@@ -6393,7 +6393,7 @@
       }
     },
     "heat.list": {
-      "description": "The identity's heat proposals: active ones (open, published, landed), or every state      with `all`. Each holds its metric, value, threshold, target and window in exact units.",
+      "description": "The identity's heat proposals: active ones (open, published, landed), or every state with `all`. Each holds its metric, value, threshold, target and window in exact units.",
       "params": {
         "$ref": "#/$defs/HeatListParams"
       },
@@ -6402,7 +6402,7 @@
       }
     },
     "heat.metrics": {
-      "description": "The generic metrics of each repository over the range, per provider and session kind:      eqv per commit, context at session start, repeated reads and the cost of finding per      session, the share of cache reads, the tool error rate, time parked and the flaky verdict      rate per closed item. Each says whether it is exact or an estimate and whether it compares      across providers.",
+      "description": "The generic metrics of each repository over the range, per provider and session kind: eqv per commit, context at session start, repeated reads and the cost of finding per session, the share of cache reads, the tool error rate, time parked and the flaky verdict rate per closed item. Each says whether it is exact or an estimate and whether it compares across providers.",
       "params": {
         "$ref": "#/$defs/ReportParams"
       },
@@ -6483,7 +6483,7 @@
       }
     },
     "notify.channel.add": {
-      "description": "Adds a notification channel to the identity: its kind, non-secret parameters, events and      minimum gap in its database, its secret in the OS credential store under      `notify/<identity>/<name>/<id>`, the id random per channel row. The secret is in no row, log, error or result. Takes the      operator token.",
+      "description": "Adds a notification channel to the identity: its kind, non-secret parameters, events and minimum gap in its database, its secret in the OS credential store under `notify/<identity>/<name>/<id>`, the id random per channel row. The secret is in no row, log, error or result. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/ChannelAddParams"
       },
@@ -6492,7 +6492,7 @@
       }
     },
     "notify.channel.list": {
-      "description": "The identity's live notification channels, each with its credential-store entry and      whether the entry is present, never the secret. Needs no operator token.",
+      "description": "The identity's live notification channels, each with its credential-store entry and whether the entry is present, never the secret. Needs no operator token.",
       "params": {
         "$ref": "#/$defs/IdentityParams"
       },
@@ -6501,7 +6501,7 @@
       }
     },
     "notify.channel.remove": {
-      "description": "Removes a notification channel of the identity: deletes its credential-store entry, then      marks its row removed. Takes the operator token.",
+      "description": "Removes a notification channel of the identity: deletes its credential-store entry, then marks its row removed. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/ChannelParams"
       },
@@ -6510,7 +6510,7 @@
       }
     },
     "notify.channel.test": {
-      "description": "Sends a test message on a notification channel of the identity now, outside any outbox,      and says whether its service accepted it. Takes the operator token.",
+      "description": "Sends a test message on a notification channel of the identity now, outside any outbox, and says whether its service accepted it. Takes the operator token.",
       "params": {
         "$ref": "#/$defs/ChannelParams"
       },

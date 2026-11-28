@@ -44,7 +44,23 @@ fn item(items: &mut [ItemHistory], n: u32) -> &mut ItemHistory {
     items.iter_mut().find(|h| h.item.item.id.0 == id).unwrap()
 }
 
+/// A session of the attempt `attempt` of `local:demo#n` at `started_ms`, unless it has one.
+fn attempt_at(items: &mut [ItemHistory], n: u32, attempt: u32, started_ms: i64) {
+    let history = item(items, n);
+    if history.runs.iter().any(|r| r.attempt == attempt) {
+        return;
+    }
+    let mut run = history.runs[0].clone();
+    run.attempt = attempt;
+    run.spawn = u32::try_from(history.runs.len()).unwrap() + 1;
+    run.started_ms = started_ms;
+    history.runs.push(run);
+}
+
+/// `tests` flaky in the attempt `attempt` of `local:demo#n`, an attempt of the window unless it
+/// has a session already.
 fn flaky(items: &mut [ItemHistory], n: u32, attempt: u32, tests: &[&str]) {
+    attempt_at(items, n, attempt, T + DAY);
     let history = item(items, n);
     history
         .flaky_tests
@@ -317,4 +333,54 @@ fn a_verdict_slower_than_the_threshold_fires() {
     budget_stop(&mut scene, 1);
     let detection = run(&scene);
     assert!(detection.findings.is_empty(), "{:#?}", detection.findings);
+}
+
+/// An item flaky in its attempts 1 and 2 before the window, then resumed in it: only the attempt
+/// that started in the window counts, for F1 and R1 alike
+/// (`mutant_heat_loop_attempts_unwindowed` counts every attempt).
+#[test]
+fn a_flaky_test_of_an_attempt_before_the_window_is_not_counted() {
+    const TEST: &str = "store::tests::shared_flag";
+    let mut scene = items(5);
+    for n in 1..=5 {
+        let history = item(&mut scene, n);
+        // Attempt 1 started before the window; the arrows are in it.
+        history.runs[0].started_ms = T - 3 * DAY;
+    }
+    attempt_at(&mut scene, 1, 2, T - 2 * DAY);
+    flaky(&mut scene, 1, 1, &[TEST]);
+    flaky(&mut scene, 1, 2, &[TEST]);
+    attempt_at(&mut scene, 1, 3, T + DAY);
+    flaky(&mut scene, 1, 3, &[TEST]);
+    for n in 1..=5 {
+        deny(&mut scene, n, DenialSource::Permission, "rm -rf target", 2);
+    }
+    let detection = run(&scene);
+    assert_eq!(
+        of(&detection, FLAKY_TEST_ACROSS_ATTEMPTS),
+        Vec::<&Finding>::new(),
+        "{detection:#?}"
+    );
+    assert_eq!(
+        of(&detection, DENIED_TARGET_ACROSS_ITEMS),
+        Vec::<&Finding>::new(),
+        "{detection:#?}"
+    );
+
+    // Its attempt 2 in the window: F1 counts two attempts.
+    item(&mut scene, 1)
+        .runs
+        .iter_mut()
+        .find(|r| r.attempt == 2)
+        .unwrap()
+        .started_ms = T + DAY;
+    let detection = run(&scene);
+    let found = of(&detection, FLAKY_TEST_ACROSS_ATTEMPTS);
+    assert_eq!(found.len(), 1, "{detection:#?}");
+    assert_eq!(found[0].value, 2, "{found:#?}");
+    let lines = found[0].evidence.lines().join(
+        "
+",
+    );
+    assert!(!lines.contains("attempt 1"), "{lines}");
 }

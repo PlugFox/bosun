@@ -13,7 +13,9 @@
 //!
 //! Each identity has its own [`Heat`] handle over its own store and repositories, so an
 //! evaluation asked for one identity reads and writes that identity's rows only. One evaluation
-//! runs at a time per identity: two calls never interleave their reads and writes.
+//! runs at a time per identity: two calls never interleave their reads and writes. The user's
+//! writes (`heat.dismiss`, `heat.land`) hold the same mutex around their read and write, so an
+//! evaluation's batch never carries a step for a proposal the user moved after it read them.
 //!
 //! Besides `heat.evaluate`, a daily timer per identity ([`Heat::spawn`]) evaluates each of its
 //! repositories through the same handle and mutex: the first time [`FIRST_DELAY_MS`] after the
@@ -66,7 +68,8 @@ pub(crate) struct Heat {
     reader: Reader,
     writer: Writer,
     repos: Arc<Vec<(String, Repo)>>,
-    /// Held for the whole of an evaluation, the timer's and `heat.evaluate`'s alike.
+    /// Held for the whole of an evaluation, the timer's and `heat.evaluate`'s alike, and around
+    /// the read and write of `heat.dismiss` and `heat.land`.
     running: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -79,6 +82,11 @@ impl Heat {
             repos: Arc::new(repos),
             running: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// The identity's mutex of evaluations and of the user's writes, held until the guard drops.
+    pub(crate) async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.running.lock().await
     }
 
     /// The daily timer of the identity `identity`, for a daemon started at `started_ms`: every
@@ -124,7 +132,7 @@ impl Heat {
                 })?]
             }
         };
-        let _running = self.running.lock().await;
+        let _running = self.lock().await;
         let mut out = Vec::new();
         for (name, config) in repos {
             let key = config.key.as_str();
@@ -343,9 +351,17 @@ async fn list(served: &Served, p: &HeatListParams) -> Result<HeatProposals, Erro
     })
 }
 
-/// Dismisses the identity's proposal `p.key` when it is open or published. A key of no row of
-/// the identity's store and a sighting (seen once, not a proposal yet) are refused alike.
+/// Dismisses the identity's proposal `p.key` when it is open or published, under the identity's
+/// mutex of evaluations. A key of no row of the identity's store and a sighting (seen once, not
+/// a proposal yet) are refused alike.
 async fn dismiss(served: &Served, p: &HeatDismissParams) -> Result<ProposalView, ErrorObject> {
+    // Mutant (`mutant_heat_user_write_without_lock`): the dismissal does not wait for a running
+    // evaluation.
+    let _running = if cfg!(mutant_heat_user_write_without_lock) {
+        None
+    } else {
+        Some(served.heat.lock().await)
+    };
     let reader = served.store.reader();
     let row = reader
         .proposal(&p.key)
@@ -394,8 +410,9 @@ fn is_sha(sha: &str) -> bool {
 }
 
 /// Records that the remedy of the identity's proposal `p.key` landed now, by hand, when it is
-/// open or published: its `Landed` step and its repository's annotation, in one batch. A key
-/// of no row of the identity's store and a sighting are refused alike.
+/// open or published: its `Landed` step and its repository's annotation, in one batch, under the
+/// identity's mutex of evaluations. A key of no row of the identity's store and a sighting are
+/// refused alike.
 async fn land(served: &Served, p: &HeatLandParams) -> Result<ProposalView, ErrorObject> {
     if let Some(sha) = p.sha.as_deref().filter(|sha| !is_sha(sha)) {
         return Err(ErrorObject::new(
@@ -403,6 +420,7 @@ async fn land(served: &Served, p: &HeatLandParams) -> Result<ProposalView, Error
             format!("{sha:?} is not a commit id: 7 to 40 hex digits"),
         ));
     }
+    let _running = served.heat.lock().await;
     let reader = served.store.reader();
     let row = reader
         .proposal(&p.key)

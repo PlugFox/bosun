@@ -6,8 +6,8 @@
 use bosun_store::{ToolRow, UsageRow};
 
 use crate::detect::{
-    Detection, Detector, Evidence, Finding, MEDIA_SHARE, REINGEST_NEEDED, REPEATED_COMMAND,
-    TOOL_WALL_TIME, Thresholds, WallEvidence, detect,
+    Detection, Detector, Evidence, Finding, MEDIA_SHARE, NO_TOOL_FIGURES, REINGEST_NEEDED,
+    REPEATED_COMMAND, TOOL_WALL_TIME, Thresholds, WallEvidence, detect,
 };
 use crate::exact::Scope;
 use crate::metrics::tests::{Stored, T, call, inputs, message, stored, tokens};
@@ -29,6 +29,8 @@ fn scope() -> Scope<'static> {
 struct Scene {
     usage: Vec<UsageRow>,
     calls: Vec<ToolRow>,
+    /// `None` for `claude`.
+    provider: Option<&'static str>,
 }
 
 impl Scene {
@@ -41,11 +43,15 @@ impl Scene {
         scene
     }
 
+    fn provider(&self) -> &'static str {
+        self.provider.unwrap_or("claude")
+    }
+
     /// A message of `session` of `kind`, at a time of its own; its id.
     fn message(&mut self, session: &str, kind: &str) -> String {
         let ts = T + DAY + i64::try_from(self.usage.len()).unwrap();
         let row = message(
-            "claude",
+            self.provider(),
             session,
             None,
             kind,
@@ -69,7 +75,7 @@ impl Scene {
         let message = self.message(session, kind);
         let tool_use = format!("{message}-call");
         self.calls.push(stored(
-            call("claude", &message, name, result_bytes, false, &[]),
+            call(self.provider(), &message, name, result_bytes, false, &[]),
             &tool_use,
             fields,
         ));
@@ -301,4 +307,63 @@ fn a_session_heavy_with_images_fires_the_media_share() {
     media_scene(&mut scene, 20_000);
     let detection = scene.detect();
     assert_eq!(of(&detection, MEDIA_SHARE), Vec::<&Finding>::new());
+}
+
+/// T1 leaves out `Task` and `Agent`: their wall time is a whole subagent run
+/// (`mutant_heat_t1_times_subagents` times them).
+#[test]
+fn t1_leaves_out_the_subagent_tools() {
+    let mut scene = Scene::ten();
+    for n in 0..10 {
+        let from = 1_000_000 * i64::from(n + 1);
+        for tool in ["Task", "Agent"] {
+            scene.timed(&session(n + 1), (tool, None), from, 600_000);
+        }
+    }
+    let detection = scene.detect();
+    assert_eq!(of(&detection, TOOL_WALL_TIME), Vec::<&Finding>::new());
+    // A long tool beside them still fires.
+    wall_scene(&mut scene);
+    let detection = scene.detect();
+    let subjects: Vec<&str> = of(&detection, TOOL_WALL_TIME)
+        .iter()
+        .map(|f| f.subject.as_str())
+        .collect();
+    assert_eq!(subjects, ["Bash cargo", "WebFetch"], "{detection:#?}");
+}
+
+/// Only `claude`'s parser stores the tool figures: a group of another provider is
+/// `insufficient` for X1, T1 and M1 with [`NO_TOOL_FIGURES`], even at parser version 4, and not
+/// with the reingest reason (`mutant_heat_tool_gate_any_provider` compares the version only).
+#[test]
+fn a_provider_without_tool_figures_is_insufficient_with_its_own_reason() {
+    let mut scene = Scene {
+        provider: Some("codex"),
+        ..Scene::default()
+    };
+    for n in 1..=10 {
+        scene.message(&session(n), "run");
+    }
+    commands_scene(&mut scene);
+    wall_scene(&mut scene);
+    media_scene(&mut scene, 200_000);
+    let detection = scene.detect();
+    assert_eq!(detection.findings, Vec::<Finding>::new(), "{detection:#?}");
+    let silent: Vec<(&str, &str, Option<&str>)> = detection
+        .insufficient
+        .iter()
+        .filter(|i| [REPEATED_COMMAND.id, TOOL_WALL_TIME.id, MEDIA_SHARE.id].contains(&i.detector))
+        .map(|i| (i.detector, i.provider.as_str(), i.reason))
+        .collect();
+    let none = Some(NO_TOOL_FIGURES);
+    assert_eq!(
+        silent,
+        [
+            (REPEATED_COMMAND.id, "codex", none),
+            (TOOL_WALL_TIME.id, "codex", none),
+            (MEDIA_SHARE.id, "codex", none),
+        ],
+        "{detection:#?}"
+    );
+    assert!(!NO_TOOL_FIGURES.contains("reingest"));
 }

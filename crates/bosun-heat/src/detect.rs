@@ -32,7 +32,8 @@ mod tools;
 pub use context::{ANY_PROVIDER, INSTRUCTION_FILES};
 pub(crate) use tools::is_tool;
 pub use tools::{
-    CommandEvidence, MIN_PARSER_VERSION, MediaEvidence, REINGEST_NEEDED, WallEvidence,
+    CommandEvidence, MIN_PARSER_VERSION, MediaEvidence, NO_TOOL_FIGURES, REINGEST_NEEDED,
+    TOOL_PROVIDER, WallEvidence,
 };
 
 /// What a detector is, apart from its numbers.
@@ -638,7 +639,8 @@ pub struct Insufficient {
     pub closed_items: u64,
     pub run_sessions: u64,
     /// Why it is silent when not for the minimum sample: [`REINGEST_NEEDED`] for a tool
-    /// detector over rows of an older parser.
+    /// detector over rows of an older parser, [`NO_TOOL_FIGURES`] for one of a provider whose
+    /// parser stores no tool figures.
     pub reason: Option<&'static str>,
 }
 

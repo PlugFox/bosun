@@ -3,10 +3,12 @@
 //! script), T1 (the wall time of a tool, from its call to its result) and M1 (the share of
 //! media in the result bytes).
 //!
-//! - **The parser gate.** A (repository, provider) group in which any message of the window
-//!   that made a tool call, of any session kind, was parsed by a version below
-//!   [`MIN_PARSER_VERSION`] holds calls without these columns: all three answer
-//!   `insufficient` for it (the reason asks for `bosun reingest`) and fire nothing.
+//! - **The parser gate.** Only Claude's parser stores these columns: a group of any other
+//!   provider answers `insufficient` for all three with [`NO_TOOL_FIGURES`], whatever its parser
+//!   version. A `claude` group in which any message of the window that made a tool call, of any
+//!   session kind, was parsed by a version below [`MIN_PARSER_VERSION`] holds calls without
+//!   these columns: all three answer `insufficient` for it (the reason asks for
+//!   `bosun reingest`) and fire nothing.
 //! - Only `run` sessions count; the sample of all three is the group's run sessions, at least
 //!   [`super::Thresholds::min_run_sessions`] (closed items do not make it).
 //! - Every value is exact: a count of calls, milliseconds, a share of bytes in ppm. None has an
@@ -16,6 +18,11 @@
 //!   of a command than `command_text`, which #232 stored already scrubbed and capped. A message
 //!   attributed to its repository only after it was stored has no fingerprint until
 //!   `bosun reingest`, although its parser version is 4: X1 then undercounts it.
+//! - A message parsed across an upgrade of the daemon (its `tool_use` record at version 3, a
+//!   later record of it at 4) is stored at the latest version, 4, while its call keeps the NULL
+//!   fingerprint and `call_ts_ms` of version 3: the gate passes, X1 undercounts it and T1 skips
+//!   the call. `bosun reingest` corrects it.
+//! - T1 leaves out the subagent tools ([`SUBAGENTS`]); X1 and M1 count them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,19 +33,30 @@ use super::{
     TOOL_WALL_TIME,
 };
 
-/// The parser version from which a call carries its command's fingerprint and text, its times
-/// and its media bytes: Claude's (`bosun_ingest::claude::PARSER_VERSION` 4, #232; not imported,
-/// `bosun-heat` does not depend on `bosun-ingest`). The `stub` provider parses at version 1 and
-/// stores none of these columns, so it is always `insufficient` for these detectors, which is
-/// right: there is nothing to measure.
+/// The parser version of [`TOOL_PROVIDER`] from which a call carries its command's fingerprint
+/// and text, its times and its media bytes (`bosun_ingest::claude::PARSER_VERSION` 4, #232; not
+/// imported, `bosun-heat` does not depend on `bosun-ingest`). It is Claude's version only: no
+/// other provider's version is compared with it.
 pub const MIN_PARSER_VERSION: u32 = 4;
 
-/// Why a tool detector is silent in a group of an older parser.
+/// The one provider whose parser stores the tool figures.
+pub const TOOL_PROVIDER: &str = "claude";
+
+/// Why a tool detector is silent in a `claude` group of an older parser.
 pub const REINGEST_NEEDED: &str =
     "rows of a parser version below 4 in the window: run `bosun reingest`";
 
+/// Why a tool detector is silent in a group of any provider but [`TOOL_PROVIDER`] (`stub`,
+/// say): a reingest cannot add the columns, there is nothing to measure.
+pub const NO_TOOL_FIGURES: &str = "this provider's parser stores no tool figures";
+
 /// The tools whose subject is the tool and its command head.
 const SHELLS: [&str; 2] = ["Bash", "PowerShell"];
+
+/// The tools that run a subagent, which T1 leaves out: their wall time is the subagent's whole
+/// run, so in run sessions their p90 is nearly always over T1's threshold, a finding no remedy
+/// of a tool can move.
+const SUBAGENTS: [&str; 2] = ["Task", "Agent"];
 
 /// The tools M1's evidence names at most.
 const TOP_TOOLS: usize = 3;
@@ -100,12 +118,15 @@ impl<'a> ToolCalls<'a> {
             }
             *command.sessions.entry(session).or_default() += 1;
         }
-        let timed = self.timed.entry(subject(call)).or_default();
-        match (call.call_ts_ms, call.result_ts_ms) {
-            (Some(called), Some(answered)) if answered >= called => {
-                timed.calls.push((session, called, answered));
+        // Mutant (`mutant_heat_t1_times_subagents`): the subagent tools are timed.
+        if cfg!(mutant_heat_t1_times_subagents) || !SUBAGENTS.contains(&call.name.as_str()) {
+            let timed = self.timed.entry(subject(call)).or_default();
+            match (call.call_ts_ms, call.result_ts_ms) {
+                (Some(called), Some(answered)) if answered >= called => {
+                    timed.calls.push((session, called, answered));
+                }
+                _ => timed.skipped += 1,
             }
-            _ => timed.skipped += 1,
         }
         *self.media.entry(&call.name).or_default() += call.result_media_bytes.unwrap_or(0);
         self.result_bytes += call.result_bytes;
@@ -138,7 +159,10 @@ pub(crate) fn sample(context: &Context<'_, '_>) -> (u64, &'static str) {
 /// [`super::Insufficient::reason`] says it (`Some` for the parser gate, `None` below the
 /// minimum sample).
 pub(crate) fn sufficient(context: &Context<'_, '_>) -> Result<(), Option<&'static str>> {
-    if !context.tools.current() {
+    // Mutant (`mutant_heat_tool_gate_any_provider`): the gate compares the version only.
+    if !cfg!(mutant_heat_tool_gate_any_provider) && context.provider != TOOL_PROVIDER {
+        Err(Some(NO_TOOL_FIGURES))
+    } else if !context.tools.current() {
         Err(Some(REINGEST_NEEDED))
     } else if context.run_sessions < context.thresholds.min_run_sessions {
         Err(None)

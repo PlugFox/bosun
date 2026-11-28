@@ -23,21 +23,31 @@ pub(crate) struct World {
 
 impl World {
     pub(crate) async fn new() -> Self {
+        Self::with(&[("a", &["alpha"]), ("b", &["beta"])]).await
+    }
+
+    /// The identities `identities`, each with its repositories, served from one configuration.
+    pub(crate) async fn with(identities: &[(&str, &[&str])]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
         let mut config = String::new();
-        for (identity, repo) in [("a", "alpha"), ("b", "beta")] {
+        for (identity, repos) in identities {
             let claude = d.join(identity).join("claude");
             std::fs::create_dir_all(claude.join("projects")).unwrap();
-            std::fs::create_dir_all(d.join(repo)).unwrap();
             let _ = write!(
                 config,
-                "[identity.{identity}]\nclaude_config_dir = '{}'\ndatabase = '{}'\n\n\
-                 [repo.{repo}]\npath = '{}'\nidentity = '{identity}'\n\n",
+                "[identity.{identity}]\nclaude_config_dir = '{}'\ndatabase = '{}'\n\n",
                 claude.display(),
                 d.join(identity).join("bosun.db").display(),
-                d.join(repo).display(),
             );
+            for repo in *repos {
+                std::fs::create_dir_all(d.join(repo)).unwrap();
+                let _ = write!(
+                    config,
+                    "[repo.{repo}]\npath = '{}'\nidentity = '{identity}'\n\n",
+                    d.join(repo).display(),
+                );
+            }
         }
         let path = d.join("config.toml");
         std::fs::write(&path, config).unwrap();

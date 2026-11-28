@@ -259,13 +259,19 @@ pub fn starts_cooldown(state: ProposalState, outcome: Option<FollowupOutcome>) -
     }
 }
 
-/// The proposal's own key: 16 lower-case hex digits of the 64-bit FNV-1a of `dedup_key`, `\n`
-/// and `created_ms`. A card body names its proposal as `Proposal: <key>`.
+/// The proposal's own key: 16 lower-case hex digits of the 64-bit FNV-1a of `keyed`, `\n` and
+/// `created_ms`. A card body names its proposal as `Proposal: <key>`.
+///
+/// The key is unique across the store's whole table, and one evaluation opens the sightings of
+/// every repository of an identity at one `created_ms`, while the [`dedup_key`] does not name
+/// the repository. So heat passes as `keyed` the repository's path key (the value the store
+/// keys the repository by), `\n` and the dedup key. Keys made before #242 hashed the dedup key
+/// alone; they stay as they are.
 #[must_use]
-pub fn proposal_key(dedup_key: &str, created_ms: i64) -> String {
+pub fn proposal_key(keyed: &str, created_ms: i64) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let text = format!("{dedup_key}\n{created_ms}");
+    let text = format!("{keyed}\n{created_ms}");
     let hash = text
         .bytes()
         .fold(OFFSET, |h, b| (h ^ u64::from(b)).wrapping_mul(PRIME));

@@ -3,9 +3,12 @@
 //! V1 (#210, slow or timed-out verdict runs) and B1 (#210, items stopped by their budget).
 //!
 //! - An item belongs to the provider of its last session, as [`closed_items`] decides; an item
-//!   without a session is skipped. Its flaky tests and denials count when it has an arrow in
-//!   the window; a verdict run when it started in the window; a budget stop when its arrow to
-//!   `needs_you` is in the window.
+//!   without a session is skipped. An item counts when it has an arrow in the window; of it, a
+//!   flaky test and a denial count when their attempt started in the window (its attempt row's
+//!   start, or else its first session's; an attempt of neither does not count), so the attempts
+//!   of an item resumed after a fix landed do not count again in the follow-up's window; a
+//!   verdict run when it started in the window; a budget stop when its arrow to `needs_you` is
+//!   in the window.
 //! - Every value is an exact count, over the group's closed items: a loop finding has no bytes
 //!   (`impact_bytes` 0, no estimate), so it ranks after every byte detector.
 //! - What a subject names is scrubbed here ([`bosun_core::publish::scrub`]: invisible
@@ -108,6 +111,24 @@ fn result_name(result: RunResult) -> &'static str {
     }
 }
 
+/// When the attempt `attempt` of `history` started: its attempt row's start, or else its first
+/// session's; `None` when the history holds neither.
+fn attempt_start(history: &ItemHistory, attempt: u32) -> Option<i64> {
+    history
+        .attempts
+        .iter()
+        .find(|a| a.attempt.number == attempt)
+        .map(|a| a.started_ms)
+        .or_else(|| {
+            history
+                .runs
+                .iter()
+                .filter(|r| r.attempt == attempt)
+                .map(|r| r.started_ms)
+                .min()
+        })
+}
+
 /// The module prefixes of a test name, longest first: `a::b::t` has `a::b::` and `a::`.
 fn prefixes(test: &str) -> impl Iterator<Item = &str> {
     test.rmatch_indices("::")
@@ -132,7 +153,12 @@ impl<'a> LoopRows<'a> {
             return None;
         }
         let item = history.item.item.id.0.as_str();
-        for (attempt, test) in &history.flaky_tests {
+        // Mutant (`mutant_heat_loop_attempts_unwindowed`): every attempt counts.
+        let counted = |attempt: u32| {
+            cfg!(mutant_heat_loop_attempts_unwindowed)
+                || attempt_start(history, attempt).is_some_and(in_range)
+        };
+        for (attempt, test) in history.flaky_tests.iter().filter(|(a, _)| counted(*a)) {
             self.flaky
                 .entry(test.as_str())
                 .or_default()
@@ -143,7 +169,7 @@ impl<'a> LoopRows<'a> {
                 .insert(test.as_str());
         }
         for denial in &history.denials {
-            if denial.source != DenialSource::Permission {
+            if denial.source != DenialSource::Permission || !counted(denial.attempt) {
                 continue;
             }
             let subject = denial_subject(&denial.tool, denial.target.as_deref());

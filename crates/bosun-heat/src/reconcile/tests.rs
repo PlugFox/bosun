@@ -155,7 +155,9 @@ fn a_finding_seen_once_is_not_yet_a_proposal() {
     let [new] = opened(&first)[..] else {
         panic!("{:?}", first.writes)
     };
-    assert_eq!(new.key, proposal_key(&dedup, NOW));
+    // The key hashes the repository's path key with the dedup key.
+    assert_eq!(new.key, proposal_key(&format!("{REPO}\n{dedup}"), NOW));
+    assert_ne!(new.key, proposal_key(&dedup, NOW));
     assert_eq!(new.detector, "file_read_across_runs");
     assert_eq!(new.subject_kind, SubjectKind::File);
     assert_eq!(new.subject, "src/big.rs");

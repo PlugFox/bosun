@@ -87,24 +87,31 @@ fn assistant(id: &str, content: &Value) -> Value {
 /// Ten run sessions of one item of `beta` in `b`'s store and its projects directory, inside the
 /// 14 days before now; five of them read `src/big.rs`.
 async fn seed_b(world: &World) {
+    seed(world, 0, 0).await;
+}
+
+/// Ten run sessions of one item of `b`'s repository `index` (sessions and records numbered from
+/// `base`) in `b`'s store and its projects directory, inside the 14 days before now; five of
+/// them read `src/big.rs`.
+async fn seed(world: &World, index: usize, base: usize) {
     let served = &world.state.identities["b"];
-    let (name, repo) = &served.repos[0];
-    let cwd = world.dir.path().join("beta").display().to_string();
+    let (name, repo) = &served.repos[index];
+    let cwd = world.dir.path().join(name).display().to_string();
     let big = world
         .dir
         .path()
-        .join("beta")
+        .join(name)
         .join("src")
         .join("big.rs")
         .display()
         .to_string();
     let projects = world.dir.path().join("b").join("claude").join("projects");
-    let dir = projects.join("-synthetic-beta");
+    let dir = projects.join(format!("-synthetic-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let start = crate::overview::now_ms() - DAY;
-    let mut n = 0;
+    let mut n = base * 100;
     for s in 0..10 {
-        let id = session(s);
+        let id = session(base + s);
         let at = start + i64::try_from(s).unwrap() * 60_000;
         let mut text = String::new();
         n += 1;
@@ -135,7 +142,7 @@ async fn seed_b(world: &World) {
         std::fs::write(dir.join(format!("{id}.jsonl")), text).unwrap();
     }
 
-    let item = ItemId::new("beta#1");
+    let item = ItemId::new(format!("{name}#1"));
     let go =
         |item: &Item, event: &Event| -> Stepped { step(item, event, &Ctx::at(start)).unwrap() };
     let claimed = go(&Item::new(item.clone()), &Event::Claim);
@@ -164,7 +171,7 @@ async fn seed_b(world: &World) {
             spawn: u32::try_from(s + 1).unwrap(),
             mode: SpawnMode::Fresh,
             provider: "claude".to_owned(),
-            session_key: session(s),
+            session_key: session(base + s),
             started_ms: start + i64::try_from(s).unwrap() * 60_000,
             start_sha: None,
             effort: None,
@@ -533,5 +540,83 @@ async fn an_evaluation_survives_a_repository_whose_documents_cannot_be_listed() 
     let listed = only(&world).await;
     assert_eq!(listed["detector"], "file_read_across_runs", "{listed}");
     assert_eq!(listed["seen_count"], 2, "{listed}");
+    world.close().await;
+}
+
+/// #242: two repositories of one identity that find one subject in one evaluation open two
+/// sightings, each under a key of its own, and two proposals at the next evaluation, without an
+/// error (`mutant_heat_proposal_key_without_repo` hashes the dedup key alone, so the second
+/// repository's batch breaks the key's unique constraint).
+#[tokio::test]
+async fn two_repositories_with_one_subject_get_two_proposals() {
+    let world = World::with(&[("a", &["alpha"]), ("b", &["beta", "gamma"])]).await;
+    seed(&world, 0, 0).await;
+    seed(&world, 1, 20).await;
+
+    for (round, field) in [(0, "sightings"), (1, "promoted")] {
+        let result = world.ok("heat.evaluate", json!({"identity": "b"})).await;
+        let repos = result["repos"].as_array().unwrap();
+        assert_eq!(repos.len(), 2, "{round}: {result}");
+        for repo in repos {
+            assert_eq!(repo["error"], Value::Null, "{round}: {result}");
+            assert_eq!(repo["findings"], 1, "{round}: {result}");
+            assert_eq!(repo[field], 1, "{round}: {result}");
+        }
+    }
+    let listed = proposals(&world, "b").await;
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    let mut names: Vec<&str> = listed
+        .iter()
+        .map(|p| p["repo"]["name"].as_str().unwrap())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["beta", "gamma"], "{listed:?}");
+    for p in &listed {
+        assert_eq!(p["detector"], "file_read_across_runs", "{p}");
+        assert_eq!(p["state"], "open", "{p}");
+        assert_eq!(p["seen_count"], 2, "{p}");
+    }
+    assert_ne!(listed[0]["key"], listed[1]["key"], "{listed:?}");
+    world.close().await;
+}
+
+/// #242: a dismissal holds the identity's mutex of evaluations around its read and write: while
+/// an evaluation holds it, the dismissal writes nothing, and it completes once the mutex is
+/// released (`mutant_heat_user_write_without_lock` dismisses without it).
+#[tokio::test]
+async fn a_dismiss_waits_for_a_running_evaluation() {
+    let world = World::new().await;
+    seed_b(&world).await;
+    evaluate(&world, "b").await;
+    let second = evaluate(&world, "b").await;
+    assert_eq!(second["promoted"], 1, "{second}");
+    let key = only(&world).await["key"].as_str().unwrap().to_owned();
+    let served = &world.state.identities["b"];
+    let state = || async {
+        let row = served.store.reader().proposal(&key).await.unwrap().unwrap();
+        row.state.as_str().to_owned()
+    };
+
+    {
+        let running = served.heat.lock().await;
+        let params = json!({"operator": crate::notify_tests::TOKEN, "identity": "b", "key": key,
+                        "reason": "synthetic"});
+        let dismiss = world.call("heat.dismiss", params);
+        tokio::pin!(dismiss);
+        let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut dismiss).await;
+        assert!(
+            early.is_err(),
+            "the dismissal ran under the lock: {early:?}"
+        );
+        assert_eq!(state().await, "open");
+
+        drop(running);
+        let dismissed = tokio::time::timeout(std::time::Duration::from_secs(30), dismiss)
+            .await
+            .expect("the dismissal completes once the lock is released")
+            .unwrap();
+        assert_eq!(dismissed["state"], "dismissed", "{dismissed}");
+        assert_eq!(state().await, "dismissed");
+    }
     world.close().await;
 }

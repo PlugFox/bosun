@@ -677,6 +677,13 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(mutant_artifact_digest_keeps_escape)",
   "cfg(mutant_outbox_device_note_by_attempt_only)",
   "cfg(mutant_loop_probing_kept_on_early_return)",
+  # #242: proposal keys per repository, the user's writes under the evaluation's lock, F1 and
+  # R1 within their window, T1 without subagents, the tool gate per provider.
+  "cfg(mutant_heat_proposal_key_without_repo)",
+  "cfg(mutant_heat_user_write_without_lock)",
+  "cfg(mutant_heat_loop_attempts_unwindowed)",
+  "cfg(mutant_heat_t1_times_subagents)",
+  "cfg(mutant_heat_tool_gate_any_provider)",
 ] }
 
 [workspace.lints.clippy]

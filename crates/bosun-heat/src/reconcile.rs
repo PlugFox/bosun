@@ -251,8 +251,19 @@ fn opened(finding: &Finding, kind: SubjectKind, dedup: &str, now_ms: i64) -> New
         .to_string(),
         (None, false) => "{}".to_owned(),
     };
+    // Mutant (`mutant_heat_proposal_key_without_repo`): the key hashes the dedup key alone, so
+    // two repositories that find one subject in one evaluation compute one key.
+    let keyed = if cfg!(mutant_heat_proposal_key_without_repo) {
+        dedup.to_owned()
+    } else {
+        format!(
+            "{}
+{dedup}",
+            finding.repo
+        )
+    };
     NewProposal {
-        key: proposal_key(dedup, now_ms),
+        key: proposal_key(&keyed, now_ms),
         repo: finding.repo.clone(),
         provider: finding.provider.clone(),
         detector: finding.detector.id.to_owned(),

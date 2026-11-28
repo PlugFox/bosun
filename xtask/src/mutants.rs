@@ -2779,7 +2779,8 @@ const MUTANTS: &[Mutant] = &[
     Mutant {
         name: "mutant_store_repo_by_path",
         issue: 132,
-        breaks: "a loop matches stored items by path: a moved repository's items are lost and a                  card of one is claimed as new, against its stored transitions",
+        breaks: "a loop matches stored items by path: a moved repository's items are lost and a \
+                 card of one is claimed as new, against its stored transitions",
         package: "bosund",
         check: Check::Test(
             "executor::tests::moved::a_moved_repository_keeps_its_items_and_their_history",
@@ -3711,7 +3712,8 @@ const MUTANTS: &[Mutant] = &[
     Mutant {
         name: "mutant_git_ignored_unfolded",
         issue: IGNORED_FOLD_CARD,
-        breaks: "a refusal for new ignored files lists every path, thousands of them, in the                  record, the log, the event stream and `bosun item`",
+        breaks: "a refusal for new ignored files lists every path, thousands of them, in the \
+                 record, the log, the event stream and `bosun item`",
         package: "bosun-git",
         check: Check::Test(
             "refusal::tests::thousands_of_new_ignored_files_fold_to_their_places_with_a_hint",
@@ -3964,8 +3966,9 @@ const MUTANTS: &[Mutant] = &[
     },
     Mutant {
         name: "mutant_proposal_no_dedup",
-        issue: 11,
-        breaks: "a proposal's own key stands for its dedup key: a second active proposal of one                  subject is stored",
+        issue: 224,
+        breaks: "a proposal's own key stands for its dedup key: a second active proposal of one \
+                 subject is stored",
         package: "bosun-store",
         check: Check::Test(
             "proposal::tests::a_second_active_proposal_for_the_same_subject_is_refused",
@@ -3974,8 +3977,9 @@ const MUTANTS: &[Mutant] = &[
     },
     Mutant {
         name: "mutant_proposal_allow_incomplete",
-        issue: 11,
-        breaks: "an incomplete proposal reaches the INSERT and is refused without naming what                  it lacks",
+        issue: 224,
+        breaks: "an incomplete proposal reaches the INSERT and is refused without naming what \
+                 it lacks",
         package: "bosun-store",
         check: Check::Test(
             "proposal::tests::a_proposal_without_a_target_or_a_window_is_not_stored",
@@ -3984,7 +3988,7 @@ const MUTANTS: &[Mutant] = &[
     },
     Mutant {
         name: "mutant_proposal_no_cooldown",
-        issue: 11,
+        issue: 224,
         breaks: "a repeat of a dismissed proposal is stored inside the cooldown",
         package: "bosun-store",
         check: Check::Test(
@@ -3994,7 +3998,7 @@ const MUTANTS: &[Mutant] = &[
     },
     Mutant {
         name: "mutant_proposal_measured_reopens",
-        issue: 11,
+        issue: 224,
         breaks: "a measured proposal seen again opens",
         package: "bosun-core",
         check: Check::Test("proposal::tests::a_measured_proposal_cannot_reopen"),
@@ -4453,7 +4457,8 @@ const MUTANTS: &[Mutant] = &[
     Mutant {
         name: "mutant_verdict_kill_in_device_check_recorded",
         issue: 243,
-        breaks: "a run killed during its device check is recorded as not ready while the machine                  counts a failed run",
+        breaks: "a run killed during its device check is recorded as not ready while the machine \
+                 counts a failed run",
         package: "bosund",
         check: Check::Test(
             "executor::verdict::tests::a_kill_during_the_device_check_records_no_verdict_run",
@@ -4488,17 +4493,64 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("executor::tests::probes::a_failed_claim_check_clears_the_probe_wait"),
         platform: None,
     },
+    // #242: proposal keys per repository, the user's writes under the evaluation's lock, F1 and
+    // R1 within their window, T1 without subagents, the tool gate per provider.
+    Mutant {
+        name: "mutant_heat_proposal_key_without_repo",
+        issue: 242,
+        breaks: "a proposal's key hashes the dedup key alone: a second repository with the same \
+                 finding in one evaluation breaks the key's unique constraint and loses its batch",
+        package: "bosund",
+        check: Check::Test("heat_tests::two_repositories_with_one_subject_get_two_proposals"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_user_write_without_lock",
+        issue: 242,
+        breaks: "heat.dismiss writes while an evaluation holds the identity's lock",
+        package: "bosund",
+        check: Check::Test("heat_tests::a_dismiss_waits_for_a_running_evaluation"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_loop_attempts_unwindowed",
+        issue: 242,
+        breaks: "F1 and R1 count the flaky tests and denials of attempts that started before \
+                 the window",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::loops::tests::a_flaky_test_of_an_attempt_before_the_window_is_not_counted",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_t1_times_subagents",
+        issue: 242,
+        breaks: "T1 times Task and Agent, whose wall time is a whole subagent run",
+        package: "bosun-heat",
+        check: Check::Test("detect::tools::tests::t1_leaves_out_the_subagent_tools"),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_tool_gate_any_provider",
+        issue: 242,
+        breaks: "the tool gate compares any provider's parser version with Claude's: a provider \
+                 that stores no tool figures passes it or is told to reingest",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::tools::tests::a_provider_without_tool_figures_is_insufficient_with_its_own_reason",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #11 (part D) that adds the tool detectors X1, T1 and M1 of #210 over the columns
-/// of parser version 4 (its own number was not known when it was written; its parent's stands
-/// in).
-const TOOL_DETECTORS_CARD: u32 = 210;
+/// of parser version 4.
+const TOOL_DETECTORS_CARD: u32 = 233;
 
 /// The card of #11 (part D) that stores a tool call's command fingerprint and text, its times
-/// and its result's media bytes for the detectors of #210 (its own number was not known when it
-/// was written; its parent's stands in).
-const TOOL_CALL_V4_CARD: u32 = 210;
+/// and its result's media bytes for the detectors of #210.
+const TOOL_CALL_V4_CARD: u32 = 232;
 
 /// The card of #6 that counts, per transcript, the lines of unknown record types and the
 /// usage-bearing lines that billed nothing, and shows them in `bosun ingest status` and

@@ -167,3 +167,55 @@ async fn a_failing_probe_keeps_its_card_ready_and_lets_the_next_card_run() {
     let _ = task.await;
     let _ = watcher.await;
 }
+
+/// #221: card 1 needs `rig`, whose probe fails, so the card waits on it. Then the identity check
+/// before a claim refuses (another login, checked again every 100 ms): the poll returns before
+/// any probe, and the card no longer shows as waiting on one, which may have recovered
+/// meanwhile. `mutant_loop_probing_kept_on_early_return` keeps the list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_claim_check_clears_the_probe_wait() {
+    use super::worktrees::{subscribe_trouble, trouble};
+    let mut scene = Scene::with_worktrees(None).await;
+    scene.config_more = format!(
+        "[resource.rig]\nkind = \"device\"\nprobe = '''test -f \"{}\"'''\n",
+        sh_path(&scene.path("rig-up")),
+    );
+    std::fs::write(&scene.config_path, scene.config_text("'docs/frozen'")).unwrap();
+    scene.write_board(&[card_needing(1, "test -f one.txt", &["rig"])]);
+    scene.script(1, &["commit one.txt one".to_owned()]);
+    let mut sub = subscribe_trouble(&scene);
+
+    let (tx, rx) = watch::channel(Arc::new(scene.config()));
+    let probe: Arc<dyn DiskProbe + Send + Sync> = Arc::new(SystemProbe::new());
+    let watcher = config_watch::spawn(
+        scene.config_path.clone(),
+        tx,
+        probe,
+        Duration::from_millis(50),
+        config_watch::Reported::default(),
+    );
+    let (mut options, deps) = scene.options_and_deps(None, scene.queue());
+    options.recheck = Duration::from_millis(100);
+    let task = tokio::spawn(Loop::new(options, deps, rx).run());
+
+    wait_for("card 1 to wait on the probe", LIMIT, async || {
+        scene.blockers.probing_of("demo").len() == 1
+    })
+    .await;
+
+    std::fs::write(scene.path("login"), "someone-else").unwrap();
+    let mut seen = Vec::new();
+    wait_for("the claim refusal", LIMIT, async || {
+        seen.extend(trouble(&mut sub));
+        seen.iter().any(|l| l.contains("refused before spawn (#2)"))
+    })
+    .await;
+    // The list is cleared before the refusal is told.
+    assert_eq!(scene.blockers.probing_of("demo"), []);
+    assert_eq!(scene.state(1).await, Some(State::Ready));
+
+    task.abort();
+    watcher.abort();
+    let _ = task.await;
+    let _ = watcher.await;
+}

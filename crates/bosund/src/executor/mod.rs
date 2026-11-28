@@ -2041,6 +2041,7 @@ impl Loop {
         if stored.values().any(|s| s.item.state.is_active()) {
             // Recovery made the item in flight current; another one is not the loop's to guess.
             self.waiting = true;
+            self.no_probe_this_poll();
             self.shared.trouble(
                 "an item is in flight that the loop does not run; the repository waits for the \
                  user",
@@ -2167,10 +2168,13 @@ impl Loop {
             .iter()
             .find(|c| item_id(&repo_name, c.id) == *next)
         else {
+            self.no_probe_this_poll();
             return;
         };
         match self.ready_to_claim(repo, identity).await {
             Err(e) => {
+                // Cleared before the refusal is told: no probe runs while the claim is refused.
+                self.no_probe_this_poll();
                 // Mutant (`mutant_loop_claim_refusal_every_poll`): every refusal is logged.
                 if self.refused.first(&e) || cfg!(mutant_loop_claim_refusal_every_poll) {
                     self.shared.trouble(e);
@@ -2296,6 +2300,23 @@ impl Loop {
                 "the notice of the drained Ready column cannot be queued: {e}"
             ));
         }
+    }
+
+    /// A poll that read the board but returns before its probes (an item the loop does not run
+    /// is in flight, the card to claim is not on the board, the check before a claim refused):
+    /// the list of cards waiting on a probe
+    /// (#221) is cleared, since no probe of this poll keeps it current and the one it names may
+    /// have recovered. A poll that read nothing (the board or the pull requests unreadable)
+    /// keeps the last list, as it keeps every other fact of the last poll.
+    fn no_probe_this_poll(&self) {
+        // Mutant (`mutant_loop_probing_kept_on_early_return`): the early returns keep the list.
+        if cfg!(mutant_loop_probing_kept_on_early_return) {
+            return;
+        }
+        self.shared
+            .deps
+            .blockers
+            .set_probing(&self.shared.options.repo, Vec::new());
     }
 
     /// Publishes `probing`, the cards of the repository that wait on a failing probe, and

@@ -4450,6 +4450,44 @@ const MUTANTS: &[Mutant] = &[
         check: Check::Test("notify_outbox_tests::stop_tries_the_pending_marks_once_more"),
         platform: None,
     },
+    Mutant {
+        name: "mutant_verdict_kill_in_device_check_recorded",
+        issue: 243,
+        breaks: "a run killed during its device check is recorded as not ready while the machine                  counts a failed run",
+        package: "bosund",
+        check: Check::Test(
+            "executor::verdict::tests::a_kill_during_the_device_check_records_no_verdict_run",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_artifact_digest_keeps_escape",
+        issue: 243,
+        breaks: "a sha256sum line for a Windows path keeps its leading backslash and does not parse",
+        package: "bosund",
+        check: Check::Test(
+            "executor::artifact::tests::a_sha256sum_line_for_a_windows_path_is_parsed",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_outbox_device_note_by_attempt_only",
+        issue: 243,
+        breaks: "the attempts-exhausted comment quotes an earlier run's device note of the attempt",
+        package: "bosund",
+        check: Check::Test(
+            "executor::outbox::tests::the_exhausted_comment_quotes_only_the_failing_runs_device_note",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_loop_probing_kept_on_early_return",
+        issue: 243,
+        breaks: "a poll that returns before its probes keeps the cards shown waiting on a probe",
+        package: "bosund",
+        check: Check::Test("executor::tests::probes::a_failed_claim_check_clears_the_probe_wait"),
+        platform: None,
+    },
 ];
 
 /// The card of #11 (part D) that adds the tool detectors X1, T1 and M1 of #210 over the columns

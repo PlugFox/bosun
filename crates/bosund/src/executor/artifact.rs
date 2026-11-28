@@ -124,9 +124,19 @@ pub(crate) fn decide(result: RunResult, local: Option<&str>, device: &Device) ->
 
 /// The digest a `digest` command printed: its last non-blank stdout line's first
 /// whitespace-separated token when that is 64 hex digits (lowercased), else none.
+///
+/// One leading `\` is stripped from the token first: GNU `sha256sum` (Git for Windows' copy
+/// included) escapes a file name that holds a backslash and marks its line so
+/// (`\<64 hex>  C:\\dev\\app`).
 pub(crate) fn parse_digest(stdout: &str) -> Option<String> {
     let line = stdout.lines().rev().find(|l| !l.trim().is_empty())?;
     let token = line.split_whitespace().next()?;
+    // Mutant (`mutant_artifact_digest_keeps_escape`): the leading `\` is kept.
+    let token = if cfg!(mutant_artifact_digest_keeps_escape) {
+        token
+    } else {
+        token.strip_prefix('\\').unwrap_or(token)
+    };
     (token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()))
         .then(|| token.to_ascii_lowercase())
 }
@@ -408,5 +418,16 @@ mod tests {
         assert_eq!(parse_digest(&format!("{}\n", &A[..63])), None);
         assert_eq!(parse_digest(""), None);
         assert_eq!(parse_digest(&format!("{A}\nno such file\n")), None);
+    }
+
+    #[test]
+    fn a_sha256sum_line_for_a_windows_path_is_parsed() {
+        // GNU sha256sum escapes a name with a backslash and marks the line with a `\`.
+        assert_eq!(
+            parse_digest(&format!("\\{A}  C:\\\\dev\\\\app\n")),
+            Some(A.to_owned())
+        );
+        // Only one: two leading backslashes are not a digest.
+        assert_eq!(parse_digest(&format!("\\\\{A}  C:\\\\dev\\\\app\n")), None);
     }
 }

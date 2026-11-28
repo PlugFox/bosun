@@ -505,15 +505,28 @@ impl Drainer {
     /// For [`Reason::AttemptsExhausted`], a counted failure against a stale device copy (#44 C):
     /// the device check of the attempt that just failed, when it noted one, as `; the device
     /// check of the last run: <note>`; else empty.
+    ///
+    /// The note is quoted only when it is the failing run's own ([`failing_runs_note`]): a note
+    /// of an earlier run of the attempt (one that failed against a differing copy before a re-run
+    /// failed against a matching one, or a not-ready check) does not describe the failure.
     async fn device_check(&self, row: &OutboxRow, reason: Reason) -> Result<String, String> {
         if reason == Reason::AttemptsExhausted
             && let Some((attempt, _, _)) = key_parts(&row.effect_key)
             && let Some(note) = self.note(&row.item, NOTE_UNREADY).await?
-            && note.starts_with(&format!("attempt {attempt}, "))
         {
+            let runs = self
+                .shared
+                .deps
+                .reader
+                .verdict_runs(&row.item)
+                .await
+                .map_err(|e| e.to_string())?;
+            let Some(note) = failing_runs_note(&note, attempt, &runs) else {
+                return Ok(String::new());
+            };
             return Ok(format!(
                 "; the device check of the last run: {}",
-                publish::sanitise_inline(&note, 500)
+                publish::sanitise_inline(note, 500)
             ));
         }
         Ok(String::new())
@@ -1014,9 +1027,84 @@ fn shortstat(out: &str) -> DiffStat {
     stat
 }
 
+/// `note` when it is the device note (`attempt N, verdict run M: ...`, [`super::artifact`]) of
+/// the run that failed attempt `attempt`: its last run with a counted result (a fail or a
+/// timeout) among `runs`. Else none.
+fn failing_runs_note<'a>(
+    note: &'a str,
+    attempt: u32,
+    runs: &[bosun_store::VerdictRow],
+) -> Option<&'a str> {
+    // Mutant (`mutant_outbox_device_note_by_attempt_only`): the old prefix match, by the attempt
+    // only.
+    if cfg!(mutant_outbox_device_note_by_attempt_only) {
+        return note
+            .starts_with(&format!("attempt {attempt}, "))
+            .then_some(note);
+    }
+    let failing = runs
+        .iter()
+        .filter(|r| r.attempt == attempt)
+        .filter(|r| matches!(r.result, Some(RunResult::Fail | RunResult::Timeout)))
+        .map(|r| r.run)
+        .max()?;
+    note.starts_with(&format!("attempt {attempt}, verdict run {failing}: "))
+        .then_some(note)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn verdict_row(attempt: u32, run: u32, result: RunResult) -> bosun_store::VerdictRow {
+        bosun_store::VerdictRow {
+            attempt,
+            run,
+            command: "true".to_owned(),
+            started_ms: 0,
+            ended_ms: Some(1),
+            result: Some(result),
+            exit_code: None,
+            duration_ms: None,
+            verdict_line: None,
+            tail: None,
+        }
+    }
+
+    #[test]
+    fn the_exhausted_comment_quotes_only_the_failing_runs_device_note() {
+        let first = "attempt 2, verdict run 1: the device check of resource `phone`, artifact \
+                     `app`: the device's copy differs (local a, device b)";
+        // Run 1 failed against a differing copy, the re-run failed against a matching one: the
+        // note is run 1's, not the failure's.
+        let runs = [
+            verdict_row(2, 1, RunResult::Fail),
+            verdict_row(2, 2, RunResult::Fail),
+        ];
+        assert_eq!(failing_runs_note(first, 2, &runs), None);
+        // A not-ready device check of run 1, a failed run 2: not quoted either.
+        let runs = [
+            verdict_row(2, 1, RunResult::Unready),
+            verdict_row(2, 2, RunResult::Fail),
+        ];
+        assert_eq!(failing_runs_note(first, 2, &runs), None);
+        // The failing run's own note is quoted; a later not-ready run does not hide it.
+        let runs = [
+            verdict_row(2, 1, RunResult::Fail),
+            verdict_row(2, 2, RunResult::Unready),
+        ];
+        assert_eq!(failing_runs_note(first, 2, &runs), Some(first));
+        // Another attempt's note, or a run 10 against run 1: never.
+        assert_eq!(
+            failing_runs_note(first, 3, &[verdict_row(3, 1, RunResult::Fail)]),
+            None
+        );
+        let tenth = first.replace("verdict run 1:", "verdict run 10:");
+        assert_eq!(
+            failing_runs_note(&tenth, 2, &[verdict_row(2, 1, RunResult::Fail)]),
+            None
+        );
+    }
 
     #[test]
     fn effect_keys_and_card_numbers_parse() {

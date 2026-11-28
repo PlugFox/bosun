@@ -398,18 +398,8 @@ async fn run_in(
     };
     let Some(result) = finished else {
         // Killed: the run's container went with its future; its child is no longer there.
-        let key = *started.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(key) = key {
-            let _ = shared
-                .deps
-                .writer
-                .write(vec![Write::ChildGone {
-                    pid: key.pid,
-                    started_ms: key.start.raw().cast_signed(),
-                }])
-                .await;
-        }
-        return (fail(RunResult::Fail), Vec::new());
+        child_gone(shared, &started).await;
+        return (fail(KILLED), Vec::new());
     };
     let verdict = match result {
         Ok(verdict) => verdict,
@@ -431,9 +421,15 @@ async fn run_in(
     )
     .await;
     let Some(checked) = checked else {
-        // Killed during the check: a killed run; the unchecked run does not stand.
-        record_end(shared, run, &verdict, RunResult::Unready).await;
-        return (fail(RunResult::Fail), Vec::new());
+        // Killed during the check: a killed run; the unchecked run does not stand. Its child
+        // exited before the check; its row is told so, as a run killed while it ran.
+        let (recorded, told) = killed_in_check();
+        if let Some(recorded) = recorded {
+            record_end(shared, run, &verdict, recorded).await;
+        } else {
+            child_gone(shared, &started).await;
+        }
+        return (fail(told), Vec::new());
     };
     if let Some(note) = &checked.note {
         // Stored before the event is applied: the Needs-you comment quotes it.
@@ -481,6 +477,38 @@ async fn run_in(
     (fail(result), failing)
 }
 
+/// Tells the store the verdict run's child (if one started) is gone, for a killed run that
+/// records no result.
+async fn child_gone(shared: &Shared, started: &Mutex<Option<ProcessKey>>) {
+    let key = *started.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(key) = key {
+        let _ = shared
+            .deps
+            .writer
+            .write(vec![Write::ChildGone {
+                pid: key.pid,
+                started_ms: key.start.raw().cast_signed(),
+            }])
+            .await;
+    }
+}
+
+/// What the machine is told of a verdict run killed while it ran: nothing is recorded for it.
+const KILLED: RunResult = RunResult::Fail;
+
+/// A run killed during its device check (#44 C), as one killed while it ran: what it records
+/// (nothing, so the store and the machine agree on the attempt's runs) and what the machine is
+/// told ([`KILLED`]).
+fn killed_in_check() -> (Option<RunResult>, RunResult) {
+    // Mutant (`mutant_verdict_kill_in_device_check_recorded`): the killed run is recorded as not
+    // ready again.
+    if cfg!(mutant_verdict_kill_in_device_check_recorded) {
+        (Some(RunResult::Unready), KILLED)
+    } else {
+        (None, KILLED)
+    }
+}
+
 async fn record_end(shared: &Shared, run: &Run, verdict: &VerdictRun, result: RunResult) {
     let mut writes = vec![Write::VerdictEnded(VerdictEnd {
         item: run.item.clone(),
@@ -514,4 +542,18 @@ async fn record_end(shared: &Shared, run: &Run, verdict: &VerdictRun, result: Ru
         result: events::run_result_name(result).to_owned(),
         duration_ms: u64::try_from(verdict.duration.as_millis()).unwrap_or(u64::MAX),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kill_during_the_device_check_records_no_verdict_run() {
+        let (recorded, told) = killed_in_check();
+        // Nothing stored, as for a run killed while it ran: `report_facts` and the machine
+        // then agree on the attempt's runs.
+        assert_eq!(recorded, None);
+        assert_eq!(told, KILLED);
+    }
 }

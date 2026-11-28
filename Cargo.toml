@@ -673,6 +673,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # marks once more.
   "cfg(mutant_breaker_counts_shim_install)",
   "cfg(mutant_outbox_stop_drops_pending_marks)",
+  "cfg(mutant_verdict_kill_in_device_check_recorded)",
+  "cfg(mutant_artifact_digest_keeps_escape)",
+  "cfg(mutant_outbox_device_note_by_attempt_only)",
+  "cfg(mutant_loop_probing_kept_on_early_return)",
 ] }
 
 [workspace.lints.clippy]

@@ -4,6 +4,9 @@
 "aqua:EmbarkStudios/cargo-deny" = "0.22.0"
 "aqua:crate-ci/typos" = "1.52.2"
 "github:bnjbvr/cargo-machete" = "0.10.1"
+# The test runner (#12, #234); its configuration is `.config/nextest.toml`. CI installs it alone
+# in the rust job (`install_args`), so the version lives only here.
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.152"
 # The sqlx CLI regenerates and checks `.sqlx/` (#19). It publishes no binaries of its own; with
 # cargo-binstall present (under its short name, which mise's cargo backend looks for), mise
 # fetches the signed QuickInstall build where one exists (Linux x86_64, so CI) and compiles

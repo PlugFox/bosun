@@ -74,7 +74,9 @@
 //! - A refused tool call (see the spike below): `{"type":"system","subtype":"permission_denied",
 //!   "tool_name":...,"tool_use_id":...,"decision_reason_type":"rule","message":...}` when it
 //!   happens, and one entry `{"tool_name":...,"tool_use_id":...,"tool_input":{...}}` of the
-//!   result's `permission_denials` for each refusal of the session.
+//!   result's `permission_denials` for each refusal of the session. A resumed session's result
+//!   lists only the refusals of its own process, not those before the resume (observed with
+//!   CLI 2.1.329, #209), so each run's denials are stored once.
 //!
 //! # Denials
 //!

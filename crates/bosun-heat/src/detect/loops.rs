@@ -8,15 +8,17 @@
 //!   `needs_you` is in the window.
 //! - Every value is an exact count, over the group's closed items: a loop finding has no bytes
 //!   (`impact_bytes` 0, no estimate), so it ranks after every byte detector.
-//! - What a subject names is redacted here ([`bosun_core::publish::redact`], then cut to
-//!   [`SUBJECT_CAP`] bytes): no raw refused target or verdict command reaches a finding.
+//! - What a subject names is scrubbed here ([`bosun_core::publish::scrub`]: invisible
+//!   characters out, then redacted, #138; then cut to [`SUBJECT_CAP`] bytes): no raw refused
+//!   target or verdict command reaches a finding, not even a token split by a zero-width
+//!   character.
 //!
 //! [`closed_items`]: crate::metrics::closed_items
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use bosun_core::RunResult;
-use bosun_core::publish::redact;
+use bosun_core::publish::{redact, scrub};
 use bosun_store::{DenialSource, ItemHistory};
 
 use super::{
@@ -57,9 +59,16 @@ pub(crate) struct LoopRows<'a> {
     budget: BTreeSet<&'a str>,
 }
 
-/// `text` redacted, then cut to [`SUBJECT_CAP`] bytes at a char boundary.
+/// `text` scrubbed (cleaned of invisible characters, then redacted, #138), then cut to
+/// [`SUBJECT_CAP`] bytes at a char boundary.
 fn redacted(text: &str) -> String {
-    let mut out = redact(text);
+    // Mutant (`mutant_heat_loop_subject_redact_only`): the subject is only redacted, so a token
+    // split by a zero-width character keeps all but that character.
+    let mut out = if cfg!(mutant_heat_loop_subject_redact_only) {
+        redact(text)
+    } else {
+        scrub(text)
+    };
     if out.len() > SUBJECT_CAP {
         let mut end = SUBJECT_CAP;
         while !out.is_char_boundary(end) {

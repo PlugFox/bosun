@@ -223,13 +223,13 @@ pub(crate) async fn items(
     Ok(out)
 }
 
-/// The refused tool calls of `histories`, per tool and redacted target, most frequent first,
+/// The refused tool calls of `histories`, per tool and scrubbed target (#138), most frequent first,
 /// then by tool and target.
 fn denied_calls(histories: &[ItemHistory]) -> Vec<DeniedCall> {
     let mut by: BTreeMap<(String, Option<String>), (u64, BTreeSet<String>)> = BTreeMap::new();
     for history in histories {
         for denial in &history.denials {
-            let target = denial.target.as_deref().map(bosun_core::publish::redact);
+            let target = denial.target.as_deref().map(bosun_core::publish::scrub);
             let entry = by.entry((denial.tool.clone(), target)).or_default();
             entry.0 += 1;
             entry.1.insert(history.item.item.id.0.clone());

@@ -247,6 +247,34 @@ fn a_target_denied_across_items_fires_with_its_redacted_target() {
     );
 }
 
+/// A target and a verdict command whose token a zero-width space splits (#138): `redact` alone
+/// sees no token shape, so the subject must be scrubbed (cleaned first) to lose the token.
+#[test]
+fn a_refused_target_with_a_zero_width_character_is_scrubbed() {
+    let body = "a".repeat(36);
+    let split = format!("ghp_\u{200B}{body}");
+    let target = format!("deploy {split}");
+    let mut scene = items(5);
+    deny(&mut scene, 1, DenialSource::Permission, &target, 3);
+    deny(&mut scene, 2, DenialSource::Permission, &target, 3);
+    let command = format!("deploy {split} && cargo test");
+    verdict(&mut scene, 1, &command, 700_000, RunResult::Pass);
+    verdict(&mut scene, 2, &command, 700_000, RunResult::Pass);
+    let detection = run(&scene);
+    for detector in [DENIED_TARGET_ACROSS_ITEMS, SLOW_VERDICT] {
+        let found = of(&detection, detector);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        let subject = &found[0].subject;
+        assert!(subject.contains("deploy [redacted]"), "{subject}");
+        assert!(!subject.contains(&body), "{subject}");
+        assert!(!subject.contains('\u{200B}'), "{subject}");
+    }
+    assert!(
+        !format!("{:?}", detection.findings).contains(&body),
+        "no split token reaches a finding"
+    );
+}
+
 #[test]
 fn a_verdict_slower_than_the_threshold_fires() {
     let mut scene = items(5);

@@ -8,8 +8,9 @@
 //! configuration, agent, `gh` or the installed daemon: every path is in a temporary directory
 //! and the endpoint is the test's own.
 //!
-//! `bosund`, `bosun-mcp` and `fake-agent` are binaries of other packages, built by the test
-//! with `cargo build` into the target directory it runs from; none is linked.
+//! `bosund`, `bosun-mcp` and `fake-agent` are binaries of other packages, none linked: under
+//! nextest the setup script `build-daemon` builds them once per run, under `cargo test` the
+//! test builds them with `cargo build` into the target directory it runs from.
 #![allow(clippy::disallowed_methods, reason = "a test's own children")]
 
 use std::path::{Path, PathBuf};
@@ -26,16 +27,22 @@ const PATIENCE: Duration = Duration::from_secs(90);
 fn bin_dir() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
+        // nextest's setup script `build-daemon` built them once for the whole run.
+        if let Some(dir) = std::env::var_os("BOSUN_TEST_BIN_DIR") {
+            return PathBuf::from(dir);
+        }
         let dir = Path::new(env!("CARGO_BIN_EXE_bosun"))
             .parent()
             .unwrap()
             .to_path_buf();
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         let mut build = Command::new(cargo);
+        // The packages of `.config/build-daemon.sh` and `tests/cli.rs`: one feature set, one
+        // build for both test binaries.
         build
             .args(["build", "--locked"])
             .args(["--package", "bosund", "--package", "bosun-mcp"])
-            .args(["--package", "fake-agent"])
+            .args(["--package", "fake-agent", "--package", "recount"])
             .current_dir(env!("CARGO_MANIFEST_DIR"));
         if dir.file_name().is_some_and(|n| n == "release") {
             build.arg("--release");

@@ -3,8 +3,9 @@
 //! held to the help text. Each test runs its own daemon on its own endpoint, over copies of the
 //! synthetic fixtures (#16) in a temporary directory, as `crates/bosund/tests/daemon.rs` does.
 //!
-//! `bosund` and `recount` are binaries of other packages, so the tests build them once with
-//! `cargo build` into the target directory this test runs from; neither is linked.
+//! `bosund` and `recount` are binaries of other packages, neither linked: under nextest the
+//! setup script `build-daemon` builds them once per run, under `cargo test` the tests build
+//! them once with `cargo build` into the target directory this test runs from.
 #![allow(clippy::disallowed_methods, reason = "a test's own children")]
 
 use std::fmt::Write as _;
@@ -25,21 +26,22 @@ const PATIENCE: Duration = Duration::from_secs(30);
 fn bin_dir() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
+        // nextest's setup script `build-daemon` built them once for the whole run.
+        if let Some(dir) = std::env::var_os("BOSUN_TEST_BIN_DIR") {
+            return PathBuf::from(dir);
+        }
         let dir = Path::new(env!("CARGO_BIN_EXE_bosun"))
             .parent()
             .unwrap()
             .to_path_buf();
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         let mut build = Command::new(cargo);
+        // The packages of `.config/build-daemon.sh` and `tests/loop_commands.rs`: one feature
+        // set, one build for both test binaries.
         build
-            .args([
-                "build",
-                "--locked",
-                "--package",
-                "bosund",
-                "--package",
-                "recount",
-            ])
+            .args(["build", "--locked"])
+            .args(["--package", "bosund", "--package", "bosun-mcp"])
+            .args(["--package", "fake-agent", "--package", "recount"])
             .current_dir(env!("CARGO_MANIFEST_DIR"));
         if dir.file_name().is_some_and(|n| n == "release") {
             build.arg("--release");

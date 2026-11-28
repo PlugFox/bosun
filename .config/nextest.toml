@@ -21,6 +21,14 @@ scenes = { max-threads = 4 }
 command = "sh .config/build-helpers.sh"
 slow-timeout = "10m"
 
+[scripts.setup.build-daemon]
+# Builds `bosund`, `bosun-mcp`, `fake-agent` and `recount` once per run for `bosun-cli`'s
+# daemon tests and exports their directory in `BOSUN_TEST_BIN_DIR`, which `bin_dir()` in
+# `crates/bosun-cli/tests/{cli,loop_commands}.rs` takes instead of running `cargo build` in
+# every test process. Always a debug build, as `build-helpers`.
+command = "sh .config/build-daemon.sh"
+slow-timeout = "10m"
+
 [profile.default]
 # `bosun-cli`'s `tests/install.rs` registers a real scheduled task (#117): never by default.
 # `cargo nextest run --ignore-default-filter -p bosun-cli --test install` runs it.
@@ -46,6 +54,10 @@ test-group = "scenes"
 [[profile.default.scripts]]
 filter = "package(bosund) & test(/^executor::tests::/)"
 setup = "build-helpers"
+
+[[profile.default.scripts]]
+filter = "package(bosun-cli) & (binary(cli) | binary(loop_commands))"
+setup = "build-daemon"
 
 # For `BOSUN_TEST_SLOWDOWN` up to 3 (a loaded machine, a CI shard): terminate after 600 s,
 # past 3 x 180 s.

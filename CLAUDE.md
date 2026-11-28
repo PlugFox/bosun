@@ -24,6 +24,8 @@ Ready (only the user moves cards here), In progress, Verify, Done, Needs you.
   item has a mutant (see the issues).
 - Consult Fable for architecture and plan decisions; verify what it claims.
 - Windows is the development machine and the first platform a feature must work on.
+- A card's unattended session follows `docs/unattended.md`; a change to those rules is a commit
+  there, never an edit of every queued card.
 - Finished work lands on master after the local checks pass; GitHub CI runs after the fact and is
   not waited for. Its result (the only Linux coverage) is read before the next run.
 

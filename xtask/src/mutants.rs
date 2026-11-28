@@ -4404,6 +4404,30 @@ const MUTANTS: &[Mutant] = &[
         ),
         platform: None,
     },
+    // #241: the second of two adjacent Telegram tokens is redacted; heat's loop subjects are
+    // scrubbed, not only redacted.
+    Mutant {
+        name: "mutant_redact_telegram_single_pass",
+        issue: 241,
+        breaks: "the Telegram pattern runs once: of two tokens one character apart, the second \
+                 stays in clear",
+        package: "bosun-core",
+        check: Check::Test(
+            "publish::redact::tests::two_telegram_tokens_one_character_apart_are_both_redacted",
+        ),
+        platform: None,
+    },
+    Mutant {
+        name: "mutant_heat_loop_subject_redact_only",
+        issue: 241,
+        breaks: "R1 and V1 subjects are only redacted: a token split by a zero-width character \
+                 reaches a finding",
+        package: "bosun-heat",
+        check: Check::Test(
+            "detect::loops::tests::a_refused_target_with_a_zero_width_character_is_scrubbed",
+        ),
+        platform: None,
+    },
 ];
 
 /// The card of #11 (part D) that adds the tool detectors X1, T1 and M1 of #210 over the columns

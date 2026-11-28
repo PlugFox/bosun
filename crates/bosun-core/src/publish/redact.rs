@@ -13,14 +13,30 @@ use regex::Regex;
 /// What a redacted secret is replaced with.
 const REDACTED: &str = "[redacted]";
 
-/// Each pattern and its replacement; `${keep}` and `${tail}` keep the parts around the secret.
-static PATTERNS: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
-    let whole = |p: &str| (Regex::new(p).expect("valid regex"), REDACTED.to_owned());
+/// Each pattern, its replacement (`${keep}` and `${tail}` keep the parts around the secret) and
+/// whether it is applied until the text no longer changes.
+///
+/// A pattern that consumes a character after the secret (its `tail`) repeats: `replace_all`
+/// resumes after that character, so a second secret that needs it as its `keep` (`TOK1 TOK2`)
+/// would stay in clear after one pass. It terminates: every replacement shortens the text.
+static PATTERNS: LazyLock<Vec<(Regex, String, bool)>> = LazyLock::new(|| {
+    let whole = |p: &str| {
+        (
+            Regex::new(p).expect("valid regex"),
+            REDACTED.to_owned(),
+            false,
+        )
+    };
     let keep = |p: &str| {
         (
             Regex::new(p).expect("valid regex"),
             format!("${{keep}}{REDACTED}${{tail}}"),
+            false,
         )
+    };
+    let repeat = |p: &str| {
+        let (regex, replacement, _) = keep(p);
+        (regex, replacement, true)
     };
     #[allow(unused_mut, reason = "the mutant below changes it")]
     let mut patterns = vec![
@@ -54,7 +70,7 @@ static PATTERNS: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
         patterns.push(if cfg!(mutant_redact_telegram_word_boundary) {
             whole(r"\b\d{6,12}:[A-Za-z0-9_-]{35}\b")
         } else {
-            keep(r"(?P<keep>^|[^A-Za-z0-9]|bot)[0-9]{6,12}:[A-Za-z0-9_-]{35}(?P<tail>[^A-Za-z0-9_-]|$)")
+            repeat(r"(?P<keep>^|[^A-Za-z0-9]|bot)[0-9]{6,12}:[A-Za-z0-9_-]{35}(?P<tail>[^A-Za-z0-9_-]|$)")
         });
     }
     patterns
@@ -70,8 +86,20 @@ pub fn redact(text: &str) -> String {
     #[cfg(not(mutant_publish_no_redact))]
     {
         let mut out = text.to_owned();
-        for (pattern, replacement) in PATTERNS.iter() {
-            out = pattern.replace_all(&out, replacement.as_str()).into_owned();
+        for (pattern, replacement, repeat) in PATTERNS.iter() {
+            // Mutant (`mutant_redact_telegram_single_pass`): every pattern is applied once, so
+            // the second of two tokens one character apart stays in clear.
+            let repeat = *repeat && !cfg!(mutant_redact_telegram_single_pass);
+            loop {
+                let next = pattern.replace_all(&out, replacement.as_str());
+                let std::borrow::Cow::Owned(next) = next else {
+                    break;
+                };
+                out = next;
+                if !repeat {
+                    break;
+                }
+            }
         }
         out
     }
@@ -178,6 +206,28 @@ mod tests {
                 "{token}"
             );
             assert_eq!(redact(&format!("token {token}")), "token [redacted]");
+        }
+    }
+
+    #[test]
+    fn two_telegram_tokens_one_character_apart_are_both_redacted() {
+        let first = telegram_token("A");
+        let second = telegram_token("-");
+        for (text, expected) in [
+            (
+                format!("{first} {second}"),
+                "[redacted] [redacted]".to_owned(),
+            ),
+            (
+                format!("{first}\n{second}"),
+                "[redacted]\n[redacted]".to_owned(),
+            ),
+            (
+                format!("a,{first},{second}"),
+                "a,[redacted],[redacted]".to_owned(),
+            ),
+        ] {
+            assert_eq!(redact(&text), expected, "{text:?}");
         }
     }
 

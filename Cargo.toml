@@ -665,6 +665,10 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # the bare-name protections under it.
   "cfg(mutant_breaker_blind_to_spawn_failure)",
   "cfg(mutant_loop_bare_name_ignores_directory_allowance)",
+  # #241: the second of two adjacent Telegram tokens is redacted; heat's loop subjects are
+  # scrubbed, not only redacted.
+  "cfg(mutant_redact_telegram_single_pass)",
+  "cfg(mutant_heat_loop_subject_redact_only)",
 ] }
 
 [workspace.lints.clippy]

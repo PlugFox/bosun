@@ -736,6 +736,12 @@ fn unstarted() -> Option<SessionEnd> {
     })
 }
 
+/// How a session refused before its spawn ended (a refused lease, an identity refusal): with
+/// `event`, and no end for the fast-death breaker, as the agent never ran (#7).
+fn refused(event: Event) -> (Event, Option<SessionEnd>) {
+    (event, None)
+}
+
 /// The id a resumed session continues: the attempt's last run's.
 async fn resumed_id(shared: &Shared, run: &Run) -> Option<SessionId> {
     let runs = shared.deps.reader.runs(&run.item).await.ok()?;
@@ -763,12 +769,13 @@ pub(crate) async fn session(
     // An early return that is not the agent's: the breaker does not observe it (#7). These are
     // a kill (a withdrawn lease request, a setup killed after a reset), a repository or an
     // identity the configuration no longer has, and what the daemon could not prepare (the
-    // reset, the credential, the session files, the environment, the run row, the shim's row).
-    // A refused lease, an identity refusal and a failed setup return events of their own, also
-    // unobserved.
+    // reset, the credential, the session files, the environment, the run row, the shim's row,
+    // the shim's copy and directory: [`Unspawned::Prepare`]). A refused lease and an identity
+    // refusal ([`refused`]) and a failed setup return events of their own, also unobserved.
     let crash = Some((run.exited(Exit::Crash), None));
-    // The agent's own fast death: its CLI is missing or cannot be started. The breaker counts
-    // it (#7), or a repository whose agent is broken would crash every attempt unpaused.
+    // The agent's own fast death: its CLI is missing or cannot be started
+    // ([`Unspawned::Spawn`]). The breaker counts it (#7), or a repository whose agent is broken
+    // would crash every attempt unpaused.
     let unstarted = Some((run.exited(Exit::Crash), unstarted()));
     let Some((repo, identity)) = lookup(config, &shared.options.repo) else {
         return crash;
@@ -788,7 +795,7 @@ pub(crate) async fn session(
             // A refusal is the configuration's change since the daemon started (E24).
             Err(Some(e)) => {
                 shared.trouble(format!("{}: its leases: {e}", run.item));
-                return Some((Event::ConfigChanged, None));
+                return Some(refused(Event::ConfigChanged));
             }
         }
     }
@@ -808,11 +815,10 @@ pub(crate) async fn session(
         Ok(bundle) => bundle,
         Err(e) => {
             shared.trouble(format!("{}: {e}", run.item));
-            let refused = Event::IdentityRefused {
+            return Some(refused(Event::IdentityRefused {
                 attempt: run.attempt,
                 spawn: run.spawn,
-            };
-            return Some((refused, None));
+            }));
         }
     };
 
@@ -1051,11 +1057,16 @@ pub(crate) async fn session(
     }
     let spawned = match &shim_dir {
         Some(dir) => spawn_under_shim(shared, run, &spec, dir).await,
-        None => shared.deps.spawner.spawn(&spec).map_err(|e| e.to_string()),
+        None => shared
+            .deps
+            .spawner
+            .spawn(&spec)
+            .map_err(|e| Unspawned::Spawn(e.to_string())),
     };
     let spawned = match spawned {
         Ok(spawned) => spawned,
-        Err(e) => {
+        Err(unspawned) => {
+            let e = unspawned.message();
             shared.trouble(format!(
                 "{}: {} cannot be started: {e}",
                 run.item,
@@ -1073,7 +1084,7 @@ pub(crate) async fn session(
                 &[],
             )
             .await;
-            return unstarted;
+            return Some((run.exited(Exit::Crash), unspawned.session_end()));
         }
     };
     // The fast-death breaker measures a session from here (#7).
@@ -1520,7 +1531,7 @@ pub(crate) async fn attach(
             // A refusal is the configuration's change since the daemon started (E24).
             Err(Some(e)) => {
                 shared.trouble(format!("{}: its leases: {e}", run.item));
-                return Some((Event::ConfigChanged, None));
+                return Some(refused(Event::ConfigChanged));
             }
         }
     }
@@ -1695,14 +1706,14 @@ async fn spawn_under_shim(
     run: &Run,
     spec: &ChildSpec,
     dir: &Path,
-) -> Result<bosun_proc::Spawned, String> {
+) -> Result<bosun_proc::Spawned, Unspawned> {
     let (found, daemon_dir) = (
         shared.options.shim.clone(),
         shared.options.daemon_dir.clone(),
     );
     let copy = blocking(move || install_shim(&found, &daemon_dir))
         .await
-        .map_err(|e| format!("the session shim cannot be installed: {e}"))?;
+        .map_err(|e| Unspawned::Prepare(format!("the session shim cannot be installed: {e}")))?;
     let shim = ShimSpawner::new(copy, dir, run.shim_cap);
     let (sessions, spec, dir) = (
         shared.deps.sessions.clone(),
@@ -1710,12 +1721,42 @@ async fn spawn_under_shim(
         dir.to_path_buf(),
     );
     blocking(move || {
-        std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::create_dir(&dir)
+            .map_err(|e| Unspawned::Prepare(format!("{}: {e}", dir.display())))?;
         sessions
             .spawn_in(&shim, &spec, &dir)
-            .map_err(|e| format!("through the session shim: {e}"))
+            .map_err(|e| Unspawned::Spawn(format!("through the session shim: {e}")))
     })
     .await
+}
+
+/// Why a session's agent was not started, by the step that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Unspawned {
+    /// What the daemon prepares for the spawn: the shim's copy, the shim's directory.
+    Prepare(String),
+    /// The spawn of the agent itself (under the shim or not).
+    Spawn(String),
+}
+
+impl Unspawned {
+    fn message(&self) -> &str {
+        match self {
+            Self::Prepare(e) | Self::Spawn(e) => e,
+        }
+    }
+
+    /// The end the fast-death breaker sees (#7): a failed spawn is the agent's fast death
+    /// ([`unstarted`]); what the daemon could not prepare is not the agent's, and unobserved.
+    fn session_end(&self) -> Option<SessionEnd> {
+        match self {
+            // Mutant (`mutant_breaker_counts_shim_install`): a shim the daemon cannot install
+            // counts as the agent's fast death.
+            Self::Prepare(_) if cfg!(mutant_breaker_counts_shim_install) => unstarted(),
+            Self::Prepare(_) => None,
+            Self::Spawn(_) => unstarted(),
+        }
+    }
 }
 
 /// The `process` row of the session's shim in `dir`, with the shim's key once it is known; with
@@ -1903,6 +1944,43 @@ async fn end(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #7: what the daemon could not prepare for the spawn under the shim (the shim's copy, its
+    /// directory) is not the agent's fast death, and the breaker does not observe it; a spawn
+    /// that failed is (`mutant_breaker_counts_shim_install`: a failed install counts;
+    /// `mutant_breaker_blind_to_spawn_failure`: a failed spawn does not).
+    #[test]
+    fn a_shim_the_daemon_cannot_install_is_not_a_fast_death() {
+        let prepare = Unspawned::Prepare("the session shim cannot be installed: locked".into());
+        assert_eq!(prepare.session_end(), None);
+        assert_eq!(
+            Unspawned::Prepare("shim-s1: exists".into()).session_end(),
+            None
+        );
+        assert_eq!(
+            Unspawned::Spawn("through the session shim: not found".into()).session_end(),
+            Some(SessionEnd {
+                crashed: true,
+                by_itself: true,
+                lived: Duration::ZERO,
+            })
+        );
+    }
+
+    /// #7: a refused lease and an identity refusal end the session with their own events and
+    /// no end for the fast-death breaker: the agent never ran.
+    #[test]
+    fn an_early_return_for_a_refusal_reports_no_session_end() {
+        for event in [
+            Event::ConfigChanged,
+            Event::IdentityRefused {
+                attempt: 2,
+                spawn: 3,
+            },
+        ] {
+            assert_eq!(refused(event.clone()), (event, None));
+        }
+    }
 
     #[test]
     fn the_shim_cap_is_the_remaining_wall_budget_or_a_day() {

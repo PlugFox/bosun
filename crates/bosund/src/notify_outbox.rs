@@ -25,7 +25,9 @@
 //!   in memory; a restart forgets it, and the refused rows still wait for their retry.
 //!
 //! A stop ([`Stop`]) lets the pass in flight end, its send and its mark, and ends the loop
-//! there; the daemon aborts it only after [`STOP_DEADLINE`].
+//! there; the daemon aborts it only after [`STOP_DEADLINE`]. Before it ends, each mark the
+//! store refused is written once more; one still refused is logged with its notices' ids, as
+//! they may be sent again at the next start.
 //!
 //! While the kill switch is thrown (`Control::board_writes_stopped`) nothing is sent; the rows
 //! wait. The drainer reads only its own identity's database, so a channel of one identity
@@ -69,11 +71,13 @@ pub(crate) const STOP_DEADLINE: Duration =
 pub(crate) type Stop = watch::Sender<bool>;
 
 /// The faults a test throws into a drainer: while `refuse_writes` is set, every write of the
-/// drainer fails, as a store that refuses writes would.
+/// drainer fails, as a store that refuses writes would; `refuse_next` writes fail after it,
+/// each counting it down.
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct Faults {
     pub(crate) refuse_writes: std::sync::atomic::AtomicBool,
+    pub(crate) refuse_next: std::sync::atomic::AtomicU32,
 }
 
 /// The readers of every identity this daemon opened, for `mutant_notify_shared_channel` only:
@@ -111,15 +115,40 @@ impl Drainer {
             loop {
                 self.pass(&mut memory, &stopping).await;
                 if *stopping.borrow() {
-                    return;
+                    break;
                 }
                 tokio::select! {
                     () = tokio::time::sleep(POLL) => {}
-                    _ = stopping.changed() => return,
+                    _ = stopping.changed() => break,
                 }
             }
+            self.last_marks(&mut memory).await;
         });
         (task, stop)
+    }
+
+    /// At a stop: each mark the store refused is written once more; the ones still refused are
+    /// logged, as their rows, pending in the store, may be sent again at the next start.
+    async fn last_marks(&self, memory: &mut Memory) {
+        // Mutant (`mutant_outbox_stop_drops_pending_marks`): the marks are dropped untried.
+        if cfg!(mutant_outbox_stop_drops_pending_marks) {
+            return;
+        }
+        for (channel, mark) in std::mem::take(&mut memory.unmarked) {
+            if self.write(mark.clone()).await {
+                continue;
+            }
+            let ids = match &mark {
+                Write::NoticesSent { ids, .. }
+                | Write::NoticesFailed { ids, .. }
+                | Write::NoticesDropped { ids, .. } => ids.clone(),
+                _ => Vec::new(),
+            };
+            self.log(&format!(
+                "warning: channel {channel}: the mark of notice(s) {ids:?} is lost at the \
+                 stop; they may be sent again at the next start"
+            ));
+        }
     }
 
     fn stopped(&self) -> bool {
@@ -159,6 +188,15 @@ impl Drainer {
             .faults
             .refuse_writes
             .load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .faults
+                .refuse_next
+                .try_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok()
         {
             self.log("the notification outbox cannot be written: refused by the test");
             return false;

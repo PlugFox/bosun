@@ -351,3 +351,36 @@ async fn stop_lets_the_send_in_flight_land_its_mark() {
     );
     world.close().await;
 }
+
+/// #9: a mark the store refused during the pass a stop ends is written once more before the
+/// drainer ends, so its notice is not sent again at the next start
+/// (`mutant_outbox_stop_drops_pending_marks`: the mark is dropped and the row stays pending).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_tries_the_pending_marks_once_more() {
+    const SINK: &str = "notify-outbox-tests-stop-marks";
+    let world = World::new().await;
+    channel_with(&world, "a", SINK, &[("delay_ms", "1000")]).await;
+    // The drainer's first write is the mark of the send: refused; the second is accepted.
+    let faults = world.state.identities["a"].notify.faults().clone();
+    faults.refuse_next.store(1, Ordering::SeqCst);
+    needs_you(&world, "a", "alpha").await;
+    wait_for("the send to begin", Duration::from_secs(10), async || {
+        bosun_notify::fake::sends(SINK) >= 1
+    })
+    .await;
+    assert_eq!(bosun_notify::fake::sent(SINK), Vec::<String>::new());
+
+    world.state.identities["a"].notify.stop().await;
+    assert_eq!(bosun_notify::fake::sent(SINK).len(), 1);
+    assert_eq!(
+        faults.refuse_next.load(Ordering::SeqCst),
+        0,
+        "the first mark was refused"
+    );
+    assert_eq!(
+        pending(&world, "a").await,
+        [],
+        "the refused mark landed at the stop"
+    );
+    world.close().await;
+}
